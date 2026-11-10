@@ -564,7 +564,7 @@ CREATE INDEX IF NOT EXISTS claims_kind_index ON claims(kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
-"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-hb4ef462c895d owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
+"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-h48ab0ffcf698 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
 -- Heals once compared claim identities through this index; nothing reads it any more.
 DROP INDEX IF EXISTS claims_batch_claim_id;
@@ -758,6 +758,13 @@ CREATE TABLE IF NOT EXISTS replica_envelope_holds (
     envelope_hash TEXT NOT NULL,
     reason TEXT NOT NULL CHECK(reason IN ('unsigned','fenced')),
     updated_at_unix_ms TEXT NOT NULL,
+    PRIMARY KEY(writer, sequence, envelope_hash)
+);
+
+CREATE TABLE IF NOT EXISTS replica_restore_quarantine (
+    writer TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    envelope_hash TEXT NOT NULL,
     PRIMARY KEY(writer, sequence, envelope_hash)
 );
 
@@ -2116,12 +2123,32 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn claims_page_query(subject: bool, descending: bool) -> String {
-    let subject_filter = if subject { "subject=?3 AND " } else { "" };
+/// How a claims page selects subjects: all of them, one exact subject (`?3`), or the range
+/// `?3 <= subject < ?6` a subject prefix spans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimsSubject {
+    Any,
+    Exact,
+    Range,
+}
+
+/// A page of claims after store index `?1` and before `?2`, at most `?4` rows, optionally of kind
+/// `?5`. Each filter reads the index that keeps the page in store-index order where it can: a kind
+/// walks `claims_kind_index` (with a prefix checked on each row), a subject `claims_subject_index`
+/// or `claims_subject_kind_index`, and a prefix alone the `claims_subject_index` range.
+pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool) -> String {
+    let (index, filter) = match (subject, kind) {
+        (ClaimsSubject::Any, false) => ("", ""),
+        (ClaimsSubject::Exact, false) => ("", "subject=?3 AND "),
+        (ClaimsSubject::Exact, true) => (" INDEXED BY claims_subject_kind_index", "subject=?3 AND kind=?5 AND "),
+        (ClaimsSubject::Any, true) => (" INDEXED BY claims_kind_index", "kind=?5 AND "),
+        (ClaimsSubject::Range, false) => (" INDEXED BY claims_subject_index", "subject>=?3 AND subject<?6 AND "),
+        (ClaimsSubject::Range, true) => (" INDEXED BY claims_kind_index", "kind=?5 AND subject>=?3 AND subject<?6 AND "),
+    };
     let order = if descending { "DESC" } else { "ASC" };
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims WHERE subject NOT LIKE 'glass/%' AND {subject_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
@@ -2485,6 +2512,9 @@ impl Store {
             let page = self.readers.get().prepare(
                 "SELECT sequence,envelope_hash FROM replica_envelopes AS envelopes
                  WHERE writer=?1 AND (sequence,envelope_hash)>(?2,?3) AND sequence<=?4
+                   AND NOT EXISTS(SELECT 1 FROM replica_restore_quarantine AS quarantine
+                     WHERE quarantine.writer=envelopes.writer AND quarantine.sequence=envelopes.sequence
+                       AND quarantine.envelope_hash=envelopes.envelope_hash)
                    AND NOT EXISTS(SELECT 1 FROM replica_envelope_signatures AS signatures
                      WHERE signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
                        AND signatures.envelope_hash=envelopes.envelope_hash AND signatures.member_key=?5)
@@ -2853,8 +2883,12 @@ impl Store {
     fn held_signature_requests(&self) -> Result<Vec<ReplicaEnvelopeId>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
-            "SELECT writer, sequence, envelope_hash FROM replica_envelope_holds
-             WHERE reason='unsigned' ORDER BY writer, sequence, envelope_hash LIMIT ?1",
+            "SELECT writer, sequence, envelope_hash FROM replica_envelope_holds AS holds
+             WHERE reason='unsigned' AND NOT EXISTS(
+               SELECT 1 FROM replica_restore_quarantine AS quarantine
+               WHERE quarantine.writer=holds.writer AND quarantine.sequence=holds.sequence
+                 AND quarantine.envelope_hash=holds.envelope_hash)
+             ORDER BY writer, sequence, envelope_hash LIMIT ?1",
         )?;
         let requests = statement
             .query_map([REPLICATION_SIGNATURE_LIMIT as i64], |row| {
@@ -7070,8 +7104,14 @@ impl Store {
         let mut snapshot;
         let mut attempts = 0;
         loop {
-            self.seal_local_batches_after_frontier()?;
-            snapshot = self.sealed_replication_snapshot()?;
+            {
+                let _span = crate::profile::span("replication.seal");
+                self.seal_local_batches_after_frontier()?;
+            }
+            snapshot = {
+                let _span = crate::profile::span("replication.snapshot");
+                self.sealed_replication_snapshot()?
+            };
             attempts += 1;
             if !snapshot.unsealed || attempts == 8 {
                 break;
@@ -7079,7 +7119,10 @@ impl Store {
         }
         // Judge the claims just sealed only after the snapshot is taken: a verdict pass takes the
         // writer, and writes queued behind it must not land between sealing and the snapshot.
-        self.judge_claims_slice(false)?;
+        {
+            let _span = crate::profile::span("replication.judge");
+            self.judge_claims_slice(false)?;
+        }
         Ok(snapshot)
     }
 
@@ -7238,11 +7281,16 @@ impl Store {
             return Ok(snapshot);
         }
         let waiting = crate::windows::Timer::start(crate::windows::StoreWork::SnapshotBuildWait);
+        // A trim's patch holds this lock while it marks, and copies the snapshot first when an
+        // exchange still holds it; this span shows what an exchange waited for that.
+        let wait_span = crate::profile::span("replication.snapshot_build_wait");
         let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
+        drop(wait_span);
         drop(waiting);
         if let Some(snapshot) = current(self)? {
             return Ok(snapshot);
         }
+        let _span = crate::profile::span("replication.snapshot_build");
         let _timing = time_stage(&self.replication_timers.snapshot);
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -7525,9 +7573,15 @@ impl Store {
                 .collect();
             exchange.envelopes.extend(self.replica_envelopes(wanted)?);
         }
-        exchange.signatures = self.replication_signatures_for(signature_requests)?;
-        exchange.signature_requests = self.replication_signature_requests()?;
-        fit_exchange_body(&mut exchange, budget)?;
+        {
+            let _span = crate::profile::span("replication.signatures");
+            exchange.signatures = self.replication_signatures_for(signature_requests)?;
+            exchange.signature_requests = self.replication_signature_requests()?;
+        }
+        {
+            let _span = crate::profile::span("replication.fit_body");
+            fit_exchange_body(&mut exchange, budget)?;
+        }
         Ok(exchange)
     }
 
@@ -7537,19 +7591,29 @@ impl Store {
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
         let snapshot = self.replication_snapshot()?;
-        let digests = self.exported_digests(&snapshot)?;
+        let digests = {
+            let _span = crate::profile::span("replication.digests");
+            self.exported_digests(&snapshot)?
+        };
         let _timing = time_stage(&self.replication_timers.export);
         let same = !remote.digest.is_empty() && remote.digest == snapshot.inventory.digest;
         if !same && !remote.buckets.is_empty() {
             // The peer sent range digests, so only differing ranges need identities. Each
             // answer lists from the next differing range, so every one is listed in turn.
-            let (missing, listed) = compact_replication_difference_turn(
-                &snapshot.inventory,
-                &snapshot.buckets,
-                remote,
-                REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
-                self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
-            );
+            let (missing, listed) = {
+                let _span = crate::profile::span("replication.difference");
+                compact_replication_difference_turn(
+                    &snapshot.inventory,
+                    &snapshot.buckets,
+                    remote,
+                    REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
+                    self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
+                )
+            };
+            let envelopes = {
+                let _span = crate::profile::span("replication.envelopes");
+                self.replica_envelopes(missing)?
+            };
             return Ok(ReplicationExchange {
                 peer: self.origin.clone(),
                 fleet_id: fleet_id.to_owned(),
@@ -7568,7 +7632,7 @@ impl Store {
                     checkpoint: self.trimmed_checkpoint()?,
                     claim_range_query: None,
                 },
-                envelopes: self.replica_envelopes(missing)?,
+                envelopes,
                 signature_requests: Vec::new(),
                 signatures: Vec::new(),
                 build: Some(crate::store::checkpoint_agreement::checkpoint_build()),
@@ -8287,9 +8351,7 @@ impl Store {
                         break;
                     }
                     let prepared = prepared_envelope::prepare_envelope(
-                        envelope,
-                        &*self.runtime,
-                        Some(row.clone()),
+                        envelope, &*self.runtime, Some(row.clone()),
                     );
                     prepared_bytes += prepared.bytes;
                     outcome.verify += prepared.verify;
@@ -8341,7 +8403,18 @@ impl Store {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let hold = match (authority, shard.as_deref()) {
+                    let keyed = prepared.requires_keyed_envelope();
+                    let quarantined: bool = pass.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM replica_restore_quarantine WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
+                        params![envelope.writer, envelope.sequence, envelope.hash], |row| row.get(0),
+                    )?;
+                    let hold = if quarantined || (keyed && !matches!(
+                        prepared_membership.window(&envelope.writer, envelope.sequence), crate::fleet::Window::Keyed(_),
+                    )) {
+                        Some("unsigned")
+                    } else if keyed {
+                        fleet_admission_hold(&pass, prepared_membership, envelope)?
+                    } else { match (authority, shard.as_deref()) {
                         (AdmissionAuthority::Membership, Some(shard)) => {
                             shard_admission_hold(&pass, prepared_membership, shard, envelope)?
                         }
@@ -8349,7 +8422,7 @@ impl Store {
                             fleet_admission_hold(&pass, prepared_membership, envelope)?
                         }
                         (AdmissionAuthority::Source, _) => None,
-                    };
+                    }};
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
@@ -8935,6 +9008,14 @@ impl Store {
                     // mistake its not-yet-committed claims for an empty backlog.
                     let projection_state =
                         self.replication_projection_state.load(Ordering::Acquire);
+                    // Local claims project in their own transaction; only admission can
+                    // leave claims behind this pass. Read its committed watermark while
+                    // the writer still excludes admission, alongside the generation.
+                    let admitted: u64 = connection.query_row(
+                        "SELECT value FROM meta WHERE key='replication_admitted_index'", [],
+                        |row| row.get::<_, String>(0),
+                    )?.parse()?;
+                    let pending = through < admitted;
                     stages.enter("release");
                     drop(connection);
                     drop(stages);
@@ -8965,9 +9046,8 @@ impl Store {
                             error
                         })?;
                     }
-                    // Admission and catch-up deferral can run after this index read. Clear
-                    // only the generation observed before it; a newer deferral must survive.
-                    let pending = through < self.index()?;
+                    // Admission and catch-up deferral can run after the watermark read.
+                    // Clear only the generation observed before it; a newer deferral must survive.
                     before_clear();
                     if !pending {
                         let _ = self.replication_projection_state.compare_exchange(

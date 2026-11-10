@@ -54,6 +54,11 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
         for (name, value) in [("memory-max", budgets.memory_max.as_deref()), ("disk-max", budgets.disk_max.as_deref())] {
             if let Some(value) = value { leaves.push(text(name, value)); }
         }
+        for entry in &budgets.attention {
+            let mut attention = text("attention", &entry.person);
+            property(&mut attention, "asks", i128::from(entry.asks));
+            leaves.push(attention);
+        }
         children.push(block(node("declared-budgets", []), leaves));
     }
     if *system { children.push(node("system", [])); }
@@ -194,6 +199,16 @@ mod tests {
     }
 
     #[test]
+    fn canonical_declared_admission_round_trip() {
+        round_trip(r#"mission "test" state="ready" {
+            goal "Keep declaration metadata."
+            declared-priority "normal"
+            declared-lane "check"
+            declared-budgets { cpu-seconds 300; token-budget 100000; memory-max "8G"; disk-max "20G"; attention "person/reviewer" asks=3; }
+        }"#);
+    }
+
+    #[test]
     fn canonical_declared_admission_retains_typed_metadata() {
         let mut spec = parse(r#"mission "test" state="ready" { goal "Keep declaration metadata."; }"#);
         spec.declared_priority = Some(crate::model::DeclaredPriority::Unknown("future-priority".into()));
@@ -203,6 +218,7 @@ mod tests {
             token_budget: Some(100_000),
             memory_max: Some("8G".into()),
             disk_max: Some("20G".into()),
+            ..Default::default()
         });
         let rendered = render_mission_kdl(&spec).unwrap();
         let document: KdlDocument = rendered.text.parse().unwrap();

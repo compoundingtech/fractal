@@ -174,3 +174,26 @@ fn eta_uses_declared_critical_paths_and_minimum_sample_count() {
         assert_eq!(eta["remaining_high_ms"], eta["remaining_low_ms"]);
     }
 }
+
+#[test]
+fn step_estimates_keep_the_sampled_steps_when_another_has_no_samples() {
+    let store = Store::open_memory("node").unwrap();
+    let source = "version 2\nmission \"eta\" state=\"ready\" { concurrent-runs max=10; goal \"Estimate.\"; step \"a\" { agentless }; step \"b\" { agentless } }";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = store
+        .mission(&intent, IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &plan.subject_tokens, "graph").unwrap();
+    let prior = run(&store, "prior");
+    let a = prior.steps.iter().find(|step| step.step == "a").unwrap();
+    store.set_step_state(&a.subject, "working", None).unwrap();
+    store.set_step_state(&a.subject, "completed", None).unwrap();
+    store.set_mission_run_state(&prior.id, "completed", "terminal", None).unwrap();
+    let current = run(&store, "current");
+    assert!(store.mission_run_eta(&current.subject, 1).unwrap().is_none(), "b has no samples");
+    let steps = store.mission_run_step_etas(&current.subject).unwrap();
+    assert_eq!(steps.keys().collect::<Vec<_>>(), ["a"]);
+    let (low, high, samples) = steps["a"];
+    assert_eq!((samples, low), (1, high));
+    assert!(store.mission_run_step_etas(&prior.subject).unwrap().is_empty(), "a finished run");
+}

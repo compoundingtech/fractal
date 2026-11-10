@@ -11,7 +11,7 @@ message.
 `access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `utf8` and `import` (Codex),
 or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
 `run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
-back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
+back on the session it suspended on, holds mail older than seven days, and consumes recent never-offered
 mail exactly once. The Rust wrapper
 `crates/fractal/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
 

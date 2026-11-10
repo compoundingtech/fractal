@@ -63,6 +63,7 @@ pub struct ExecRuntime {
     log_dir: PathBuf,
     owned_children: Arc<Mutex<BTreeMap<u32, OwnedChild>>>,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+    scope_join_limit: Duration,
 }
 
 /// A child this runtime started, until its exit is in its record.
@@ -148,7 +149,14 @@ impl ExecRuntime {
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
             unlaned_seat: None,
+            scope_join_limit: crate::isolate::SCOPE_JOIN_LIMIT,
         }
+    }
+
+    #[cfg(test)]
+    fn with_scope_join_limit(mut self, limit: Duration) -> Self {
+        self.scope_join_limit = limit;
+        self
     }
 
     /// Set only by the daemon's seat runtime, never inferred from ambient environment.
@@ -325,6 +333,26 @@ impl ExecRuntime {
             .lock()
             .expect("exec child mutex poisoned")
             .insert(pid, OwnedChild::Running(child));
+        // `systemd-run` joins its scope only when the user manager starts it, and runs the task
+        // after. Until then it is in this process's cgroup and ends with it, so the exec outlives
+        // this process only once it has joined.
+        if let Some(unit) = generation.scope_unit.as_deref() {
+            let join = crate::isolate::await_join(unit, pid, self.scope_join_limit, || {
+                process_generation_alive(pid, start_token)
+            });
+            if !matches!(join, Ok(crate::isolate::Join::Joined | crate::isolate::Join::Exited)) {
+                // A failed spawn leaves nothing that could still die with this process. Unjoined,
+                // the leader is still `systemd-run`, alone in the session it started.
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                join.with_context(|| {
+                    format!("the exec's join of its scope {unit} could not be read, so it was ended")
+                })?;
+                anyhow::bail!(
+                    "the exec did not join its scope {unit} within {}ms, so it was ended",
+                    self.scope_join_limit.as_millis()
+                );
+            }
+        }
         Ok(generation)
     }
 
@@ -2251,9 +2279,84 @@ libc.pthread_exit(None)
         }
     }
 
+    /// The spawn's own PATH finds a systemd-run that orders the exec's scope after `gate`, so the
+    /// scope starts only when the test releases it.
+    #[cfg(target_os = "linux")]
+    fn gated_environment(root: &Path, gate: &StartGate) -> BTreeMap<String, String> {
+        let mut environment = scope_environment();
+        let systemd_run = crate::resolve_executable("systemd-run", &environment).unwrap();
+        let bin = root.join("bin");
+        fs::create_dir(&bin).unwrap();
+        crate::test_executable::fake_executable(
+            &bin,
+            "systemd-run",
+            &format!("#!/bin/sh\nexec '{}' --property=After={} \"$@\"\n", systemd_run.display(), gate.0),
+        );
+        let path = format!("{}:{}", bin.display(), environment["PATH"]);
+        environment.insert("PATH".into(), path);
+        environment
+    }
+
+    /// Spawns `sleep 600` as `work` on another thread, behind a scope start that waits for `gate`,
+    /// and returns once its record is written and its scope is loaded.
+    #[cfg(target_os = "linux")]
+    fn spawn_behind(
+        runtime: &ExecRuntime,
+        root: &Path,
+        gate: &StartGate,
+    ) -> (thread::JoinHandle<Result<ExecGeneration>>, ExecGeneration) {
+        let environment = gated_environment(root, gate);
+        let spawning = {
+            let runtime = runtime.clone();
+            let root = root.to_owned();
+            thread::spawn(move || {
+                runtime.spawn(
+                    "work",
+                    &crate::Launch::Argv(vec!["sleep".into(), "600".into()]),
+                    &root,
+                    &environment,
+                )
+            })
+        };
+        let record = || runtime.read_generation_path(&runtime.record_path("work")).ok().flatten();
+        wait_until("the exec was never recorded", || record().is_some());
+        let recorded = record().unwrap();
+        let unit = recorded.scope_unit.clone().unwrap();
+        wait_until("the exec's scope was never loaded", || {
+            systemctl_show(&unit, "LoadState") == "loaded"
+        });
+        (spawning, recorded)
+    }
+
+    /// The spawn returns only once `systemd-run` has joined the exec's scope. Before that it is in
+    /// the spawning service's cgroup, and a kill of that cgroup would end it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_spawn_returns_once_the_exec_has_joined_its_scope() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let _kill = KillOnDrop(runtime.clone());
+        let release = root.path().join("release");
+        let gate = StartGate::new(&release);
+        let (spawning, recorded) = spawn_behind(&runtime, root.path(), &gate);
+        let unit = recorded.scope_unit.clone().unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert!(!spawning.is_finished(), "the spawn returned before its exec joined {unit}");
+
+        fs::write(&release, "\n").unwrap();
+        let generation = spawning.join().unwrap().unwrap();
+        assert_eq!(generation, recorded);
+        assert!(crate::isolate::joined(&unit, generation.pid));
+    }
+
     /// A kill sent before the exec's scope has started ends the exec. `systemd-run` moves into its
     /// scope when the user manager starts it and only then runs the task, and until then the
-    /// scope is loaded and empty. Here its start waits for a unit the test releases.
+    /// scope is loaded and empty. A kill can come while the spawn waits, or from a daemon that
+    /// restarted while it did.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_kill_before_the_exec_has_joined_its_scope_ends_it() {
@@ -2266,30 +2369,8 @@ libc.pthread_exit(None)
         let _kill = KillOnDrop(runtime.clone());
         let release = root.path().join("release");
         let gate = StartGate::new(&release);
-        // The spawn's own PATH finds a systemd-run that orders the scope after the gate.
-        let mut environment = scope_environment();
-        let systemd_run = crate::resolve_executable("systemd-run", &environment).unwrap();
-        let bin = root.path().join("bin");
-        fs::create_dir(&bin).unwrap();
-        crate::test_executable::fake_executable(
-            &bin,
-            "systemd-run",
-            &format!("#!/bin/sh\nexec '{}' --property=After={} \"$@\"\n", systemd_run.display(), gate.0),
-        );
-        let path = format!("{}:{}", bin.display(), environment["PATH"]);
-        environment.insert("PATH".into(), path);
-        let generation = runtime
-            .spawn(
-                "work",
-                &crate::Launch::Argv(vec!["sleep".into(), "600".into()]),
-                root.path(),
-                &environment,
-            )
-            .unwrap();
+        let (spawning, generation) = spawn_behind(&runtime, root.path(), &gate);
         let unit = generation.scope_unit.clone().unwrap();
-        wait_until("the exec's scope was never loaded", || {
-            systemctl_show(&unit, "LoadState") == "loaded"
-        });
         assert!(!crate::isolate::joined(&unit, generation.pid));
 
         runtime
@@ -2297,7 +2378,39 @@ libc.pthread_exit(None)
             .unwrap();
         fs::write(&release, "\n").unwrap();
 
+        // The spawn sees its exec end rather than join.
+        spawning.join().unwrap().unwrap();
         wait_for_exit(&runtime, "work");
+    }
+
+    /// A user manager that never starts the scope does not hold the spawn: the exec, still
+    /// `systemd-run` in the spawning service's cgroup, ends, and the spawn fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exec_that_never_joins_its_scope_ends_and_fails_its_spawn() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+            .with_scope_join_limit(Duration::from_millis(300));
+        let _kill = KillOnDrop(runtime.clone());
+        let release = root.path().join("release");
+        let gate = StartGate::new(&release);
+        let environment = gated_environment(root.path(), &gate);
+        let error = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec!["sleep".into(), "600".into()]),
+                root.path(),
+                &environment,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("did not join its scope"), "{error:#}");
+        // The leader ended as `systemd-run`, so the task never ran.
+        let exited = wait_for_exit(&runtime, "work");
+        assert_eq!(exited.exit_signal, Some(libc::SIGKILL));
     }
 
     #[cfg(target_os = "linux")]

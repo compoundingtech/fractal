@@ -9,8 +9,8 @@ import { Banners, StatusLine, useListsOnFocus, useMissionsOnFocus } from '../chr
 import { agentGlyph, agentRows } from '../agentsView';
 import { missionTitle, missionWord, wordStyle } from '../missionsView';
 import { navigationRef, type RootScreen } from '../navigation';
-import { rememberResources, sidebarGroups, type SidebarChoices, type SidebarResource } from '../sidebarView';
-import { resourceRow, subjectToFile } from '../sidebarResources';
+import { rememberResources, sidebarGroups, sidebarResourceMatches, type SidebarChoices, type SidebarResource } from '../sidebarView';
+import { resourceRow, subjectToFile, terminalResourceRow } from '../sidebarResources';
 import { folderCreate, folderName, folderLocation, moveFolder, placeResource, sidebarArrangement, uuid7 } from '../sidebarEdits';
 import { useStore } from '../store';
 import { Button, Field, ListRow, Note, Screen, T } from '../ui';
@@ -72,7 +72,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     ...sidebarResources.map(resourceRow),
     ...agents.map(agent => ({ id: agent.id, title: agent.name, kind: 'Agents' as const, target: agent.target })),
     ...data.missions.map(mission => ({ id: mission.id, title: missionTitle(mission), kind: 'Missions' as const, target: mission.id })),
-    ...sidebarTerminals.map(terminal => ({ id: terminal.id, title: terminal.owner_id, kind: 'Terminals' as const, target: terminal.terminal_id! })),
+    ...sidebarTerminals.map(terminalResourceRow),
     ...data.machines.map(machine => ({ id: machine.id, title: machine.name, kind: 'Machines' as const, target: machine.id })),
   ];
   sidebarSeen.current = rememberResources(sidebarSeen.current, current);
@@ -177,7 +177,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
       {issue || error ? <Note tone="fault">{issue || error}</Note> : null}
       {form?.kind === 'place' ? <><T bold>Move {form.resource.title} to {form.title}?</T><Button label="Move" disabled={!editable} onPress={() => void submit(() => placeResource(arrangement, form.resource.id, form.folder)).then(done => { if (done) setForm(null); })} /></> : <><T bold>{form?.kind === 'add' ? `Add to ${form.title}` : form?.kind === 'rename' ? `Rename ${form.title}` : 'New folder'}</T>
       <Field accessibilityLabel={form?.kind === 'add' ? 'Find a resource to add' : 'Folder name'} value={name} onChangeText={setName} autoFocus onSubmitEditing={form?.kind !== 'add' ? () => void makeFolder() : undefined} />
-      {form?.kind === 'add' ? <ScrollView style={{ maxHeight: 360 }}>{subjectToFile(name, sidebarSeen.current) ? <ListRow title={`File ${name.trim()}`} onPress={editable ? () => openForm({ kind: 'place', resource: subjectToFile(name, sidebarSeen.current)!, folder: form.id, title: form.title }) : undefined} /> : null}{[...sidebarSeen.current.values()].filter(resource => !resource.missing && !/^(session|pty)\//.test(resource.id) && folderLocation(arrangement, resource.id) !== form.id && (resource.title.toLowerCase().includes(name.toLowerCase()) || resource.id.toLowerCase().includes(name.toLowerCase()))).map(resource => <ListRow key={resource.id} title={resource.title} onPress={editable ? () => openForm({ kind: 'place', resource, folder: form.id, title: form.title }) : undefined} />)}</ScrollView> : <Button label="Save" disabled={!editable || !name.trim()} onPress={() => void makeFolder()} />}</>}
+      {form?.kind === 'add' ? <ScrollView style={{ maxHeight: 360 }}>{subjectToFile(name, sidebarSeen.current) ? <ListRow title={`File ${name.trim()}`} onPress={editable ? () => openForm({ kind: 'place', resource: subjectToFile(name, sidebarSeen.current)!, folder: form.id, title: form.title }) : undefined} /> : null}{[...sidebarSeen.current.values()].filter(resource => !resource.missing && !/^(session|pty)\//.test(resource.id) && folderLocation(arrangement, resource.id) !== form.id && sidebarResourceMatches(resource, name)).map(resource => <ListRow key={resource.id} title={resource.title} onPress={editable ? () => openForm({ kind: 'place', resource, folder: form.id, title: form.title }) : undefined} />)}</ScrollView> : <Button label="Save" disabled={!editable || !name.trim()} onPress={() => void makeFolder()} />}</>}
       <Button label="Cancel" onPress={() => setForm(null)} />
     </View></View></Modal>
   </Screen>;

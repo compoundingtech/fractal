@@ -393,7 +393,8 @@ mod tests {
     #[test]
     fn moved_message_producers_use_the_common_wrapper() {
         let source = include_str!("limits.rs");
-        assert!(source.contains("append_claim_tx(") && source.contains("\"message.sent\""));
+        // send_message_tx appends through the same wrapper when it does not queue for the stream.
+        assert!(source.contains("send_message_tx(") && source.contains("\"message.sent\""));
     }
 
     pub fn declare(store: &Store) -> String {

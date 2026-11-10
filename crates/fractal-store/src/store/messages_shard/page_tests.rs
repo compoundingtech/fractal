@@ -247,8 +247,10 @@ fn a_stream_item_the_graph_also_holds_is_listed_once_as_the_graphs() {
     let doubled = [&subjects[4], &subjects[7], &subjects[8]];
     for subject in doubled {
         let view = message_view(&graph, subject).unwrap().unwrap();
+        // As a replicated copy arrives: a send through this member's store replays the item.
         graph
-            .append_claim(&ClaimInput {
+            .graph
+            .append_claim_outcome(&ClaimInput {
                 subject: subject.clone(),
                 kind: "message.sent".into(),
                 actor: Some(view.from.clone()),

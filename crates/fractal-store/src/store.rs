@@ -16,21 +16,30 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod message_expiry;
 pub mod deploy;
+mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
 pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
+pub mod workspace_observations;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
 mod notice_authority;
+mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod declarations;
+pub mod desired_batch;
+mod desired_actual;
+mod desired_progress;
+#[cfg(test)]
+mod desired_batch_index_tests;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
@@ -39,12 +48,16 @@ pub mod identities;
 pub(crate) mod agent_review_answer;
 #[allow(dead_code)]
 pub(crate) mod agent_review_decode;
+#[doc(hidden)]
+pub mod agent_review_transaction;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
 #[cfg(test)]
 mod observation_trim_tests;
 pub mod directive_notes;
+mod declared_admission;
+mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
@@ -80,6 +93,8 @@ pub mod owned_sets;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod usage_fold_tests;
+pub mod usage_credits;
+pub use usage_credits::{UsageCreditReading, UsageCreditSnapshot};
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
@@ -125,6 +140,8 @@ pub mod projectors;
 pub mod projectors_tests;
 #[cfg(test)]
 mod mission_start_production_copy_tests;
+#[cfg(test)]
+mod declared_admission_compatibility_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -238,9 +255,15 @@ pub mod checkpoint_status;
 pub mod human_review_reassignment;
 pub mod mission_eligibility;
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
+/// The explicitly owned weekly agent-list performance fault.
+pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-missed";
+/// The explicitly owned weekly API readiness fault.
+pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 pub mod revision_seats;
 pub mod delegation;
+pub mod claim_pages;
+pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
@@ -248,6 +271,7 @@ pub mod local_trim_fault;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
+pub mod attention_budget;
 mod slo_breaches;
 pub use slo_breaches::{PreparedSloMission, Check as SloCheck, Observation as SloObservation, HealthyWitness as SloHealthyWitness};
 
@@ -259,6 +283,12 @@ pub mod message_marks;
 #[cfg(test)]
 mod message_marks_tests;
 pub mod message_outbox;
+pub mod message_routing;
+#[cfg(test)]
+mod message_routing_tests;
+pub mod message_sent;
+#[cfg(test)]
+mod message_sent_tests;
 #[cfg(test)]
 mod message_outbox_tests;
 pub mod relayed_closes;
@@ -310,8 +340,13 @@ pub mod operations;
 pub mod mission_ivm;
 pub mod run_eta;
 pub mod gate_runners;
+pub mod wake_lookup;
 #[cfg(test)]
 mod gate_runners_tests;
+#[cfg(test)]
+mod wake_lookup_tests;
+#[cfg(test)]
+mod status_summary_tests;
 #[cfg(test)]
 mod run_eta_tests;
 #[cfg(test)]
@@ -767,7 +802,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6e39e16546c7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1027,6 +1062,23 @@ CREATE TABLE IF NOT EXISTS desired (
     owner_generation TEXT,
     owner_step TEXT
 );
+-- A repair may rewrite a selected row without moving either the claim cut or graph
+-- health. Capture every row write, including raw corrections, in its own transaction.
+CREATE TABLE IF NOT EXISTS local_desired_write_witness (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=0)
+);
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_insert AFTER INSERT ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_update AFTER UPDATE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_delete AFTER DELETE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+-- Sparse kind-filtered desired pages seek one kind's subject range, not the whole graph.
+CREATE INDEX IF NOT EXISTS desired_kind_subject_index ON desired(kind, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_step_index ON desired(owner_step, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_run_index ON desired(owner_run, subject);
 -- Deleting a claim checks these references (foreign keys are on); see
@@ -1578,6 +1630,20 @@ pub const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
     SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id
 )";
 
+/// The claims a subject's actual state folds. The full fold and the newest-first field read
+/// both filter with it, so a summary read answers each field as the full reduction does.
+pub(crate) static ACTUAL_FOLD_CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!("{ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}")
+});
+
+#[cfg(test)]
+thread_local! {
+    /// A filter the field read uses in place of `ACTUAL_FOLD_CLAIM`, without its index, so a
+    /// test can show that its equivalence check fails when the two filters differ.
+    pub(crate) static ACTUAL_FIELDS_FILTER_FOR_TEST: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 // Both discovery and index installation share the actual fold's open-ended kind predicate.
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
 pub const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
@@ -1892,9 +1958,14 @@ struct StatusSubjects<'a> {
 pub enum ClaimsReduction {
     Full,
     Summary,
+    /// Internal full status fields without provenance. Never cached or exposed as a status response.
+    Fields,
     /// Runtime resources do not consume claim ids, counts, or session boundaries.
     Runtime,
     AgentCard,
+    /// Only `status` and `incarnation_id` of the actual state, read newest first, and no claims or
+    /// harness: what a driver or `st work` reads of a seat. Never kept, so never served as another.
+    Incarnation,
 }
 /// One subject's status at `at_index`, and the action it asks of its host when it is current and
 /// differs from what is declared. With `owner_filter`, a subject another run owns is skipped.
@@ -1908,8 +1979,10 @@ pub fn subject_status_at(
     let _profile = crate::profile::span(match claims {
         ClaimsReduction::Full => "status/reduction-full",
         ClaimsReduction::Summary => "status/reduction-summary",
+        ClaimsReduction::Fields => "status/reduction-fields",
         ClaimsReduction::Runtime => "status/reduction-runtime",
         ClaimsReduction::AgentCard => "status/reduction-agent-card",
+        ClaimsReduction::Incarnation => "status/reduction-incarnation",
     });
     #[cfg(any(test, feature = "test-support"))]
     SUBJECT_REDUCTIONS.with(|reductions| reductions.set(reductions.get() + 1));
@@ -1946,15 +2019,19 @@ pub fn subject_status_at(
         .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok());
     let actual = if matches!(claims, ClaimsReduction::Runtime) {
         latest_actual_fields_at(connection, subject, at_index, RUNTIME_PROJECTION_FIELDS)?
+    } else if matches!(claims, ClaimsReduction::Incarnation) {
+        latest_actual_fields_filtered_at(connection, subject, at_index, INCARNATION_FIELDS, true)?
     } else {
         latest_actual_at(connection, subject, at_index)?
     };
-    let (actual_claim, actual_origin, actual_origin_conflict) = selected_actual_source_at(
+    let (actual_claim, actual_origin, actual_origin_conflict) = selected_actual_source_filtered_at(
         connection,
         subject,
         at_index,
         member.as_ref().map(|member| member.host.as_str()),
+        matches!(claims, ClaimsReduction::Incarnation),
     )?;
+    let exclude_reserved = matches!(claims, ClaimsReduction::Incarnation);
     let (harness, claims, claims_summary, conflicts) = match claims {
         ClaimsReduction::Full => (
             current_harness_at(connection, subject, at_index)?,
@@ -1978,8 +2055,15 @@ pub fn subject_status_at(
                 at_index,
             )?,
         ),
-        ClaimsReduction::Runtime => (
+        ClaimsReduction::Runtime | ClaimsReduction::Fields => (
             current_harness_at(connection, subject, at_index)?,
+            Vec::new(),
+            ClaimsSummary::default(),
+            desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.claim_id.as_str()), at_index)?,
+        ),
+        // The harness only passes through to the response, and these callers do not read it.
+        ClaimsReduction::Incarnation => (
+            None,
             Vec::new(),
             ClaimsSummary::default(),
             desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.claim_id.as_str()), at_index)?,
@@ -2029,9 +2113,10 @@ pub fn subject_status_at(
     };
     assemble_subject_status(
         connection, subject, at_index, inputs,
-        &mut |owner| latest_actual_fields_at(
+        &mut |owner| latest_actual_fields_filtered_at(
             connection, owner, at_index,
             if owner.starts_with("mission-run/") { &["status", "mode"] } else { &["status"] },
+            exclude_reserved,
         ),
     ).map(Some)
 }
@@ -2255,6 +2340,7 @@ pub struct Store {
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
+    usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
@@ -2699,7 +2785,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
+        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2722,7 +2809,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
+        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2746,7 +2834,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
+        Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2759,6 +2848,28 @@ impl Store {
             self.fractal.claim_registry.set(registry).is_ok(),
             "the registry is set once"
         );
+    }
+
+    /// Configure local observer append admission and read-time folds. Empty excludes all writers.
+    pub fn set_usage_limits_writers(&self, writers: Vec<String>) -> Result<(), FractalError> {
+        for writer in &writers {
+            let subject = fractal_schema::registry().validate_subject(writer)
+                .map_err(|e| FractalError::new(e.code, e.message))?;
+            if subject.family != "agent" {
+                return Err(FractalError::new("invalid-usage-limits-writer", "usage writers must be agent identities"));
+            }
+        }
+        *self.fractal.usage_limits_writers.lock().unwrap() = writers.into_iter().collect();
+        if !self.usage_limits_writers().is_empty() {
+            self.start_usage_credit_backfill()
+                .map_err(|error| FractalError::new("usage-credit-backfill", error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Snapshot the local writers used by usage folds; stored evidence is configuration-independent.
+    pub fn usage_limits_writers(&self) -> BTreeSet<String> {
+        self.fractal.usage_limits_writers.lock().unwrap().clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3237,9 +3348,13 @@ impl Store {
         local_receipt: Option<(&str, &Value)>,
         checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, FractalError> {
+        fractal_missions_base::declared_admission::validate_publication(intent)?;
+        crate::graph::validate_mission_runtimes(intent, &self.origin)?;
         let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
+                declared_admission::validate_publication(transaction, &self.origin, intent)?;
+                agent_charter::validate_publication(transaction, &self.origin, intent)?;
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
                 let intent = normalized_intent.as_ref();
                 let mut normalized_expected = std::borrow::Cow::Borrowed(expected);
@@ -4162,11 +4277,20 @@ impl Store {
         )
     }
 
+    /// Append `input` to the graph; a repeat replays (false). A `message.sent` the messages shard
+    /// already holds, by idempotency key or subject, replays the stream item instead, so a send
+    /// retried down the graph path never writes a message twice (see [`message_sent`]).
     pub fn append_claim_outcome(
         &self,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
-        self.graph.append_claim_outcome(input)
+        if input.kind != "message.sent" {
+            return self.graph.append_claim_outcome(input);
+        }
+        message_sent::gated(self, input, || match message_sent::sent_to_stream(self, input)? {
+            Some(item) => Ok((item, false)),
+            None => self.graph.append_claim_outcome(input),
+        })
     }
 
     pub fn claims_page(
@@ -4178,8 +4302,25 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        let filter = ClaimsFilter { subject, ..ClaimsFilter::default() };
+        self.claims_page_matching(filter, owner_run, after_index, before_index, descending, limit)
+    }
+
+    /// Claims after `after_index` (and before `before_index`) matching `filter`, at most `limit`
+    /// in store-index order; `next_cursor` is set when more remain. Each filter reads through a
+    /// claims index (see [`claims_page_query`]).
+    pub fn claims_page_matching(
+        &self,
+        filter: ClaimsFilter<'_>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+    ) -> Result<ClaimsPage> {
+        let (subject, lower, upper) = claim_pages::subject_match(filter)?;
         let connection = self.readers.get();
-        let query = claims_page_query(subject.is_some(), descending);
+        let query = claims_page_query(subject, filter.kind.is_some(), descending);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4188,8 +4329,12 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
+        let values: [&dyn rusqlite::ToSql; 6] =
+            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper];
+        // Each query names its highest parameter; the unused ones below it stay NULL.
+        let bound = statement.parameter_count();
         let rows = statement.query_map(
-            params![after_index, before_index, subject, scan_limit],
+            rusqlite::params_from_iter(&values[..bound]),
             claim_from_row,
         )?;
         let mut claims = Vec::new();
@@ -4216,6 +4361,7 @@ impl Store {
     }
 
     pub fn validate_claim_input(&self, input: &ClaimInput) -> Result<(), FractalError> {
+        self.fractal.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
         validate_claim_input(input)
     }
 
@@ -4608,20 +4754,57 @@ impl Store {
             .transpose()
     }
 
+    /// The claim written under the idempotency key `key`: the graph's, or the stream item this
+    /// member's own stream send wrote under it, which the shard's `stream_operations` records. A
+    /// key names one request wherever it went, so a sender asking whether it already sent finds
+    /// either.
     pub fn operation_claim(&self, key: &str) -> Result<Option<ClaimRecord>> {
         let connection = self.readers.get();
         let operation_id = operation_id_for_key(key);
-        connection
+        let graph = connection
             .query_row(
                 "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
                         claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
                  FROM operations JOIN claims ON claims.id=operations.canonical_claim_id
                  WHERE operations.id=?1 AND operations.state='active'",
-                [operation_id],
+                [&operation_id],
                 claim_from_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        match (graph, messages_shard::shard(self)) {
+            (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
+            (graph, _) => Ok(graph),
+        }
+    }
+
+    /// Native occupants of an operation key, including divergent replicated requests.
+    /// Unlike `operation_claim`, this does not interpret a conflicted registry entry as
+    /// absence. Returns at most 16 occupants plus an explicit overflow flag.
+    /// Uses only the existing operation-ID index, with no full-history sort or
+    /// receipt ranking. Replaced repair claims do not participate in ownership.
+    pub fn operation_claims(&self, key: &str) -> Result<(Vec<ClaimRecord>, bool)> {
+        let connection = self.readers.get();
+        let operation_id = operation_id_for_key(key);
+        let mut statement = connection.prepare_cached(
+            "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+                    claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
+             FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id')=?1
+               AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims
+                              WHERE projection_digest_repaired_claims.id=claims.id)
+             LIMIT 17",
+        )?;
+        let mut claims = statement.query_map([&operation_id], claim_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if let Some(shard) = messages_shard::shard(self)
+            && let Some(claim) = messages_shard::stream_operations::operation_claim(&shard, &operation_id)? {
+            claims.push(claim);
+        }
+        claims.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        claims.dedup_by(|left, right| left.id == right.id);
+        let overflow = claims.len() > 16;
+        claims.truncate(16);
+        Ok((claims, overflow))
     }
 
     /// Daemon-only evidence captured while holding the runtime spawn locks.
@@ -4950,6 +5133,27 @@ impl Store {
         self.status_at_view(selected, selected_owner_run, at_index, true)
     }
 
+    /// One seat's status for a caller that reads one field of it: its declaration and the
+    /// `status` and `incarnation_id` of its actual state, read newest first. It leaves `harness`,
+    /// `claims` and `claims_summary` empty. A full reduction folds every actual-state claim of
+    /// the subject and lists every claim id, which reads each of a seat's claims in turn.
+    pub fn status_summary_at(&self, selected: &str, at_index: Option<u64>) -> Result<StatusResponse> {
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let selected = identities::resolve_reference_conn(&connection, selected)?;
+            let cut = selected_index(current_index(&connection)?, at_index).map_err(anyhow::Error::new)?;
+            if !self.generic_status_subject_visible_at(&selected, cut)? {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
+                ).with_detail("reason", "notices-unavailable")));
+            }
+            self.status_at_view_for_names_in_snapshot(
+                Some(&selected), None, Some(cut), false,
+                StatusSubjects { names: None, excluded: None }, ClaimsReduction::Incarnation,
+            )
+        })
+    }
+
     pub fn status_for_subject_prefix_uncached(
         &self,
         prefix: &str,
@@ -5167,6 +5371,7 @@ impl Store {
             ClaimsReduction::Runtime => &cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return None,
         };
         entries.get(subject)
             .filter(|entry| {
@@ -5202,6 +5407,7 @@ impl Store {
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
         // frees slots; no growing history map or full-status cache warming is needed.
@@ -5433,21 +5639,28 @@ impl Store {
         if fractal_schema::notice::is_reserved_subject(subject) {
             return Ok(false);
         }
-        let connection = self.readers.get();
-        let mut query = connection.prepare(
-            "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND store_index<=?2",
-        )?;
-        for kind in query.query_map(params![subject,cut], |row| row.get::<_,String>(0))? {
-            if fractal_schema::notice::is_reserved_kind(&kind?) { return Ok(false); }
-        }
-        Ok(true)
+        let kinds = subject_kinds_at(&self.readers.get(), subject, cut)?;
+        Ok(!kinds.iter().any(|kind| fractal_schema::notice::is_reserved_kind(kind)))
     }
 
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
     /// Keep internal status and authoritative replication readers unchanged.
     pub fn status_for_generic_reads(
+        &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>, history: bool,
+    ) -> Result<StatusResponse> {
+        self.generic_status_reduction(selected, owner, at, history, ClaimsReduction::Full)
+    }
+
+    /// Owned-set member reads consume actual only: never expose an unenumerated claims vector.
+    pub fn actual_for_generic_reads(&self, subject: &str, at: Option<u64>) -> Result<Option<Value>> {
+        Ok(self.generic_status_reduction(
+            Some(subject), None, at, false, ClaimsReduction::Fields,
+        )?.subjects.into_iter().next().and_then(|status| status.actual))
+    }
+
+    fn generic_status_reduction(
         &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
-        history: bool,
+        history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -5472,7 +5685,7 @@ impl Store {
             }
             self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history,
-                StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
+                StatusSubjects { names: None, excluded: Some(&excluded) }, claims,
             )
         })
     }
@@ -5557,9 +5770,10 @@ impl Store {
                 )?;
             }
         }
-        // A snapshot reduction is kept per subject until a claim it depends on arrives.
+        // Uncached field/incarnation reads must not
+        // scan an unrelated backlog to maintain shared caches they never use.
         let newest = match at_index {
-            Some(_) if selected_owner_run.is_none() => {
+            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Fields) => {
                 Some(self.advance_subject_cache(&connection, store_index)?)
             }
             _ => None,
@@ -6242,15 +6456,29 @@ impl Store {
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
         // One read cut for every family, so a run, step, declaration or failure that many
         // faults share is read once.
-        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of)))
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, false)))
     }
 
-    fn fault_snapshot_in_cut(&self, as_of: u128) -> Result<Vec<FaultView>> {
+    /// The faults whose notices the generic reconciler owns.
+    pub fn fault_delivery_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, true)))
+    }
+
+    fn fault_snapshot_in_cut(&self, as_of: u128, generic_delivery_only: bool) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
         items.extend(self.operational_fault_families(None, as_of)?);
         // Failure episodes come from the fault cache, read again only where something changed.
         let (operational, gates) = self.cached_failure_faults(as_of)?;
-        items.extend(operational);
+        let mut explicit_reviewers = BTreeSet::new();
+        for fault in operational {
+            if generic_delivery_only && fault.suppress_generic_delivery {
+                continue;
+            }
+            if fault.explicit_reviewer_only {
+                explicit_reviewers.insert(fault.item.episode.clone());
+            }
+            items.push(fault.item);
+        }
         items.extend(gates);
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
@@ -6261,7 +6489,11 @@ impl Store {
             .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
             .map(|item| {
                 Ok(FaultView {
-                    owner: self.fault_owner(&item, fallback.as_deref())?,
+                    owner: self.fault_owner(
+                        &item,
+                        fallback.as_deref(),
+                        explicit_reviewers.contains(&item.episode),
+                    )?,
                     item,
                 })
             })
@@ -10984,13 +11216,17 @@ pub fn has_unknown_claim_at(
     if let Some(operation) = conflict {
         return Ok(Some(format!("idempotency-conflict:{operation}")));
     }
-    // Seek once per distinct kind, then test the cut with the index's third term.
-    // DISTINCT would still visit every retained diagnostic of the subject.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he1d3df5f7b95 owner=fractal_store::store TODO=trace-statement-and-value-representation */ SUBJECT_KINDS_AT_QUERY)?;
-    let kinds = statement
+    Ok(first_unknown_kind(subject_kinds_at(connection, subject, through)?))
+}
+
+/// The kinds of `subject`'s claims at or below `through`. It seeks once per distinct kind, then
+/// tests the cut with the index's third term: DISTINCT would still visit every retained
+/// diagnostic of the subject, tens of thousands for a busy seat.
+fn subject_kinds_at(connection: &Connection, subject: &str, through: u64) -> Result<Vec<String>> {
+    Ok(connection
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-he1d3df5f7b95 owner=fractal_store::store TODO=trace-statement-and-value-representation */ SUBJECT_KINDS_AT_QUERY)?
         .query_map(params![subject, through], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(first_unknown_kind(kinds))
+        .collect::<Result<Vec<_>, _>>()?)
 }
 
 fn first_unknown_kind(kinds: impl IntoIterator<Item = String>) -> Option<String> {
@@ -11012,6 +11248,10 @@ fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
 ) -> Result<bool, FractalError> {
+    if input.kind == message_expiry::KIND {
+        message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
+        return message_expiry::validate_transition(transaction, &input.subject);
+    }
     let requested = match input.kind.as_str() {
         "message.sent" => "sent",
         "message.staged" => "staged",
@@ -11078,6 +11318,8 @@ fn validate_message_transition(
             .filter(|kind| *kind == "message")
             .map(|_| "sent")
     };
+    let late_consumption = matches!(requested, "delivered" | "read")
+        && message_expiry::exists(transaction, &input.subject).map_err(internal)?;
     if requested != "sent" && current == Some(requested)
         && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
@@ -11093,7 +11335,7 @@ fn validate_message_transition(
         (Some("delivered" | "read" | "closed"), "staged")
             | (Some("read" | "closed"), "delivered")
             | (Some("closed"), "read")
-    ) && input.actor.is_some()
+    ) && input.actor.is_some() && !late_consumption
     {
         let index: Option<u64> = transaction
             .query_row("SELECT created_index FROM message_index WHERE subject=?1", [&input.subject], |row| row.get(0))
@@ -11116,7 +11358,7 @@ fn validate_message_transition(
             | (Some("sent"), "delivered")
             | (Some("delivered"), "read")
             | (Some("read"), "closed")
-    );
+    ) || (late_consumption && matches!(current, Some("sent" | "staged" | "read" | "closed")));
     let custody_read = requested == "read"
         && input.fields.contains_key("acting_for")
         && matches!(current, Some("sent" | "staged" | "read"));
@@ -11192,6 +11434,19 @@ pub fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    fn sorted(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.keys().is_sorted() && fields.values().all(sorted),
+            Value::Array(values) => values.iter().all(sorted),
+            _ => true,
+        }
+    }
+    let canonical;
+    let body = if (kind.starts_with("custom.client.pairing") || kind.starts_with("custom.client.terminal"))
+        && !sorted(body) {
+        canonical = smallclaims::hash::canonical_json_value(body);
+        &canonical
+    } else { body };
     append_claim_tx_with_assistant_answer(transaction, origin, subject, kind, actor, body, predecessors, forced_batch, None)
 }
 
@@ -11210,7 +11465,7 @@ pub fn append_claim_tx_with_assistant_answer(
 ) -> Result<ClaimRecord> {
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
-        if kind != "message.sent" || actor != Some("assistant/chatgpt")
+        if kind != "message.sent" || actor != Some(authorization.principal())
             || authorization.scope != "write.assistant.answers"
         {
             return Err(anyhow::anyhow!("assistant answer authorization does not bind this notification"));
@@ -11218,7 +11473,7 @@ pub fn append_claim_tx_with_assistant_answer(
         let grant_id = assistant_write::authorize_grant(transaction, origin, authorization)
             .map_err(anyhow::Error::new)?;
         assistant_body = body.clone();
-        assistant_body["fields"]["from"] = json!("assistant/chatgpt");
+        assistant_body["fields"]["from"] = json!(authorization.principal());
         assistant_body["fields"]["sender_class"] = json!("external-assistant");
         assistant_body["fields"]["assistant_grant_id"] = json!(grant_id);
         assistant_body["fields"]["assistant_owner"] = json!(authorization.owner);
@@ -11233,6 +11488,10 @@ pub fn append_claim_tx_with_assistant_answer(
     }
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
+    if kind == message_expiry::KIND {
+        return Err(anyhow::Error::new(FractalError::new(
+            "invalid-message-expiry", "expiry requires runtime receipt admission")));
+    }
     if kind == retirements::KIND {
         return Err(anyhow::Error::new(retirements::writer_required()));
     }
@@ -11265,6 +11524,33 @@ pub fn append_claim_tx_with_assistant_answer(
     )
 }
 
+// LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+// Expansion preserves main's writer spelling. A later spelling switch needs a durable
+// one-way fence and a historical reader floor before this bridge can be contracted.
+fn legacy_work_claimant<'a>(kind: &str, fields: &'a BTreeMap<String, Value>) -> Option<&'a str> {
+    if !matches!(kind, "work.claimed" | "work.renewed" | "work.progress" | "work.extended") {
+        return None;
+    }
+    fields.get("claimant").and_then(Value::as_str).filter(|claimant| {
+        fractal_schema::canonical_agent_actor(claimant).is_some_and(|canonical| {
+            canonical.starts_with("agent/") && canonical.as_ref() != *claimant
+        })
+    })
+}
+
+fn replicated_work_validation_fields<'a>(
+    kind: &str,
+    fields: &'a BTreeMap<String, Value>,
+) -> std::borrow::Cow<'a, BTreeMap<String, Value>> {
+    let Some(claimant) = legacy_work_claimant(kind, fields) else {
+        return std::borrow::Cow::Borrowed(fields);
+    };
+    let mut validation = fields.clone();
+    validation.insert("claimant".into(), json!(fractal_schema::canonical_agent_actor(claimant)));
+    std::borrow::Cow::Owned(validation)
+}
+// LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
+
 #[allow(clippy::too_many_arguments)]
 /* sqlite-large-value-flow: allow-for-now flow-h1f241b496964 owner=fractal_store::store TODO=prepare-body-and-predecessor-values */ fn append_admitted_claim_tx(
     transaction: &Transaction<'_>,
@@ -11276,6 +11562,9 @@ pub fn append_claim_tx_with_assistant_answer(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
+    declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
+    agent_charter::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
@@ -11288,10 +11577,13 @@ pub fn append_claim_tx_with_assistant_answer(
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    human_review_reassignment::admit_reassignment(transaction, kind, &fields)
+        .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
@@ -11747,6 +12039,16 @@ pub fn selected_actual_source_at(
     at_index: Option<u64>,
     desired_host: Option<&str>,
 ) -> Result<(Option<String>, Option<String>, bool)> {
+    selected_actual_source_filtered_at(connection, subject, at_index, desired_host, false)
+}
+
+fn selected_actual_source_filtered_at(
+    connection: &Connection,
+    subject: &str,
+    at_index: Option<u64>,
+    desired_host: Option<&str>,
+    exclude_reserved: bool,
+) -> Result<(Option<String>, Option<String>, bool)> {
     let through = at_index.unwrap_or(i64::MAX as u64);
     if subject.starts_with("arrangement/") {
         return Ok((arrangements::arrangement_at(connection, subject, through)?
@@ -11781,15 +12083,21 @@ pub fn selected_actual_source_at(
         .map(|(id, kind, origin, body)| Ok((id, kind, origin, serde_json::from_str::<Value>(&body)?)))
         .collect::<Result<Vec<_>>>()?;
     if parsed.is_empty() {
-        return Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2207725f1c2f owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT claims.id, claims.origin FROM claims INDEXED BY claims_actual_accepted_index
+        let mut fallback = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h518e0bfb7ccb owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT claims.id, claims.origin, claims.kind FROM claims INDEXED BY claims_actual_accepted_index
              JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND +claims.store_index<=?2
                AND {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM}
-             ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
-        ))?.query_row(/* sqlite-large-value: allow-for-now lv-h83c147f35b1f owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, through], |row| {
-            Ok((Some(row.get(0)?), Some(row.get(1)?), false))
-        }).optional()?.unwrap_or((None, None, false)));
+             ORDER BY {CANONICAL_ORDER_DESC} LIMIT ?3"
+        ))?;
+        let mut rows = fallback.query(params![subject, through, if exclude_reserved { -1 } else { 1 }])?;
+        while let Some(row) = rows.next()? {
+            if exclude_reserved && fractal_schema::notice::is_reserved_kind(row.get_ref(2)?.as_str()?) {
+                continue;
+            }
+            return Ok((Some(row.get(0)?), Some(row.get(1)?), false));
+        }
+        return Ok((None, None, false));
     }
     if parsed.len() == 1 {
         let (id, _, origin, _) = parsed.into_iter().next().expect("one runtime source");
@@ -11957,14 +12265,13 @@ pub fn latest_actual_at(
     // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
     // open while fetching each body on this same connection: even an unpinned caller then
     // reads both statements from one SQLite read cut, without retaining history bodies.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4ae5bcd8a91 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7554008ab79c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-           AND claims.kind NOT LIKE 'harness.%'
-           AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
-         ORDER BY {CANONICAL_ORDER}"
+         WHERE claims.subject=?1 AND {} AND claims.store_index<=?2
+         ORDER BY {CANONICAL_ORDER}",
+        ACTUAL_FOLD_CLAIM.as_str()
     ))?;
     let mut rows = statement.query(params![subject, at_index])?;
     let mut bodies = connection
@@ -11989,6 +12296,9 @@ pub fn latest_actual_at(
 const RUNTIME_PROJECTION_FIELDS: &[&str] =
     &["status", "runtime_id", "incarnation_id", "terminal", "reachability", "reason"];
 
+/// Every observation of a running seat carries both, so the newest one resolves them.
+const INCARNATION_FIELDS: &[&str] = &["status", "incarnation_id"];
+
 /// Resolve only the requested actual fields, newest first, including explicit nulls and
 /// omitted state-transition fields. Keep the index cursor open while reading bodies so
 /// both statements share one read cut without retaining discarded history.
@@ -11998,15 +12308,31 @@ fn latest_actual_fields_at(
     at_index: Option<u64>,
     fields: &[&str],
 ) -> Result<Option<Value>> {
+    latest_actual_fields_filtered_at(connection, subject, at_index, fields, false)
+}
+
+fn latest_actual_fields_filtered_at(
+    connection: &Connection,
+    subject: &str,
+    at_index: Option<u64>,
+    fields: &[&str],
+    exclude_reserved: bool,
+) -> Result<Option<Value>> {
     debug_assert!(fields.len() < usize::BITS as usize);
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5911198f6cf3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let fields_sql = format!(
         "SELECT claims.store_index FROM claims INDEXED BY claims_actual_accepted_index
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-           AND claims.kind NOT LIKE 'harness.%'
-           AND +claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
+         WHERE claims.subject=?1 AND {} AND +claims.store_index<=?2
+         ORDER BY {CANONICAL_ORDER_DESC}",
+        ACTUAL_FOLD_CLAIM.as_str()
+    );
+    #[cfg(test)]
+    let fields_sql = ACTUAL_FIELDS_FILTER_FOR_TEST.with(|filter| filter.borrow().as_ref().map(|filter| format!(
+        "SELECT claims.store_index FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND {filter} AND claims.store_index<=?2
          ORDER BY {CANONICAL_ORDER_DESC}"
-    ))?;
+    ))).unwrap_or(fields_sql);
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc44243b75520 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &fields_sql)?;
     let mut rows = statement.query(params![subject, at_index.unwrap_or(i64::MAX as u64)])?;
     let mut bodies = connection.prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
     let mut actual = serde_json::Map::new();
@@ -12016,10 +12342,16 @@ fn latest_actual_fields_at(
     let registry = fractal_schema::registry();
     while resolved != complete {
         let Some(row) = rows.next()? else { break; };
-        seen = true;
         let index: u64 = row.get(0)?;
-        let (kind, body): (String, String) =
-            bodies.query_row(/* sqlite-large-value: allow-for-now lv-ha1002d83b7ac owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let body = bodies.query_row(/* sqlite-large-value: allow-for-now lv-h21c970c2c1f9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| {
+            let kind: String = row.get(0)?;
+            if exclude_reserved && fractal_schema::notice::is_reserved_kind(&kind) {
+                return Ok(None);
+            }
+            Ok(Some((kind, row.get::<_, String>(1)?)))
+        })?;
+        let Some((kind, body)) = body else { continue; };
+        seen = true;
         #[cfg(any(test, feature = "test-support"))]
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
         let value: Value = serde_json::from_str(&body)?;
@@ -15021,11 +15353,11 @@ pub fn arm_waiting_mission_deadline_tx(
     // The batched writer has its own clock. Keep this admission row on the accepted
     // event timestamp too, so local activity and replay describe the same transition.
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h8a7db1487ff7 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET updated_at_unix_ms=?3
          WHERE subject=?1 AND step_path=?2
-           AND EXISTS(SELECT 1 FROM mission_run_after WHERE run_id=step_runs.run_id)",
-            params![
+           AND EXISTS(SELECT 1 FROM mission_run_after WHERE run_id=step_runs.run_id)").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-hb757b662d7d4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                 step,
                 crate::mission::AFTER_RUN_STEP,
                 admitted_at_unix_ms.to_string()
@@ -15033,7 +15365,7 @@ pub fn arm_waiting_mission_deadline_tx(
         )
         .map_err(internal)?;
     let waiting: Option<(String, u64)> = transaction
-        .query_row(
+        .prepare_cached(
             "SELECT deadlines.run_id, deadlines.timeout_ms
              FROM step_runs
              JOIN mission_run_after ON mission_run_after.run_id=step_runs.run_id
@@ -15042,8 +15374,8 @@ pub fn arm_waiting_mission_deadline_tx(
                AND deadlines.deadline_at_unix_ms IS NULL
                AND NOT EXISTS(SELECT 1 FROM step_runs AS earlier INDEXED BY step_runs_run_index
                  WHERE earlier.run_id=step_runs.run_id AND earlier.step_path=?2
-                   AND earlier.status='completed' AND earlier.subject<>step_runs.subject)",
-            params![step, crate::mission::AFTER_RUN_STEP],
+                   AND earlier.status='completed' AND earlier.subject<>step_runs.subject)").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-hb81297962ca8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![step, crate::mission::AFTER_RUN_STEP],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -15051,10 +15383,10 @@ pub fn arm_waiting_mission_deadline_tx(
     if let Some((run, timeout_ms)) = waiting {
         let deadline = admitted_at_unix_ms.saturating_add(u128::from(timeout_ms));
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-he8255d18268b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_run_deadlines SET deadline_at_unix_ms=?2
-                 WHERE run_id=?1 AND deadline_at_unix_ms IS NULL",
-                params![run, deadline.to_string()],
+                 WHERE run_id=?1 AND deadline_at_unix_ms IS NULL").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-hefbfae6d736f owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run, deadline.to_string()],
             )
             .map_err(internal)?;
     }
@@ -15500,6 +15832,59 @@ pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
 
 #[cfg(any(test, feature = "test-support"))]
 #[test]
+pub fn catch_up_projection_distinguishes_inline_local_writes_from_new_admission_between_chunks() {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    for replicated in [false, true] {
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        target.bind_fleet(FLEET).unwrap();
+        let append = |store: &Store, index: usize| {
+            store.put_document(
+                &format!("doc/projection-watermark/{index}"),
+                b"An invented local write.",
+                &None,
+                &format!("projection-watermark-{index}"),
+            ).unwrap();
+        };
+        let admit = || {
+            let mut inventory = target.replication_inventory().unwrap();
+            inventory.accepts = None;
+            let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+            target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+            assert!(target.validate_replication_backlog().unwrap().changed);
+        };
+        for index in 0..=smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append(&source, index);
+        }
+        admit();
+        let admitted = target.index().unwrap();
+        let mut yielded = false;
+        assert!(target.project_replication_backlog_with_yield(|| {
+            if !yielded {
+                yielded = true;
+                let next = smallclaims::store::PROJECTION_CHUNK_CLAIMS + 1;
+                if replicated {
+                    append(&source, next);
+                    admit();
+                } else {
+                    append(&target, next);
+                }
+            }
+        }).unwrap());
+        assert!(yielded, "the test must write between bounded chunks");
+        assert!(target.index().unwrap() > admitted);
+        assert!(target.projected_through() >= admitted);
+        assert_eq!(target.replication_projection_deferred(), replicated);
+        if replicated {
+            assert!(target.project_replication_backlog().unwrap());
+            assert!(!target.replication_projection_deferred());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[test]
 pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
     pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
@@ -15624,8 +16009,8 @@ pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert_eq!(target.projected_through(), admitted);
     assert!(
-        target.replication_projection_deferred(),
-        "later claims still need a pass"
+        !target.replication_projection_deferred(),
+        "inline local writes leave no admitted claim behind the pass"
     );
     assert!(target.project_replication_backlog().unwrap());
     assert!(!target.replication_projection_deferred());
@@ -15759,6 +16144,9 @@ pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, FractalError> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+    // Signed legacy ownership can arrive before its row. Projection checks eligibility.
+    // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
     if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched" | "client.action-result") {
         return Err(FractalError::new("invalid-replicated-claim",
             "helper launcher authority, launch history, and client action receipts cannot be admitted from peers"));
@@ -15776,7 +16164,8 @@ pub fn classify_replicated_claim_with_registry(
             ),
         )
     })?;
-    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &fields) {
+    let validation_fields = replicated_work_validation_fields(&claim.kind, &fields);
+    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &validation_fields) {
         // A peer may already publish a field introduced by a newer schema. Keep
         // that authenticated record retryable so an upgrade can admit the
         // original claim without replacing or rewriting it.
@@ -15791,6 +16180,7 @@ pub fn classify_replicated_claim_with_registry(
             ),
         ));
     }
+    message_expiry::validate_actor(&claim.kind, claim.actor.as_deref())?;
     identities::validate_replicated(claim)?;
     if claim.kind == retirements::KIND
         && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
@@ -15819,6 +16209,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::usage_limits::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
@@ -15877,7 +16269,7 @@ pub fn terminal_binding_replica_admission_rejects_a_foreign_actor() {
 /// and forget each one whose lease has ended.
 pub fn reapply_local_work_lease_renewals_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
     let mut statement = transaction
-        .prepare(
+        .prepare_cached(
             "SELECT subject, attempt, lease_owner, lease_incarnation,
                     lease_expires_at_unix_ms, updated_at_unix_ms
              FROM local_work_lease_renewals",
@@ -15900,25 +16292,25 @@ pub fn reapply_local_work_lease_renewals_tx(transaction: &Transaction<'_>) -> Re
     drop(statement);
     for (subject, attempt, owner, incarnation, expires, updated) in renewals {
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h74be3b2acae0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?5, updated_at_unix_ms=?6
                  WHERE subject=?1 AND attempt=?2 AND lease_owner=?3 AND lease_incarnation=?4
                    AND status NOT IN ('completed','failed','cancelled')
-                   AND COALESCE(CAST(lease_expires_at_unix_ms AS INTEGER), 0) < CAST(?5 AS INTEGER)",
-                params![subject, attempt, owner, incarnation, expires, updated],
+                   AND COALESCE(CAST(lease_expires_at_unix_ms AS INTEGER), 0) < CAST(?5 AS INTEGER)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-hb4ed27e10d92 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, attempt, owner, incarnation, expires, updated],
             )
             .map_err(internal)?;
     }
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h2b8a189403f1 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_work_lease_renewals WHERE NOT EXISTS (
                SELECT 1 FROM step_runs WHERE step_runs.subject=local_work_lease_renewals.subject
                  AND step_runs.attempt=local_work_lease_renewals.attempt
                  AND step_runs.lease_owner=local_work_lease_renewals.lease_owner
                  AND step_runs.lease_incarnation=local_work_lease_renewals.lease_incarnation
                  AND step_runs.status NOT IN ('completed','failed','cancelled')
-             )",
-            [],
+             )").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h2bb59dfa7394 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [],
         )
         .map_err(internal)?;
     Ok(())
@@ -16595,29 +16987,41 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
     let claims = claims_in_replay_order_tx(transaction, &subjects, &generations, None)?;
     holds::rebuilt(claims.len());
     for run in runs {
-        for table in [
-            "step_runs",
-            "revision_proposals",
-            "mission_run_deadlines",
-            "mission_run_after",
-            "run_generations",
+        for sql in [
+            /* sqlite-large-value: allow-for-now lv-h916a8b8ea8ec owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+            "DELETE FROM step_runs WHERE run_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h1da4aa29c874 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM revision_proposals WHERE run_id=?1",
+            /* sqlite-large-value: allow-for-now lv-ha155c7e6fbf3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_run_deadlines WHERE run_id=?1",
+            /* sqlite-large-value: allow-for-now lv-h3c9d35a10089 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_run_after WHERE run_id=?1",
+            /* sqlite-large-value: allow-for-now lv-hdbc94a39fc8f owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1",
         ] {
             transaction
-                .execute(&format!(/* sqlite-large-value: allow-for-now lv-he4f445b8a2b4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE run_id=?1"), [run])
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h544e4622b144 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)
+                .map_err(internal)?
+                .execute(/* sqlite-large-value: allow-for-now lv-h11afbd79d913 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run])
                 .map_err(internal)?;
         }
         transaction
-            .execute(/* sqlite-large-value: allow-for-now lv-hb922e5825674 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [run])
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb922e5825674 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1")
+            .map_err(internal)?
+            .execute(/* sqlite-large-value: allow-for-now lv-h4288338d54aa owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run])
             .map_err(internal)?;
     }
-    for claim in &claims {
-        transaction
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-hf900ad7e9a7d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate=?1",
-                [format!("projection:runs:{}", claim.id)],
-            )
-            .map_err(internal)?;
-    }
+    // Match exactly the replayed claim IDs, not every run quarantine in this store.
+    let mut claim_ids = Vec::new();
+    serde::Serializer::collect_seq(
+        &mut serde_json::Serializer::new(&mut claim_ids),
+        claims.iter().map(|claim| claim.id.as_str()),
+    )
+    .map_err(internal)?;
+    transaction
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h30f4093bf903 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health
+             WHERE aggregate IN (SELECT 'projection:runs:' || value FROM json_each(?1))",
+        )
+        .map_err(internal)?
+        .execute(/* sqlite-large-value: allow-for-now lv-h090e8ca62948 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [String::from_utf8(claim_ids).map_err(internal)?])
+        .map_err(internal)?;
     for pass in 0..3 {
         for claim in &claims {
             let included = match pass {
@@ -17549,11 +17953,16 @@ pub fn project_claim_isolated_tx(
     project: impl FnOnce() -> Result<(), FractalError>,
 ) -> Result<(), FractalError> {
     transaction
-        .execute_batch(/* sqlite-large-value: allow-for-now lv-h2d897e2887b5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SAVEPOINT project_claim")
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h2d897e2887b5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SAVEPOINT project_claim")
+        .map_err(internal)?
+        .execute(/* sqlite-large-value: allow-for-now lv-h2d3bf3f4b0f7 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [])
         .map_err(internal)?;
     match project() {
         Ok(()) => transaction
-            .execute_batch(/* sqlite-large-value: allow-for-now lv-h16304247d6f3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "RELEASE project_claim")
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h16304247d6f3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "RELEASE project_claim")
+            .map_err(internal)?
+            .execute(/* sqlite-large-value: allow-for-now lv-h8c98eb9ef770 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [])
+            .map(|_| ())
             .map_err(internal),
         Err(error) => {
             transaction
@@ -17788,9 +18197,9 @@ fn reconcile_carried_step_tx(
     // owns its state; otherwise the carried claim is the last direct state
     // observation for this successor step.
     let later_step_claim = transaction
-        .query_row(
-            "SELECT 1 FROM claims WHERE subject=?1 AND kind<>'step-run.carried' LIMIT 1",
-            [&claim.subject],
+        .prepare_cached(
+            "SELECT 1 FROM claims WHERE subject=?1 AND kind<>'step-run.carried' LIMIT 1").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h63a59c3c52d6 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&claim.subject],
             |_| Ok(()),
         )
         .optional()
@@ -17818,14 +18227,14 @@ fn reconcile_carried_step_tx(
             .filter(|_| matches!(status, "claimed" | "working" | "verifying" | "blocked"))
     };
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h49652782434a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
                     blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE NULL END,
                     not_before_unix_ms=CASE WHEN status=?2 THEN not_before_unix_ms ELSE NULL END,
                     lease_owner=?6, lease_incarnation=?7, lease_expires_at_unix_ms=?8,
                     updated_at_unix_ms=?5
-                 WHERE subject=?1 AND status<>?2",
-            params![
+                 WHERE subject=?1 AND status<>?2").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h2d4f1c046310 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                 claim.subject,
                 status,
                 attempt,
@@ -17859,9 +18268,9 @@ pub fn project_mission_run_created(
     // Creation claims fold in canonical order. A second admission of the same occurrence must
     // not append steps from another child revision to the winning initial generation.
     if transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1)",
-            [run_id],
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1)").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h9ae29240567a owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run_id],
             |row| row.get::<_, bool>(0),
         )
         .map_err(internal)?
@@ -17890,9 +18299,9 @@ pub fn project_mission_run_created(
             )
         })?;
     let mission_body = transaction
-        .query_row(
-            "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-            params![mission_id, revision],
+        .prepare_cached(
+            "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-he1c3134d5f7b owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![mission_id, revision],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -17949,17 +18358,17 @@ pub fn project_mission_run_created(
     let after = fields.get("after").and_then(Value::as_str);
     let mission = crate::mission::run_mission(mission, after)?;
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-ha72ce7d5f839 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', 'normal', ?12, ?12)",
-            params![run_id, mission_id, revision, generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string()],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', 'normal', ?12, ?12)").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-ha5b0b3825013 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, mission_id, revision, generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string()],
         )
         .map_err(internal)?;
     if let Some(after) = after {
         transaction
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-hd079be46f9d4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_run_after(run_id, after_run) VALUES (?1, ?2)",
-                params![run_id, after],
+            .prepare_cached(
+                /* sqlite-large-value: allow-for-now lv-hd079be46f9d4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_run_after(run_id, after_run) VALUES (?1, ?2)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h9c5234022862 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, after],
             )
             .map_err(internal)?;
     }
@@ -17972,18 +18381,18 @@ pub fn project_mission_run_created(
             None
         };
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h6ccb2c4ee957 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_run_deadlines(run_id, timeout_ms, deadline_at_unix_ms)
-                 VALUES (?1, ?2, ?3)",
-                params![run_id, timeout_ms, deadline_at_unix_ms.map(|deadline| deadline.to_string())],
+                 VALUES (?1, ?2, ?3)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-hfa2720becb4a owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, timeout_ms, deadline_at_unix_ms.map(|deadline| deadline.to_string())],
             )
             .map_err(internal)?;
     }
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h0317d34c8045 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
-             VALUES (?1, ?2, ?3, NULL, 'running', ?4, 'initial mission run', ?5, ?5)",
-            params![generation_id, run_id, revision, requester, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string()],
+             VALUES (?1, ?2, ?3, NULL, 'running', ?4, 'initial mission run', ?5, ?5)").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-hc149310cb1c8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![generation_id, run_id, revision, requester, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string()],
         )
         .map_err(internal)?;
     let view = mission_run_view_tx(transaction, run_id).map_err(internal)?;
@@ -18013,17 +18422,17 @@ pub fn project_mission_run_created(
         let goals = interpolate_goals(&step.goals, &step_variables)?;
         let constraints = interpolate_goals(&constraints, &step_variables)?;
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h7f91e9281efb owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, created_at_unix_ms, updated_at_unix_ms, constraints)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 1, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)",
-                params![subject, run_id, generation_id, step.path, step.definition_hash, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string(), constraints],
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 1, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-he31742587399 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, run_id, generation_id, step.path, step.definition_hash, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string(), constraints],
             )
             .map_err(internal)?;
     }
     let root_terminal = transaction
-        .query_row(
-            "SELECT status, phase FROM mission_runs WHERE id=?1",
-            [root_run_id],
+        .prepare_cached(
+            "SELECT status, phase FROM mission_runs WHERE id=?1").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h63b87e6f9619 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [root_run_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
@@ -18070,9 +18479,9 @@ pub fn project_mission_run_update(
             .and_then(Value::as_str)
             .unwrap_or("superseded");
         let current_status = transaction
-            .query_row(
-                "SELECT status FROM run_generations WHERE id=?1",
-                [generation_id],
+            .prepare_cached(
+                "SELECT status FROM run_generations WHERE id=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h4f2670f99bc3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [generation_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -18085,9 +18494,9 @@ pub fn project_mission_run_update(
             return Ok(());
         }
         transaction
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-h2d0b209a8855 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status=?2, updated_at_unix_ms=?3 WHERE id=?1",
-                params![generation_id, status, claim.accepted_at_unix_ms.to_string()],
+            .prepare_cached(
+                /* sqlite-large-value: allow-for-now lv-h2d0b209a8855 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations SET status=?2, updated_at_unix_ms=?3 WHERE id=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h93954082ed5d owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![generation_id, status, claim.accepted_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
         if is_terminal_generation_state(status) {
@@ -18115,9 +18524,9 @@ pub fn project_mission_run_update(
             .and_then(Value::as_str)
             .unwrap_or("normal");
         let current = transaction
-            .query_row(
-                "SELECT status, phase FROM mission_runs WHERE id=?1",
-                [run_id],
+            .prepare_cached(
+                "SELECT status, phase FROM mission_runs WHERE id=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h4d8c3d13ab5a owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
@@ -18129,9 +18538,9 @@ pub fn project_mission_run_update(
             return Ok(());
         }
         transaction
-            .execute(
-                /* sqlite-large-value: allow-for-now lv-h84bfdd20ea97 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2, phase=?3, updated_at_unix_ms=?4 WHERE id=?1",
-                params![run_id, status, phase, claim.accepted_at_unix_ms.to_string()],
+            .prepare_cached(
+                /* sqlite-large-value: allow-for-now lv-h84bfdd20ea97 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2, phase=?3, updated_at_unix_ms=?4 WHERE id=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-he4b8f413eb73 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, status, phase, claim.accepted_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
         if is_terminal_run_state(status) || phase == "terminal" {
@@ -18168,12 +18577,12 @@ pub fn project_mission_run_update(
             .transpose()
             .map_err(internal)?;
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h6f1d040af73f owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='pending', attempt=?2, worker_reported=0, lease_owner=NULL,
                         lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, blocked_reason=?3,
                         not_before_unix_ms=?4, activated_at_unix_ms=NULL, updated_at_unix_ms=?5,
-                        goals=COALESCE(?6, goals) WHERE subject=?1",
-                params![claim.subject, attempt, fields.get("reason").and_then(Value::as_str), not_before, claim.accepted_at_unix_ms.to_string(), goals],
+                        goals=COALESCE(?6, goals) WHERE subject=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h9f9fbaefd206 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![claim.subject, attempt, fields.get("reason").and_then(Value::as_str), not_before, claim.accepted_at_unix_ms.to_string(), goals],
             )
             .map_err(internal)?;
         return Ok(());
@@ -18190,20 +18599,20 @@ pub fn project_mission_run_update(
         let previously_completed = if status == "completed"
             && claim.subject.rsplit('/').next() == Some(crate::mission::AFTER_RUN_STEP)
         {
-            transaction.query_row("SELECT status='completed' FROM step_runs WHERE subject=?1",
-                [&claim.subject], |row| row.get::<_, bool>(0))
+            transaction.prepare_cached("SELECT status='completed' FROM step_runs WHERE subject=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h7806ccf90921 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&claim.subject], |row| row.get::<_, bool>(0))
                 .optional().map_err(internal)?.unwrap_or(false)
         } else { false };
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h640f51c3d2c5 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, blocked_reason=?3,
                     lease_owner=CASE WHEN ?2 IN ('ready','orphaned','completed','failed','cancelled') THEN NULL ELSE lease_owner END,
                     lease_incarnation=CASE WHEN ?2 IN ('ready','orphaned','completed','failed','cancelled') THEN NULL ELSE lease_incarnation END,
                     lease_expires_at_unix_ms=CASE WHEN ?2 IN ('ready','orphaned','completed','failed','cancelled') THEN NULL ELSE lease_expires_at_unix_ms END,
                         not_before_unix_ms=CASE WHEN ?2='ready' THEN NULL ELSE not_before_unix_ms END,
                         activated_at_unix_ms=CASE WHEN ?2='ready' THEN ?4 ELSE activated_at_unix_ms END,
-                        readiness_epoch=COALESCE(?5, readiness_epoch), updated_at_unix_ms=?4 WHERE subject=?1",
-                params![claim.subject, status, fields.get("reason").and_then(Value::as_str), claim.accepted_at_unix_ms.to_string(), fields.get("readiness_epoch").and_then(Value::as_u64)],
+                        readiness_epoch=COALESCE(?5, readiness_epoch), updated_at_unix_ms=?4 WHERE subject=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h3df3f741ed16 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![claim.subject, status, fields.get("reason").and_then(Value::as_str), claim.accepted_at_unix_ms.to_string(), fields.get("readiness_epoch").and_then(Value::as_u64)],
             )
             .map_err(internal)?;
         if status == "completed" {
@@ -18217,9 +18626,9 @@ pub fn project_mission_run_update(
         }
         let claim_attempt = fields.get("attempt").and_then(Value::as_u64).unwrap_or(1);
         let current_attempt = transaction
-            .query_row(
-                "SELECT attempt FROM step_runs WHERE subject=?1",
-                [&claim.subject],
+            .prepare_cached(
+                "SELECT attempt FROM step_runs WHERE subject=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h2e711dcec75d owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&claim.subject],
                 |row| row.get::<_, u64>(0),
             )
             .optional()
@@ -18227,13 +18636,29 @@ pub fn project_mission_run_update(
         if current_attempt != Some(claim_attempt) {
             return Ok(());
         }
+        // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+        let validation_fields = schema_fields_for_body(&claim.kind, &claim.body).map_err(internal)?;
+        if let Some(claimant) = legacy_work_claimant(&claim.kind, &validation_fields) {
+            let (assignee, available, agentless): (Option<String>, String, bool) = transaction.query_row(
+                "SELECT assignee, available_to, agentless FROM step_runs WHERE subject=?1",
+                [&claim.subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(internal)?;
+            let available: Vec<String> = serde_json::from_str(&available).map_err(internal)?;
+            if agentless || !(work_actor_matches(assignee.as_deref(), claimant)
+                || available.iter().any(|candidate| work_actor_matches(Some(candidate), claimant)))
+            {
+                return Err(FractalError::new("invalid-work-claimant",
+                    "legacy work claimant is not eligible for the target step"));
+            }
+        }
+        // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
         if claim.kind == "work.handoff-returned" {
-            transaction.execute(
+            transaction.prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE step_runs SET assignee=?2, available_to='[]', status='ready', lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, readiness_epoch=?3,
-                 updated_at_unix_ms=?4 WHERE subject=?1",
-                params![claim.subject, fields["handoff_to"].as_str(), fields["readiness_epoch"].as_u64(),
+                 updated_at_unix_ms=?4 WHERE subject=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h0abfb88206d0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![claim.subject, fields["handoff_to"].as_str(), fields["readiness_epoch"].as_u64(),
                     claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
             return Ok(());
         }
@@ -18241,9 +18666,9 @@ pub fn project_mission_run_update(
             && let Some(to) = fields.get("handoff_to").and_then(Value::as_str)
         {
             transaction
-                .execute(
-                    /* sqlite-large-value: allow-for-now lv-h94d302224acf owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to='[]' WHERE subject=?1",
-                    params![claim.subject, to],
+                .prepare_cached(
+                    /* sqlite-large-value: allow-for-now lv-h94d302224acf owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to='[]' WHERE subject=?1").map_err(internal)?.execute(
+                    /* sqlite-large-value: allow-for-now lv-hb7ed2976f44f owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![claim.subject, to],
                 )
                 .map_err(internal)?;
         }
@@ -18252,11 +18677,11 @@ pub fn project_mission_run_update(
             .and_then(Value::as_u64)
             .map(|value| value.to_string());
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h42590a6b7f39 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4,
                         lease_incarnation=?5, lease_expires_at_unix_ms=?6, blocked_reason=?7,
-                        readiness_epoch=COALESCE(?8, readiness_epoch), updated_at_unix_ms=?9 WHERE subject=?1",
-                params![
+                        readiness_epoch=COALESCE(?8, readiness_epoch), updated_at_unix_ms=?9 WHERE subject=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h54dfbec0e2de owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                     claim.subject,
                     status,
                     fields
@@ -18317,13 +18742,13 @@ pub fn project_revision_proposal(
             .cloned()
             .unwrap_or_else(|| json!([]));
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-hec8d3183c68e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO revision_proposals(
                    id, run_id, source_generation_id, candidate_revision, actor, reason, status,
                    cutover, compatible_steps, reviewers, approvals, preview_hash,
                    created_at_unix_ms, updated_at_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '[]', ?11, ?12, ?12)",
-                params![
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '[]', ?11, ?12, ?12)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h4d2837e7987c owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                     proposal_id,
                     run.strip_prefix("mission-run/").unwrap_or(run),
                     generation_id_from_subject(source),
@@ -18341,13 +18766,13 @@ pub fn project_revision_proposal(
             .map_err(internal)?;
         if status == "draining" {
             transaction
-                .execute(
+                .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-h340b38e48161 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining', updated_at_unix_ms=?2
                      WHERE id=?1 AND current_generation_id=?3 AND phase='normal'
                        AND status IN ('running','standing','blocked')
                        AND EXISTS (SELECT 1 FROM revision_proposals
-                                   WHERE id=?4 AND status='draining')",
-                    params![
+                                   WHERE id=?4 AND status='draining')").map_err(internal)?.execute(
+                    /* sqlite-large-value: allow-for-now lv-h5f60dea41724 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                         run.strip_prefix("mission-run/").unwrap_or(run),
                         now,
                         generation_id_from_subject(source),
@@ -18363,9 +18788,9 @@ pub fn project_revision_proposal(
             return Ok(());
         };
         let mut approvals = transaction
-            .query_row(
-                "SELECT approvals FROM revision_proposals WHERE id=?1",
-                [proposal_id],
+            .prepare_cached(
+                "SELECT approvals FROM revision_proposals WHERE id=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-ha9b16cac3b04 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [proposal_id],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -18376,9 +18801,9 @@ pub fn project_revision_proposal(
             .unwrap_or_default();
         approvals.insert(reviewer.to_owned());
         let terminal = transaction
-            .query_row(
-                "SELECT status IN ('applied','cancelled') FROM revision_proposals WHERE id=?1",
-                [proposal_id],
+            .prepare_cached(
+                "SELECT status IN ('applied','cancelled') FROM revision_proposals WHERE id=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h81d9a7bdc93a owner=fractal_store::store TODO=trace-statement-and-value-representation */ [proposal_id],
                 |row| row.get::<_, bool>(0),
             )
             .optional()
@@ -18390,20 +18815,20 @@ pub fn project_revision_proposal(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             && transaction
-                .query_row(
-                    "SELECT cutover='when-idle' FROM revision_proposals WHERE id=?1",
-                    [proposal_id],
+                .prepare_cached(
+                    "SELECT cutover='when-idle' FROM revision_proposals WHERE id=?1").map_err(internal)?.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h4049fea3aa76 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [proposal_id],
                     |row| row.get::<_, bool>(0),
                 )
                 .optional()
                 .map_err(internal)?
                 .unwrap_or(false);
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h092c4905d015 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals SET approvals=?2,
                    status=CASE WHEN ?3 THEN 'draining' ELSE status END,
-                   updated_at_unix_ms=?4 WHERE id=?1",
-                params![
+                   updated_at_unix_ms=?4 WHERE id=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h0ad1c9ec75ff owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                     proposal_id,
                     serde_json::to_string(&approvals).map_err(internal)?,
                     draining,
@@ -18413,12 +18838,12 @@ pub fn project_revision_proposal(
             .map_err(internal)?;
         if draining {
             transaction
-                .execute(
+                .prepare_cached(
                     /* sqlite-large-value: allow-for-now lv-hb53ca2b2ba08 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining', updated_at_unix_ms=?2
                      WHERE id=(SELECT run_id FROM revision_proposals WHERE id=?1)
                        AND current_generation_id=(SELECT source_generation_id FROM revision_proposals WHERE id=?1)
-                       AND phase='normal' AND status IN ('running','standing','blocked')",
-                    params![proposal_id, now],
+                       AND phase='normal' AND status IN ('running','standing','blocked')").map_err(internal)?.execute(
+                    /* sqlite-large-value: allow-for-now lv-h01299dfeb17a owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![proposal_id, now],
                 )
                 .map_err(internal)?;
         }
@@ -18436,20 +18861,20 @@ pub fn project_revision_proposal(
         _ => return Ok(()),
     };
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-hf01d490c1378 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals SET status=?2, successor_generation_id=?3,
-               updated_at_unix_ms=?4 WHERE id=?1",
-            params![proposal_id, status, successor, now],
+               updated_at_unix_ms=?4 WHERE id=?1").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-he42b16c8446b owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![proposal_id, status, successor, now],
         )
         .map_err(internal)?;
     if status == "cancelled" {
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h4e3c87aa90c9 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='normal', updated_at_unix_ms=?2
                  WHERE id=(SELECT run_id FROM revision_proposals WHERE id=?1)
                    AND current_generation_id=(SELECT source_generation_id FROM revision_proposals WHERE id=?1)
-                   AND phase='revision-draining'",
-                params![proposal_id, now],
+                   AND phase='revision-draining'").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h4d52976136f9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![proposal_id, now],
             )
             .map_err(internal)?;
     }
@@ -18464,9 +18889,9 @@ fn project_run_generation_created(
         return Ok(());
     };
     if transaction
-        .query_row(
-            "SELECT 1 FROM run_generations WHERE id=?1",
-            [generation_id],
+        .prepare_cached(
+            "SELECT 1 FROM run_generations WHERE id=?1").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h4565144c15d9 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [generation_id],
             |_| Ok(()),
         )
         .optional()
@@ -18505,9 +18930,9 @@ fn project_run_generation_created(
         .strip_prefix("mission/")
         .unwrap_or(&current.mission);
     let body = transaction
-        .query_row(
-            "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-            params![mission_id, revision],
+        .prepare_cached(
+            "SELECT body FROM mission_revisions WHERE mission_id=?1 AND revision=?2").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h16198fff7563 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![mission_id, revision],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -18529,10 +18954,10 @@ fn project_run_generation_created(
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-hcd5f8930fb35 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?7)",
-            params![generation_id, run_id, revision, predecessor, claim.actor, reason, claim.accepted_at_unix_ms.to_string()],
+             VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?7)").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h9c37f529635a owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![generation_id, run_id, revision, predecessor, claim.actor, reason, claim.accepted_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
     let mut new_steps = Vec::new();
@@ -18549,14 +18974,16 @@ fn project_run_generation_created(
         // written, so use that claim as the authority for the successor state. Only this
         // generation carries onto its own step subjects, but a cutover may write each carried
         // claim in a batch of its own, so find it by subject rather than by this batch.
+        static CARRIED_QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+            "SELECT claims.body FROM claims JOIN batches ON batches.id=claims.batch_id
+             WHERE claims.subject=?1 AND claims.kind='step-run.carried'
+             ORDER BY {CANONICAL_ORDER} LIMIT 1"
+        ));
         let carried_body = transaction
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h91ff51368a4c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-                    "SELECT claims.body FROM claims JOIN batches ON batches.id=claims.batch_id
-                     WHERE claims.subject=?1 AND claims.kind='step-run.carried'
-                     ORDER BY {CANONICAL_ORDER} LIMIT 1"
-                ),
-                [&subject],
+            .prepare_cached(
+                /* sqlite-large-value: allow-for-now lv-hc724a00fdd5c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &CARRIED_QUERY,
+            ).map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h7a0e5eaaa7e2 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&subject],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -18619,17 +19046,17 @@ fn project_run_generation_created(
         let goals = interpolate_goals(&step.goals, &step_variables)?;
         let constraints = interpolate_goals(&constraints, &step_variables)?;
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h840dfae817e7 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported, blocked_reason, not_before_unix_ms, readiness_epoch, created_at_unix_ms, updated_at_unix_ms, constraints, lease_owner, lease_incarnation, lease_expires_at_unix_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, ?18, ?19, ?20, ?21)",
-                params![subject, run_id, generation_id, step.path, step.definition_hash, status, attempt, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, worker_reported, matching_predecessor.and_then(|old| old.blocked_reason.as_deref()), matching_predecessor.and_then(|old| old.not_before_unix_ms).map(|value| value.to_string()), carried.map(|old| old.readiness_epoch).unwrap_or(0), claim.accepted_at_unix_ms.to_string(), constraints, carried_lease("claimant"), carried_lease("claim_incarnation"), carried_lease("claim_expires_at_unix_ms")],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, ?18, ?19, ?20, ?21)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h8374e489f6a2 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![subject, run_id, generation_id, step.path, step.definition_hash, status, attempt, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, worker_reported, matching_predecessor.and_then(|old| old.blocked_reason.as_deref()), matching_predecessor.and_then(|old| old.not_before_unix_ms).map(|value| value.to_string()), carried.map(|old| old.readiness_epoch).unwrap_or(0), claim.accepted_at_unix_ms.to_string(), constraints, carried_lease("claimant"), carried_lease("claim_incarnation"), carried_lease("claim_expires_at_unix_ms")],
             )
             .map_err(internal)?;
     }
     transaction
-        .execute(
-            /* sqlite-large-value: allow-for-now lv-h36db6e2779d2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id=?2, status='running', phase='normal', updated_at_unix_ms=?3 WHERE id=?1",
-            params![run_id, generation_id, claim.accepted_at_unix_ms.to_string()],
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h36db6e2779d2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id=?2, status='running', phase='normal', updated_at_unix_ms=?3 WHERE id=?1").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h54af0c948808 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, generation_id, claim.accepted_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
     Ok(())
@@ -18840,7 +19267,7 @@ impl RosterStepRow {
     }
 }
 
-/// The held and ready agent steps of seat `?1`, or of every seat when null. The unfinished-step
+/// The held and ready agent steps of seat spellings `?1`, or of every seat when null. The unfinished-step
 /// predicate, word for word that of `step_runs_open_index`, reads the fleet's open steps rather
 /// than every step the store has run.
 const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assignee, lease_owner,
@@ -18849,7 +19276,8 @@ const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assigne
      WHERE agentless=0
        AND status IN ('ready', 'claimed', 'working', 'verifying')
        AND status NOT IN ('completed','failed','cancelled')
-       AND (?1 IS NULL OR assignee=?1 OR lease_owner=?1)
+       AND (?1 IS NULL OR assignee IN (SELECT value FROM json_each(?1))
+            OR lease_owner IN (SELECT value FROM json_each(?1)))
        AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
        AND NOT ((status='ready' OR (status IN ('claimed','working','verifying')
                   AND lease_expires_at_unix_ms IS NOT NULL
@@ -18887,15 +19315,15 @@ impl SeatQueueInputs {
     }
 }
 
-/// When each seat `?1` (every seat when null) joined each open run it has a step in, and the
+/// When each seat spelling in `?1` (every seat when null) joined each open run it has a step in, and the
 /// run's status. It reads from the open runs to their steps, in that order: from the steps,
 /// SQLite reads every step any seat was ever assigned before it finds the open runs among them.
-/// Every seat's queue moves (`?2` null), or one seat's, that no repair replaced, in graph order.
+/// Every seat's queue moves (`?2` null), or one seat's spelling array, that no repair replaced, in graph order.
 pub fn seat_queue_moves_query() -> String {
     canonical_sql(
         "SELECT claims.id, claims.subject, claims.actor, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
+         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
            AND NOT EXISTS (
                SELECT 1 FROM replica_records
                WHERE replica_records.claim_id=claims.id
@@ -18908,30 +19336,49 @@ pub fn seat_queue_moves_query() -> String {
 pub fn seat_queue_joins_query() -> String {
     format!(
         "SELECT step_runs.assignee, step_runs.run_id,
-                MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
+                MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status,
+                MAX(step_runs.generation_id=mission_runs.current_generation_id)
          FROM mission_runs CROSS JOIN step_runs ON step_runs.run_id=mission_runs.id
          WHERE {OPEN_MISSION_RUN}
            AND mission_runs.phase<>'terminal'
            AND step_runs.agentless=0
            AND step_runs.assignee IS NOT NULL
-           AND (?1 IS NULL OR step_runs.assignee=?1)
+           AND (?1 IS NULL OR step_runs.assignee IN (SELECT value FROM json_each(?1)))
          GROUP BY step_runs.assignee, step_runs.run_id
-         HAVING MAX(step_runs.generation_id=mission_runs.current_generation_id)=1
          ORDER BY step_runs.assignee, step_runs.run_id"
     )
 }
 
-/// When seat `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
+/// When a seat spelling in `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
 /// run's status. `+step_runs.assignee` keeps SQLite on the run's own steps (`step_runs_run_index`):
 /// through the assignee index it read every step the seat was ever assigned, once per named run,
 /// and a seat that has moved its queue often names a hundred runs on every claim.
 pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
     "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
      FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-     WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
+     WHERE +step_runs.assignee IN (SELECT value FROM json_each(?1))
+       AND step_runs.run_id=?2 AND step_runs.agentless=0";
 
-/// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
-/// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
+pub use crate::seat_queue::work_actor_matches;
+
+/// Exact persisted spellings of one logical work actor, as a JSON array for indexed SQL reads.
+/// Only a prefixless name that canonicalizes back to the same actor is an alias.
+pub fn work_actor_spellings_json(actor: &str) -> String {
+    let Some(canonical) = fractal_schema::canonical_agent_actor(actor) else {
+        return "[]".into();
+    };
+    let legacy = canonical.strip_prefix("agent/").filter(|legacy| {
+        fractal_schema::canonical_agent_actor(legacy).as_deref() == Some(canonical.as_ref())
+    });
+    match legacy {
+        Some(legacy) => json!([canonical, legacy]).to_string(),
+        None => json!([canonical]).to_string(),
+    }
+}
+
+/// [`work_at_snapshot_query`] for one actor's JSON spelling array `?1`.
+/// The reconciler reads each running seat's steps on every pass; the actor's steps are found
+/// through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
 /// step the store ever ran.
 pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
@@ -18945,10 +19392,10 @@ pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
                 lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
          FROM step_runs
          WHERE rowid IN (
-                 SELECT rowid FROM step_runs WHERE assignee=?1
-                 UNION SELECT rowid FROM step_runs WHERE lease_owner=?1
+                 SELECT rowid FROM step_runs WHERE assignee IN (SELECT value FROM json_each(?1))
+                 UNION SELECT rowid FROM step_runs WHERE lease_owner IN (SELECT value FROM json_each(?1))
                  UNION SELECT rowid FROM step_runs WHERE available_to!='[]'
-                   AND EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1)
+                   AND EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1)))
                )
            AND (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
@@ -18971,6 +19418,14 @@ pub fn seat_queue_inputs_tx(
     seat_queue_inputs_of_tx(connection, agent, None)
 }
 
+/// Queue inputs for mutation admission, without merging actor aliases.
+pub fn seat_queue_inputs_literal_tx(
+    connection: &Connection,
+    agent: Option<&str>,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    seat_queue_inputs_matching_tx(connection, agent, None, false)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Named-run probes `seat_queue_inputs_of_tx` made on this thread, for tests.
@@ -18990,9 +19445,22 @@ pub fn seat_queue_inputs_of_tx(
     agent: Option<&str>,
     only: Option<&BTreeSet<String>>,
 ) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    seat_queue_inputs_matching_tx(connection, agent, only, true)
+}
+
+fn seat_queue_inputs_matching_tx(
+    connection: &Connection,
+    agent: Option<&str>,
+    only: Option<&BTreeSet<String>>,
+    aliases: bool,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    let actor_spellings = |actor: &str| {
+        if aliases { work_actor_spellings_json(actor) } else { json!([actor]).to_string() }
+    };
+    let spellings = agent.map(actor_spellings);
     let mut seats = BTreeMap::<String, SeatQueueInputs>::new();
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd2995294a599 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_moves_query())?;
-    let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, agent], |row| {
+    let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, spellings], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -19003,6 +19471,12 @@ pub fn seat_queue_inputs_of_tx(
     })?;
     for row in rows {
         let (claim_id, subject, actor, body, accepted_at) = row?;
+        let subject = if aliases {
+            fractal_schema::canonical_agent_actor(&subject)
+                .map(std::borrow::Cow::into_owned).unwrap_or(subject)
+        } else {
+            subject
+        };
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         let text = |name: &str| fields.get(name).and_then(Value::as_str).map(str::to_owned);
@@ -19039,24 +19513,31 @@ pub fn seat_queue_inputs_of_tx(
     drop(statement);
 
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9270afe17ad4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_joins_query())?;
-    let rows = statement.query_map(params![agent], |row| {
+    let rows = statement.query_map(params![spellings], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, bool>(4)?,
         ))
     })?;
     for row in rows {
-        let (seat, run_id, joined_at, status) = row?;
+        let (seat, run_id, joined_at, status, current) = row?;
+        let seat = if aliases {
+            fractal_schema::canonical_agent_actor(&seat)
+                .map(std::borrow::Cow::into_owned).unwrap_or(seat)
+        } else {
+            seat
+        };
         let run = format!("mission-run/{run_id}");
         let inputs = seats.entry(seat).or_default();
-        inputs.joins.push(QueueJoin {
-            run: run.clone(),
-            at_unix_ms: u128::try_from(joined_at).unwrap_or_default(),
-        });
+        let at_unix_ms = u128::try_from(joined_at).unwrap_or_default();
+        inputs.joins.push(QueueJoin { run: run.clone(), at_unix_ms });
         inputs.statuses.insert(run.clone(), status);
-        inputs.live.insert(run);
+        if current {
+            inputs.live.insert(run);
+        }
     }
     drop(statement);
 
@@ -19064,7 +19545,17 @@ pub fn seat_queue_inputs_of_tx(
     if let Some(only) = only {
         seats.retain(|seat, _| only.contains(seat));
     }
+    seats.retain(|_, inputs| !inputs.live.is_empty() || !inputs.moves.is_empty());
     for (seat, inputs) in &mut seats {
+        inputs.joins.retain(|join| inputs.live.contains(&join.run));
+        // Mixed spellings can contribute different generations of the same run.
+        // Keep their earliest join, but only current-generation membership makes it live.
+        inputs.joins.sort_unstable_by(|left, right| {
+            left.run.cmp(&right.run).then(left.at_unix_ms.cmp(&right.at_unix_ms))
+        });
+        inputs.joins.dedup_by(|left, right| left.run == right.run);
+        inputs.statuses.retain(|run, _| inputs.live.contains(run));
+        let spellings = actor_spellings(seat);
         let moves = inputs
             .moves
             .iter()
@@ -19077,7 +19568,7 @@ pub fn seat_queue_inputs_of_tx(
             #[cfg(any(test, feature = "test-support"))]
             NAMED_RUN_PROBES.with(|probes| probes.set(probes.get() + 1));
             let joined = statement
-                .query_row(/* sqlite-large-value: allow-for-now lv-h79c5fdb57d22 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![seat, run_id], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-hf01b6d5cecf5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![spellings, run_id], |row| {
                     Ok((
                         row.get::<_, Option<i64>>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -20104,6 +20595,56 @@ enum WakeHistory {
     Deferred,
 }
 
+/// Seek the step's wake tags before fetching message bodies. During the one-time copy only
+/// the unindexed historical tail uses the recipient index; its rowid bounds precede body reads.
+/// DISTINCT keeps one row per message; CROSS JOIN fixes candidates as the driving side. An IN
+/// subquery lets SQLite choose the kind index and walk every message claim before testing ids.
+pub(super) fn work_wake_history_query(complete: bool) -> String {
+    let tail = if complete { "" } else {
+        "UNION SELECT pending.id FROM claims pending INDEXED BY claims_message_to_order_index
+         WHERE pending.store_index>(SELECT cursor FROM local_work_wake_backfill WHERE singleton=1)
+           AND pending.store_index<=(SELECT ceiling FROM local_work_wake_backfill WHERE singleton=1)
+           AND pending.kind='message.sent'
+           AND json_extract(pending.body, '$.fields.to') IN (?3, ?4)"
+    };
+    canonical_sql(&format!(
+        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
+                EXISTS(SELECT 1 FROM claims consumed
+                       WHERE consumed.subject=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks consumed
+                       WHERE consumed.message=claims.subject
+                         AND consumed.kind IN ('message.read','message.closed')
+                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
+                EXISTS(SELECT 1 FROM claims delivered
+                       WHERE delivered.subject=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_marks delivered
+                       WHERE delivered.message=claims.subject
+                         AND delivered.kind='message.delivered'
+                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
+                EXISTS(SELECT 1 FROM claims staged
+                       WHERE staged.subject=claims.subject
+                         AND staged.kind='message.staged'
+                         AND staged.accepted_at_unix_ms<=?1)
+                OR EXISTS(SELECT 1 FROM local_message_staged staged
+                       WHERE staged.message=claims.subject
+                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
+         FROM (
+             SELECT DISTINCT claim_id FROM local_work_wake_tags
+             WHERE recipient IN (?3, ?4) AND tag>=?2 AND tag<?5
+             {tail}
+         ) AS wake_candidates
+         CROSS JOIN claims ON claims.id=wake_candidates.claim_id
+         WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
+           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
+           AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
+         ORDER BY CANONICAL_ASC(claims)"
+    ))
+}
+
 pub fn enrich_step_wake_at(
     connection: &Connection,
     view: &mut StepRunView,
@@ -20180,43 +20721,18 @@ fn enrich_step_wake_with(
         .strip_prefix("agent/")
         .filter(|suffix| !suffix.contains('/'))
         .unwrap_or(assignee);
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-habf9fbe214b0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-        "SELECT claims.body, claims.accepted_at_unix_ms, claims.subject,
-                EXISTS(SELECT 1 FROM claims consumed
-                       WHERE consumed.subject=claims.subject
-                         AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_marks consumed
-                       WHERE consumed.message=claims.subject
-                         AND consumed.kind IN ('message.read','message.closed')
-                         AND consumed.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
-                EXISTS(SELECT 1 FROM claims delivered
-                       WHERE delivered.subject=claims.subject
-                         AND delivered.kind='message.delivered'
-                         AND delivered.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_marks delivered
-                       WHERE delivered.message=claims.subject
-                         AND delivered.kind='message.delivered'
-                         AND delivered.recorded_at_unix_ms<=CAST(?1 AS INTEGER)),
-                EXISTS(SELECT 1 FROM claims staged
-                       WHERE staged.subject=claims.subject
-                         AND staged.kind='message.staged'
-                         AND staged.accepted_at_unix_ms<=?1)
-                OR EXISTS(SELECT 1 FROM local_message_staged staged
-                       WHERE staged.message=claims.subject
-                         AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
-         FROM claims INDEXED BY claims_message_to_index
-         WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
-           AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
-           AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
-         ORDER BY CANONICAL_ASC(claims)",
-    ))?;
+    let (_, _, complete) = wake_lookup::status(connection)?;
+    let mut upper = wake_tag_prefix.clone();
+    upper.pop();
+    upper.push('A'); // The exclusive lexicographic successor of the final '@'.
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h20950ed4b5dc owner=fractal_store::store TODO=trace-statement-and-value-representation */ &work_wake_history_query(complete))?;
     let rows = statement.query_map(
         params![
             snapshot_unix_ms.to_string(),
             wake_tag_prefix,
             assignee,
-            bare_assignee
+            bare_assignee,
+            upper
         ],
         |row| {
             Ok((
@@ -20876,15 +21392,15 @@ pub fn apply_effective_step_state(
     snapshot_unix_ms: u128,
 ) -> rusqlite::Result<()> {
     let owner = connection
-        .query_row(
+        .prepare_cached(
             "SELECT mission_runs.status, mission_runs.phase,
                     mission_runs.current_generation_id, run_generations.status,
                     root_runs.status, root_runs.phase
              FROM mission_runs JOIN run_generations
                ON run_generations.id=?2 AND run_generations.run_id=mission_runs.id
              JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
-             WHERE mission_runs.id=?1",
-            params![
+             WHERE mission_runs.id=?1")?.query_row(
+            /* sqlite-large-value: allow-for-now lv-ha1fd9fcb88f3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                 view.run.strip_prefix("mission-run/").unwrap_or(&view.run),
                 generation_id_from_subject(&view.generation),
             ],
@@ -21156,7 +21672,7 @@ pub fn descendant_mission_run_ids_tx(
     connection: &Connection,
     generation_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         /* sqlite-large-value: allow-for-now lv-h2f4e2cad1b68 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "WITH RECURSIVE descendant_runs(id) AS (
            SELECT child.id
            FROM mission_runs child
@@ -21268,15 +21784,15 @@ pub fn terminalize_projected_generation_steps_tx(
     updated_at_unix_ms: u128,
 ) -> Result<(), FractalError> {
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h3a753a5db0a5 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
              SET status='cancelled', blocked_reason=?2, lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
                  updated_at_unix_ms=?3
              WHERE generation_id=?1
                AND (status NOT IN ('completed','failed','cancelled')
-                    OR (status='cancelled' AND blocked_reason=?4))",
-            params![
+                    OR (status='cancelled' AND blocked_reason=?4))").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-he0e8552f8225 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                 generation_id,
                 reason,
                 updated_at_unix_ms.to_string(),
@@ -21294,15 +21810,15 @@ fn terminalize_projected_run_steps_tx(
     updated_at_unix_ms: u128,
 ) -> Result<(), FractalError> {
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-he3a8a7eb7ea8 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
              SET status='cancelled', blocked_reason=?2, lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
                  updated_at_unix_ms=?3
              WHERE run_id=?1
                AND (status NOT IN ('completed','failed','cancelled')
-                    OR (status='cancelled' AND blocked_reason=?4))",
-            params![
+                    OR (status='cancelled' AND blocked_reason=?4))").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-ha09c14267009 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![
                 run_id,
                 reason,
                 updated_at_unix_ms.to_string(),
@@ -21321,9 +21837,9 @@ fn terminalize_projected_run_tree_tx(
 ) -> Result<(), FractalError> {
     terminalize_projected_run_steps_tx(transaction, run_id, reason, updated_at_unix_ms)?;
     let generation = transaction
-        .query_row(
-            "SELECT current_generation_id FROM mission_runs WHERE id=?1",
-            [run_id],
+        .prepare_cached(
+            "SELECT current_generation_id FROM mission_runs WHERE id=?1").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h401827c1a9e4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run_id],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -21332,50 +21848,50 @@ fn terminalize_projected_run_tree_tx(
         return Ok(());
     };
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h7dd81ca6368e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs
              SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                  phase=CASE WHEN status IN ('running','standing','blocked') THEN 'terminal' ELSE phase END,
                  updated_at_unix_ms=?2
-             WHERE id=?1 AND status IN ('running','standing','blocked')",
-            params![run_id, updated_at_unix_ms.to_string()],
+             WHERE id=?1 AND status IN ('running','standing','blocked')").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h05976ec71372 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, updated_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
     transaction
-        .execute(
+        .prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h38ff906d5d58 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations
              SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                  updated_at_unix_ms=?2
-             WHERE id=?1 AND status IN ('running','standing','blocked')",
-            params![generation, updated_at_unix_ms.to_string()],
+             WHERE id=?1 AND status IN ('running','standing','blocked')").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-ha11d36ce3517 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![generation, updated_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
     for descendant in descendant_mission_run_ids_tx(transaction, &generation).map_err(internal)? {
         terminalize_projected_run_steps_tx(transaction, &descendant, reason, updated_at_unix_ms)?;
         let child_generation = transaction
-            .query_row(
-                "SELECT current_generation_id FROM mission_runs WHERE id=?1",
-                [&descendant],
+            .prepare_cached(
+                "SELECT current_generation_id FROM mission_runs WHERE id=?1").map_err(internal)?.query_row(
+                /* sqlite-large-value: allow-for-now lv-h8b45d2191e0b owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&descendant],
                 |row| row.get::<_, String>(0),
             )
             .map_err(internal)?;
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h49273ccc63c3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs
                  SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                      phase=CASE WHEN status IN ('running','standing','blocked') THEN 'terminal' ELSE phase END,
                      updated_at_unix_ms=?2
-                 WHERE id=?1 AND status IN ('running','standing','blocked')",
-                params![descendant, updated_at_unix_ms.to_string()],
+                 WHERE id=?1 AND status IN ('running','standing','blocked')").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h0c2ce8fba6b7 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![descendant, updated_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
         transaction
-            .execute(
+            .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-hd2e06f96148e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE run_generations
                  SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                      updated_at_unix_ms=?2
-                 WHERE id=?1 AND status IN ('running','standing','blocked')",
-                params![child_generation, updated_at_unix_ms.to_string()],
+                 WHERE id=?1 AND status IN ('running','standing','blocked')").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h441567057f55 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![child_generation, updated_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
     }
@@ -21387,7 +21903,7 @@ pub fn step_owner_is_terminal_tx(
     subject: &str,
 ) -> Result<bool, FractalError> {
     let owner = transaction
-        .query_row(
+        .prepare_cached(
             "SELECT mission_runs.status, mission_runs.phase,
                     mission_runs.current_generation_id, step_runs.generation_id,
                     run_generations.status, root_runs.status, root_runs.phase
@@ -21395,8 +21911,8 @@ pub fn step_owner_is_terminal_tx(
              JOIN mission_runs ON mission_runs.id=step_runs.run_id
              JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
              JOIN run_generations ON run_generations.id=step_runs.generation_id
-             WHERE step_runs.subject=?1",
-            [subject],
+             WHERE step_runs.subject=?1").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-hc818dfd7c7f0 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -21733,7 +22249,7 @@ pub fn mission_run_view_for_projection_tx(
     run_id: &str,
 ) -> rusqlite::Result<MissionRunView> {
     let mut view = mission_run_header_tx(connection, run_id)?;
-    let mut statement = connection.prepare(
+    let mut statement = connection.prepare_cached(
         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                 lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
          FROM step_runs WHERE generation_id=?1 ORDER BY created_at_unix_ms, step_path",
@@ -21935,11 +22451,11 @@ pub fn mission_run_header_tx(
     connection: &Connection,
     run_id: &str,
 ) -> rusqlite::Result<MissionRunView> {
-    let query = MISSION_RUN_HEADER_SELECT.replace(
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| MISSION_RUN_HEADER_SELECT.replace(
         "ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
         "WHERE mission_runs.id=?1",
-    );
-    connection.query_row(/* sqlite-large-value: allow-for-now lv-hf75128696613 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query, [run_id], mission_run_header_from_row)
+    ));
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4bcba70ae933 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h9c09cdadea59 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [run_id], mission_run_header_from_row)
 }
 
 pub fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRunView> {
@@ -22220,6 +22736,8 @@ pub fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, inc
 
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod real_part_rebuild_bench;
 
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
@@ -22326,8 +22844,9 @@ pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), FractalError> {
                     ),
                 )
             })?;
+            let validation_fields = replicated_work_validation_fields(&claim.kind, &fields);
             fractal_schema::registry()
-                .validate_claim(&claim.subject, &claim.kind, &fields)
+                .validate_claim(&claim.subject, &claim.kind, &validation_fields)
                 .map_err(|error| {
                     FractalError::new(
                         "invalid-replicated-claim",
@@ -22401,13 +22920,52 @@ pub struct ClaimCommitContext<'a> {
     pub retirement_writer: bool,
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
+    /// Runtime append owns cross-file expiry/receipt serialization.
+    pub expiry_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Dedicated client operations publish a native receipt in the same transaction.
+    pub client_operation: bool,
     /// Write the claim as a build from before its kind became a local observation did: a
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
     pub as_older_build: bool,
+}
+
+fn claim_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    operation: Option<&(String, String)>,
+) -> Result<Option<ClaimRecord>, FractalError> {
+    if let Some((operation_id, request_digest)) = operation {
+        if let Some((stored_digest, canonical_claim, state)) =
+            operation_tx(transaction, operation_id).map_err(internal)?
+        {
+            if state == "conflict" {
+                return Err(FractalError::new(
+                    "idempotency-conflict",
+                    "the replicated operation has conflicting requests",
+                )
+                .with_detail("operation_id", operation_id.clone()));
+            }
+            if stored_digest != *request_digest {
+                return Err(FractalError::new(
+                    "idempotency-mismatch",
+                    "the idempotency key already identifies a different request",
+                )
+                .with_detail("operation_id", operation_id.clone())
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest.clone()));
+            }
+            let claim = claim_by_id_tx(transaction, &canonical_claim)
+                .map_err(internal)?
+                .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
+            identities::check_receipt(transaction, &claim)?;
+            return Ok(Some(claim));
+        }
+        checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+    }
+    Ok(None)
 }
 
 pub fn append_claim_with_commit_context(
@@ -22420,6 +22978,10 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND && !context.expiry_writer {
+            return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
+        }
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());
         }
@@ -22538,34 +23100,11 @@ pub fn append_claim_with_commit_context(
                 }
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
+                    && !(matches!(input.kind.as_str(), "message.delivered" | "message.read")
+                        && message_expiry::exists(transaction, &input.subject).map_err(internal)?)
             } else { false };
-            if let Some((operation_id, request_digest)) = &operation
-                && let Some((stored_digest, canonical_claim, state)) =
-                    operation_tx(transaction, operation_id).map_err(internal)?
-            {
-                if state == "conflict" {
-                    return Err(FractalError::new(
-                        "idempotency-conflict",
-                        "the replicated operation has conflicting requests",
-                    )
-                    .with_detail("operation_id", operation_id.clone()));
-                }
-                if stored_digest != *request_digest {
-                    return Err(FractalError::new(
-                        "idempotency-mismatch",
-                        "the idempotency key already identifies a different request",
-                    )
-                    .with_detail("operation_id", operation_id.clone())
-                    .with_detail("stored_digest", stored_digest)
-                    .with_detail("request_digest", request_digest.clone()));
-                }
-                let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
-                    .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
-                identities::check_receipt(transaction, &claim)?;
-                return Ok((claim,false));
-            }
-            if let Some((operation_id, request_digest)) = &operation {
-                checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+            if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+                return Ok((claim, false));
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.
@@ -22807,6 +23346,9 @@ pub fn append_claim_with_commit_context(
             }
             Ok((record, true))
             })()?;
+            if context.client_operation && outcome.1 {
+                crate::pairing::append_operation_receipt_tx(transaction, &outcome.0).map_err(internal)?;
+            }
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
@@ -22850,6 +23392,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::usage_limits::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     identities::claim_operation(input)?;
     Ok(())

@@ -404,7 +404,7 @@ enum Fetched {
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
-    AlertOutcome(String, bool),
+    AlertOutcome(String, Result<(), String>),
     /// Harness sessions st did not start, found on this machine.
     Session(String, Result<Box<fractal_client::Session>, String>),
     /// A document's page, a page of the documents list, and the documents a mission or step names.
@@ -1090,9 +1090,10 @@ pub fn run(context: Context) -> Result<()> {
                     extras.bodies.insert(id, (from, title, content));
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
-                Fetched::AlertOutcome(id, accepted) => {
-                    if !accepted {
+                Fetched::AlertOutcome(id, outcome) => {
+                    if let Err(error) = outcome {
                         ui.finish_answer(&id, false);
+                        ui.answer_errors.insert(id.clone(), error);
                         answers.remove(&id);
                     } else if let Some(timing) = answers.get_mut(&id) {
                         timing.accepted = true;
@@ -1851,7 +1852,14 @@ pub fn run(context: Context) -> Result<()> {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
                 if let Some(id) = alert {
-                    let _ = tx.send(Fetched::AlertOutcome(id, outcome.is_ok()));
+                    let _ = tx.send(Fetched::AlertOutcome(id,
+                        outcome.as_ref().map(|_| ()).map_err(|error| {
+                            // Refused here before sending: nothing reached Fractal.
+                            if error.downcast_ref::<crate::OptionNotesUnsupported>().is_some() {
+                                return error.to_string();
+                            }
+                            format!("Could not confirm answer: {} · request restored; check before sending again", plain(error))
+                        })));
                 }
                 if let Some(token) = token {
                     let _ = tx.send(Fetched::Sent(
@@ -1876,12 +1884,9 @@ pub fn run(context: Context) -> Result<()> {
                     // A message's refusal is said, and its text put back, where its answer is
                     // handled (`Fetched::Sent`).
                     Err(_) if sends_message => {}
+                    Err(_) if optimistic_answer => {}
                     Err(error) => {
-                        let notice = if optimistic_answer {
-                            format!("Could not confirm answer: {} · request restored; check before sending again", plain(&error))
-                        } else {
-                            format!("Not done: {}", plain(&error))
-                        };
+                        let notice = format!("Not done: {}", plain(&error));
                         let _ = tx.send(Fetched::Notice(notice));
                     }
                 }
@@ -2817,9 +2822,10 @@ async fn perform(
             action,
             reason,
             answer,
+            option_notes,
         } => {
             let seen = model.attention().find(|card| card.header.id == id);
-            crate::attention_action(client, person, &id, seen, &action, reason, answer)
+            crate::attention_action(client, person, &id, seen, &action, reason, answer, option_notes)
                 .await
                 .map(|notice| (notice, None))
         }
@@ -4043,6 +4049,7 @@ mod tests {
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
@@ -4102,6 +4109,7 @@ mod tests {
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -4155,6 +4163,7 @@ mod tests {
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
@@ -4472,6 +4481,7 @@ mod tests {
             action: "review.approve".into(),
             reason: None,
             answer: None,
+            option_notes: Vec::new(),
         };
         let terminal = Effect::CreateTerminal {
             name: "shell".into(),
@@ -4583,6 +4593,7 @@ mod tests {
                 .unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),

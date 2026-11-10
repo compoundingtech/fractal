@@ -47,8 +47,15 @@ fn linked_store() -> Store {
 }
 
 fn assert_links_fail_closed_like_rebuild(tx: &Transaction<'_>) -> Result<()> {
+    for subject in [SNAPSHOT, CONTROL] {
+        let row = custom::source(tx, subject)?.unwrap();
+        assert_ne!(row["state"], "ready"); assert!(row["error"].is_string());
+    }
+    assert_links_match_rebuild(tx)
+}
+
+fn assert_links_match_rebuild(tx: &Transaction<'_>) -> Result<()> {
     let incremental = [SNAPSHOT, CONTROL].map(|subject| custom::source(tx, subject).unwrap().unwrap());
-    for row in &incremental { assert_ne!(row["state"], "ready"); assert!(row["error"].is_string()); }
     custom::rebuild(tx)?;
     for (subject, before) in [SNAPSHOT, CONTROL].iter().zip(incremental) {
         assert_eq!(custom::source(tx, subject)?.unwrap(), before);
@@ -75,6 +82,102 @@ fn notice_agent_and_runtime_cannot_write_person_controls() {
     }
     store.append_claim(&input(CONTROL, "custom.attention.control-created", "person/example", linked(&source, true))).unwrap();
     assert!(store.append_claim(&input(CONTROL, "custom.attention.control-updated", RUNTIME, linked(&source, true))).is_err());
+}
+
+#[test]
+fn notice_required_fields_cannot_be_omitted_independently() {
+    let (store, source) = setup();
+    for (subject, kind, actor, fields, required) in [
+        ("custom/attention/source/01900000-0000-7000-8000-000000000004",
+            source.kind.as_str(), "agent/example/producer", serde_json::to_value(custom::fields(&source)).unwrap(),
+            &["schema_version", "dedupe_key", "resource", "recipient", "intent", "urgency",
+                "requested", "summary", "links", "source", "created_at"][..]),
+        (SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, linked(&source, false),
+            &["source_id", "creation_claim", "producer", "recipient", "runtime", "policy", "delivery"][..]),
+        (CONTROL, "custom.attention.control-created", "person/example", linked(&source, true),
+            &["source_id", "creation_claim", "producer", "recipient", "runtime", "seen_at", "dismissed_at", "snoozed_until"][..]),
+    ] {
+        for field in required {
+            let mut omitted = fields.clone();
+            assert!(omitted.as_object_mut().unwrap().remove(*field).is_some());
+            assert!(store.append_claim(&input(subject, kind, actor, omitted)).is_err(), "{kind}: {field}");
+        }
+        assert!(custom::source(&store.readers.get(), subject).unwrap().is_none(), "{kind}");
+        store.append_claim(&input(subject, kind, actor, fields)).unwrap();
+    }
+}
+
+#[test]
+fn notice_snapshot_and_person_control_updates_preserve_links_like_rebuild() {
+    let store = linked_store();
+    let source = custom::claims(&store.readers.get(), SOURCE).unwrap();
+    for (subject, kind, actor, control, field, value) in [
+        (SNAPSHOT, "custom.attention.snapshot-updated", RUNTIME, false, "policy", json!({"disposition":"deliver","reason":"Updated policy"})),
+        (CONTROL, "custom.attention.control-updated", "person/example", true, "seen_at", json!("2026-10-01T10:00:00Z")),
+    ] {
+        let original = linked(&source[0], control);
+        let mut fields = original.clone(); fields[field] = value.clone();
+        let updated = store.append_claim(&input(subject, kind, actor, fields)).unwrap();
+        assert_eq!(custom::fields(&updated)[field], value);
+        for link in ["source_id", "creation_claim", "producer", "recipient", "runtime"] {
+            assert_eq!(custom::fields(&updated)[link], original[link], "{link}");
+        }
+        let row = custom::source(&store.readers.get(), subject).unwrap().unwrap();
+        assert_eq!(row["state"], "ready");
+        assert_eq!(row["input_count"], 2);
+    }
+    store.connection.batched(assert_links_match_rebuild).unwrap().unwrap();
+}
+
+#[test]
+fn notice_control_update_refreshes_after_external_dirty_marker_conflict() {
+    let fixture = linked_store();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "birch").unwrap();
+    custom::tests_shared_delivery::legacy_sync(&fixture, &store);
+    let before = custom::source(&store.readers.get(), CONTROL).unwrap().unwrap();
+    assert_eq!(before["state"], "ready");
+    assert_eq!(before["input_count"], 1);
+    assert!(!transaction_work::custom_pending(&store.connection.write()));
+
+    let external = Connection::open(&path).unwrap();
+    configure_projection_writer(&external).unwrap();
+    assert_eq!(external.query_row(
+        "SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name GLOB 'custom_work_*'",
+        [], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0);
+    assert_eq!(external.execute(
+        /* sqlite-large-value: allow-for-now lv-he5f2d04685a6 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty(subject) VALUES(?1)", [CONTROL],
+    ).unwrap(), 1);
+    assert!(external.is_autocommit());
+    drop(external);
+    {
+        let connection = store.connection.write();
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+            [CONTROL], |row| row.get::<_, bool>(0),
+        ).unwrap(), "the independent writer's durable marker must be visible");
+        assert!(!transaction_work::custom_pending(&connection),
+            "the external writer must not notify this connection");
+    }
+
+    let source = custom::claims(&store.readers.get(), SOURCE).unwrap();
+    let mut fields = linked(&source[0], true);
+    fields["seen_at"] = json!("2026-10-01T10:00:00Z");
+    let updated = store.append_claim(&input(
+        CONTROL, "custom.attention.control-updated", "person/example", fields,
+    )).unwrap();
+    assert_eq!(custom::fields(&updated)["seen_at"], "2026-10-01T10:00:00Z");
+    let after = custom::source(&store.readers.get(), CONTROL).unwrap().unwrap();
+    assert_eq!(after["state"], "ready");
+    assert_eq!(after["input_count"], 2);
+    assert_ne!(after["revision"], before["revision"]);
+    assert!(!store.connection.write().query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+        [CONTROL], |row| row.get::<_, bool>(0),
+    ).unwrap());
+    store.connection.batched(assert_links_match_rebuild).unwrap().unwrap();
 }
 
 #[test]
@@ -194,7 +297,7 @@ fn notice_source_registration_and_document_removal_revalidate_links_like_rebuild
 
 #[test]
 fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
-    for mutation in ["stop", "drop-role", "retire"] {
+    for mutation in ["stop", "drop-role", "retire", "handover"] {
         let store = linked_store();
         let token = store.selected_desired_token(RUNTIME).unwrap().unwrap();
         if mutation == "retire" {
@@ -206,10 +309,16 @@ fn notice_local_designation_stop_change_and_retirement_match_rebuild() {
             ).unwrap();
         } else {
             let source = if mutation == "stop" { "version 2\nstop \"agent/example/runtime\"" }
-                else { "version 2\nagent \"example/runtime\" { command \"true\"; }" };
+                else if mutation == "handover" {
+                    "version 2\nstop \"agent/example/runtime\"\nagent \"example/next\" { command \"true\"; notice-runtime; }"
+                } else { "version 2\nagent \"example/runtime\" { command \"true\"; }" };
             let intent = crate::parse_intent(source, "example").unwrap();
-            store.apply_as(&intent, &BTreeMap::from([(RUNTIME.into(), vec![token])]),
-                mutation, Some("person/example")).unwrap();
+            let expected = intent.subjects.keys().map(|subject| (subject.clone(),
+                if subject == RUNTIME { vec![token.clone()] } else { Vec::new() })).collect();
+            store.apply_as(&intent, &expected, mutation, Some("person/example")).unwrap();
+            if mutation == "handover" {
+                assert_eq!(runtime(&store.readers.get()).unwrap(), "agent/example/next");
+            }
         }
         store.connection.batched(assert_links_fail_closed_like_rebuild).unwrap().unwrap();
     }
@@ -335,5 +444,52 @@ fn notice_runtime_identity_fences_match_rebuild_without_declaration_changes() {
             }
             Ok(())
         }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn notice_untouched_finalizer_is_sql_free_even_with_ready_notices() {
+    use rusqlite::hooks::Authorization;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let store = linked_store();
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h99223601f75d owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=value WHERE key='custom_projections_version'", []).unwrap();
+    assert!(!transaction_work::custom_pending(&tx));
+    let statements = Arc::new(AtomicUsize::new(0));
+    let counted = statements.clone();
+    tx.authorizer(Some(move |_: rusqlite::hooks::AuthContext<'_>| {
+        counted.fetch_add(1, Ordering::Relaxed);
+        Authorization::Deny
+    }));
+    let result = custom::flush(&tx);
+    tx.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>);
+    result.unwrap();
+    assert_eq!(statements.load(Ordering::Relaxed), 0);
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn notice_work_signal_preserves_savepoint_work_and_shares_outer_boundary() {
+    let store = linked_store();
+    let mut connection = store.connection.write();
+    for commit in [false, true] {
+        let tx = connection.transaction().unwrap();
+        assert!(!transaction_work::custom_pending(&tx));
+        assert!(!transaction_work::resources_pending(&tx));
+        tx.execute(/* sqlite-large-value: allow-for-now lv-he4c6451c597a owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty VALUES(?1)", [SNAPSHOT]).unwrap();
+        assert!(transaction_work::custom_pending(&tx));
+        assert!(!transaction_work::resources_pending(&tx));
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hfece32705544 owner=fractal_store::store::notice_authority_tests TODO=trace-statement-and-value-representation */ "SAVEPOINT notice_flush").unwrap();
+        custom::flush(&tx).unwrap();
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hc35f31df4335 owner=fractal_store::store::notice_authority_tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO notice_flush; RELEASE notice_flush").unwrap();
+        assert!(transaction_work::custom_pending(&tx));
+        assert!(tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| r.get::<_, bool>(0)).unwrap());
+        custom::flush(&tx).unwrap();
+        tx.query_row("SELECT resource_preparation_work_pending()", [], |_| Ok(())).unwrap();
+        assert!(transaction_work::resources_pending(&tx));
+        if commit { tx.commit().unwrap(); } else { tx.rollback().unwrap(); }
+        assert!(!transaction_work::custom_pending(&connection));
+        assert!(!transaction_work::resources_pending(&connection));
     }
 }

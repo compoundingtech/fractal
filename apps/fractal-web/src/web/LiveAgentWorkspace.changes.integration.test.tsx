@@ -161,7 +161,8 @@ describe('live captured Changes dock', () => {
     expect(titles).toHaveLength(1)
     expect(titles[0]?.textContent).toBe('Changes A')
     expect(host.querySelector('[data-testid="transcript-header"]')).toBeNull()
-    expect(host.querySelector('[data-testid="thread-header"] [data-testid="transcript-header-status"]')).not.toBeNull()
+    // A healthy conversation says nothing about sync in the header.
+    expect(host.querySelector('[data-testid="thread-header"] [data-testid="transcript-header-status"]')).toBeNull()
 
     await openChanges()
     expect(inspectorRequested).toHaveBeenCalledTimes(1)
@@ -230,6 +231,29 @@ describe('live captured Changes dock', () => {
     await act(async () => vi.dynamicImportSettled())
     await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
     expect(inspectorSeparators()).toEqual(['Resize Details'])
+  })
+
+  it('returns focus to Toggle right panel after an explicit dock close, but not after a passive one', async () => {
+    await mount()
+    await openChanges()
+    close().focus()
+    await act(async () => close().click())
+    expect(close()).toBeNull()
+    expect(document.activeElement).toBe(toggle())
+    // Enter on the focused dock separator is the keyboard close; the separator unmounts with the dock.
+    await openChanges()
+    separator().focus()
+    await key('Enter')
+    expect(separator()).toBeNull()
+    expect(document.activeElement).toBe(toggle())
+    // Selecting another thread closes the inspector passively; focus stays where the person left it.
+    await openChanges()
+    const sidebarWidth = host.querySelector<HTMLElement>('[role="separator"][aria-label="Agent sidebar width"]')!
+    sidebarWidth.focus()
+    await selectAgent('agent/example-changes-peer')
+    expect(inspectorSeparators()).toEqual([])
+    expect(document.activeElement).not.toBe(toggle())
+    expect(document.activeElement).toBe(sidebarWidth)
   })
 
   it('clamps keyboard resizing and persists the committed width across close and remount', async () => {

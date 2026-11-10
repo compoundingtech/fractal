@@ -2059,7 +2059,7 @@ mod tests {
         ] {
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: "custom/client/invented-display".into(),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/example".into()),
@@ -2106,7 +2106,7 @@ mod tests {
         }
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/invented-display".into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/example".into()),

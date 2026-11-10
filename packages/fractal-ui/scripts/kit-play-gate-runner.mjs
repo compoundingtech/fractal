@@ -5,7 +5,7 @@ import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism, cpus, loadavg } from 'node:os'
-import { storyIdsFromIndex } from './kit-play-index.mjs'
+import { storyIdsFromIndex, playSetIdsFromIndex } from './kit-play-index.mjs'
 import { commitSetCases, fullCases, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { createIsolatedKitWorker } from './kit-play-isolation.mjs'
 import { shardStories } from './kit-play-shards.mjs'
@@ -25,7 +25,7 @@ export function assertStrictEvidence(records, id, a11y) {
 
 
 // The CLI always supplies the reviewed source policy; fixture tests may inject theirs directly.
-export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES }) {
+export async function runKitPlayGate({ buildDirectory, outputDirectory, overrides = FULL_CASE_OVERRIDES, assessCost = assessKitPlayCost }) {
   const shardIndex = Number(process.env.KIT_PLAY_SHARD_INDEX ?? 0)
   const shardCount = Number(process.env.KIT_PLAY_SHARD_COUNT ?? 1)
   // KIT_PLAY_SET=critical runs only stories tagged `critical`; KIT_PLAY_SET=commit is the per-commit
@@ -78,7 +78,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
-    const cost = assessKitPlayCost(budget, {
+    const cost = assessCost(budget, {
       elapsedSeconds, busyCoreMinutes: cpuDelta.busyCoreMinutes, costRequired: set === 'commit', plays: rows.length,
     })
     const receipt = {
@@ -116,13 +116,14 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     // Validate the complete index; fullIds is the selected set's inventory, which the union gate
     // checks a sharded full run against. Only KIT_PLAY_SET=all partitions it across shards.
     const index = await response.json()
+    const playSets = playSetIdsFromIndex(index)
     fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
     validateCaseOverrides(index.entries, overrides)
     storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
     if (set === 'commit') {
-      const selection = commitSetCases(ids, { overrides })
+      const selection = commitSetCases(ids, { ...playSets, overrides })
       ;({ ids, cases } = selection)
       omitted = { stories: selection.omittedStories, cases: selection.omittedCases }
     } else {
