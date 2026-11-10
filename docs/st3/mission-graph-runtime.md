@@ -194,6 +194,7 @@ mission "MISSION_ID"
   assigned-to "agent/${ST_MISSION_RUN}/owner"
   // Or repeat available-to. A mission cannot declare agentless.
   capacity cores=2 memory="4G"   // the lane of each agent here that declares none
+  authority { start "factory/publish"; write "resource/factory/*" }   // top-level only
 
   completion { when "all-steps-exhausted" }
   // Or: completion { depends-on { step "publish" completed } }
@@ -234,6 +235,21 @@ An exact idempotent retry returns its existing run before the capacity check. A 
 `revisions="human-only"` is optional and inherited by child steps. `revision-reviewer` requires that protection.
 
 The reviewer defaults to the mission run requester. `revision-cutover` is `restart-active` by default or `when-idle` when declared. The value in the current generation controls how its successor starts; a candidate cannot select its own cutover.
+
+`authority` is optional and belongs on a top-level mission only. It says what the mission's runs
+may do as the actor `mission-run/RUN` when a program step acts as the run
+([program engine §3](program-engine.md#3-declaration-and-authority)): one `VERB "PATTERN"` rule per
+line, in the shape of an agent's `*-authority` blocks. `publish`, `start`, `revise` and `cancel` take
+a mission ID without `mission/`; `write` takes a subject, or a registered family alone, before
+`/*`. A pattern is exact or ends in `/*`, which covers everything under it. Parsing refuses an empty
+block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
+mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
+is. A mission without the block grants its runs nothing. The block is stored with the revision;
+the daemon does not yet bind a run actor or enforce it. An older member would quarantine a
+revision that declares it (it hashes the mission without the field), so publication holds such a
+revision until every member advertises `mission_authority=1` on its `daemon.started`
+(`mission-authority-unavailable`, also an `apply --dry-run` blocker), as for `capacity`
+([seat lanes](seat-lanes.md)).
 
 A mission can contain direct declarations. Direct agents in the mission can revise the complete mission.
 
@@ -346,11 +362,12 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
   produces-mission "generated-mission"
   uses-mission output-of="producer-step"
   after-run "mission-run/RUN_ID"
+  program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"
   gate "NAME" { GATE_BODY }
 }
 ```
 
-`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
+`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, `after-run` and `program` are single fields.
 
 `fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
 
@@ -1214,6 +1231,17 @@ step "wait-for-build" {
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
 To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
+
+### Running a program
+
+`program` runs a step as a program the daemon's program engine executes: one ES module pinned by
+its sha256. The step is agentless and the program alone decides its outcome, so it cannot name
+an agent, gates, products, nested or used missions or `after-run`, and it cannot be a `finally`
+step. `fractal apply` sends the bundle's bytes with the publication; see [Program
+engine](program-engine.md). An older member would quarantine a revision with a program step (it
+hashes the mission without the field), so publication holds such a revision until every member
+advertises `mission_program=1` on its `daemon.started` (`mission-program-unavailable`, also an
+`apply --dry-run` blocker), as for `capacity` ([seat lanes](seat-lanes.md)).
 
 ## Run reports
 
