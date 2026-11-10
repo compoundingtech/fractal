@@ -4,8 +4,25 @@ use super::*;
 use crate::config::RunAuthorityMode;
 use crate::model::{AuthorityGrant, AuthorityVerb, MissionRunRequest};
 
-/// The mode is the daemon's, process-wide: tests that depend on it take turns.
+/// The mode is the daemon's, process-wide: tests that depend on it take turns, and each gives
+/// back the mode it found.
 static MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct ModeGuard {
+    before: RunAuthorityMode,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        set_run_authority_mode(self.before);
+    }
+}
+
+fn hold_mode() -> ModeGuard {
+    let turn = MODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    ModeGuard { before: run_authority_mode(), _turn: turn }
+}
 
 fn grant(verb: AuthorityVerb, pattern: &str) -> AuthorityGrant {
     AuthorityGrant { verb, pattern: pattern.into() }
@@ -125,7 +142,7 @@ fn a_claims_needed_grant_follows_its_operation() {
 /// A document a run binds is decided by its run authority, as its claims are.
 #[test]
 fn a_runs_document_writes_are_decided_by_its_authority() {
-    let _mode = MODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _mode = hold_mode();
     set_run_authority_mode(RunAuthorityMode::Enforce);
     let store = missions();
     let land = start(&store, "land", "land-docs", None).unwrap();
@@ -141,7 +158,7 @@ fn a_runs_document_writes_are_decided_by_its_authority() {
 
 #[test]
 fn a_run_writes_only_within_its_authority_intersected_with_its_starters() {
-    let _mode = MODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _mode = hold_mode();
     set_run_authority_mode(RunAuthorityMode::Enforce);
     let store = missions();
     let land = start(&store, "land", "land-run", None).unwrap();
@@ -192,12 +209,11 @@ fn a_run_writes_only_within_its_authority_intersected_with_its_starters() {
     write(&store, &land.subject, "custom/factory/again").unwrap();
     assert_eq!(store.rule_audits(Some("run-authority"), 10).unwrap().len(), 1);
     assert_eq!(run_authority_mode(), RunAuthorityMode::Audit);
-    set_run_authority_mode(RunAuthorityMode::Enforce);
 }
 
 #[test]
 fn writers_other_than_runs_are_untouched() {
-    let _mode = MODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _mode = hold_mode();
     // Enforced by default, before any config sets the mode.
     assert_eq!(run_authority_mode(), RunAuthorityMode::Enforce);
     let store = missions();
