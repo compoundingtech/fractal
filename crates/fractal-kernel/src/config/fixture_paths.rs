@@ -96,6 +96,10 @@ fn validate_at_root(config: &Config, root: &Path) -> Result<(), FixturePathRefus
     for name in &STORE_DATABASE_FILES[1..] {
         exact_path(&state.join(name), &state.join(name), root, "store_path")?;
     }
+    let operator = root.join("run/fractal.sock");
+    exact_path(&config.socket, &operator, root, "socket")?;
+    let operator_bound = super::socket_binding_path(&operator);
+    exact_path(&operator_bound, &operator_bound, root, "socket")?;
     let socket = root.join("run/fractal-client.sock");
     exact_path(&config.client_gateway_socket, &socket, root, "client_gateway_socket")?;
     let bound = super::socket_binding_path(&socket);
@@ -145,6 +149,7 @@ mod tests {
         let mut config = fixture(&home.path().join(".st-instance/ordinary"));
         config.store_dir = Some(home.path().join("external-store"));
         config.client_gateway_socket = home.path().join("external-client.sock");
+        config.socket = home.path().join("external-operator.sock");
         config.validate_fixture_paths().unwrap();
         assert!(!home.path().join("external-store").exists());
     }
@@ -165,6 +170,50 @@ mod tests {
             config.client_gateway_socket = socket;
             assert_eq!(validate_at_root(&config, &root).unwrap_err().path, "client_gateway_socket");
         }
+    }
+
+    #[test]
+    fn privileged_socket_overrides_and_symlink_aliases_are_refused_before_effects() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".st-instance/client-control-fixture");
+        for socket in [
+            home.path().join("run/fractal.sock"),
+            home.path().join(".st-instance/other/run/fractal.sock"),
+            home.path().join("outside.sock"),
+        ] {
+            let mut config = fixture(&root);
+            config.socket = socket;
+            let error = validate_at_root(&config, &root).unwrap_err();
+            assert_eq!(error.code, "local-only-fixture-path-refused");
+            assert_eq!(error.path, "socket");
+            assert!(!root.exists());
+        }
+        let config = fixture(&root);
+        fs::create_dir_all(config.socket.parent().unwrap()).unwrap();
+        symlink(home.path().join("normal.sock"), &config.socket).unwrap();
+        assert_eq!(validate_at_root(&config, &root).unwrap_err().path, "socket");
+        fs::remove_file(&config.socket).unwrap();
+        fs::remove_dir(config.socket.parent().unwrap()).unwrap();
+        let outside = home.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("run")).unwrap();
+        assert_eq!(validate_at_root(&config, &root).unwrap_err().path, "socket");
+        assert!(!config.state_dir.exists());
+        assert!(!config.store_path().exists());
+    }
+
+    #[test]
+    fn privileged_legacy_binding_leaf_cannot_alias_another_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("x".repeat(108)).join(".st-instance/client-control-fixture");
+        let config = fixture(&root);
+        let bound = super::super::socket_binding_path(&config.socket);
+        assert_ne!(bound.as_ref(), config.socket);
+        fs::create_dir_all(bound.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(home.path().join("normal.sock"), bound.as_ref()).unwrap();
+        assert_eq!(validate_at_root(&config, &root).unwrap_err().path, "socket");
+        assert!(!config.state_dir.exists());
     }
 
     #[test]
@@ -209,6 +258,6 @@ mod tests {
         fs::remove_file(&config.client_gateway_socket).unwrap();
         fs::remove_dir(config.client_gateway_socket.parent().unwrap()).unwrap();
         symlink(&other, root.join("run")).unwrap();
-        assert_eq!(validate_at_root(&config, &root).unwrap_err().path, "client_gateway_socket");
+        assert_eq!(validate_at_root(&config, &root).unwrap_err().path, "socket");
     }
 }

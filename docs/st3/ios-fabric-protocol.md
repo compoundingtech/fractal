@@ -128,6 +128,8 @@ also be the instance-derived paths: outside-root overrides and symlink aliases f
 with `local-only-fixture-path-refused` before identity/store effects, at bind and at
 exposure. The active instance root comes from HOME, not a state-dir override; an
 explicit reserved state path is only a fallback when that instance is not active.
+The privileged operator listener is likewise fixed to `<instance-root>/run/fractal.sock`;
+both that pathname and its actual legacy binding pathname reject symlink aliases.
 It refuses production service names; other instances refuse the reserved fixture service. Fixture
 pairings use distinct `st-fixture-device-…` inbound-only peers with only that service.
 Status, revoke and disable scope cleanup to the instance's peer names, leaving normal

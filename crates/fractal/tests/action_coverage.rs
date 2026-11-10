@@ -7403,6 +7403,8 @@ fn cli_fixture_path_overrides_refused_before_identity_store_or_bind() {
     for (flag, path) in [
         ("--state-dir", other.clone()),
         ("--store-dir", other.clone()),
+        ("--socket", root.path().join("run/fractal.sock")),
+        ("--socket", other.join("fractal.sock")),
         ("--client-gateway-socket", root.path().join("run/fractal.sock")),
         ("--client-gateway-socket", root.path().join("run/fractal-client.sock")),
         ("--client-gateway-socket", other.join("fractal.sock")),
@@ -7415,4 +7417,13 @@ fn cli_fixture_path_overrides_refused_before_identity_store_or_bind() {
     std::os::unix::fs::symlink(&database, &own_socket).unwrap();
     run("--client-gateway-socket", &own_socket);
     assert!(std::fs::symlink_metadata(&own_socket).unwrap().file_type().is_symlink());
+    std::fs::remove_file(&own_socket).unwrap();
+    let operator = fixture.run_dir().join("fractal.sock");
+    std::os::unix::fs::symlink(&database, &operator).unwrap();
+    run("--socket", &operator);
+    assert!(std::fs::symlink_metadata(&operator).unwrap().file_type().is_symlink());
+    std::fs::remove_file(&operator).unwrap();
+    std::fs::remove_dir(fixture.run_dir()).unwrap();
+    std::os::unix::fs::symlink(&other, fixture.run_dir()).unwrap();
+    run("--socket", &operator);
 }
