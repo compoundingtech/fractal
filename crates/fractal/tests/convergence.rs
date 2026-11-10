@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v18.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1020,7 +1020,24 @@ impl World {
             });
         }
         let family = self.rng.pick(&spec.subjects).clone();
-        let subject = self.subject_of(&family, index)?;
+        let subject = if spec.kind == "message.expired" {
+            // Expiry requires existing sent mail. A fresh subject would make every random
+            // expiry fail admission even with the runtime actor; native admission still
+            // decides whether delivery or closure has already made this mail ineligible.
+            let mut subjects = claims(&self.nodes[index].store)
+                .into_values()
+                .filter(|claim| claim.kind == "message.sent")
+                .map(|claim| claim.subject)
+                .collect::<Vec<_>>();
+            subjects.sort();
+            subjects.dedup();
+            if subjects.is_empty() {
+                return None;
+            }
+            self.rng.pick(&subjects).clone()
+        } else {
+            self.subject_of(&family, index)?
+        };
         let deployment = deployment_fields(&spec.kind);
         let (fields, actor) = if let Some(mut fields) = deployment {
             if spec.kind == "deploy.go" && self.rng.chance(40) {
@@ -1035,11 +1052,15 @@ impl World {
                     fields.insert(name.clone(), self.value_of(field, index));
                 }
             }
-            let actor = match self.rng.below(4) {
-                0 => None,
-                1 => Some(PERSON.to_owned()),
-                2 if subject.starts_with("agent/") => Some(subject.clone()),
-                _ => Some("agent/run-0/worker-0".to_owned()),
+            let actor = if spec.kind == "message.expired" {
+                Some("daemon/runtime".to_owned())
+            } else {
+                match self.rng.below(4) {
+                    0 => None,
+                    1 => Some(PERSON.to_owned()),
+                    2 if subject.starts_with("agent/") => Some(subject.clone()),
+                    _ => Some("agent/run-0/worker-0".to_owned()),
+                }
             };
             (fields, actor)
         };
@@ -1693,6 +1714,33 @@ fn append_generated_claim(
 }
 
 #[test]
+fn generated_message_expiry_is_admitted_and_replicates() {
+    let mut world = World::new(1, Sabotage::None);
+    let mut sent = world.claim_of(&corpus()["message.sent"], 0).unwrap();
+    sent.actor = Some(PERSON.into());
+    sent.fields = BTreeMap::from([
+        ("status".into(), json!("sent")),
+        ("from".into(), json!(PERSON)),
+        ("to".into(), json!("agent/run-0/worker-0")),
+        ("content".into(), json!("Convergence expiry fixture")),
+    ]);
+    append_generated_claim(&world.nodes[0].store, &sent).unwrap();
+
+    // Use the random schedule's exact generation and admission paths, not a
+    // hand-authored expiry that only proves corpus membership.
+    let input = world.claim_of(&corpus()["message.expired"], 0).unwrap();
+    assert_eq!(input.subject, sent.subject);
+    assert_eq!(input.actor.as_deref(), Some("daemon/runtime"));
+    assert_eq!(input.fields["status"], json!("expired"));
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    let expiry = world.nodes[0].store.latest_claim(&input.subject, Some("message.expired")).unwrap().unwrap();
+    assert_eq!(expiry.id, claim.id);
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
+}
+
+#[test]
 fn generated_mission_publications_replicate_as_canonical_missions() {
     let mut world = World::new(1, Sabotage::None);
     let mut input = world.claim_of(&corpus()["mission.published"], 0).unwrap();
@@ -1814,7 +1862,6 @@ const NEVER_TRIMS: &[u64] = &[2];
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
