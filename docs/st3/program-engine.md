@@ -310,10 +310,18 @@ Choice: a child run. It needs no standing owner and reuses §6.
   The published work row carries that key (`program`, `gate_kind: program`), read from the step's
   newest 64 entries when the row is folded. A program step whose journal has no new entry within
   its `stalled-after` (default 30 minutes) is `no-progress`, so its run is stalled.
-- Stalls: a program step whose journal shows no new entry within its `stalled-after` raises the
-  run fault with scope `program/stalled`, naming the open key. A dead host that the engine cannot
-  restart raises `program/host` on every program step it held, and so does a program worker the
-  host terminated for missing its liveness deadline (DQ8), on that worker's step.
+- Stalls: a running program step whose journal shows no new entry within its `stalled-after`
+  raises a fault on the step with scope `program/stalled`, naming the open key (and the child it
+  waits on). The run's evaluation arms the deadline (the last entry, or the start of execution,
+  plus `stalled-after`) instead of scanning; each journal entry is a claim on the step, so it moves
+  the deadline and closes the fault, as does the step leaving `working`.
+- A host that cannot start or be restarted raises `program/host` on every program step it held,
+  and so does a program worker the host terminated for missing its liveness deadline (DQ8), on
+  that worker's step. A step whose host could not start keeps its state and is dispatched again 30
+  seconds later; the fault closes when a host runs it. While `program/host` is open the step does
+  not also raise `program/stalled`.
+- Both faults close when their run ends (the inactive-fault sweep), and surface as operator
+  attention like every reconcile fault that lasts.
 
 ### 9. One execution model
 

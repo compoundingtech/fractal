@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A program step whose journal is quiet past its `stalled-after` raises the `program/stalled` fault naming its open key, and a program step whose host cannot start or whose worker missed its liveness deadline raises `program/host`; both close when the cause ends or the run ends",
+  "replay": {"status": "none", "detail": "No new claim kind. The faults are ordinary `reconcile.fault` claims on the program's step-run subject with the new scopes `program/stalled` and `program/host`."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "changed", "detail": "A program step's evaluation arms a deadline at its last journal entry plus `stalled-after` (default 30 minutes) and re-dispatches a step whose host could not start 30 seconds later; neither polls. A host start failure no longer surfaces as a generic `mission-run` fault: it is `program/host` on the step, which keeps its state. The inactive-fault sweep closes both scopes once the step's run ends. Faults that last surface as operator attention like other reconcile faults."},
+  "downtime": {"status": "none", "detail": "No restart or migration beyond a normal deploy."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "A fault closes by itself when the journal moves, a host runs the step, or the run ends."}
+}
