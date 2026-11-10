@@ -253,6 +253,8 @@ acceptance-trace data for all clients, covering each state, stale/reordered
 started rows, missing/wrong item binding, command-before-start and
 command-after-terminal. Context-dependent lifecycle checks belong to the
 client handler; decoding a resource never grants authority.
+Scenario folding ignores lifecycle-only control metadata rather than changing
+the visible resource state.
 
 TypeScript canonical hashing supports Hermes without WebCrypto through an
 injected `ClientControlSha256 = (bytes: Uint8Array) => Promise<Uint8Array>`.
@@ -260,6 +262,8 @@ Pass it as the second argument to `visibleStateDigest` or
 `clientResultCanonicalBytes`; omitting it uses generated
 `defaultWebCryptoSha256`. Canonical encoding remains generated and unchanged;
 the injected implementation returns the raw 32 SHA-256 bytes, not hex or text.
+The default WebCrypto adapter copies input into an owned `ArrayBuffer`; injected
+hashers retain the general `Uint8Array` input contract.
 Invalid Unicode is refused with the exported TypeScript
 `ClientResultCanonicalizationError` and its `code: "invalid-unicode"`, including
 through `clientResultCanonicalBytes`; consumers must not match error messages.
