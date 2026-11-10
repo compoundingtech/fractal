@@ -6,6 +6,7 @@ import type { SidebarArrangement } from './sidebarEdits';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
+import type { DeviceCommand } from '../../clients/typescript/fractal-client';
 
 /** Unwired membership conversion: epoch must come from the daemon capability, never a snapshot ID. */
 export const sidebarMembershipFrame = (token: MembershipToken, subscription: string, frame: CollectionFrame, epoch?: string): MembershipEvent | undefined => {
@@ -138,6 +139,8 @@ export class Feed {
   private live = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
+  private commands: ((command: DeviceCommand) => void) | undefined;
+  private commandsReset: (() => void) | undefined;
   private cancelOpen: (() => void) | undefined;
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
   private terminal: TerminalFollow | undefined;
@@ -179,6 +182,20 @@ export class Feed {
       if (active) { this.failures = 0; void this.connect(); } else this.suspend();
     });
     if (foreground.active) void this.connect();
+  }
+
+  /** Test clients alone may consume commands, on this pairing's existing socket. */
+  followCommands(testMode: boolean, granted: boolean, receive: (command: DeviceCommand) => void, reset?: () => void): () => void {
+    if (!testMode || !granted) return () => {};
+    this.commands = receive;
+    this.commandsReset = reset;
+    this.stream?.subscribe('commands', 'commands');
+    return () => {
+      if (this.commands !== receive) return;
+      this.commandsReset?.(); this.commandsReset = undefined;
+      this.commands = undefined;
+      this.stream?.unsubscribe('commands');
+    };
   }
 
   /** Open a fresh socket now, for a person who asks to reconnect. */
@@ -250,6 +267,7 @@ export class Feed {
   }
 
   private suspend(unexpected = false): void {
+    this.commandsReset?.();
     this.attempt++;
     this.cancelOpen?.();
     this.cancelOpen = undefined;
@@ -343,6 +361,7 @@ export class Feed {
       this.stream = opened;
       this.heard();
       this.inventory.open(opened);
+      if (this.commands) opened.subscribe('commands', 'commands');
       for (const name of Object.keys(FEED_WINDOWS) as FeedWindow[]) if (name !== 'missions' || this.missions) this.subscribeWindow(name);
       if (this.conversation) opened.subscribeConversation(CONVERSATION, this.conversation.target);
       if (this.glasses) { this.glasses.window = undefined; opened.subscribeGlasses(GLASSES); }
@@ -401,6 +420,14 @@ export class Feed {
   }
 
   private frame(frame: CollectionFrame, received: number): void {
+    if ((frame.kind === 'resync' || frame.kind === 'error') && frame.id === 'commands') { this.commandsReset?.(); return; }
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'commands' && frame.id === 'commands') {
+      if (frame.kind === 'snapshot' || frame.removes.length) this.commandsReset?.();
+      for (const command of frame.kind === 'snapshot' ? frame.items : frame.upserts) {
+        if (command.kind === 'device-command') this.commands?.(command);
+      }
+      return;
+    }
     // The app holds no ordered-membership window; its windows hold resources.
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
