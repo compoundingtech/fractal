@@ -2519,6 +2519,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "message.expired",
+            &["message"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("messages"),
+            true,
+            &[],
+        ),
+        (
             "planning-session.started",
             &["planning-session"],
             WritePolicy::AuthorizedRequester,
@@ -4206,6 +4215,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
         "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
+        "message.expired" => &[
+            ("status", required_enum(&["expired"])),
+            ("reason", required_enum(&["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"])),
+        ],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -4885,10 +4898,11 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the registry at the principal transition, before usage observations.
+        // Reconstruct the principal-transition registry, excluding subsequently added kinds.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove("message.expired").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

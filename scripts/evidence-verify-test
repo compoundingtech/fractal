@@ -1460,12 +1460,14 @@ class CommittedPolicy(unittest.TestCase):
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
             'apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf',  # read at run time by a test in crates/fractal-daemon/src/attach_image.rs
+            'packages/fractal/fixtures',  # included by crates/fractal/tests/validate.rs
             'slo', 'templates', 'vendor', 'wit']), 'typescript-client': sorted([
             'apps/fractal-web/package.json', 'packages/fractal-sdk/package.json',
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
             'clients/typescript', 'crates/fractal-client-codegen/templates/declarations.ts.in',
             'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
-            'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
+            'docs/site',  # the fractal package's docs test renders every path-commented TS sample there
+            'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client']), 'fractal-web': sorted([
             # The web lane detector's paths (scripts/ci-fractal-web-changes, PATTERNS and KIT_PATTERNS, as files that exist)...
             '.buckconfig', '.buckconfig.genie.ts', '.buckroot', '.github/repo-settings.json', '.github/repo-settings.json.genie.ts',
