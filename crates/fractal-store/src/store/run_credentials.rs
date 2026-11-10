@@ -7,9 +7,11 @@ use super::*;
 
 /// The capability kind of a run credential.
 pub const RUN_CREDENTIAL_KIND: &str = "program-run";
+/// The environment variable a program attempt's effects carry their run credential in.
+pub const RUN_CREDENTIAL_ENV: &str = "ST_RUN_CREDENTIAL";
 
-/// The step statuses in which a program attempt runs.
-const LIVE_STEP_STATES: [&str; 3] = ["ready", "working", "blocked"];
+/// The step statuses in which a program attempt runs, including one waiting on a person's answer.
+const LIVE_STEP_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
 
 /// The actor a run credential binds: `run` is `mission-run/RUN`.
 #[derive(Clone, Debug, Eq, PartialEq)]
