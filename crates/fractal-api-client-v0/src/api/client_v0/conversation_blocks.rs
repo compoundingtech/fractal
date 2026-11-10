@@ -709,6 +709,7 @@ mod tests {
             None,
             10,
             true,
+            &mut NativeReadAdmission::default(),
         )
         .unwrap();
         let item = page
@@ -831,6 +832,7 @@ mod tests {
             state, snapshot, native, session, &native.id, &[],
             crate::external_sessions::TimelineOrder::TimestampSequence, None,
             (limit + 1).max(CLIENT_MAX_PAGE_ITEMS), None, true,
+            &mut NativeReadAdmission::default(),
         ).unwrap();
         let count = slice.items.len().min(CLIENT_MAX_PAGE_ITEMS);
         let header = fractal_api_core::conversation_header::derive(
@@ -838,6 +840,118 @@ mod tests {
         );
         let items = slice.items.into_iter().take(limit).rev().collect();
         (header, items)
+    }
+
+    #[test]
+    fn native_read_admission_survives_slice_refills_header_and_display_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([{"type":"text","text":"reply"}]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let slots = read_slots(&native.transcript);
+        let mut admission = NativeReadAdmission::default();
+        let mut slice = read_slice(&native, &session, &native.id,
+            crate::external_sessions::TimelineOrder::Sequence, None, 1, false, &mut admission,
+        ).unwrap();
+        assert_eq!(slots.available_permits(), 3);
+        let other_reads = slots.try_acquire_many(3).unwrap();
+        // Refill/head reads reuse the first decision even when no second permit exists.
+        read_slice(&native, &session, &native.id,
+            crate::external_sessions::TimelineOrder::Sequence, None, 1, false, &mut admission,
+        ).unwrap();
+        let header = header_items(&native, &native.id, &slice.items);
+        assert!(!header.is_empty());
+        for item in &mut slice.items {
+            prepare_one(&native, &session, &native.id, &slice.basis, item).unwrap();
+        }
+        assert_eq!(slots.available_permits(), 0);
+        drop(admission);
+        assert_eq!(slots.available_permits(), 1);
+        drop(other_reads);
+        assert_eq!(slots.available_permits(), 4);
+    }
+
+    #[test]
+    fn header_projection_is_byte_equal_for_an_ordinary_9000_byte_model() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"model", "type":"assistant", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[{"kind":"text","payload":{},"metadata":{"model":"m".repeat(9000)}}]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let expected = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut actual = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut actual);
+        assert!(actual["model"]["value"].as_str().unwrap().ends_with("size limit; 9000 bytes]"));
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    #[test]
+    fn header_page_and_continuation_match_legacy_with_a_managed_graph_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let mut native = fixture(root.path(), json!([]));
+        let transcript = (0..4).map(|index| {
+            let record = json!({"type":"message", "id":format!("overlay-{index}"),
+                "timestamp":format!("2026-10-06T12:00:0{index}Z"),
+                "message":{"role":"assistant","content":[{"type":"text","text":format!("reply {index}")}]}});
+            format!("{record}\n")
+        }).collect::<String>();
+        std::fs::write(&native.transcript, transcript).unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "header-overlay");
+        let owner = "agent/header-overlay";
+        let incarnation = "header-overlay:i1";
+        native.id = super::super::managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject:"message/header-overlay".into(), kind:"message.sent".into(), actor:Some("person/example".into()),
+            fields:serde_json::from_value(json!({"from":"person/example", "to":owner,
+                "session_id":native.id, "status":"sent", "content":"graph overlay"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        let managed = (owner.to_owned(), Some(incarnation.to_owned()), None);
+        let snapshot = super::super::new_client_snapshot(&state);
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let mut query = super::super::ClientListQuery { limit: Some(2), ..Default::default() };
+        let page = super::super::native_slice_page_at_generation(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert!(page["items"].as_array().unwrap().iter().any(|item| item["type"] == "message"));
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(page.clone(), expected, true);
+        query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        let older = super::super::native_slice_page_at_generation(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(older, expected, false);
+    }
+
+    fn assert_complete_page_matches_legacy(mut actual: Value, mut expected: Value, first: bool) {
+        if first {
+            // Independently issued first pages have different wall-clock TTLs (and MACs).
+            // Compare every other cursor position field; continuation cursors below are
+            // byte-equal because both paths receive the same incoming expiration.
+            for page in [&mut actual, &mut expected] {
+                let cursor = page["page"]["next_cursor"].as_str().unwrap();
+                let mut cursor: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(
+                    cursor.strip_prefix(super::super::NATIVE_PAGE_CURSOR_PREFIX).unwrap(),
+                ).unwrap()).unwrap();
+                cursor["position"].as_object_mut().unwrap().remove("expires_at_unix_ms");
+                page["page"]["next_cursor"] = cursor["position"].take();
+                page["page"].as_object_mut().unwrap().remove("cursor_expires_at");
+            }
+        }
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
     }
 
     fn assert_header_page_matches_legacy(limit: usize) {
@@ -860,15 +974,24 @@ mod tests {
         let mut session = ClientSession::local(None).unwrap();
         session.conversation_blocks = true;
         let snapshot = super::super::new_client_snapshot(&state);
-        let (expected_header, expected_items) = legacy_head(&state, &native, &session, &snapshot, limit);
+        let mut query = super::super::ClientListQuery { limit: Some(limit), ..Default::default() };
         reset_prepared_bodies(&native.id);
         let page = super::super::native_slice_page(
-            &state, &snapshot, &session, &native.id,
-            &super::super::ClientListQuery { limit: Some(limit), ..Default::default() }, &native,
+            &state, &snapshot, &session, &native.id, &query, &native,
         ).unwrap().0;
-        assert_eq!(serde_json::to_vec(&page["header"]).unwrap(), serde_json::to_vec(&expected_header).unwrap());
-        assert_eq!(serde_json::to_vec(&page["items"]).unwrap(), serde_json::to_vec(&expected_items).unwrap());
         assert_eq!(prepared_bodies(), limit + 1);
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, None,
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(page.clone(), expected, true);
+        query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        let older = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id, &query, &native,
+        ).unwrap().0;
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, None,
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(older, expected, false);
     }
 
     #[test]
@@ -2396,6 +2519,7 @@ mod tests {
                             None,
                             10,
                             true,
+                            &mut NativeReadAdmission::default(),
                         )
                     })
                 };

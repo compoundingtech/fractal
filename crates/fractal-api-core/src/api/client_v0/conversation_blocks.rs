@@ -32,13 +32,39 @@ static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     getrandom::fill(&mut key).expect("owner reference key entropy");
     key
 });
-pub fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
-    slots.try_acquire().map_err(|_| ApiError {
+fn reads_busy() -> ApiError {
+    ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         code: "rate-limited".into(),
         message: "owner conversation reads are busy; retry this read".into(),
         details: Box::default(),
-    })
+    }
+}
+
+pub fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
+    slots.try_acquire().map_err(|_| reads_busy())
+}
+
+/// One admission decision, taken after the first fold lock and retained through all
+/// refills, the header head read, projection and display preparation for this request.
+#[derive(Default)]
+pub struct NativeReadAdmission {
+    #[cfg(not(any(test, feature = "test-support")))]
+    permit: Option<tokio::sync::SemaphorePermit<'static>>,
+    #[cfg(any(test, feature = "test-support"))]
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl NativeReadAdmission {
+    fn acquire(&mut self, source: &ExternalSession) -> Result<(), ApiError> {
+        if self.permit.is_none() {
+            #[cfg(not(any(test, feature = "test-support")))]
+            { self.permit = Some(read_slot(read_slots(&source.transcript))?); }
+            #[cfg(any(test, feature = "test-support"))]
+            { self.permit = Some(read_slots(&source.transcript).try_acquire_owned().map_err(|_| reads_busy())?); }
+        }
+        Ok(())
+    }
 }
 
 pub const VALUE_BYTES: usize = 8 * 1024;
@@ -526,6 +552,7 @@ pub struct PreparedSlice {
 
 /// Read a bounded source slice with optional display preparation. Replay extents only
 /// inspect identity, sequence and echo correlation; they must not expand display bodies.
+#[allow(clippy::too_many_arguments)]
 pub fn read_slice(
     source: &ExternalSession,
     session: &ClientSession,
@@ -534,13 +561,13 @@ pub fn read_slice(
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
     prepare_display: bool,
+    admission: &mut NativeReadAdmission,
 ) -> Result<PreparedSlice, ApiError> {
     let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
-    let slots = read_slots(&source.transcript);
-    let _slot = read_slot(&slots)?;
+    admission.acquire(source)?;
     drop(queue);
     let basis = basis(source)?;
     let fold = crate::profile::span("conversation/native-fold");
@@ -611,18 +638,30 @@ pub fn prepared_counter_guard() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Bound the derived header independently of the native payloads it summarizes.
+/// Cap aggregate header values without clipping display previews a second time.
+/// Each constituent value was already cleaned and bounded by `header_items`.
 pub fn bound_header(value: &mut Value) {
-    fn clean(value: &mut Value) {
-        match value {
-            Value::String(text) => text.retain(|character| !character.is_control()),
-            Value::Array(values) => values.iter_mut().for_each(clean),
-            Value::Object(values) => values.values_mut().for_each(clean),
-            _ => {}
+    if let Some(fields) = value.as_object_mut() {
+        for field in fields.values_mut() {
+            if let Some(value) = field.get_mut("value")
+                && matches!(value, Value::Array(_) | Value::Object(_))
+            {
+                let encoded = serde_json::to_string(value).expect("JSON value encodes");
+                if encoded.len() > VALUE_BYTES * 2 {
+                    *value = json!(clipped(&encoded));
+                }
+            }
         }
     }
-    bound_open_value(value);
-    clean(value);
+}
+
+fn clean_header_value(value: &mut Value) {
+    match value {
+        Value::String(text) => text.retain(|character| !character.is_control()),
+        Value::Array(values) => values.iter_mut().for_each(clean_header_value),
+        Value::Object(values) => values.values_mut().for_each(clean_header_value),
+        _ => {}
+    }
 }
 
 /// Header-only projection of folded entries. Large native payloads never enter this path.
@@ -654,14 +693,21 @@ pub fn header_items(source: &ExternalSession, session_id: &str, items: &[Value])
         prepare_task_links(source, session_id, &mut blocks);
         for block in &mut blocks {
             for key in ["metadata", "view", "payload"] {
+                clean_header_value(&mut block[key]);
                 bound_open_value(&mut block[key]);
             }
         }
-        json!({
+        let mut projected = json!({
             "id": item["id"], "type": item["type"],
             "timestamp": item["timestamp"], "sequence": item["sequence"],
             "body": {"code": item["body"]["code"], "call_id": item["body"]["call_id"], "blocks": blocks},
-        })
+        });
+        for pointer in ["/id", "/timestamp", "/body/call_id"] {
+            let value = projected.pointer_mut(pointer).expect("header projection field");
+            clean_header_value(value);
+            bound_open_value(value);
+        }
+        projected
     }).collect()
 }
 

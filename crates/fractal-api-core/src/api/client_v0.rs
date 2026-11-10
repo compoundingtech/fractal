@@ -2506,6 +2506,31 @@ pub fn native_slice_page_at_generation(
     source: &crate::external_sessions::ExternalSession,
     managed: Option<&super::ManagedSessionOwner>,
 ) -> Result<(Json<Value>, u64, u64), ApiError> {
+    native_slice_page_impl(state, snapshot, session, session_id, query, source, managed,
+        #[cfg(any(test, feature = "test-support"))]
+        false,
+    )
+}
+
+/// The pre-split display path, retained only to compare complete page responses in tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn legacy_native_slice_page_for_test(
+    state: &AppState, snapshot: &ClientSnapshot, session: &ClientSession, session_id: &str,
+    query: &ClientListQuery, source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
+) -> Result<(Json<Value>, u64, u64), ApiError> {
+    native_slice_page_impl(state, snapshot, session, session_id, query, source, managed, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_slice_page_impl(
+    state: &AppState, snapshot: &ClientSnapshot, session: &ClientSession, session_id: &str,
+    query: &ClientListQuery, source: &crate::external_sessions::ExternalSession,
+    managed: Option<&super::ManagedSessionOwner>,
+    #[cfg(any(test, feature = "test-support"))] legacy_display: bool,
+) -> Result<(Json<Value>, u64, u64), ApiError> {
+    #[cfg(not(any(test, feature = "test-support")))]
+    let legacy_display = false;
     let preparation = crate::profile::span("conversation/native-preparation");
     let cursor = query.cursor.as_deref().map(decode_native_page_cursor).transpose()?;
     let source_basis = conversation_blocks::basis(source)?;
@@ -2555,8 +2580,12 @@ pub fn native_slice_page_at_generation(
         Vec::new()
     };
     drop(preparation);
+    // Acquire after the first fold lock, then retain the same permit through refills,
+    // the header read and preparation: no second try-acquire decision under load.
+    let mut admission = conversation_blocks::NativeReadAdmission::default();
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, false,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, legacy_display,
+        &mut admission,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2572,7 +2601,8 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed, false,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, legacy_display,
+                &mut admission,
             )?.0)
         } else {
             None
@@ -2580,12 +2610,14 @@ pub fn native_slice_page_at_generation(
         let head = head.as_ref().unwrap_or(&native);
         native_head_fence(head, &source_basis, native.generation)?;
         let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
-        let header_items = conversation_blocks::header_items(source, session_id, &head.items[..count]);
+        let header_items = (!legacy_display).then(|| {
+            conversation_blocks::header_items(source, session_id, &head.items[..count])
+        });
         let mut header = conversation_page_header(
-            state, session, session_id, &header_items,
+            state, session, session_id, header_items.as_deref().unwrap_or(&head.items[..count]),
             head.has_more || head.items.len() > count,
         );
-        if let Some(value) = &mut header {
+        if !legacy_display && let Some(value) = &mut header {
             conversation_blocks::bound_header(value);
         }
         header
@@ -2594,12 +2626,15 @@ pub fn native_slice_page_at_generation(
     };
     native.has_more |= native.items.len() > limit + 1;
     native.items.truncate(limit + 1);
-    for item in &mut native.items {
-        conversation_blocks::prepare_one(source, session, session_id, &source_basis, item)?;
+    if !legacy_display {
+        for item in &mut native.items {
+            conversation_blocks::prepare_one(source, session, session_id, &source_basis, item)?;
+        }
     }
     if conversation_blocks::basis(source)? != source_basis {
         return Err(client_page_expired("the transcript changed while preparing the page"));
     }
+    drop(admission);
     let overlay = crate::profile::span("conversation/overlay");
     // Message sequences are unique, and native_session_messages already returns them
     // newest-first by timestamp and sequence. Compute each full key only once.
@@ -2706,9 +2741,10 @@ pub fn canonical_native_slice(
     limit: usize,
     managed: Option<&super::ManagedSessionOwner>,
     prepare_display: bool,
+    admission: &mut conversation_blocks::NativeReadAdmission,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
-        source, session, session_id, order, before, limit, prepare_display,
+        source, session, session_id, order, before, limit, prepare_display, admission,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
@@ -2728,7 +2764,7 @@ pub fn canonical_native_slice(
         let mut next = conversation_blocks::read_slice(
             source, session, session_id, order, boundary.as_ref(),
             (limit - slice.items.len()).min(budget),
-            prepare_display,
+            prepare_display, admission,
         )?;
         scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
