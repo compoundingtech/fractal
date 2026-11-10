@@ -80,6 +80,7 @@ export const scenarioExemptions: readonly string[] = [
   'DrawersFlow:contract-fixture',
   'DrawersLight:contract-fixture',
   'DrawersOpen:contract-fixture',
+  'S1FixDockedFocus:contract-fixture',
   'SidebarDragUnmountCleanup:contract-fixture',
   'SidebarShortcutFocusReturn:contract-fixture',
   'TerminalToggle:contract-fixture',
@@ -328,6 +329,61 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   const reopened = await openDetailsSheet(canvasElement)
   await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
 } }
+/**
+ * Explicitly closing the docked inspector unmounts the focused control; focus returns to the header's Toggle right
+ * panel, by pointer, by keyboard and by Enter on the dock separator. The inspector is nonmodal, so Escape inside it does
+ * not close it, and a passive close (switching agents) leaves focus where the person put it. Below the breakpoint the
+ * inspector is a modal sheet whose Escape closes it back to its opener.
+ */
+export const S1FixDockedFocus: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The real workspace over deterministic feeds pins focus return to the header opener after every explicit docked-inspector close, nonmodal Escape and passive-close focus ownership.' } }, play: restoringStoryUrl(async ({ canvasElement }) => {
+  const { canvas, narrow, header } = await workspace(canvasElement)
+  if (narrow) {
+    const { opener } = await openDetailsSheet(canvasElement)
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
+    await waitFor(() => expect(opener).toHaveFocus())
+    return
+  }
+  await assertWide(canvasElement)
+  const toggle = header.getByRole('button', { name: 'Toggle right panel' })
+  const closed = async () => {
+    await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    await expect(toggle).toHaveFocus()
+  }
+  // Pointer: the close button is the focused control the close unmounts.
+  await userEvent.click(toggle)
+  const pointer = await loadedInspector(canvasElement)
+  await userEvent.click(within(pointer.inspector).getByRole('button', { name: 'Close agent inspector' }))
+  await closed()
+  // Keyboard: the toggle reopens, focus moves to the close button, Enter closes back to the toggle.
+  await userEvent.keyboard('{Enter}')
+  const keyboard = await loadedInspector(canvasElement)
+  within(keyboard.inspector).getByRole('button', { name: 'Close agent inspector' }).focus()
+  await userEvent.keyboard('{Enter}')
+  await closed()
+  // Enter on the dock separator is the other explicit close.
+  await userEvent.keyboard('{Enter}')
+  await loadedInspector(canvasElement)
+  canvas.getByRole('separator', { name: 'Resize Details' }).focus()
+  await userEvent.keyboard('{Enter}')
+  await closed()
+  // Nonmodal: Escape inside the docked inspector neither closes it nor moves focus.
+  await userEvent.keyboard('{Enter}')
+  const nonmodal = await loadedInspector(canvasElement)
+  nonmodal.tab('Details').focus()
+  await userEvent.keyboard('{Escape}')
+  await nextFrame()
+  await nextFrame()
+  await expect(canvas.getByRole('complementary', { name: 'Agent inspector' })).toBe(nonmodal.inspector)
+  await expect(nonmodal.tab('Details')).toHaveFocus()
+  // Passive: switching agents closes the inspector without pulling focus to the toggle.
+  await userEvent.click(await within(canvas.getByRole('complementary', { name: 'Agents' })).findByRole('row', { name: /^MissionsUi,/ }))
+  await waitFor(() => expect(header.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent('MissionsUi'))
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
+  await nextFrame()
+  await expect(header.getByRole('button', { name: 'Toggle right panel' })).not.toHaveFocus()
+}) }
 /** Collapse removes the real dock separator mid-drag; its Escape listener must leave with it. */
 export const SidebarDragUnmountCleanup: Story = {
   tags: ['critical'],

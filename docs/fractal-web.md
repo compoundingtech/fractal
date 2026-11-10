@@ -209,6 +209,31 @@ tailscale serve --bg --https=8443 http://127.0.0.1:7411
 Set `TAILNET_HTTPS_ORIGIN` to the exact HTTPS origin published by Serve, including
 its port when non-default.
 
+For an immutable deployment, the flake exposes `packages.<system>.fractal-web-publisher`
+and `apps.<system>.fractal-web-publisher`. The executable bundles the upstream
+`server/main.mts` and its dependencies from the frozen workspace installation and
+runs with the pinned Node 24 runtime. During packaging, esbuild reads dependencies
+directly from the immutable installation via `NODE_PATH` and writes the bundle to
+the writable build directory; no dependency-tree copy is needed. No source checkout
+or package installation is needed on the serving host. The publisher does not include
+assets or start the daemon; select the assets independently with `WF_DIST`:
+
+```sh
+WF_DIST=/path/to/selected-package/share/fractal-web \
+WF_PORT=7411 \
+WF_PUBLIC_ORIGIN="$TAILNET_HTTPS_ORIGIN" \
+WF_TAILNET_LOGINS=robin@example.com \
+WF_ST_GATEWAY=$XDG_RUNTIME_DIR/fractal-client.sock \
+WF_ST_AUTHORIZATION_FILE=/path/to/paired-bearer \
+  nix run .#fractal-web-publisher
+```
+
+Fleet service managers must resolve `WF_DIST` from the running daemon's selected
+`--web-dist`, not a pinned store path or a candidate installer. Restart the
+publisher after daemon selection changes: the host reads `build-identity.json`
+at startup, and serves assets from that same selected directory. A changed
+installer record alone does not prove that the daemon restarted with those assets.
+
 The settings:
 
 - `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.

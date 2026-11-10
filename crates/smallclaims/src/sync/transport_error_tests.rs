@@ -367,6 +367,95 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
     }
 }
 
+#[test]
+fn client_failed_boundary_includes_peer_and_exchange_correlation() {
+    let capture = SummaryCapture::default();
+    tracing::subscriber::with_default(capture.clone(), || {
+        let timing = ExchangeTiming {
+            id: "test-correlation".into(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        };
+        timing.record("client-send-start");
+        timing.client_failed("birch");
+    });
+    let events = capture.0.lock().unwrap();
+    let failures: Vec<_> = events.iter()
+        .filter(|event| event.get("stage").is_some_and(|stage| stage == "\"client-failed\""))
+        .collect();
+    assert_eq!(failures.len(), 1);
+    let failure = failures[0];
+    assert_eq!(failure["peer"], "\"birch\"");
+    assert_eq!(failure["correlation_id"], "test-correlation");
+    assert!(failure.contains_key("unix_ms"));
+    assert!(failure.contains_key("elapsed_us"));
+}
+
+#[test]
+fn failed_exchange_answer_line_includes_backend_split_and_local_http_status() {
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert(EXCHANGE_CORRELATION_HEADER, id.parse().unwrap());
+    let timing = ExchangeTiming::server(&headers);
+    for (slot, (stage, elapsed_us)) in timing.boundaries.lock().unwrap().0.iter_mut().zip([
+        ("permit-acquired", 1000),
+        ("local-receive-start", 2000),
+        ("local-receive-done", 9000),
+        ("follow-up-export-start", 10000),
+        ("backend-done", 13000),
+    ]) {
+        *slot = Some(ExchangeBoundary { stage, elapsed_us, unix_ms: 0 });
+    }
+    let mut failure = ReplicationExchangeFailure::from_error(
+        &anyhow::anyhow!("private error text"),
+        ReplicationFailurePhase::LocalReceive,
+        Duration::from_millis(13),
+        Some(500),
+    );
+    let line = timing.failure_line(&headers, "birch", Some("shard-a"), "failed", Some(&failure));
+    for field in [
+        format!("correlation_id={id}"), "peer=birch".into(), "shard=shard-a".into(),
+        "outcome=failed".into(), "code=replication-operation-failed".into(),
+        "phase=local-receive".into(), "permit_wait_ms=1".into(),
+        "local_receive_ms=7".into(), "follow_up_export_ms=3".into(),
+        "local_receive_http_status=500".into(),
+    ] {
+        assert!(line.contains(&field), "{line}");
+    }
+    assert!(line.contains(" elapsed_ms="));
+    assert!(!line.contains("private error text"));
+    failure.phase = ReplicationFailurePhase::FollowUpExport;
+    let line = timing.failure_line(&headers, "birch", None, "failed", Some(&failure));
+    assert!(line.contains("phase=follow-up-export"));
+    assert!(!line.contains("local_receive_http_status="));
+}
+
+#[test]
+fn unanswered_exchange_answer_lines_distinguish_missing_and_in_progress_timings() {
+    let headers = HeaderMap::new();
+    let timing = ExchangeTiming::server(&headers);
+    for outcome in ["no-answer", "overload"] {
+        let line = timing.failure_line(&headers, "birch", None, outcome, None);
+        assert!(line.contains("correlation_id=none peer=birch shard=none"));
+        assert!(line.contains(&format!("outcome={outcome}")));
+        assert!(line.contains(if outcome == "no-answer" {
+            "code=replication-no-answer"
+        } else {
+            "code=replication-overloaded"
+        }));
+        assert!(line.contains("phase=none"));
+        assert!(line.contains("permit_wait_ms=none local_receive_ms=none follow_up_export_ms=none"));
+    }
+    timing.record("permit-acquired");
+    timing.record("local-receive-start");
+    let line = timing.failure_line(&headers, "birch", None, "overload", None);
+    assert!(line.contains("phase=local-receive"));
+    assert!(!line.contains("local_receive_ms=none"));
+    assert!(line.contains("follow_up_export_ms=none"));
+    assert!(!line.contains("local_receive_http_status="));
+}
+
 #[tokio::test]
 async fn exchange_body_observation_counts_bytes_and_logs_incomplete_upload_once() {
     use futures_util::{StreamExt as _, stream};

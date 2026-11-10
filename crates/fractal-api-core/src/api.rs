@@ -564,7 +564,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
-        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier") {
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier" | "agent-charter-feature-barrier") {
             body["applied"] = json!("none");
         }
         if let Some(applied) = body["details"].get("applied").cloned() {
@@ -833,6 +833,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
@@ -2106,6 +2107,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-document-reference"
         | "invalid-declared-admission"
         | "declared-admission-feature-barrier"
+        | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),

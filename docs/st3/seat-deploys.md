@@ -128,8 +128,13 @@ New seats receive `ST3_MAILBOX_TRANSPORT=push`. Each delivery component connects
 over the local daemon Unix socket. The stream sends the full seat record and pushes new mail.
 Every connection starts a new automatic-delivery boundary. Never-offered pre-connection mail
 sent within the preceding seven days is eligible for recovery; older mail stays held in the graph
-mailbox. Of that recovery backlog, mail older than one hour is admitted oldest first, at most five
-messages per connection. Mail at most one hour old and new live mail do not consume that cap.
+mailbox. Of that recovery backlog, mail older than one hour is admitted oldest first, in batches of
+at most five. Only one batch is outstanding per connection: the next batch opens when every
+member is delivered or withdrawn. A terminally closed message is withdrawn, not delivered;
+withdrawal creates no delivery receipt. Staging or offering a message does not release a slot;
+one stuck, non-closed member holds the whole next batch. Mail at most one hour old and new live
+mail do not consume that budget. Delivery or withdrawal wakes the stream to admit the next
+batch without a reconnect.
 Both age boundaries use the original send time relative to connection start, including late imports.
 Previously staged or delivered-but-unread mail stays held regardless of age; a missing receipt
 never authorizes another offer. SQLite fences both subscriptions and receipts to the live runtime
@@ -148,10 +153,11 @@ No push component projects message bodies into `resources/inbox` or `resources/a
 
 `delivered` records native transport acceptance, not model consumption. A boot or channel reconnect
 never authorizes another offer of previously offered mail. Polling drivers use the same seven-day
-recovery window and five-message oldest-first backlog cap. Their connection boundary is the
-consumer's boot/session floor; the daemon's store keeps one in-memory budget per recipient and
-replaces it when that floor changes. Pagination and filtered reads share the budget. Admitted mail
-remains visible through the current boot's staging attempt until its receipts finish; their local
+recovery window and settlement-gated batches of at most five oldest backlog messages. Their
+connection boundary is the consumer's boot/session floor; the daemon's store keeps one bounded
+outstanding batch per recipient and replaces it when that floor changes. Pagination and filtered
+reads share that batch; a stale boot cannot refill it. Admitted mail remains visible through the
+current boot's staging attempt until its receipts finish; their local
 archive projection removes old native inbox files without closing the graph messages.
 An agent can explicitly inspect that retained mail with `fractal conversations ls --as "$ST_AGENT"`
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection

@@ -198,7 +198,7 @@ def child_environment(extra=None, environ=None):
     environ = os.environ if environ is None else environ
     child = {name: environ[name] for name in PASSED_ENVIRONMENT if name in environ}
     child.update(PATH=TOOLS['PATH'], LC_ALL='C', GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0',
-                 GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+                 GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null', GIT_NO_LAZY_FETCH='1')
     child.update(extra or {})
     return child
 
@@ -213,6 +213,14 @@ def git(repo, *args, stdin=None, env=None):
     if done.returncode != 0:
         raise Refused(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
     return done.stdout
+
+
+def require_complete_commit(repo, commit):
+    """The caller hydrates its checkout; the signer never contacts a promisor remote."""
+    missing = sum(line.startswith('?') for line in
+                  git(repo, 'rev-list', '--objects', '--missing=print', commit).decode().splitlines())
+    if missing:
+        raise Refused(f'{missing} missing objects before signing; hydrate the source repository in the caller first')
 
 
 def check_nix(request):
@@ -303,6 +311,7 @@ def main():
 
     checkout = Path.cwd()
     commit = request['commit']
+    require_complete_commit(checkout, commit)
     if git(checkout, 'cat-file', '-t', commit).decode().strip() != 'commit':
         raise Refused('commit is not a commit in the caller\'s checkout')
     tree = git(checkout, 'rev-parse', f'{commit}^{{tree}}').decode().strip()
