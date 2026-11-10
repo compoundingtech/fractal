@@ -5,6 +5,7 @@ import {
   ClientControlIdentityError,
   generateClientControlKeyPair,
   getOrCreateClientControlIdentity,
+  readExistingPublicKeyPoint,
 } from './identity.ts'
 
 // Crypto is the runtime's REAL WebCrypto, never a mock. Only IndexedDB uses the
@@ -64,6 +65,34 @@ describe('client-control P-256 identity', () => {
     }
     const later = await getOrCreateClientControlIdentity()
     expect(new Uint8Array(await later.exportPublicKey())).toEqual(new Uint8Array(publicKeys[0]!))
+  })
+
+  it('reads absent identity without creating a database', async () => {
+    expect(await indexedDB.databases()).toEqual([])
+    expect(await readExistingPublicKeyPoint()).toEqual({ _tag: 'Absent' })
+    expect(await indexedDB.databases()).toEqual([])
+  })
+
+  it('reads the existing public SEC1 point without exporting a private key', async () => {
+    const identity = await getOrCreateClientControlIdentity()
+    const spki = await identity.exportPublicKey()
+    const publicKey = await subtle.importKey('spki', spki, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify'])
+    const expected = new Uint8Array(await subtle.exportKey('raw', publicKey))
+    const exports = vi.spyOn(subtle, 'exportKey')
+    try {
+      const result = await readExistingPublicKeyPoint()
+      expect(result._tag).toBe('Present')
+      if (result._tag !== 'Present') throw new Error('Existing identity missing')
+      expect(result.point).toEqual(expected)
+      expect(result.point.length).toBe(65)
+      expect(result.point[0]).toBe(0x04)
+      expect(exports).toHaveBeenCalledTimes(1)
+      expect(exports.mock.calls[0]![0]).toBe('spki')
+      expect(exports.mock.calls[0]![1].type).toBe('public')
+    } finally {
+      exports.mockRestore()
+    }
+    expect(new Uint8Array(await identity.exportPublicKey())).toEqual(new Uint8Array(spki))
   })
 
   it('fails closed without IndexedDB instead of creating an ephemeral identity', async () => {

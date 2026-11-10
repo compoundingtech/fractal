@@ -149,3 +149,63 @@ export const getOrCreateClientControlIdentity = async (): Promise<ClientControlI
     database?.close()
   }
 }
+
+export type ExistingPublicKeyPoint =
+  | { readonly _tag: 'Absent' }
+  | { readonly _tag: 'Present'; readonly point: Uint8Array<ArrayBuffer> }
+
+/**
+ * Secondary identity evidence only. Never calls the creating acquisition path, upgrades storage,
+ * exports a private key, or deletes anything. Daemon enrollment/signature verification is primary.
+ */
+export const readExistingPublicKeyPoint = async (): Promise<ExistingPublicKeyPoint> => {
+  if (globalThis.crypto?.subtle === undefined || globalThis.indexedDB === undefined) {
+    throw new ClientControlIdentityError('unavailable', 'Identity readback requires WebCrypto and IndexedDB')
+  }
+  let database: IDBDatabase | undefined
+  try {
+    const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase | undefined>()
+    // No version argument: never upgrade an existing database.
+    const request = globalThis.indexedDB.open(databaseName)
+    let absent = false
+    let blocked = false
+    request.onupgradeneeded = () => {
+      absent = true
+      request.transaction!.abort()
+      request.result.close()
+    }
+    request.onerror = () => {
+      if (absent) resolve(undefined)
+      else reject(new ClientControlIdentityError('storage-failed', 'Could not read identity storage', request.error))
+    }
+    request.onblocked = () => {
+      blocked = true
+      reject(new ClientControlIdentityError('storage-blocked', 'Identity readback is blocked'))
+    }
+    request.onsuccess = () => {
+      if (blocked) { request.result.close(); return }
+      request.result.onversionchange = () => request.result.close()
+      resolve(request.result)
+    }
+    database = await promise
+    if (database === undefined || !database.objectStoreNames.contains(storeName)) return { _tag: 'Absent' }
+    const stored = await readOrInsert(database)
+    if (stored === undefined) return { _tag: 'Absent' }
+    let spki: Uint8Array<ArrayBuffer>
+    try { spki = new Uint8Array(await globalThis.crypto.subtle.exportKey('spki', stored.publicKey)) }
+    catch (cause) { throw new ClientControlIdentityError('export-failed', 'Could not export the existing public key', cause) }
+    // DER SPKI for id-ecPublicKey + prime256v1, followed by the uncompressed SEC1 point.
+    const prefix = [0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+      0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00]
+    if (spki.length !== prefix.length + 65 || !prefix.every((byte, index) => spki[index] === byte)
+      || spki[prefix.length] !== 0x04) {
+      throw new ClientControlIdentityError('export-failed', 'Existing public key is not an uncompressed P-256 SPKI')
+    }
+    return { _tag: 'Present', point: spki.slice(prefix.length) }
+  } catch (cause) {
+    if (cause instanceof ClientControlIdentityError) throw cause
+    throw new ClientControlIdentityError('storage-failed', 'Could not read the existing identity', cause)
+  } finally {
+    database?.close()
+  }
+}
