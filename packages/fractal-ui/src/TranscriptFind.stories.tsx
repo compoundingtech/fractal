@@ -25,9 +25,21 @@ const TranscriptFindStory = ({ scheme, history }: { readonly scheme: 'dark' | 'l
   </EmbraceRuntimeProvider>
 </main>
 const styles = stylex.create({ root: { height: '100vh', backgroundColor: surface.canvas } })
-const meta = { title: 'Fractal UI/Transcript search', component: TranscriptFindStory, args: { scheme: 'dark', history: { _tag: 'Complete' } } } satisfies Meta<typeof TranscriptFindStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Transcript search', component: TranscriptFindStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Explicit TranscriptTurn and history fixtures exercise the transcript search UI contract: shortcut and focus ownership, match navigation, loaded-history coverage and tool disclosure, in dark and light themes, independently of scenario wire projection.' } }, args: { scheme: 'dark', history: { _tag: 'Complete' } } } satisfies Meta<typeof TranscriptFindStory>
 export default meta
 type Story = StoryObj<typeof meta>
+
+export const scenarioExemptions: readonly string[] = [
+  'ExpandsMatchedTool:contract-fixture',
+  'ManyMatches:contract-fixture',
+  'ManyMatchesLight:contract-fixture',
+  'NoMatch:contract-fixture',
+  'NoMatchLight:contract-fixture',
+  'Open:contract-fixture',
+  'OpenLight:contract-fixture',
+  'PartialCoverage:contract-fixture',
+  'PartialCoverageLight:contract-fixture',
+]
 
 async function openSearch(canvasElement: HTMLElement, query?: string) {
   const canvas = within(canvasElement)
