@@ -482,6 +482,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
     let incarnation = format!("{}:2026-09-30T00:00:00.000Z", std::process::id());
     publish_terminal(&state, &incarnation).await;
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Raw terminal device".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
@@ -495,6 +496,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: "raw-terminal-public-key-000000000000000000000".into(),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },).await.unwrap();
@@ -1228,6 +1230,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     assert!(
         read_only
             .pairing_begin_person(&PersonPairingBegin {
+                binding: None,
                 api_version: fractal_client::API_VERSION.into(),
                 device_name: "Unattributed device".into(),
                 device_key_fingerprint: None,
@@ -1604,6 +1607,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, "person/ada");
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Conformance phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
@@ -1621,6 +1625,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: "conformance-public-key-000000000000000000000000".into(),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },)

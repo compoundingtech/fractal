@@ -658,7 +658,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
-    capabilities.push(json!({"id":"pairing-key-binding", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"pairing-key-binding", "version":2, "state":"granted"}));
     capabilities.push(json!({"id":"person-answer-option-notes", "version":1, "state":"granted"}));
     // Pairing accepts `fabric_node_id` and reports `fabric_grant`.
     capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
@@ -797,6 +797,7 @@ pub fn authenticate(
         let pairing_completion = request.method() == axum::http::Method::POST
             && request.uri().path().starts_with("/v1/client/pairings/")
             && (request.uri().path().ends_with("/complete")
+                || request.uri().path().ends_with("/claim")
                 || request.uri().path() == "/v1/client/pairings/renewals/pending");
         return pairing_completion
             .then(ClientSession::pairing)

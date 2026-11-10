@@ -43,6 +43,7 @@ pub mod browser_pairing;
 mod browser_pairing_tests;
 pub mod device_renewal;
 pub mod pairing_verifier;
+pub mod pairing_binding;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
@@ -69,6 +70,8 @@ mod push_tests;
 mod pairing_order_tests;
 #[cfg(test)]
 mod pairing_key_binding_tests;
+#[cfg(test)]
+mod pairing_binding_tests;
 #[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
@@ -205,6 +208,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairings/{id}", get(pairing_binding::status))
+        .route("/v1/client/pairings/{id}/claim", post(pairing_binding::claim))
+        .route("/v1/client/pairings/{id}/approve", post(pairing_binding::approve))
         .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
         .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
         .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
@@ -5642,6 +5648,9 @@ pub struct PairingBegin {
     /// The intended device key, confirmed by this one local approval.
     #[serde(default)]
     device_key_fingerprint: Option<String>,
+    /// QR issuance requires a later signed scan claim and one local key approval.
+    #[serde(default)]
+    binding: Option<String>,
     full_control: Option<bool>,
     /// Narrows the default device grant; every entry must be a limited pairing scope.
     scopes: Option<Vec<String>>,
@@ -5686,6 +5695,12 @@ pub async fn pairing_begin(
         ));
     }
     pairing_verifier::validate_device_key_fingerprint(request.device_key_fingerprint.as_deref())?;
+    if request.binding.as_deref().is_some_and(|binding| !matches!(binding, "required" | "optional")) {
+        return Err(validation("pairing binding must be required or optional"));
+    }
+    if request.binding.as_deref() == Some("required") && request.device_key_fingerprint.is_some() {
+        return Err(validation("required pairing approves the scanning key after its possession claim, not at issue time"));
+    }
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -5748,6 +5763,7 @@ fn begin_person_challenge(
         ("verifier".into(), Value::String(pairing_verifier::MARKER.into())),
         ("verifier_key_id".into(), Value::String(pairing_verifier::key_id(&verifier_key))),
         ("expires_at_unix_ms".into(), json!(expires_at)),
+        ("binding".into(), json!(request.binding.as_deref().unwrap_or("optional"))),
     ]);
     let stored_pairing_id = begun_fields["pairing_id"].as_str().expect("pairing ID is a string");
     let code_hash = pairing_verifier::digest(&verifier_key, stored_pairing_id, &code);
@@ -5789,6 +5805,9 @@ pub struct PairingComplete {
     api_version: String,
     code: String,
     device_public_key: String,
+    /// Required QR completions prove possession with purpose pairing.complete.v1.
+    #[serde(default)]
+    proof: Option<String>,
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default)]
     key_storage: Option<String>,
@@ -5935,21 +5954,7 @@ pub async fn pairing_complete(
     }
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
-    let subject = format!("custom/client/pairing-{id}");
-    let begun = state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-begun", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .into_iter()
-        .find(|claim| {
-            claim
-                .body
-                .pointer("/fields/pairing_id")
-                .and_then(Value::as_str)
-                == Some(pairing_id.as_str())
-        })
-        .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    let begun = pairing_binding::challenge(&state, &id, &request.code)?;
     if begun.body["fields"]["browser_request"] == true
         && (browser_pairing::approval(&state, &begun)? != "approved"
             || request.device_public_key != format!("browser:{id}")
@@ -5957,67 +5962,10 @@ pub async fn pairing_complete(
     {
         return Err(forbidden("browser pairing requires its owner's approved request"));
     }
-    if begun.origin != state.store.origin() {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            code: "pairing-origin-required".into(),
-            message: "complete pairing on the member that began it".into(),
-            details: Box::default(),
-        });
+    let key_approval = pairing_binding::approved_key(&state, &begun, &request.device_public_key)?;
+    if key_approval.is_some() {
+        pairing_binding::completion_proof(&begun, &request.code, &request.device_public_key, request.proof.as_deref())?;
     }
-    if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
-        return Err(forbidden("the pairing challenge requires a new pairing"));
-    }
-    let used = !state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .is_empty();
-    let restart = pairing_verifier::restart;
-    let expires = begun
-        .body
-        .pointer("/fields/expires_at_unix_ms")
-        .and_then(Value::as_u64)
-        .map(u128::from)
-        .unwrap_or_default();
-    let now = client_now_ms();
-    let expected = begun.body.pointer("/fields/code_hash").and_then(Value::as_str).unwrap_or_default();
-    let valid_code = match begun.body.pointer("/fields/verifier") {
-        Some(Value::String(marker)) if marker == browser_pairing::VERIFIER => {
-            if begun.body["fields"]["browser_request"] != true {
-                return Err(restart());
-            }
-            browser_pairing::verify_request_key(&request.code, expected)
-        }
-        Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
-            let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
-            if begun.body.pointer("/fields/verifier_key_id").and_then(Value::as_str)
-                != Some(pairing_verifier::key_id(&key).as_str())
-            {
-                return Err(restart());
-            }
-            let stored_pairing_id = begun.body.pointer("/fields/pairing_id")
-                .and_then(Value::as_str).ok_or_else(restart)?;
-            pairing_verifier::verify(&key, stored_pairing_id, &request.code, expected)
-        }
-        Some(_) => return Err(restart()),
-        None => {
-            if begun.body["fields"]["browser_request"] == true {
-                return Err(restart());
-            }
-            if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
-                return Err(restart());
-            }
-            expected == credential_digest(&request.code)
-        }
-    };
-    if used || !valid_code || expires <= now {
-        return Err(forbidden(
-            "the pairing code is invalid, expired, or already used",
-        ));
-    }
-    pairing_verifier::require_approved_key(&begun.body["fields"], &request.device_public_key)?;
     // A Fabric grant needs the person's yes for this pairing, given when the code was made.
     let fabric_wanted = begun
         .body
@@ -6131,6 +6079,11 @@ pub async fn pairing_complete(
     if let Some(fingerprint) = begun.body["fields"].get("device_key_fingerprint") {
         fields.insert("device_key_fingerprint".into(), fingerprint.clone());
     }
+    if let Some(approval) = &key_approval {
+        fields.insert("binding".into(), json!("required"));
+        fields.insert("device_key_fingerprint".into(), approval.body["fields"]["device_key_fingerprint"].clone());
+        fields.insert("key_approval_id".into(), json!(approval.id));
+    }
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
@@ -6139,8 +6092,8 @@ pub async fn pairing_complete(
         kind: "custom.client.pairing-completed".into(),
         actor: Some(person_id.clone()),
         fields,
-        evidence: vec![begun.id.clone()],
-        expected_subject: Some(Some(begun.id.clone())),
+        evidence: std::iter::once(begun.id.clone()).chain(key_approval.as_ref().map(|approval| approval.id.clone())).collect(),
+        expected_subject: Some(Some(key_approval.as_ref().map_or(&begun.id, |approval| &approval.id).clone())),
         idempotency_key: None,
     });
     if let Err(error) = completed {

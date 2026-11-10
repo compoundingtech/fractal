@@ -7308,6 +7308,54 @@ fn pairing_key_preparation_and_binding_flags_are_additive() {
 }
 
 #[test]
+fn qr_pairing_separates_issuance_claim_and_explicit_approval() {
+    let issue = ["fractal", "devices", "pair", "Phone", "--gateway", "https://member.example"];
+    let parsed = Cli::try_parse_from(issue).unwrap();
+    assert!(matches!(parsed.command, Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Pair { gateway: Some(_), device_key_fingerprint: None, .. }), ..
+    })));
+    let mut prebound = issue.to_vec();
+    prebound.extend(["--device-key-fingerprint", "sha256:prepared"]);
+    assert!(Cli::try_parse_from(prebound).is_err(), "QR issuance cannot preapprove a prepared key");
+    assert!(Cli::try_parse_from(["fractal", "devices", "approve", "pairing/example"]).is_err());
+    assert!(Cli::try_parse_from([
+        "fractal", "devices", "approve", "pairing/example",
+        "--device-key-fingerprint", "sha256:scanning",
+    ]).is_ok());
+    let mut claim = vec![
+        "fractal", "devices", "complete", "https://member.example", "pairing/example", "--claim",
+    ];
+    assert!(Cli::try_parse_from(claim.clone()).is_err());
+    claim.extend(["--key-file", "/private/device.pk8", "--device-key-fingerprint", "sha256:scanning"]);
+    assert!(Cli::try_parse_from(claim.clone()).is_ok());
+    claim.push("--assistant");
+    assert!(Cli::try_parse_from(claim).is_err(), "assistant pairing has no QR claim");
+}
+
+#[test]
+fn qr_issuance_requires_binding_without_preapproving_a_key() {
+    let request = PersonPairingBegin {
+        api_version: CLIENT_V0_API_VERSION.into(),
+        device_name: "Phone".into(),
+        binding: Some("required".into()),
+        device_key_fingerprint: None,
+        person_id: "person/operator".into(),
+        full_control: None,
+        scopes: None,
+        fabric_gateway: None,
+    };
+    let wire = serde_json::to_value(request).unwrap();
+    assert_eq!(wire["binding"], "required");
+    assert!(wire.get("device_key_fingerprint").is_none());
+    let approval = serde_json::to_value(fractal_client::PairingKeyApproval {
+        api_version: CLIENT_V0_API_VERSION.into(),
+        device_key_fingerprint: "sha256:scanning".into(),
+    }).unwrap();
+    assert_eq!(approval["device_key_fingerprint"], "sha256:scanning");
+    assert!(approval.get("code").is_none(), "issuer approval does not retransmit the QR secret");
+}
+
+#[test]
 fn legacy_publish_is_not_a_public_alias() {
     assert!(
         Cli::try_parse_from(["st3", "publish", "mission.kdl", "--as", "agent/operator"])

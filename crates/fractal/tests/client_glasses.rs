@@ -503,6 +503,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     assert!(matches!(change,CollectionEvent::Changes{removes,..} if removes.len()==1));
     stream.close().await;
     let challenge = client.pairing_begin_person(&fractal_client::PersonPairingBegin { device_key_fingerprint: None, api_version: "st3.client.v0".into(),
+    binding: None,
     device_name: "Fixture phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
@@ -515,6 +516,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         api_version: "st3.client.v0".into(),
         code: challenge.code,
         device_public_key: "a".repeat(64),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },)

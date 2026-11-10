@@ -1142,7 +1142,7 @@ async fn response_envelope_unbounded(
         if request.uri().query().is_some_and(|query| {
             query.split('&').any(|pair| pair == "accepts=pairing-key-binding")
         }) {
-            capabilities.push(json!({"id":"pairing-key-binding", "version":1, "state":"granted"}));
+            capabilities.push(json!({"id":"pairing-key-binding", "version":2, "state":"granted"}));
         }
         return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
             .into_response();
@@ -2028,6 +2028,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "pairing-origin-required"
         | "pairing-restart-required"
         | "pairing-key-mismatch"
+        | "pairing-key-binding-required"
+        | "pairing-already-claimed"
+        | "pairing-claim-invalid"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"

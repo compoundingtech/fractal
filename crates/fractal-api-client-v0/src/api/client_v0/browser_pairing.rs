@@ -187,6 +187,7 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
     if status != "approved" { return Ok(Json(json!({"status":status}))); }
     let Json(paired) = pairing_complete(State(state), Extension(session), AxumPath(id.clone()), Json(PairingComplete {
         api_version: CLIENT_API_VERSION.into(), code: body.request_key,
+        proof: None,
         device_public_key: format!("browser:{id}"), key_storage: None, fabric_node_id: None,
     })).await?;
     Ok(Json(json!({"bearer":paired["credential"],"scopes":paired["scopes"],"expiresAt":paired["expires_at"]})))

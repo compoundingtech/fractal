@@ -247,6 +247,7 @@ async fn pinned_read_only_pairing_verifies_the_root_without_enrolling_a_signing_
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Pinned display".into(),
     person_id: PERSON.into(),
     full_control: None,
@@ -327,6 +328,7 @@ async fn a_pre_pin_cli_completes_against_the_current_daemon() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     for signs in [true, false] {
         let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+        binding: None,
         device_name: "Older CLI".into(),
         person_id: PERSON.into(),
         full_control: signs.then_some(true),
@@ -405,7 +407,7 @@ async fn pre_pin_response_shapes_work_for_pinned_messages_and_explicitly_unpinne
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let profile = root.path().join("client/devices.json");
     for (signs, unpinned) in [(true, false), (false, false), (false, true)] {
-        let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(), device_name: "Earlier member".into(), person_id: PERSON.into(), full_control: signs.then_some(true), scopes: None, fabric_gateway: None }).await.unwrap().value;
+        let challenge = local.pairing_begin_person(&PersonPairingBegin { binding: None, device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(), device_name: "Earlier member".into(), person_id: PERSON.into(), full_control: signs.then_some(true), scopes: None, fabric_gateway: None }).await.unwrap().value;
         let previous = std::fs::read(&profile).ok();
         let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
         let result = complete_with_options(&profile, &base, &challenge.pairing_id, &challenge.code, key,
@@ -569,6 +571,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
             };
             let public = key.public_key().unwrap();
             let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+            binding: None,
             device_name: "CLI device".into(),
             person_id: PERSON.into(),
             full_control: Some(true),
@@ -781,6 +784,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     // An older member's refusal or missing advertisement must never receive the code.
     for forbidden_capabilities in [false, true] {
         let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+        binding: None,
         device_name: "Preflight device".into(),
         person_id: PERSON.into(),
         full_control: Some(true),
@@ -855,6 +859,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         "secret-in-malformed-proof",
     ] {
         let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+        binding: None,
         device_name: "Proxy regression".into(),
         person_id: PERSON.into(),
         full_control: Some(true),
@@ -981,6 +986,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     // The member's consumed code is a separate outcome, not a client-side rollback.
     let saved = std::fs::read(&path).unwrap();
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Unwritable device".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1067,6 +1073,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
     let public = key.public_key().unwrap();
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Hall display".into(),
     person_id: PERSON.into(),
     full_control: None,
@@ -1201,6 +1208,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Failed first attempt".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1229,6 +1237,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.code.clone(),
         device_public_key: attacker.clone(),
+        proof: None,
         key_storage: Some("software".into()),
         fabric_node_id: None,
     },)
@@ -1284,6 +1293,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.code.clone(),
         device_public_key: attacker.clone(),
+        proof: None,
         key_storage: Some("software".into()),
         fabric_node_id: None,
     },)
@@ -1333,6 +1343,7 @@ async fn missing_sealed_root_proof_does_not_consume_code_or_create_a_bearer() {
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Historical proof".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1424,6 +1435,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, PERSON);
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Concurrent device".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1441,6 +1453,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.code.clone(),
         device_public_key: public,
+        proof: None,
         key_storage: Some("software".into()),
         fabric_node_id: None,
     };
@@ -1590,6 +1603,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     // The phone pairs with its own key and learns the chain it signs with.
     let phone = Device::new();
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Avery's phone".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1601,6 +1615,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: phone.public(),
+        proof: None,
         key_storage: Some("secure-enclave".into()),
         fabric_node_id: None,
     },)
@@ -1626,6 +1641,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     // A device paired only to read gets no signing key.
     let viewer = Device::new();
     let limited = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Hall display".into(),
     person_id: PERSON.into(),
     full_control: None,
@@ -1637,6 +1653,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
         api_version: fractal_client::API_VERSION.into(),
         code: limited.value.code,
         device_public_key: viewer.public(),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },)
@@ -1906,6 +1923,7 @@ async fn a_signed_send_waits_on_a_persisted_signature_fault_until_a_person_resum
     let http_server = tokio::spawn(async move { axum::serve(listener, gateway).await });
     let phone = Device::new();
     let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Avery's phone".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
@@ -1917,6 +1935,7 @@ async fn a_signed_send_waits_on_a_persisted_signature_fault_until_a_person_resum
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: phone.public(),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },)
@@ -2118,6 +2137,7 @@ async fn a_pairing_grants_the_gateway_over_fabric_only_when_its_code_asked_for_i
         async move {
             let challenge = local
                 .pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+                binding: None,
                 device_name: name.into(),
                 person_id: PERSON.into(),
                 full_control: None,
@@ -2132,6 +2152,7 @@ async fn a_pairing_grants_the_gateway_over_fabric_only_when_its_code_asked_for_i
                         api_version: fractal_client::API_VERSION.into(),
                         code: challenge.value.code,
                         device_public_key: Device::new().public(),
+                        proof: None,
                         key_storage: None,
                         fabric_node_id: Some(node.into()),
                     },

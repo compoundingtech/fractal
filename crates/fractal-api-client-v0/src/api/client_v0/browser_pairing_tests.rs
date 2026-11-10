@@ -11,6 +11,7 @@ async fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientS
     let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
     let Json(paired) = pairing_complete(State(state.clone()),Extension(local),AxumPath(id.into()),Json(PairingComplete {
         api_version:CLIENT_API_VERSION.into(),code:challenge["code"].as_str().unwrap().into(),
+        proof: None,
         device_public_key:format!("opaque-device-identity-without-signing-key:{name}"),key_storage:None,fabric_node_id:None,
     })).await.unwrap();
     let request = axum::http::Request::builder().method("POST").uri("/v1/client/actions")
@@ -117,6 +118,7 @@ async fn browser_pairing_explicit_verifier_requires_a_32_byte_hex_key() {
         let id = started["requestId"].as_str().unwrap();
         let result = pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
             api_version:CLIENT_API_VERSION.into(),code:presented.clone(),
+            proof: None,
             device_public_key:format!("browser:{id}"),key_storage:None,fabric_node_id:None,
         })).await;
         assert_eq!(result.is_ok(),allowed);
@@ -145,6 +147,7 @@ async fn browser_pairing_stripped_verifier_never_uses_legacy_completion() {
     let id = started["requestId"].as_str().unwrap();
     let error = pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
         api_version:CLIENT_API_VERSION.into(),code:key.clone(),
+        proof: None,
         device_public_key:format!("browser:{id}"),key_storage:None,fabric_node_id:None,
     })).await.unwrap_err();
     assert_eq!(error.code,"pairing-restart-required");
@@ -173,6 +176,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     let id = denied["requestId"].as_str().unwrap();
     assert!(pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
         api_version: CLIENT_API_VERSION.into(), code: key.clone(), device_public_key: format!("browser:{id}"),
+        proof: None,
         key_storage: None, fabric_node_id: None,
     })).await.is_err(), "ordinary completion must not bypass owner approval");
     answer(&state,&owner,&denied,"deny").unwrap();

@@ -96,6 +96,7 @@ impl Harness {
         let complete = PairingComplete {
             api_version: fractal_client::API_VERSION.into(), code: challenge["value"]["code"].as_str().unwrap().into(),
             device_public_key: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into(),
+            proof: None,
             key_storage: Some("software".into()),
             fabric_node_id: None,
         };
