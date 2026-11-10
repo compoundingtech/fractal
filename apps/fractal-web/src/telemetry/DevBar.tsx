@@ -189,9 +189,9 @@ const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { rea
           deploymentId={deploymentId}
           dark={dark}
           hasUnseen={hasUnseen}
-          onOpen={changelog.acknowledge}
+          onChangesSeen={changelog.acknowledge}
           onPrefetch={changelog.prefetch}
-          changes={() => <ChangelogContent />}
+          changes={(firstEntryRef) => <ChangelogContent firstEntryRef={firstEntryRef} />}
         />
       ),
     },

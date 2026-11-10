@@ -8,6 +8,7 @@ import { inputPaintRegionMounted, registerInputPaintRegions, installInputPaint, 
 import { PortalContainerRegistrationContext, RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { App as RealAppShell } from '../web/App.tsx'
 import { installNativePopover } from '../testNativePopover.ts'
+import { createIntersectionObserverModel } from '../testIntersectionObserver.ts'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, defineConsts: (constants: unknown) => constants, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 vi.mock('virtual:build-identity', () => ({ buildIdentity: { machineVersion: 'test', dirty: false }, deploymentId: undefined }))
@@ -44,6 +45,8 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  // The dev-bar changes list observes its first entry; nothing enters view in jsdom.
+  vi.stubGlobal('IntersectionObserver', createIntersectionObserverModel().IntersectionObserver)
   let nextFrame = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = ++nextFrame; frames.set(id, callback); return id })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })

@@ -198,6 +198,7 @@ bundled_app_kit_inputs = (
     "apps/fractal-web/src/monitor/usageSectionView.ts",
     "apps/fractal-web/src/monitor/wire.ts",
     "apps/fractal-web/src/shell/sameFolderFleet.ts",
+    "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
     "apps/fractal-web/src/telemetry/devBarPreference.ts",
     "apps/fractal-web/src/web/AgentResourcesPanel.tsx",
     "apps/fractal-web/src/web/AlertDetailsPane.tsx",

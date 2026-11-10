@@ -2,12 +2,13 @@
 /**
  * Build identity and recent changes share one developer-bar entry: the real DevBar composes the
  * kit's build identity disclosure with the app's changelog, the trigger carries the unseen
- * indicator, intent only prefetches, opening shows identity, acknowledges and loads prose, Escape
- * closes only the popover and returns focus to the trigger, and an overflowed entry's unseen state
- * is mirrored on the kit's +N control.
+ * indicator, intent only prefetches, opening shows identity and loads prose, the changes are
+ * acknowledged only once the first entry is in view, Escape closes only the popover and returns
+ * focus to the trigger, and an overflowed entry's unseen state is mirrored on the kit's +N control.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { installNativePopover } from '../testNativePopover.ts'
+import { createIntersectionObserverModel } from '../testIntersectionObserver.ts'
 import type * as ChangelogModule from '../changelog/build.ts'
 
 const fixture = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ vi.mock('../changelog/build.ts', () => ({
 
 let unmount: (() => Promise<void>) | undefined
 let restorePopover: (() => void) | undefined
+let intersections = createIntersectionObserverModel()
 
 beforeEach(() => {
   fixture.wait = undefined
@@ -64,6 +66,8 @@ beforeEach(() => {
   fixture.loaded = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  intersections = createIntersectionObserverModel()
+  vi.stubGlobal('IntersectionObserver', intersections.IntersectionObserver)
   restorePopover = installNativePopover()
   window.localStorage.clear()
 })
@@ -101,8 +105,10 @@ const buildTrigger = (host: HTMLElement) => {
 const buildPopover = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Build and changes"] [data-devbar-build-changes]')
 const unseenName = /^Build identity: 1234567 · n\/a, show Build and changes, unseen changes$/
 const seenName = /^Build identity: 1234567 · n\/a, show Build and changes$/
+const storedCursor = () => JSON.parse(window.localStorage.getItem('wf.ui@1') ?? '{}').entries?.['changelog.fractal-web.main']
+const firstEntryTitle = () => [...(buildPopover()?.querySelectorAll('h3') ?? [])].find((heading) => heading.textContent === fixture.title)
 
-it('opens build identity and recent changes from one devbar trigger, acknowledges them, and closes on Escape with focus restored', async () => {
+it('opens build identity and recent changes from one devbar trigger, acknowledges them once the first entry is in view, and closes on Escape with focus restored', async () => {
   const { act, host } = await mount()
   const trigger = buildTrigger(host)
   expect(trigger.getAttribute('aria-label')).toMatch(unseenName)
@@ -121,13 +127,24 @@ it('opens build identity and recent changes from one devbar trigger, acknowledge
     expect(buildPopover()?.textContent).toContain(fixture.title)
   })
   expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  expect(buildPopover()?.querySelector('[data-build-summary]')?.textContent).toContain('1234567')
   expect(buildPopover()?.textContent).toContain('123456789abc')
   expect(buildPopover()?.textContent).toContain(fixture.machineVersion)
   expect(buildPopover()?.textContent).toContain("What's new")
+  // Opening alone proves nothing was read: the first entry is observed but not yet in view.
+  const title = firstEntryTitle()!
+  expect(intersections.observed()).toEqual([title])
+  expect(trigger.getAttribute('aria-label')).toMatch(unseenName)
+  expect(trigger.querySelector('[data-devbar-unseen]')).not.toBeNull()
+  expect(storedCursor()).toBeUndefined()
+
+  await act(async () => intersections.reveal(title))
   expect(trigger.getAttribute('aria-label')).toMatch(seenName)
   expect(trigger.querySelector('[data-devbar-unseen]')).toBeNull()
-  const stored = JSON.parse(window.localStorage.getItem('wf.ui@1') ?? '{}')
-  expect(stored.entries?.['changelog.fractal-web.main']?.value).toEqual({ visited: true, entryIds: [fixture.entryId] })
+  expect(storedCursor()?.value).toEqual({ visited: true, entryIds: [fixture.entryId] })
+  expect(intersections.observed()).toEqual([])
+  // The open list keeps the grouping it was read with.
+  expect(firstEntryTitle()).toBe(title)
 
   const content = buildPopover()!
   await act(async () => { content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
@@ -162,18 +179,21 @@ it('opens idle-prefetched code without an intermediate loading state', async () 
   expect(fixture.loads).toBe(1)
 }, 30_000)
 
-it('opens immediately on a cold load and contains a failed chunk with retry', async () => {
+it('opens immediately on a cold load, contains a failed chunk with retry, and acknowledges only once an entry is in view', async () => {
   const { promise, resolve: release } = Promise.withResolvers<void>()
   fixture.wait = promise
   fixture.fail = true
   const { act, host } = await mount()
   await act(async () => buildTrigger(host).click())
   expect(buildPopover()?.textContent).toContain('Loading recent changes')
+  expect(intersections.observed()).toEqual([])
   await act(async () => release())
   await vi.waitFor(async () => {
     await act(async () => {})
     expect(buildPopover()?.textContent).toContain('workspace is unaffected')
   })
+  expect(intersections.observed()).toEqual([])
+  expect(buildTrigger(host).getAttribute('aria-label')).toMatch(unseenName)
   fixture.fail = false
   const retry = [...buildPopover()!.querySelectorAll('button')].find(button => button.textContent === 'Retry')
   await act(async () => retry?.click())
@@ -181,6 +201,11 @@ it('opens immediately on a cold load and contains a failed chunk with retry', as
     await act(async () => {})
     expect(buildPopover()?.textContent).toContain(fixture.title)
   })
+  expect(buildTrigger(host).getAttribute('aria-label')).toMatch(unseenName)
+  expect(storedCursor()).toBeUndefined()
+  await act(async () => intersections.reveal(firstEntryTitle()!))
+  expect(buildTrigger(host).getAttribute('aria-label')).toMatch(seenName)
+  expect(storedCursor()?.value).toEqual({ visited: true, entryIds: [fixture.entryId] })
 }, 30_000)
 
 it('mirrors the unseen indicator on the overflow control when the build segment is hidden', async () => {
