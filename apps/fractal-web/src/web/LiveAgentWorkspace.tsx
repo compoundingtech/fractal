@@ -259,7 +259,7 @@ const prefetchTerminalDetail = () => {
 }
 
 /** The terminal grid, fonts and native key encoder stay outside the eager shell; a fresh lazy identity on retry avoids React's permanently rejected module cache. */
-class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `terminal/${string}` }> {
+class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `terminal/${string}`; readonly shown: boolean }> {
   state = { failed: false, Detail: terminalDetail(() => terminalChunk.load()) }
   static getDerivedStateFromError() { return { failed: true } }
   render() {
@@ -269,7 +269,7 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
     </div>
     const Detail = terminalDetailLoaded?.TerminalDetail ?? this.state.Detail
     return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
-      <Detail address={{ ref: this.props.terminalRef, presentation: 'detail' }} visibility="visible" />
+      <Detail address={{ ref: this.props.terminalRef, presentation: 'detail' }} visibility={this.props.shown ? 'visible' : 'hidden'} keepConnected />
     </React.Suspense>
   }
 }
@@ -458,7 +458,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [terminalRef])
   const prefetchTerminalIntent = (event: React.SyntheticEvent<HTMLElement>) => {
     if (terminalRef === undefined || !(event.target instanceof Element) ||
-      event.target.closest('[aria-label="Toggle terminal drawer"]') === null) return
+      event.target.closest('[aria-label="Show terminal"]') === null) return
     prefetchTerminalDetail()
     terminalSource.prefetchTerminal?.(terminalRef)
   }
@@ -491,7 +491,17 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     setStoredAgent(ref)
     navigation.navigate(workspaceHref(ref, pane, location.split('?')[1] ?? ''))
   }
-  const select = (ref: string) => {
+  // Which agents were last left on their terminal. Memory only: a reload restores the selected agent through `?open=`.
+  const terminalAgents = React.useRef(new Set<string>())
+  React.useLayoutEffect(() => {
+    if (selectedPane.startsWith('terminal/')) terminalAgents.current.add(current)
+    else if (selectedPane === 'thread') terminalAgents.current.delete(current)
+  }, [current, selectedPane])
+  const rememberedPane = (ref: string) => {
+    const terminal = terminalAgents.current.has(ref) ? agents.find(row => row.ref === ref && row.terminalDisabledReason === undefined)?.terminal : undefined
+    return terminal === undefined ? 'thread' : `${terminal}:detail`
+  }
+  const select = (ref: string, pane = rememberedPane(ref)) => {
     if (narrow) setPhoneAgents(refs => [...new Set([...refs, current, ref])].filter(Boolean))
     if (ref !== current) {
       cancelMeasure('open_transcript')
@@ -502,7 +512,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     setResourcesAgent(undefined)
     setOpenedTool(undefined)
     agentsDrawer.current?.close()
-    navigate(ref)
+    navigate(ref, pane)
   }
   const open = (request: OpenRequest) => {
     if (request.ref.startsWith('agent/') && request.presentation === undefined) {
@@ -510,6 +520,11 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       return
     }
     const id = `${request.ref}:${request.presentation ?? 'detail'}`
+    // The terminal replaces the conversation through the header control, so it never becomes a tab.
+    if (isTerminalRef(request.ref)) {
+      navigate(current, id)
+      return
+    }
     setPanes((rows) => (rows.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === id) ? rows : [...rows, { ref: request.ref, ...(request.presentation === undefined ? {} : { presentation: request.presentation }) }]))
     navigate(current, id)
   }
@@ -629,8 +644,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
   const changesWorkspace = agent?.workspace._tag === 'Known' ? JSON.stringify([agent.host, agent.workspace.value]) : current
-  const terminalOpen = selectedPane.includes('terminal/')
-  const toggleTerminal = () => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }
+  const view = workspaceView(chosen)
+  const terminalOpen = view._tag === 'Terminal'
+  // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
+  const shownTerminalDisabledReason = terminalOpen ? undefined : terminalDisabledReason
+  const focusShownView = React.useRef(false)
+  const toggleTerminal = () => {
+    if (terminalOpen) { focusShownView.current = true; navigate(current) }
+    else if (terminalRef !== undefined) { focusShownView.current = true; navigate(current, `${terminalRef}:detail`) }
+  }
   const resourcesDockOpen = !narrow && current !== '' && resourcesAgent === current
   // The dock separator names the inspector view on screen. Every panel mount starts on Details, so the stored
   // view resets whenever the mounted inspector changes or goes away, before this render paints the label.
@@ -722,7 +744,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                   </div>
                 ) : null}
                 {/* Keep this panel and its portal container at one reconciliation position across the breakpoint. */}
-                <PhoneWorkspaceTabs enabled={narrow} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(terminalDisabledReason === undefined ? {} : { disabledReason: terminalDisabledReason })} /> : undefined} tabs={phoneTabs} selected={selectedPane === 'thread' ? current : selectedPane} onSelect={id => id === current || agents.some(row => row.ref === id) ? select(id) : navigate(current, id)}>
+                <PhoneWorkspaceTabs enabled={narrow} tabsHidden={terminalOpen} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined} tabs={phoneTabs} selected={selectedPane === 'thread' ? current : selectedPane} onSelect={id => id === current || agents.some(row => row.ref === id) ? select(id) : navigate(current, id)}>
                   <div ref={setPaneHost} {...stylex.props(styles.body, narrow && selectedPane === 'changes' && styles.phoneHidden)} />
                   {narrow && selectedPane === 'changes' && current !== '' ? <React.Suspense fallback={<SystemNotice kind="loading" title="Loading captured changes" />}><ChangesInspector key={current} agentRef={current} width="fill" /></React.Suspense> : null}
                 </PhoneWorkspaceTabs>
@@ -803,8 +825,24 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
   }, [viewportStore])
   const [retained, setRetained] = React.useState<readonly RetainedPane[]>([])
   const [switched, setSwitched] = React.useState<{ readonly shown: string; readonly covered: string | undefined }>({ shown: current, covered: undefined })
-  // The terminal is a drawer below the thread: the thread stays shown and usable beside it.
-  const visible = !hidden && current !== '' && (view._tag === 'Thread' || view._tag === 'Terminal')
+  // The terminal replaces the conversation, which stays retained behind it like any hidden pane.
+  const visible = !hidden && current !== '' && view._tag === 'Thread'
+  // The selected agent's terminal stays mounted and connected once shown, so switching back reveals it. Leaving the agent releases it.
+  const [terminal, setTerminal] = React.useState<{ readonly owner: string; readonly ref: TerminalRef }>()
+  if (current !== '' && view._tag === 'Terminal') {
+    if (terminal?.ref !== view.ref || terminal.owner !== current) setTerminal({ owner: current, ref: view.ref })
+  } else if (terminal !== undefined && terminal.owner !== current) setTerminal(undefined)
+  const terminalShown = !hidden && view._tag === 'Terminal' && view.ref === terminal?.ref
+  const area = React.useRef<HTMLDivElement>(null)
+  const narrow = React.useContext(NarrowLayoutContext)
+  // An explicit switch moves focus to the shown view. Terminal focus stays on the pane: focusing the grid would arm typing without a gesture.
+  // A phone keeps focus on its toggle, so the switch does not raise the keyboard over the view it just revealed.
+  React.useLayoutEffect(() => {
+    if (focusShownView?.current !== true) return
+    focusShownView.current = false
+    if (narrow) return
+    area.current?.querySelector<HTMLElement>(view._tag === 'Terminal' ? '[data-testid="terminal-pane"]' : '[data-wf-shown-pane] textarea:not(:disabled)')?.focus({ preventScroll: true })
+  }, [view._tag, focusShownView, narrow])
   React.useLayoutEffect(() => {
     if (visible) return
     // Abandon at the eager view boundary, even if the transcript module or data
@@ -835,13 +873,18 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
     return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer) }
   }, [switched])
   return <ViewportStoreContext.Provider value={viewportStore}>
-    <div {...stylex.props(styles.threadArea)}>
+    <div ref={area} {...stylex.props(styles.threadArea)}>
       {retained.map(pane => {
         const shown = visible && pane.ref === current
-        return <div key={pane.ref} {...stylex.props(styles.retainedPane, shown ? styles.shownPane : visible && pane.ref === switched.covered ? null : styles.hiddenPane)}>
+        return <div key={pane.ref} data-wf-shown-pane={shown ? '' : undefined} {...stylex.props(styles.retainedPane, shown ? styles.shownPane : visible && pane.ref === switched.covered ? null : styles.hiddenPane)}>
           <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />
         </div>
       })}
+      {terminal === undefined ? null : (
+        <section key={terminal.ref} aria-label="Terminal" data-testid="terminal-pane" data-terminal-shown={terminalShown} tabIndex={-1} inert={!terminalShown} aria-hidden={!terminalShown} {...stylex.props(styles.retainedPane, styles.terminalPane, terminalShown ? styles.shownPane : styles.hiddenPane)}>
+          <TerminalCodeBoundary terminalRef={terminal.ref} shown={terminalShown} />
+        </section>
+      )}
       {view._tag === 'Missions' ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
           <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
@@ -859,11 +902,6 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
         : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
           : null}
     </div>
-    {current !== '' && view._tag === 'Terminal' ? (
-      <section key={view.ref} aria-label="Terminal drawer" data-testid="terminal-pane" {...stylex.props(styles.terminalDrawer)}>
-        <TerminalCodeBoundary terminalRef={view.ref} />
-      </section>
-    ) : null}
   </ViewportStoreContext.Provider>
 }
 
@@ -902,7 +940,7 @@ const styles = stylex.create({
   shownPane: { zIndex: 1 },
   hiddenPane: { contentVisibility: 'hidden' },
   threadArea: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, flexBasis: 0, minWidth: 0, minHeight: 0 },
-  terminalDrawer: { display: 'flex', flexDirection: 'column', flexGrow: 0, flexShrink: 0, flexBasis: '45%', minHeight: 160, minWidth: 0, overflow: 'hidden', backgroundColor: c.canvas, borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.border },
+  terminalPane: { overflow: 'hidden', outline: 'none' },
   tabs: { height: 32, display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.lg, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border, flexShrink: 0 },
   // Hidden retained panes stay absolutely positioned and opaque; pane notices sit above them.
   paneNotice: { position: 'relative', zIndex: 2 },
