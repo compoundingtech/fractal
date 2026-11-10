@@ -2612,11 +2612,14 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         ));
     }
     if let Some(description) = child_string(document, "description")?
-        && description.len() > 1_000
+        && description.len() > agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
     {
         return Err(FractalError::new(
             "description-too-long",
-            "an agent description cannot exceed 1,000 bytes",
+            format!(
+                "an agent description, its charter, cannot exceed {} bytes",
+                agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
+            ),
         ));
     }
     parse_workspace(document)?;
@@ -4530,6 +4533,28 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {
+        let agent = |description: &str| {
+            format!("version 2\nagent \"example/chartered\" {{\n  description {description:?}\n  command \"true\"\n}}\n")
+        };
+        // Nine bytes per line: a three-byte character, ASCII, and a newline.
+        let at_limit = format!("{}ab", "界 line\n".repeat(910));
+        assert_eq!(at_limit.len(), agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES);
+        let intent = parse_intent(&agent(&at_limit), "node").unwrap();
+        assert_eq!(
+            crate::model::canonical_child_string(
+                &intent.subjects["agent/example/chartered"].desired,
+                "description"
+            )
+            .as_deref(),
+            Some(at_limit.as_str())
+        );
+        let error = parse_intent(&agent(&format!("{at_limit}c")), "node").unwrap_err();
+        assert_eq!(error.code, "description-too-long");
+        assert!(error.message.contains("8192 bytes"), "{}", error.message);
+    }
 
     #[test]
     fn an_agent_checkout_needs_a_workspace_and_git_ref_names() {

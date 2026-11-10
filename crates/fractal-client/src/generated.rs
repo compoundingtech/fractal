@@ -4559,13 +4559,22 @@ pub struct RequestAnswerOption {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<String>,
 }
+/// A note about another named option, not the chosen answer.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PersonOptionNote {
+    pub id: String,
+    pub text: String,
+}
 /// A named answer `id`, text, or both.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PersonAnswerInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_notes: Vec<PersonOptionNote>,
 }
 /// The typed answer a person gave to a structured request.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -4581,6 +4590,8 @@ pub struct PersonAnswer {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_notes: Vec<PersonOptionNote>,
 }
 /// The answer of a person-step ask that applies at its deadline.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

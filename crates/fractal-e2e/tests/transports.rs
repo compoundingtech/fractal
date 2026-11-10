@@ -1134,7 +1134,8 @@ mission "example/definition" state="ready" {
         ));
     }
 
-    // Descriptions are capped at 1,000 bytes; a command is not, so it can outgrow a response.
+    // A description, the agent's charter, is capped at 8 KiB; a command is not, so it can
+    // outgrow a response.
     let oversized = format!(
         "version 2\nagent \"example/large-definition\" {{ command \"true {}\" }}",
         "x".repeat(1_100_000),

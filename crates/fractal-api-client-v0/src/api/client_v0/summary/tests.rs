@@ -520,10 +520,7 @@ mission "summary-update-about" state="ready" {
                 evidence: vec![],
                 episode: None,
                 idempotency_key: "summary-update-read".into(),
-                answer: Some(crate::person_request::AnswerInput {
-                    id: Some("read".into()),
-                    text: None,
-                }),
+                answer: Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() }),
             },
             false,
         )
