@@ -12,6 +12,7 @@ export interface ClientResultBinding {
 export interface ClientControlGrant {
   grant_id: string; run_id: string; device: string; session: string; actor_agent: string;
   verbs: string[]; screens: string[]; max_commands: number; expires_at: string; state: string;
+  item_id?: string;
 }
 function quote(value: string): string {
   // RFC 8785 requires rejection of lone surrogates rather than replacement.
