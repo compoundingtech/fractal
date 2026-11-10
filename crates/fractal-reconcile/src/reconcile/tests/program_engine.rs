@@ -3,6 +3,7 @@
 //! Program steps need the runtime: these tests fail, never skip, when no `bun` is on `PATH`.
 use super::*;
 use crate::reconcile::program::{JOURNAL_KIND, Liveness, ProgramEngine, RESULT_KEY};
+use std::time::Instant;
 
 /// A hand-written bundle against HostContext v1: one journaled step, then either a busy loop or
 /// an effect that waits for a gate file while a background child shares its process group.
