@@ -1310,6 +1310,44 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertFalse((output / "success.json").exists())
         self.assertIn("refusing the disabled stub", (output / "build.log").read_text())
 
+    def test_disabled_stub_is_refused_before_pending_or_retained_install(self):
+        for retained in (False, True):
+            with self.subTest(retained=retained):
+                self.reset_delivery()
+                self.reconcile("--build-only")
+                if retained:
+                    data = self.saved_state()
+                    del data["pending"]
+                    data["installed_version"] = "0"
+                    (self.state / "state.json").write_text(json.dumps(data))
+                # Model a snapshot published by an older updater without the build guard.
+                self.configure(fabric_stub=True)
+                self.reconcile()
+                event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(event["outcome"], "install_refused")
+                self.assertEqual(event["reason"], "fabric_missing")
+                self.assertEqual(event["commit"], self.initial_commit)
+                self.assertNotIn("pending", self.saved_state())
+                self.assertNotIn("install_attempt", self.saved_state())
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertEqual(self.device_commands("install"), [])
+                self.assertEqual(self.device_commands("launch"), [])
+                receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+                self.assertFalse(receipt.exists())
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "build_failed")
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertEqual(len(self.commands("xcodebuild")), 2)
+
+    def test_pending_artifact_with_real_bridge_installs(self):
+        self.reconcile("--build-only")
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        self.assertEqual(len(self.commands("nm")), 2)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertEqual(len(self.device_commands("launch")), 1)
+
     def test_changed_build_inputs_rebuild_unchanged_revision_before_trusting_artifacts(self):
         self.reconcile("--build-only")
         self.assertEqual(len(self.commands("xcodebuild")), 1)

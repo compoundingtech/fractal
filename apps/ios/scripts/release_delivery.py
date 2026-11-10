@@ -535,6 +535,19 @@ class Delivery:
             self.record("install_held", commit=pending["commit"], reason="deploy_approval_required")
             return
         if not pending["installed"]:
+            app = Path(pending["app"])
+            try:
+                with (app / "Info.plist").open("rb") as file:
+                    info = plistlib.load(file)
+                verify_fabric_linkage(app, info, self.env)
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                # Invalidate retention too, so the next tick cannot reuse this snapshot.
+                (app.parent / "success.json").unlink(missing_ok=True)
+                del self.data["pending"]
+                self.persist()
+                self.record("install_refused", commit=pending["commit"], reason="fabric_missing",
+                            build_version=pending["build_version"])
+                return
             version = self.read_installed(pending)
             if version is None:
                 return
