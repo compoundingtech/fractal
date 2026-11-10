@@ -98,9 +98,9 @@ export const ClientControlNative = () => {
       navigate: navigation.navigate,
       result: async (binding, current) => {
         if (!current()) return;
-        if (!globalThis.crypto?.subtle) throw new Error('Client-control signing needs the generated native SHA-256 port');
-        const result = await signClientResult(binding, controlProfile.signing, signWithDeviceKey, Date.now(), base64url(Crypto.getRandomBytes(16)));
-        if (!current()) return;
+        const result = await signClientResult(binding, controlProfile.signing, signWithDeviceKey, Date.now(), base64url(Crypto.getRandomBytes(16)),
+          async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, bytes)));
+        if (!result || !current()) return;
         await client.deviceResult(result);
       },
       revoke: () => revokeClientControl(client, controlProfile.identity.device),

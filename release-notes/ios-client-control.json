@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Add capability-gated iOS test-client command admission and canonical signed-result support; native lifecycle integration remains disabled pending codegen",
+  "summary": "Add test-only capability-gated iOS commands with ordered grant lifecycle, run indicator/revoke, committed visible state and canonical native signed results",
   "replay": {"status": "none", "detail": "No claim replay changes."},
   "schema": {"status": "none", "detail": "No schema changes or handwritten wire models."},
   "rules": {"status": "none", "detail": "No checkpoint rule changes."},
   "compatibility": {"status": "none", "detail": "Normal apps never subscribe to commands; test-client commands fail closed without an authoritative grant source."},
   "downtime": {"status": "none", "detail": "No deployment or native installation."},
-  "manual": {"status": "none", "detail": "No pairing or enrollment performed; test-client flag, lifecycle codegen and native SHA-256 adapter are prerequisites."},
+  "manual": {"status": "none", "detail": "No pairing or enrollment performed; Expo testClientMode must be true. Native device validation remains a separate gate."},
   "recovery": {"status": "changed", "detail": "Test-mode pairing retains its device signing key and optional device/session identity; existing profiles without identity fail closed. Normal pairing is unchanged."}
 }

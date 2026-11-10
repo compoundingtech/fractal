@@ -6,7 +6,7 @@ import type { SidebarArrangement } from './sidebarEdits';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
-import type { DeviceCommand } from '../../clients/typescript/fractal-client';
+import type { ClientControlGrantLifecycle, DeviceCommand } from '../../clients/typescript/fractal-client';
 
 /** Unwired membership conversion: epoch must come from the daemon capability, never a snapshot ID. */
 export const sidebarMembershipFrame = (token: MembershipToken, subscription: string, frame: CollectionFrame, epoch?: string): MembershipEvent | undefined => {
@@ -139,7 +139,7 @@ export class Feed {
   private live = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
-  private commands: ((command: DeviceCommand) => void) | undefined;
+  private commands: ((command: DeviceCommand | ClientControlGrantLifecycle) => void) | undefined;
   private commandsReset: (() => void) | undefined;
   private cancelOpen: (() => void) | undefined;
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
@@ -185,7 +185,7 @@ export class Feed {
   }
 
   /** Test clients alone may consume commands, on this pairing's existing socket. */
-  followCommands(testMode: boolean, granted: boolean, receive: (command: DeviceCommand) => void, reset?: () => void): () => void {
+  followCommands(testMode: boolean, granted: boolean, receive: (command: DeviceCommand | ClientControlGrantLifecycle) => void, reset?: () => void): () => void {
     if (!testMode || !granted) return () => {};
     this.commands = receive;
     this.commandsReset = reset;
@@ -424,7 +424,7 @@ export class Feed {
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'commands' && frame.id === 'commands') {
       if (frame.kind === 'snapshot' || frame.removes.length) this.commandsReset?.();
       for (const command of frame.kind === 'snapshot' ? frame.items : frame.upserts) {
-        if (command.kind === 'device-command') this.commands?.(command);
+        if (command.kind === 'device-command' || command.kind === 'client-control-grant-lifecycle') this.commands?.(command);
       }
       return;
     }
