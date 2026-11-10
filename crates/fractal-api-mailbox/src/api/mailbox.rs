@@ -2411,14 +2411,23 @@ mod tests {
     }
 
     #[test]
-    fn recovery_refills_on_settled_receipt_deltas_in_batches_of_five() {
-        for (stream, withdraw) in [(false, false), (true, false), (false, true), (true, true)] {
+    fn recovery_refills_on_settled_receipt_and_expiry_deltas_in_batches_of_five() {
+        for (stream, terminal) in [false, true].into_iter()
+            .flat_map(|stream| ["message.delivered", "message.closed", "message.expired"].map(|phase| (stream, phase))) {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("graph.db");
         let store = Arc::new(Store::open(&database, "node").unwrap());
         let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
         let receipt = |subject: &str, phase: &str| {
-            if stream {
+            if phase == "message.expired" {
+                crate::store::stream_mirror::mirror(&store).unwrap();
+                store.append_claim(&ClaimInput {
+                    subject: subject.into(), kind: phase.into(), actor: Some("daemon/runtime".into()),
+                    fields: BTreeMap::from([("status".into(), json!("expired")),
+                        ("reason".into(), json!("cutoff-uncertain-attempt"))]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            } else if stream {
                 crate::store::messages_shard::record_lifecycle(
                     &store, subject, phase, Some(if phase == "message.closed" { "daemon/runtime" } else { "agent/eval.worker" }),
                     &BTreeMap::from([("status".into(), json!(phase.strip_prefix("message.").unwrap()))]),
@@ -2464,6 +2473,7 @@ mod tests {
             assert_eq!(recovery.backlog, expected);
             assert_eq!(snapshot.1.iter().filter(|m| m.status == "sent")
                 .map(|m| m.subject.clone()).collect::<std::collections::BTreeSet<_>>(), expected);
+            assert!(!snapshot.1.iter().any(|message| message.status == "expired"));
             previous = Some((mark, snapshot));
             for (position, subject) in expected.iter().enumerate() {
                 let phase = if position == 0 { "message.staged" } else { "message.delivered" };
@@ -2476,11 +2486,11 @@ mod tests {
             assert_eq!(recovery.backlog, expected, "one staged member must block refill");
             assert!(!snapshot.1.iter().any(|m| m.status == "sent"));
             previous = Some((mark, snapshot));
-            receipt(expected.first().unwrap(), if withdraw { "message.closed" } else { "message.delivered" });
+            receipt(expected.first().unwrap(), terminal);
             assert!(recovery_batch_settled(&store, &expected).unwrap());
-            if withdraw {
+            if terminal != "message.delivered" {
                 let message = store.message(expected.first().unwrap()).unwrap().unwrap();
-                assert_eq!(message.status, "closed");
+                assert_eq!(message.status, terminal.strip_prefix("message.").unwrap());
                 for kind in ["message.delivered", "message.read"] {
                     assert!(if stream {
                         crate::store::messages_shard::mailbox_reads::lifecycle_step(
@@ -4567,7 +4577,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_mailbox_matches_full_oracle_across_coalesced_lifecycle_changes() {
+    fn incremental_mailbox_matches_full_oracle_across_coalesced_lifecycle_and_expiry_changes() {
         let store = Store::open_memory("node").unwrap();
         crate::store::mailbox_tests::ready(&store, "session-1");
         let fence = store
@@ -4601,7 +4611,7 @@ mod tests {
                     subject: subject.into(),
                     kind: format!("message.{phase}"),
                     actor: Some(
-                        if phase == "closed" {
+                        if matches!(phase, "closed" | "expired") {
                             "daemon/runtime"
                         } else {
                             "person/fixture"
@@ -4615,6 +4625,9 @@ mod tests {
                             ("to".into(), json!(to)),
                             ("content".into(), json!("An oracle fixture.")),
                         ])
+                    } else if phase == "expired" {
+                        BTreeMap::from([("status".into(), json!(phase)),
+                            ("reason".into(), json!("no-live-recipient"))])
                     } else {
                         BTreeMap::from([("status".into(), json!(phase))])
                     },
@@ -4627,16 +4640,17 @@ mod tests {
         // Two sends and multiple receipts arrive before one cursor read; no notification is used.
         append("message/one", "sent", &fence.subject);
         append("message/two", "sent", &fence.subject);
+        append("message/three", "sent", &fence.subject);
         append("message/one", "staged", "");
         append("message/one", "delivered", "");
         append("message/foreign", "sent", "agent/other");
-        for phase in [None, Some("read"), Some("closed")] {
+        for phase in [None, Some("read"), Some("expired"), Some("closed")] {
             if let Some(phase) = phase {
                 append(
-                    if phase == "closed" {
-                        "message/two"
-                    } else {
-                        "message/one"
+                    match phase {
+                        "closed" => "message/two",
+                        "expired" => "message/three",
+                        _ => "message/one",
                     },
                     phase,
                     "",
@@ -4660,6 +4674,9 @@ mod tests {
                 serde_json::to_value(&oracle).unwrap()
             );
             assert!(updated);
+            if phase == Some("expired") {
+                assert!(!view.1.iter().any(|message| message.subject == "message/three"));
+            }
             previous = Some((mark, view));
         }
         // An idle cursor check performs no full read and produces no mailbox frame.
@@ -4723,7 +4740,7 @@ mod tests {
         assert!(updated);
         assert!(
             view.1.is_empty(),
-            "read and closed messages must both leave the mailbox"
+            "read, closed, and expired messages must leave the mailbox"
         );
         assert_eq!(
             reads.get(),

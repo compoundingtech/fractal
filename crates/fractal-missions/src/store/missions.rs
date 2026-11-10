@@ -113,6 +113,48 @@ fn validate_work_write_actor(actor: &str) -> Result<(), FractalError> {
     Ok(())
 }
 
+/// An exec moves its step's clock only while it is the exec that agentless step declared for
+/// its current attempt and the step is working. The daemon has already matched the caller to
+/// the exec's live launch. A step with a worker keeps its clock with that worker's lease.
+fn exec_owns_attempt_tx(
+    transaction: &Transaction<'_>,
+    exec: &str,
+    subject: &str,
+    step: &StepRunView,
+) -> Result<(), FractalError> {
+    let declared_attempt: Option<Option<String>> = transaction
+        .query_row(
+            "SELECT json_extract(member, '$.environment.ST_ATTEMPT') FROM desired
+             WHERE subject=?1 AND kind='exec' AND owner_step=?2",
+            params![exec, subject],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(declared_attempt) = declared_attempt.filter(|_| step.agentless) else {
+        return Err(FractalError::new(
+            "work-not-available",
+            format!("`{exec}` is not an exec of the agentless step `{subject}`"),
+        ));
+    };
+    if declared_attempt != Some(step.attempt.to_string()) {
+        return Err(FractalError::new(
+            "stale-work-attempt",
+            format!(
+                "`{exec}` was declared for another attempt of `{subject}`, which is on attempt {}",
+                step.attempt
+            ),
+        ));
+    }
+    if step.status != "working" {
+        return Err(FractalError::new(
+            "work-not-running",
+            format!("step run `{subject}` is {}; only a working step's clock runs", step.status),
+        ));
+    }
+    Ok(())
+}
+
 // One query preserves the native collection's indexed latest/live probes and shallow
 // key sort. Assistant membership matches reads::ident before pagination/hydration:
 // mission/ contributes eight allowed ASCII bytes; '-' is literal at the GLOB class end.
@@ -191,6 +233,25 @@ mod identifier_query_tests {
             plans.push(plan);
         }
         assert_eq!(plans[0], plans[1], "membership must not introduce a different scan");
+    }
+}
+
+fn child_context(
+    parent: &MissionRunView,
+    parent_step_run: &str,
+    default_selector: Option<WorkSelector>,
+    started_by: Option<String>,
+) -> ChildMissionContext {
+    ChildMissionContext {
+        root_revision: parent.root_revision.clone(),
+        root_run_id: parent
+            .root_mission_run
+            .strip_prefix("mission-run/")
+            .unwrap_or(&parent.root_mission_run)
+            .to_owned(),
+        parent_step_run: normalize_step_run(parent_step_run),
+        default_selector,
+        started_by,
     }
 }
 
@@ -1568,6 +1629,15 @@ pub trait MissionsStore {
             parent_step_run: &str,
             default_selector: Option<&WorkSelector>,
         ) -> Result<MissionRunView, FractalError>;
+    /// A child run a program step starts: the parent run starts it, so its creation is written
+    /// as `mission-run/PARENT` and it holds at most its parent's authority
+    /// (docs/st3/program-engine.md §3). The requester stays the parent's.
+    fn create_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+        ) -> Result<MissionRunView, FractalError>;
     /// An occurrence belongs to its schedule, regardless of the requesting member or revision.
     fn scheduled_mission_run_subject(schedule: &str, occurrence: u64) -> String;
     fn create_scheduled_mission_run(
@@ -2897,16 +2967,21 @@ impl MissionsStore for Store {
         ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_inner(
             request,
-            Some(ChildMissionContext {
-                root_revision: parent.root_revision.clone(),
-                root_run_id: parent
-                    .root_mission_run
-                    .strip_prefix("mission-run/")
-                    .unwrap_or(&parent.root_mission_run)
-                    .to_owned(),
-                parent_step_run: normalize_step_run(parent_step_run),
-                default_selector: default_selector.cloned(),
-            }),
+            Some(child_context(parent, parent_step_run, default_selector.cloned(), None)),
+            None,
+            None,
+        )
+    }
+
+    fn create_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+        ) -> Result<MissionRunView, FractalError> {
+        self.create_mission_run_inner(
+            request,
+            Some(child_context(parent, parent_step_run, None, Some(parent.subject.clone()))),
             None,
             None,
         )
@@ -2942,6 +3017,7 @@ impl MissionsStore for Store {
                 .into(),
             parent_step_run: normalize_step_run(schedule),
             default_selector: None,
+            started_by: None,
         });
         self.create_mission_run_inner(request, child, Some(&subject), None)
     }
@@ -4632,7 +4708,7 @@ impl MissionsStore for Store {
                     &[],
                     None,
                 )
-                .map_err(internal)?;
+                .map_err(smallclaims::error::typed)?;
             }
         }
         revision_seats::carry_completed_agents_tx(
@@ -4675,7 +4751,7 @@ impl MissionsStore for Store {
             None,
             idempotency_key,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         terminalize_generation_steps_tx(
             &transaction,
             &self.origin,
@@ -4702,7 +4778,7 @@ impl MissionsStore for Store {
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         if reopening {
             // The run's own state history says who reopened it, when, and why.
             append_claim_tx(
@@ -4720,7 +4796,7 @@ impl MissionsStore for Store {
                 &[],
                 None,
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
         }
         if let Some(proposal) = proposal {
             let changed = transaction
@@ -4751,7 +4827,7 @@ impl MissionsStore for Store {
                 &[],
                 None,
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
         }
         let view = mission_run_view_tx(&transaction, run_id).map_err(internal)?;
         transaction
@@ -6021,6 +6097,14 @@ impl MissionsStore for Store {
         let actor = request.actor.as_deref().ok_or_else(|| {
             FractalError::new("missing-work-actor", "a work action needs an actor")
         })?;
+        // A step's own exec holds no claim; it only stops and restarts its step's clock.
+        let exec = actor.starts_with("exec/");
+        if exec && !matches!(action, "wait" | "resume") {
+            return Err(FractalError::new(
+                "exec-work-action",
+                "an exec only stops and restarts its own step's execution clock: `work wait` and `work resume`",
+            ));
+        }
         let requested_incarnation = request
             .incarnation
             .as_deref()
@@ -6036,8 +6120,13 @@ impl MissionsStore for Store {
         let committed = self
             .connection
             .batched(|transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
-                let actor = physical_actor(transaction, actor)?;
-                validate_work_write_actor(&actor)?;
+                let actor = if exec {
+                    actor.to_owned()
+                } else {
+                    let actor = physical_actor(transaction, actor)?;
+                    validate_work_write_actor(&actor)?;
+                    actor
+                };
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?
@@ -6160,13 +6249,17 @@ impl MissionsStore for Store {
                 if action == "claim" && adhoc_work::pending_handoff(transaction, &current)? {
                     return Err(FractalError::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
                 }
-                let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
-                    || current.available_to.iter().any(|candidate| candidate == &actor);
-                if current.agentless || !eligible {
-                    return Err(FractalError::new(
-                        "work-not-available",
-                        format!("`{subject}` is not available to `{actor}`"),
-                    ));
+                if exec {
+                    exec_owns_attempt_tx(transaction, &actor, &subject, &current)?;
+                } else {
+                    let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
+                        || current.available_to.iter().any(|candidate| candidate == &actor);
+                    if current.agentless || !eligible {
+                        return Err(FractalError::new(
+                            "work-not-available",
+                            format!("`{subject}` is not available to `{actor}`"),
+                        ));
+                    }
                 }
                 if action == "claim" {
                     let mut statement = transaction
@@ -6257,7 +6350,8 @@ impl MissionsStore for Store {
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
-                if action != "claim"
+                if !exec
+                    && action != "claim"
                     && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
                 {
                     return Err(FractalError::new(
@@ -6341,6 +6435,10 @@ impl MissionsStore for Store {
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
+                    // An agentless step has no lease: its exec's record keeps the step as it is.
+                    "wait" | "resume" if exec => {
+                        (current.status.as_str(), current.worker_reported, None, None, None)
+                    }
                     // A wait or a resume is a progress record that moves the execution clock.
                     "wait" | "resume" => (
                         "working",

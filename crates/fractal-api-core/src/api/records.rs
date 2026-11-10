@@ -4,6 +4,8 @@ use crate::LanesStore;
 use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
+use super::client_v0::{ClientSession, require_scope};
+use rusqlite::OptionalExtension as _;
 
 pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
@@ -11,6 +13,7 @@ pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
 }
 
 /// Fill a serving page with visible claims, leaving raw replication/projector reads intact.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn generic_claims_page(
     store: &Store,
     filter: fractal_store::store::ClaimsFilter<'_>,
@@ -19,10 +22,11 @@ pub(super) fn generic_claims_page(
     mut before: Option<u64>,
     descending: bool,
     limit: usize,
+    kinds: Option<&[&str]>,
 ) -> anyhow::Result<ClaimsPage> {
     let mut claims = Vec::with_capacity(limit.saturating_add(1));
     loop {
-        let page = store.claims_page_matching(filter, owner_run, after, before, descending, limit.saturating_add(1))?;
+        let page = store.claims_page_matching_with_kinds(filter, owner_run, after, before, descending, limit.saturating_add(1), kinds)?;
         let next = page.next_cursor;
         for claim in page.claims.into_iter().filter(generic_claim_visible) {
             claims.push(claim);
@@ -45,17 +49,19 @@ pub(super) fn generic_claims_page(
 
 pub async fn put_document(
     State(state): State<AppState>,
-    bound: Option<axum::Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<DocumentPutRequest>,
 ) -> Result<Json<DocumentVersion>, ApiError> {
+    // A seat writes only its own seat documents; a run, which has none, writes none.
     if let Some(bound) = bound.as_ref()
-        && !crate::handoff::may_write(&bound.0.0, &request.name)
+        && !crate::handoff::may_write(bound.actor(), &request.name)
     {
         return Err(ApiError::bad(FractalError::new(
             "document-not-yours",
             format!(
-                "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
-                request.name
+                "`{}` belongs to a seat; a seat writes only doc/agents/… for itself, and `{}` is not that seat",
+                request.name,
+                bound.actor(),
             ),
         )));
     }
@@ -66,7 +72,7 @@ pub async fn put_document(
             &request.bytes,
             &request.expected_document,
             &request.idempotency_key,
-            bound.as_ref().map(|bound| bound.0.0.as_str()),
+            bound.as_ref().map(BoundActor::actor),
         )
         .map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -286,15 +292,54 @@ pub async fn post_claim(
 pub async fn get_claim(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Result<Json<ClaimRecord>, ApiError> {
+    session: Option<Extension<ClientSession>>,
+) -> Result<Json<Value>, ApiError> {
+    let service = session.as_ref().is_some_and(|session|
+        client_v0::external_grants::is_service(&session.0));
+    if let Some(session) = &session
+        && client_v0::external_grants::is_service(&session.0) {
+        require_scope(&session.0, "read.claims")?;
+    }
     let store = state.store.clone();
     let id_for_read = id.clone();
-    blocking_store(move || store.claim_by_id(&id_for_read))
+    blocking_store(move || {
+        if service {
+            // The id index resolves only kind. Hidden and absent rows take the
+            // same path without loading or parsing any potentially large body.
+            let kind: Option<String> = store.readers.get()
+                .query_row("SELECT kind FROM claims WHERE id=?1", [&id_for_read],
+                    |row| row.get(0))
+                .optional()?;
+            if !kind.as_deref().is_some_and(|kind| service_claim_fields(kind).is_some()) {
+                return Ok(None);
+            }
+        }
+        store.claim_by_id(&id_for_read)
+    })
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
         .filter(generic_claim_visible)
-        .map(Json)
+        .map(|claim| Json(if service {
+            service_claim(&claim)
+        } else { json!(claim) }))
         .ok_or_else(|| ApiError::not_found(format!("claim `{id}` does not exist")))
+}
+
+/// These aliases are a service surface, not a new projection capability for devices.
+pub async fn client_get_claim(
+    state: State<AppState>,
+    id: AxumPath<String>,
+    session: Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_service_claims(&session.0)?;
+    get_claim(state, id, Some(session)).await
+}
+
+fn require_service_claims(session: &ClientSession) -> Result<(), ApiError> {
+    if !client_v0::external_grants::is_service(session) {
+        return Err(client_v0::forbidden("client claim reads require a service principal"));
+    }
+    require_scope(session, "read.claims")
 }
 
 #[derive(Deserialize)]
@@ -313,6 +358,14 @@ pub struct ClaimsQuery {
     limit: usize,
 }
 
+impl ClaimsQuery {
+    fn has_selector(&self) -> bool {
+        // Every new query field requires an explicit selector-admission decision.
+        let Self { subject, subject_prefix, kind, owner_run, after_index: _, before_index: _, order: _, limit: _ } = self;
+        subject.is_some() || subject_prefix.is_some() || kind.is_some() || owner_run.is_some()
+    }
+}
+
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ClaimsOrder {
@@ -324,18 +377,30 @@ enum ClaimsOrder {
 pub async fn list_claims(
     State(state): State<AppState>,
     Query(query): Query<ClaimsQuery>,
-) -> Result<Json<ClaimsPage>, ApiError> {
+    session: Option<Extension<ClientSession>>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(session) = &session
+        && client_v0::external_grants::is_service(&session.0) {
+        require_scope(&session.0, "read.claims")?;
+    }
     if query.limit == 0 || query.limit > 500 {
         return Err(ApiError::bad(FractalError::new(
             "invalid-page-limit",
             "a claim page limit must be between 1 and 500",
         )));
     }
+    let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
     let store = state.store.clone();
-    blocking_store(move || {
-        let subject = query.subject.as_deref().map(|subject| {
-            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
-        }).transpose()?;
+    let page = blocking_store(move || {
+        let kinds = (service && query.has_selector()).then_some(SERVICE_CLAIM_KINDS);
+        let subject = if service {
+            // Services select literal canonical subjects, without alias resolution.
+            query.subject
+        } else {
+            query.subject.as_deref().map(|subject| {
+                crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+            }).transpose()?
+        };
         generic_claims_page(
             &store,
             fractal_store::store::ClaimsFilter {
@@ -348,10 +413,62 @@ pub async fn list_claims(
             query.before_index,
             matches!(query.order, ClaimsOrder::Desc),
             query.limit,
+            kinds,
         )
     })
-    .await
-    .map(Json)
+    .await?;
+    Ok(Json(if service {
+        json!({"claims":page.claims.iter().map(service_claim).collect::<Vec<_>>(),
+            "next_cursor":page.next_cursor})
+    } else { json!(page) }))
+}
+
+pub async fn client_list_claims(
+    state: State<AppState>,
+    query: Query<ClaimsQuery>,
+    session: Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_service_claims(&session.0)?;
+    list_claims(state, query, Some(session)).await
+}
+
+/// Closed R29 receipt/state schema. Unknown rows reveal only a paging position.
+fn service_claim(claim: &ClaimRecord) -> Value {
+    let Some(fields) = service_claim_fields(&claim.kind) else {
+        return json!({"store_index":claim.store_index, "withheld":true});
+    };
+    let mut value = json!({
+        "id":claim.id, "kind":claim.kind, "subject":claim.subject, "origin":claim.origin,
+        "store_index":claim.store_index, "accepted_at_unix_ms":claim.accepted_at_unix_ms,
+        "body_digest":client_v0::credential_digest(&claim.body.to_string()),
+    });
+    value["actor"] = json!(claim.actor);
+    let source = claim.body.get("fields").unwrap_or(&claim.body);
+    let projected = fields.iter().filter_map(|field| {
+        source.get(*field).filter(|value| value.is_string() || value.is_number() || value.is_boolean())
+            .map(|value| ((*field).to_owned(), value.clone()))
+    }).collect::<serde_json::Map<_, _>>();
+    value["body"] = json!({"fields":projected});
+    value
+}
+
+const SERVICE_CLAIM_KINDS: &[&str] = &[
+    "gate.result", "work.claimed", "work.renewed", "work.progress", "work.submitted",
+    "work.failed", "work.released", "work.extended",
+];
+
+fn service_claim_fields(kind: &str) -> Option<&'static [&'static str]> {
+    if kind == "gate.result" {
+        Some(&["verdict", "operation", "request", "baseline", "token_usage", "stage"])
+    } else if SERVICE_CLAIM_KINDS.contains(&kind) {
+        Some(&[
+            "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
+            "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
+            "wait_until_unix_ms", "submitted_incarnation",
+        ])
+    } else {
+        None
+    }
 }
 
 #[derive(Default, Deserialize)]

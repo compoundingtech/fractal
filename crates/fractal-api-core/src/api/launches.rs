@@ -1439,10 +1439,10 @@ fn ignored_authority_warnings(
 
 pub async fn apply_with_bound(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
-    apply_with_authority(state, request, bound.as_ref().map(|bound| bound.0.0.as_str())).await
+    apply_with_authority(state, request, bound.as_ref().map(BoundActor::actor)).await
 }
 
 pub async fn get_mission(

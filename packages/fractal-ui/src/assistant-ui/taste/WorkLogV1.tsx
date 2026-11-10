@@ -7,6 +7,7 @@ import { LiveRing } from '../composition/LiveRing'
 import { ErrorOverlay } from '../composition/ErrorOverlay'
 import { HighlightedSource } from '../composition/Markdown'
 import { ViewportStoreContext } from '../EmbraceScrollViewport'
+import { useRevealOpen } from '../composition/transcript-reveal'
 import type { WorkKind, WorkLogCall, WorkLogTurn } from './work-log'
 import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
 
@@ -50,6 +51,8 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
     setChoice(!expanded)
     if (summaryAnchorId !== undefined) viewportStore?.rememberFold(summaryAnchorId, !expanded)
   }
+  // Search opening a fold is not a reader's choice, so it goes unremembered.
+  useRevealOpen(reveal => reveal.entryId !== undefined && (turn.calls.some(call => call.id === reveal.entryId) || summaryMemberIds?.includes(reveal.entryId) === true), expanded, setChoice)
   const failedCall = turn.calls.find(call => call.status === 'error')
   const failed = turn.failed || failedCall !== undefined
   // Worked always carries a number: how long, else how many tools.
@@ -71,6 +74,7 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
 }
 function TimelineCall({ call }: { call: WorkLogCall }) {
   const [open, setOpen] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, open, setOpen)
   const renderDetail = React.useContext(CallDetailRenderer)
   const { preview, interactive } = React.useContext(CallPresentation)
   const hasOutput = call.detail !== undefined && call.detail.length > 0
@@ -88,14 +92,15 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
 }
 function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
   const [rawOpen, setRawOpen] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, rawOpen, setRawOpen)
   return <>
-    <p>{call.summary ?? call.title} · {call.status}</p>
+    <p>{call.summary === undefined ? call.title : <span data-search-tool-summary>{call.summary}</span>} · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.call, styles.rawTrigger)}>Show raw input/output</Button>
       <DisclosurePanel>{rawOpen && <>
-        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code>{call.rawInput}</code></pre>}
-        {call.detail !== undefined && call.detail !== '' && <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={call.detail} language={workLogOutputLanguage(call)} /></code></pre>}
+        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" data-search-tool-input {...stylex.props(styles.output)}><code>{call.rawInput}</code></pre>}
+        {call.detail !== undefined && call.detail !== '' && <pre data-testid="work-call-output" data-search-tool-output {...stylex.props(styles.output)}><code><HighlightedSource code={call.detail} language={workLogOutputLanguage(call)} /></code></pre>}
       </>}</DisclosurePanel>
     </Disclosure>
   </>

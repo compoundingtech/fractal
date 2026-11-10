@@ -167,7 +167,7 @@ mission "factory/land-program" state="ready" timeout="2h" {
   goal "Land one change on main and prove it live, or leave main as it was."
   authority { publish "scratch/*"; write "resource/factory/*" }
   step "program" timeout="1h" {
-    program "/abs/bundles/land-aff9555cbaf1.mjs" sha256="aff9555c…48f09"
+    program "/abs/bundles/land-aff9555cbaf1.mjs" sha256="aff9555c…48f09" stalled-after="10m"
   }
 }
 ```
@@ -177,12 +177,77 @@ may not declare an assignee, gates, products, nested or used missions, or `after
 be a `finally` step: cancellation cleanup ends final agentless work that has no runtime process, so
 a program compensates inside its body.
 
+`sha256` is the bundle's 64 lowercase hex digits; the path must be absolute. The optional
+`stalled-after` is how long the program may go without a new journal entry before its run reports
+it stalled (§8). The step definition stores them as `program {bundle, bundle_hash,
+stalled_after_ms?}`.
+
 Steps act as the run (R07). The engine starts every effect with a run credential scoped to
 `(run, step run, attempt)`; the daemon binds a request carrying it to the actor
 `mission-run/RUN`. That actor holds what the revision's `authority` block grants, intersected with
 the authority of whoever started the run, and nothing else. The daemon writes journal claims as
 that actor. Changing `authority` is a mission revision, so factory classifies it as an
 authority-class change.
+
+#### Run authority
+
+**Grammar.** A top-level mission may declare one `authority` block in the shape of the agent
+`*-authority` blocks, one `VERB "PATTERN"` rule per line. `publish`, `start`, `revise` and `cancel`
+take mission IDs exactly as `mission-authority` does (no `mission/` prefix); `write` takes a
+subject, or a registered family alone, before `/*`. A pattern is exact or a terminal `/*`
+namespace covering everything under it. Parsing refuses the block in a nested or loop body, a
+repeated block or rule, an empty block, an unknown verb and any other `*`. There is no `"none"`
+form: a mission without the block grants its runs nothing. The block is a field of the mission
+spec, kept in canonical order and absent when undeclared, so existing revisions hash unchanged and
+changing it is a mission revision. Publication holds a revision that declares it until every
+member advertises `mission_authority=1`, as for `capacity`. `cancel` is reserved: it parses and
+grants nothing yet, because setting another run's outcome takes a person or agent actor.
+
+**Starter.** A run's starter is the actor of its `mission-run.created`: its requester, or, for a
+child a program starts (§6), the parent run, `mission-run/PARENT`. The requester stays the human.
+The starter's authority is evaluated when the run writes, not copied at start, so a starter that
+loses authority takes it from its running runs.
+
+**Effective authority** of `mission-run/RUN` is the `authority` of its current generation's
+revision intersected with its starter's. A run starter contributes its own effective authority,
+recursively, so a child never exceeds its parent. A person, agent or daemon starter contributes all
+authority in free mode, and the rules that restrict it (`rule.set` in enforce mode) decide each of
+the run's writes as well. With exact-or-namespace patterns the intersection is exact: for each
+pair with one verb, the narrower pattern if one covers the other, nothing otherwise.
+
+**Credential.** For each start or resume of an attempt the engine mints a store capability of kind
+`program-run` whose subject is the step run and whose incarnation is the attempt (the secret is
+hashed at rest and never journaled), and passes it as `ST_RUN_CREDENTIAL` in the `start`
+message's `env`. The host spreads the run env last, so an effect cannot replace it.
+
+**Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
+beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
+binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
+live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
+binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
+routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
+that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
+name. The CLI defaults its actor to the run when the credential is present and names it on the
+trusted Unix client, which the daemon accepts only from a request its credential binds to that
+same run. The same-UID boundary is cooperative, as for agents.
+
+**Journal.** The engine writes `program.step` claims as `mission-run/RUN`; a run may always journal
+on its own step runs, whatever it declares.
+
+**Enforcement** is one decision at the store's write admission, beside the rules gate, for every
+claim whose actor is a run and every document a run binds. A run's message send stays on the graph
+append, where the decision applies, rather than the messages stream. The claim names the grant it
+needs, from fields its writer cannot choose: `mission.published` on `mission/ID` needs
+`publish ID`; a run's creation and a generation without a predecessor need `start ID`; a
+generation with a predecessor needs `revise ID`, and so does everything a revision writes on the
+runs it changes (its proposal, carried and terminalized steps, the superseded generation, the
+run's and its descendants' states), each on the mission of the run it changes; any other claim
+needs `write SUBJECT`. A refusal reaches its caller as `run-authority-denied`. The daemon's
+`[programs] authority` says what a write outside the authority does: `enforce` refuses it;
+`audit` lets it through and records `rule.audited` on `rule/run-authority`, so a new program can
+discover the grants it needs. Each decision reads only each revision's `authority` member along
+the starter chain.
 
 ### 4. Versioning
 
@@ -191,14 +256,21 @@ step's `definition_hash` and the mission revision. A run generation binds one re
 bundle.
 
 1. `fractal apply` of a mission with a `program` reads the declared path, checks its sha256 and
-   stores the bytes as a blob keyed by that hash. The step definition names the hash in a
-   `bundle_hash` field, so the graph replicates the blob with the mission declaration, the way it
-   replicates every blob a claim's `bundle_hash` names ([attachments](attachments.md#what-travels-and-what-does-not)).
-   The member that runs the step reads the blob, never the author's path, which stays as provenance.
+   sends the bytes with the publication (`program_bundles`, base64 by sha256, on the apply and
+   owned-set apply requests). The daemon checks each against its hash, refuses one no program of
+   the intent names, and stores the bytes as a blob keyed by that hash before it publishes. The
+   step definition names the hash in a `bundle_hash` field, so the graph replicates the blob with
+   the mission declaration, the way it replicates every blob a claim's `bundle_hash` names
+   ([attachments](attachments.md#what-travels-and-what-does-not)). The member that runs the step
+   reads the blob, never the author's path, which stays as provenance.
 2. Every dispatch and every resume reads the blob of the revision's hash, whatever the source path
    holds now (R05).
-3. A declaration whose source no longer matches its sha256 is refused at `apply`; a step whose blob
-   is missing fails with `program bundle … is not in this member's store` (R06).
+3. A declaration whose source no longer matches its sha256 is refused by `fractal apply`,
+   `apply --dry-run` and `fractal validate`, which all read the bundle locally. A publication whose
+   program's blob the member holds neither from this publication nor from an earlier one is
+   refused with `missing-program-bundle`, whatever path published it (a replica could never read
+   it). A step whose blob is missing fails with `program bundle … is not in this member's store`
+   (R06).
 4. Revising a running run creates a new generation with a new step run, hence an empty journal: the
    program restarts under the new code (T03). There is no Temporal-style patching.
 
@@ -215,6 +287,7 @@ Each inner step writes registered `program.step` claims on the program's step ru
 | `program` | string | the bundle sha256 that wrote it |
 | `value` / `error` | any | the encoded success value, or the typed error with `_tag` and fields |
 | `ms` | integer | effect duration |
+| `child` | string, optional | the child `mission-run/…` or ask subject the key waits on (§6) |
 
 Idempotency key: `program:STEP:ATTEMPT:KEY:result` for both `completed` and `failed`, so a key has
 one result per attempt whatever its status, and a double execution that produces a different
@@ -378,8 +451,8 @@ on a scratch instance at each.
 
 | Milestone | Ships |
 |---|---|
-| M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with a worker per program, replay, eager cancellation, recorded effect process groups (DQ2) and liveness pings (DQ8); the step definition names its bundle by `bundle_hash` and publishing the declaration stores the blob, so neither the field nor definition hashes change in later milestones (§4); linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
-| M2 Publication | `fractal apply` carries a program mission's bundle to the daemon it publishes on and validates it (§4); the `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration. Factory's landing mission becomes the first production program. |
+| M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with a worker per program, replay, eager cancellation, recorded effect process groups (DQ2) and liveness pings (DQ8); the step definition names its bundle by `bundle_hash`, `fractal apply` carries and validates the bundle and publishing the declaration stores the blob, so neither the field nor definition hashes change in later milestones (§4); linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
+| M2 Publication | The `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration. Factory's landing mission becomes the first production program. |
 | M3 One model | The data DSL compiles into programs (§9), with byte and behaviour parity for existing data-DSL missions; published KDL missions keep running on the native graph until they are republished. |
 
 ## Spike results (scratch, macOS, load 80–280)

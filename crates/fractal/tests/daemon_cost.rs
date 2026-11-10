@@ -48,6 +48,8 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+mod assistant_admission;
+
 use fractal_daemon::ConversationReadsStore;
 use fractal_daemon::CustomStore;
 use fractal_daemon::AdhocWorkStore;
@@ -629,6 +631,9 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/client/claims", "/v1/client/claims?limit=100"),
+    get("GET /v1/client/claims/by-id/{id}", "/v1/client/claims/by-id/{service_claim}"),
+    get("GET /v1/client/work-items/{*subject}", "/v1/client/work-items/{step}"),
     post("POST /v1/client/push-registration", "/v1/client/push-registration", |_, _| push_body()),
     Probe {
         route: "DELETE /v1/client/push-registration",
@@ -2918,6 +2923,74 @@ fn seed_git_change_reads(store: &Store, scale: f64) {
     }
 }
 
+#[cfg(test)]
+const SERVICE_PROBE_TOKEN: &str = "invented-cost-service-reader";
+
+// This integration-test target alone constructs the disabled Service profile.
+#[cfg(test)]
+fn seed_service_probe(store: &Store) -> String {
+    use fractal_daemon::api::client_v0::{credential_digest, external_grants};
+    const ID: &str = "787878787878787878787878";
+    store.append_claim(&ClaimInput {
+        subject:external_grants::subject(ID).unwrap(),kind:external_grants::GRANTED.into(),
+        actor:Some("person/bench-operator".into()),
+        fields:serde_json::from_value(json!({
+            "profile":"service","principal":"plugin/cost/reader","grant_id":ID,
+            "session_actor":format!("plugin/cost/reader/session/{ID}"),
+            "issuer":"person/bench-operator","expires_at_unix_ms":u64::MAX,
+            "credential_hash":credential_digest(SERVICE_PROBE_TOKEN),
+            "scopes":["read.claims","read.work"],
+        })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"gate-operation/cost/service-read".into(),kind:"gate.result".into(),actor:None,
+        fields:serde_json::from_value(json!({"verdict":"pass"})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap().id
+}
+
+#[cfg(test)]
+async fn service_probe(app: &Router, path: &str) -> Result<Value,String> {
+    use axum::{body::Body,http::Request};
+    use tower::ServiceExt as _;
+    let response = app.clone().oneshot(Request::builder().uri(path)
+        .header("authorization",format!("Bearer {SERVICE_PROBE_TOKEN}"))
+        .body(Body::empty()).map_err(|error| error.to_string())?)
+        .await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(),usize::MAX).await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("service read {path} failed: {status}"));
+    }
+    let envelope: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let answer = envelope["value"].clone();
+    if path.starts_with("/v1/client/claims/by-id/") {
+        if answer["body"]["fields"]["verdict"] != "pass" {
+            return Err("service receipt probe must read its populated receipt".into());
+        }
+    } else if path.starts_with("/v1/client/claims?") {
+        if !answer["claims"].as_array().is_some_and(|claims| !claims.is_empty()) {
+            return Err("service page probe must read populated claims".into());
+        }
+    } else if !answer["subject"].as_str().is_some_and(|subject| subject.starts_with("step-run/")) {
+        return Err("service work probe must read a populated work item".into());
+    }
+    Ok(answer)
+}
+
+async fn required_service_probe(app: &Router, path: &str) -> Value {
+    service_probe(app,path).await.unwrap_or_else(|error| {
+        panic!("seeded service probe must succeed before cost aggregation: {error}")
+    })
+}
+
+#[tokio::test]
+#[should_panic(expected = "seeded service probe must succeed before cost aggregation")]
+async fn missing_service_probe_is_fatal_before_cost_aggregation() {
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3098,6 +3171,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let mut state = state;
     state.harness_question_sink = Some(harness_sink.clone());
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
+    let service_claim = seed_service_probe(&store);
+    let mut service_state = state.clone();
+    service_state.owning_person = Some("person/bench-operator".into());
+    let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(120),
@@ -3165,6 +3242,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert("service_claim",service_claim);
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),
@@ -3434,6 +3512,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
+                let path = fixture.fill(probe.path,attempt);
+                counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
             } else if let Some(call) = probe.direct {
                 let (store, fixture) = (store.clone(), &fixture);
                 counted(|| async move {

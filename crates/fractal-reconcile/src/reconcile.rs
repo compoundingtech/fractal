@@ -11489,6 +11489,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
                     }
+                    // The program engine alone decides a program step's outcome: nothing here
+                    // completes it, so it stays working until the engine runs it.
+                    if step.spec.program.is_some() {
+                        return Ok(changed);
+                    }
                     if !view.agentless && !view.worker_reported {
                         return Ok(changed);
                     }
@@ -21179,6 +21184,7 @@ pub mod tests {
     mod start_preemption;
     mod seat_admission_queue;
     mod terminal_step_guard;
+    mod program_step_hold;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -27365,21 +27371,79 @@ agent "import/omp/fixture" {{
     }
 
     #[test]
-    fn launch_input_measurement_failure_is_unknown_and_subscription_faults_target_daemon() {
+    fn managed_launch_inputs_remain_watched_when_profile_or_wrapper_is_missing() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile.json");
         let desired = crate::graph::parse_test_intent(&format!("version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}", root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
         let store = Arc::new(Store::open_memory("node").unwrap());
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
         let mut member = desired.member.clone().unwrap();
         member.environment.insert("PATH".into(), root.path().display().to_string());
+        member.environment.insert("AGENT_PERSONA".into(), "generalist".into());
+        member.environment.insert("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string());
+        crate::contract::install(&store, Box::new(move |_| Ok(member.clone())));
+        assert!(crate::contract::declared(&store, &desired).is_err());
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err());
+        let profile_key = format!("launch-input/{}", profile.display());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&profile_key));
+        assert!(!reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("claude").display())),
+            "a missing managed profile must not fall back to raw claude");
+
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        reconciler.incremental.touch(&profile_key);
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err());
+        let wrapper = bin.join("claude");
+        let wrapper_key = format!("launch-input/{}", wrapper.display());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&wrapper_key));
+
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        reconciler.incremental.touch(&wrapper_key);
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err(),
+            "a non-executable wrapper must remain refused and watched");
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&wrapper_key));
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        reconciler.incremental.touch(&wrapper_key);
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&wrapper_key));
+    }
+
+    #[test]
+    fn launch_input_measurement_failure_is_unknown_and_subscription_faults_target_daemon() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("claude");
+        // Managed seats measure the selected wrapper and its interpreter, not raw PATH claude.
+        std::fs::write(&wrapper, "#!/usr/bin/env missing-claude-interpreter\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = root.path().join("profile.json");
+        std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let desired = crate::graph::parse_test_intent(&format!("version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}", root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let mut member = desired.member.clone().unwrap();
+        member.environment.insert("PATH".into(), root.path().display().to_string());
+        member.environment.insert("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string());
+        member.environment.insert("AGENT_PERSONA".into(), "generalist".into());
         let member = Arc::new(Mutex::new(member));
         let prepared = member.clone();
         crate::contract::install(&store, Box::new(move |_| Ok(prepared.lock().unwrap().clone())));
-        assert!(crate::contract::declared(&store, &desired).is_err()); // Settle the environment, not the missing provider.
+        assert!(crate::contract::declared(&store, &desired).is_err()); // Settle the environment, not the missing interpreter.
         reconciler.watch_launch_inputs(&desired).unwrap();
         assert!(crate::contract::declared_ready(&store, &desired).is_err());
-        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("claude").display())));
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", wrapper.display())));
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("missing-claude-interpreter").display())));
         let scope = format!("stage/launch-inputs/{}", desired.subject);
         let denied = root.path().join("denied");
         std::fs::create_dir(&denied).unwrap();
@@ -27393,7 +27457,7 @@ agent "import/omp/fixture" {{
         }
         std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(reconciler.isolate(&scope, "daemon/node", || reconciler.watch_launch_inputs(&desired)).is_some());
-        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", denied.join("claude").display())));
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", denied.join("missing-claude-interpreter").display())));
         assert!(store.reconcile_fault("daemon/node", &scope).unwrap().is_none());
     }
 

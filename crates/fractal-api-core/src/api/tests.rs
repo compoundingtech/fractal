@@ -31,6 +31,154 @@ fn incomplete_linux_environment_is_unavailable() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_run_credential_in_the_environment_binds_a_run_and_never_an_agent_too() {
+    for (case, environment, expected) in [
+        ("credential", b"ST_RUN_CREDENTIAL=secret\0".as_slice(), HarnessAncestry::Run(RunCredential::new("secret"))),
+        ("empty credential", b"ST_RUN_CREDENTIAL=\0".as_slice(), HarnessAncestry::Unavailable),
+        ("credential and agent", b"ST_RUN_CREDENTIAL=secret\0ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Unavailable),
+        ("credential and legacy agent", b"FRACTAL_AGENT=agent/fixture/worker\0ST_RUN_CREDENTIAL=secret\0".as_slice(),
+            HarnessAncestry::Unavailable),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+    assert_eq!(format!("{:?}", RunCredential::new("secret")), "RunCredential(..)");
+}
+
+/// An effect's descendant that clears its own environment is still bound: the walk reads each
+/// ancestor's exec-time environment and finds the credential the effect was started with.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_effects_descendant_binds_its_run() {
+    use std::io::BufRead;
+    let mut effect = std::process::Command::new("sh")
+        .args(["-c", "env -i MARKER=1 sleep 10 & echo $!; wait"])
+        .env("ST_RUN_CREDENTIAL", "secret")
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(effect.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    let pid: u32 = line.trim().parse().unwrap();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    effect.kill().unwrap();
+    let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+    effect.wait().unwrap();
+    assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
+}
+
+/// A request whose ancestry carries a live run credential is attributed to `mission-run/RUN`,
+/// may not name another actor, and writes nothing once its attempt has ended.
+#[tokio::test]
+async fn a_run_credential_binds_requests_to_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let post = |subject: &str, actor: Option<&str>| {
+        let mut body = json!({"subject": subject, "kind": "custom.example.recorded", "fields": {}});
+        if let Some(actor) = actor { body["actor"] = json!(actor); }
+        app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap())
+    };
+    let response = post("custom/example/run-own", None).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let claims = state.store.claims_for("custom/example/run-own", Some("custom.example.recorded")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(step.run.as_str()));
+    assert!(step.run.starts_with("mission-run/"));
+
+    let named = post("custom/example/run-named", Some(&step.run)).await.unwrap();
+    assert_eq!(named.status(), StatusCode::OK);
+    for actor in ["person/operator", "agent/example/worker"] {
+        let before = state.store.index().unwrap();
+        let refused = post("custom/example/run-foreign", Some(actor)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{actor}");
+        let body = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
+    // The attempt ends: the credential no longer binds, and the caller writes nothing.
+    state.store.set_step_run_state_for_tests(&step.subject, "completed", 1);
+    let before = state.store.index().unwrap();
+    let ended = post("custom/example/run-ended", None).await.unwrap();
+    assert_eq!(ended.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+/// A program effect's CLI names its run on the trusted Unix client; only a request its run
+/// credential binds to that same run may.
+#[tokio::test]
+async fn a_run_bound_unix_client_acts_as_its_run_and_no_other() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let binding = state.store.run_binding(&secret).unwrap();
+    let request = |person: &str, bound: bool| {
+        let mut request = Request::builder().method("POST").uri("/v1/client/actions")
+            .header(client_v0::LOCAL_PERSON_HEADER, person);
+        if bound { request = request.extension(BoundRun(binding.clone())); }
+        request.body(Body::empty()).unwrap()
+    };
+    let session = client_v0::authenticate(&state, &request(&step.run, true), "unix").unwrap();
+    assert_eq!((session.actor.as_str(), session.authority_actor.as_str()), (step.run.as_str(), step.run.as_str()));
+    assert!(session.local_peer);
+    for (person, bound) in [(step.run.as_str(), false), ("mission-run/another", true)] {
+        let refused = client_v0::authenticate(&state, &request(person, bound), "unix").unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{person} bound={bound}");
+    }
+}
+
+/// Handlers that hold a bound caller to itself read one bound identity, so a bound run is never
+/// an unbound person: it writes no seat's document, and it is the writer the rules decide.
+#[tokio::test]
+async fn a_bound_run_is_held_to_its_identity_by_document_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    state.store.set_rule("runs-keep-out", &smallclaims::rules::Rule {
+        mode: smallclaims::rules::Mode::Enforce,
+        actors: vec!["mission-run/*".into()],
+        kinds: vec!["doc.bound".into()],
+        subjects: vec!["doc/locked/**".into()],
+        ..Default::default()
+    }, "person/owner").unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let write = |name: &str, key: &str| {
+        let body = json!({"name": name, "bytes": b"notes".to_vec(), "expected_document": null, "idempotency_key": key});
+        let request = Request::builder().method("POST").uri("/v1/documents")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    let (status, refused) = write("doc/agents/garden/ash/handoff", "seat").await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("document-not-yours")), "{refused}");
+    let (status, refused) = write("doc/locked/notes", "locked").await;
+    assert_eq!(refused["code"], "rule-denied", "{status} {refused}");
+    let (status, written) = write("doc/runs/notes", "notes").await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(BoundActor::of(Request::builder().extension(BoundAgent("agent/a".into())).body(()).unwrap().extensions()),
+        Some(BoundActor::Agent("agent/a".into())));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn empty_process_environment_is_unavailable() {
     let mut child = std::process::Command::new("sleep").arg("10").env_clear().spawn().unwrap();
     let pid = child.id();
@@ -1952,6 +2100,122 @@ fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
         message_delivery_value(&store, to, "read", 1_000, 12_000).unwrap()["state"],
         "read"
     );
+}
+
+#[tokio::test]
+async fn message_delivery_expiry_is_terminal_before_human_and_path_diagnostics() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let seat = "agent/expiry-delivery-recipient";
+    let append = |subject: &str, kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    append(seat, "runtime.observed", seat, json!({"status":"running", "incarnation_id":"one"}));
+    append(seat, "harness.observed", seat, json!({
+        "state":"working", "driver":"claude", "incarnation_id":"one", "blocked_on":"human", "ask":"permission"
+    }));
+    let now = client_now_ms();
+    assert!(message_delivery_value(store, seat, "sent", now, now).unwrap()["reason"]
+        .as_str().unwrap().contains("held outside"));
+    delivery_presence::record(seat, &json!({
+        "transport":"omp-channel", "pid":4242, "ready":false, "reason":"native handoff refused"
+    }).to_string());
+    assert!(delivery_presence::known(seat).unwrap().stale());
+    for reason in ["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"] {
+        let subject = format!("message/{reason}");
+        let sent = append(&subject, "message.sent", "person/sender", json!({
+            "from":"person/sender", "to":seat, "content":"expiry contract", "status":"sent"
+        }));
+        append(&subject, "message.expired", "daemon/runtime", json!({"status":"expired", "reason":reason}));
+        let (status, view) = get_request(router(app.clone()), &format!("/v1/messages/delivery/{subject}")).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        let delivery = &view["delivery"];
+        assert_eq!(delivery["state"], "expired", "{view}");
+        assert_eq!(delivery["phase"], "expired", "{view}");
+        assert_eq!(delivery["reason"], reason, "{view}");
+        assert!(delivery["age_ms"].is_number());
+        assert_eq!(delivery["recipient_delivery"]["state"], "stale");
+        assert!(delivery.get("history").is_none());
+        // A receipt arriving after the endpoint captured its view still wins.
+        let expired = store.message(&subject).unwrap().unwrap();
+        for phase in ["delivered", "read"] {
+            append(&subject, &format!("message.{phase}"), seat, json!({"status":phase}));
+            assert!(store.message_expiry(&subject).unwrap().unwrap().superseded);
+            let delivery = message_delivery_for(store, &expired, sent.accepted_at_unix_ms, now, None).unwrap();
+            assert_eq!(delivery["phase"], phase);
+            let (_, view) = get_request(router(app.clone()), &format!("/v1/messages/delivery/{subject}")).await;
+            assert_eq!(view["delivery"]["phase"], phase);
+            assert_ne!(view["delivery"]["state"], "expired");
+        }
+    }
+}
+
+#[test]
+fn message_delivery_expiry_survives_remote_unknown_but_not_real_relayed_receipts() {
+    let store = Arc::new(Store::open_memory("expiry-sender").unwrap());
+    let source = "version 2\nagent \"recipient\" { host \"expiry-remote\"; command \"true\"; }";
+    let intent = crate::graph::parse_intent(source, "expiry-sender").unwrap();
+    store.apply_internal(&intent, "expiry-remote-delivery").unwrap();
+    // The remote host's advertisement, as retained by replication.
+    {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::store::append_claim_tx(&transaction, "expiry-remote", "daemon/expiry-remote",
+            "daemon.started", Some("daemon/expiry-remote"), &json!({"fields":{
+                "status":"running", "features":{"seat_freshness_reads":1, "message_offsets":1}
+            }}), &[], None).unwrap();
+        transaction.commit().unwrap();
+    }
+    let seat = store.desired_subjects().unwrap().into_iter()
+        .find(|seat| seat.member.as_ref().is_some_and(|member| member.host == "expiry-remote"))
+        .unwrap().subject;
+    let subject = "message/expiry-relay";
+    let append = |kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    let sent = append("message.sent", "person/sender", json!({
+        "from":"person/sender", "to":seat, "content":"remote expiry", "status":"sent"
+    }));
+    append("message.expired", "daemon/runtime", json!({"status":"expired", "reason":"no-live-recipient"}));
+    let expired = store.message(subject).unwrap().unwrap();
+    assert_eq!(message_reads::relay_host(&store, &expired).unwrap().as_deref(), Some("expiry-remote"));
+    let unknown = message_reads::Relayed::Unknown { host:"expiry-remote".into(), reason:"unreachable".into() };
+    let delivery = |relayed: Option<&message_reads::Relayed>| message_delivery_for(
+        &store, &expired, sent.accepted_at_unix_ms, sent.accepted_at_unix_ms, relayed,
+    ).unwrap();
+    for relayed in [None, Some(&unknown)] {
+        assert_eq!(delivery(relayed)["state"], "expired");
+        assert_eq!(delivery(relayed)["reason"], "no-live-recipient");
+    }
+    for (phases, expected) in [
+        (&["delivered"][..], "delivered"), (&["read"][..], "read"),
+        (&["read", "closed"][..], "read"), (&["closed"][..], "expired"),
+    ] {
+        let marks = phases.iter().map(|phase| (format!("message.{phase}"), seat.clone()))
+            .chain(std::iter::once(("message.read".into(), "agent/not-on-remote".into())))
+            .map(|(kind, consumer)| crate::peer::RelayedMark {
+                kind, consumer, recorded_at_unix_ms: 1, receipt: "remote-receipt".into(),
+            }).collect();
+        let answers = message_reads::settle(&store, vec![("expiry-remote".into(), Ok(crate::peer::MessageMarksAnswer {
+            subject: subject.into(), held: true, marks,
+        }))]);
+        let answer = answers.get(subject).unwrap();
+        assert_eq!(answer.status(), phases.last().copied());
+        assert_eq!(delivery(Some(answer))["phase"], expected);
+        assert_eq!(delivery(Some(answer))["state"] == "expired", expected == "expired");
+        assert!(!store.message_expiry(subject).unwrap().unwrap().superseded);
+    }
+    append("message.read", &seat, json!({"status":"read"}));
+    assert_eq!(delivery(Some(&unknown))["state"], "read");
 }
 
 #[test]
@@ -4106,6 +4370,7 @@ fn apply_request(state: &AppState, source: &str, actor: &str, key: &str) -> Appl
         expected_subjects: preview.subject_tokens,
         idempotency_key: key.into(),
         actor: Some(actor.into()),
+        program_bundles: Default::default(),
     }
 }
 
@@ -6517,6 +6782,14 @@ async fn mission_resolves_a_bare_document_to_immutable_bytes() {
 }
 
 async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value) {
+    preview_and_apply_with_bundles(app, kdl, BTreeMap::new()).await
+}
+
+async fn preview_and_apply_with_bundles(
+    app: Router,
+    kdl: &str,
+    program_bundles: BTreeMap<String, String>,
+) -> (Value, StatusCode, Value) {
     let (status, preview) = json_request(
         app.clone(),
         "/v1/intent/mission",
@@ -6543,11 +6816,80 @@ async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value)
                 .unwrap(),
             idempotency_key: format!("apply-{}", hex::encode(Sha256::digest(kdl))),
             actor: Some("person/alex".into()),
+            program_bundles,
         })
         .unwrap(),
     )
     .await;
     (preview, status, applied)
+}
+
+/// A publication carries its program bundles as base64, so both caller guards buffer a body up to
+/// the publication route limit (32 MiB) and hand a body past 16 MiB on whole.
+#[tokio::test]
+async fn caller_guards_pass_a_publication_body_past_sixteen_mebibytes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let padding = "a".repeat(20 * 1024 * 1024);
+    for (bound, body) in [
+        (Some("agent/example/publisher"), format!(r#"{{"actor":"agent/example/publisher","pad":"{padding}"}}"#)),
+        (None, format!(r#"{{"pad":"{padding}"}}"#)),
+    ] {
+        let mut request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        if bound.is_none() {
+            request.extensions_mut().insert(HarnessAncestry::Unavailable);
+        }
+        let passed = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = to_bytes(passed.into_body(), PUBLICATION_BODY_LIMIT).await.unwrap();
+        assert_eq!(bytes.len(), body.len(), "{bound:?}");
+    }
+}
+
+#[tokio::test]
+async fn publication_stores_the_program_bundle_its_declaration_names() {
+    use base64::Engine as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let app = router(state);
+    let bytes = b"export default {}";
+    let hash = hex::encode(Sha256::digest(bytes));
+    let kdl = format!(
+        "version 2\nmission \"land\" state=\"ready\" {{\n  goal \"Land.\"\n  step \"program\" {{ program \"/bundles/land.mjs\" sha256=\"{hash}\" }}\n}}"
+    );
+    let encoded = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let before = store.index().unwrap();
+    // A declaration whose bytes this member never received would be refused by every replica.
+    let (_, status, error) = preview_and_apply(app.clone(), &kdl).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "missing-program-bundle");
+    let (_, status, error) =
+        preview_and_apply_with_bundles(app.clone(), &kdl, BTreeMap::from([(hash.clone(), encoded(b"export default 2"))])).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "program-bundle-hash-mismatch");
+    let (_, status, error) = preview_and_apply_with_bundles(
+        app.clone(),
+        &kdl,
+        BTreeMap::from([(hash.clone(), encoded(bytes)), ("0".repeat(64), encoded(b""))]),
+    )
+    .await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "unused-program-bundle");
+    assert_eq!(store.index().unwrap(), before);
+    assert_eq!(store.get_blob(&hash).unwrap(), None);
+
+    let (_, status, applied) =
+        preview_and_apply_with_bundles(app, &kdl, BTreeMap::from([(hash.clone(), encoded(bytes))])).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(store.get_blob(&hash).unwrap().as_deref(), Some(&bytes[..]));
+    // The published definition names the blob by `bundle_hash`, which promotes and replicates it.
+    let published = store.latest_claim("mission/land", Some("mission.published")).unwrap().unwrap();
+    assert!(published.body.to_string().contains(&format!("\"bundle_hash\":\"{hash}\"")), "{}", published.body);
 }
 
 #[tokio::test]
@@ -6790,6 +7132,7 @@ mission "invalid-message" state="ready" {
             expected_subjects: BTreeMap::new(),
             idempotency_key: "reject-invalid-nested-message".into(),
             actor: Some("person/alex".into()),
+            program_bundles: Default::default(),
         })
         .unwrap(),
     )
