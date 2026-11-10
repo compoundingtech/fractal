@@ -556,9 +556,25 @@ impl ClientSession {
         };
         // Free mode: an agent's local session holds every scope a person's does. Its actions
         // still record the agent as their actor.
-        Ok(Self {
-            actor: person.into(),
-            authority_actor: person.into(),
+        Ok(Self::acting(person))
+    }
+
+    /// A program effect's local session, acting as `run` (docs/st3/program-engine.md §3). Only a
+    /// request its run credential binds to that same run may name it; run authority then decides
+    /// each write.
+    pub fn local_run(run: &str, bound_run: Option<&str>) -> Result<Self, ApiError> {
+        if bound_run != Some(run) {
+            return Err(forbidden(
+                "a trusted Unix client acts as a mission run only when its run credential binds that run",
+            ));
+        }
+        Ok(Self::acting(run))
+    }
+
+    fn acting(actor: &str) -> Self {
+        Self {
+            actor: actor.into(),
+            authority_actor: actor.into(),
             pairing_grant: None,
             pairing_issued_here: false,
             grant_expires_at: None,
@@ -566,14 +582,14 @@ impl ClientSession {
             transport: "unix",
             local_peer: false,
             peer_process: None,
-            custom_forms,
+            custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
-        })
+        }
     }
 
     pub fn pairing() -> Self {
@@ -776,10 +792,15 @@ pub fn authenticate(
                 .headers()
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
-            let mut session = ClientSession::local(person)?;
+            let bound_run = request.extensions().get::<super::BoundRun>().map(|bound| bound.0.run.as_str());
+            let mut session = match person.filter(|person| person.starts_with("mission-run/")) {
+                Some(run) => ClientSession::local_run(run, bound_run)?,
+                None => ClientSession::local(person)?,
+            };
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
+                || bound_run.is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
                 || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
