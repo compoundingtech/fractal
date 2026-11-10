@@ -1337,7 +1337,10 @@ Observer and subscription lists and details are available at `/v1/client/observe
 `/v1/client/subscriptions`. Each resource includes its normalized specification, current state,
 and owning run, generation, and step. Agentless work includes `gate_kind`: `watch` for a standing
 step with no gate, `predicate`, `command`, `llm`, or `human` for a single gate family, `mixed`
-for combined families, and `run` for an `after-run` step.
+for combined families, `run` for an `after-run` step, and `program` for a program step. A program
+step's work also carries `program`: its innermost open journal key (`open_key`, with
+`open_since_unix_ms` and the `child` run or ask that key waits on), `last_entry_at_unix_ms`, and
+the `stalled_after_ms` past which `missions waiting-on` reports it as `no-progress`.
 
 ## Harness-neutral session timeline
 
