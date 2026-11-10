@@ -293,7 +293,17 @@ fn invalid_or_non_agent_holders_never_emit_agent_actors() {
             let agents = Agents::default().with(id, "stopped", None, &[]);
             let shown = present(&mission, &[], &agents);
             assert_eq!(shown.who, Actor::Nobody, "{id}");
-            assert_eq!(shown.steps[0].owner, Actor::Nobody, "{id}");
+            let owner = if id == "person/avery" {
+                Actor::Person {
+                    person: id.into(),
+                    label: "avery".into(),
+                }
+            } else {
+                Actor::Nobody
+            };
+            assert_eq!(shown.steps[0].owner, owner, "{id}");
+            assert!(!matches!(shown.who, Actor::Agent { .. }), "{id}");
+            assert!(!matches!(shown.steps[0].owner, Actor::Agent { .. }), "{id}");
             assert_eq!(shown.stuck.unwrap().agent, None, "{id}");
         }
         let mission = mission("running", vec![step("build", "ready", json!({}))]);
@@ -306,6 +316,8 @@ fn invalid_or_non_agent_holders_never_emit_agent_actors() {
         let shown = present(&mission, &[], &agents);
         assert_eq!(shown.who, Actor::Nobody, "{id}");
         assert_eq!(shown.steps[0].owner, Actor::Nobody, "{id}");
+        assert!(!matches!(shown.who, Actor::Agent { .. }), "{id}");
+        assert!(!matches!(shown.steps[0].owner, Actor::Agent { .. }), "{id}");
         assert_eq!(shown.queued_behind, None, "{id}");
     }
 }
