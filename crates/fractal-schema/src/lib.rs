@@ -35,6 +35,49 @@ use sha2::{Digest as _, Sha256};
 
 pub const SCHEMA_NAME: &str = "st3.v1";
 
+/// Canonicalize an actor used for agent work without changing an explicit actor kind.
+/// Bare names need a host before admission; legacy slash-qualified names need `agent/`.
+pub fn canonical_agent_actor(id: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (kind, name) = id.split_once('/')?;
+    if kind.is_empty() || name.is_empty() {
+        return None;
+    }
+    if matches!(kind, "agent" | "person" | "daemon" | "host" | "plugin") {
+        Some(std::borrow::Cow::Borrowed(id))
+    } else {
+        Some(std::borrow::Cow::Owned(format!("agent/{id}")))
+    }
+}
+
+#[cfg(test)]
+mod canonical_agent_actor_tests {
+    use super::canonical_agent_actor;
+
+    #[test]
+    fn preserves_actor_kinds_and_prefixes_legacy_agent_ids() {
+        for id in ["agent/example/worker", "person/reviewer", "daemon/scheduler"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+        assert_eq!(
+            canonical_agent_actor("example/worker").as_deref(),
+            Some("agent/example/worker")
+        );
+        for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
+            assert!(canonical_agent_actor(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_host_and_plugin_principals() {
+        for id in ["host/example", "plugin/example"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+    }
+}
+
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
 pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h98d3e9599416 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
