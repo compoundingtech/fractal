@@ -512,8 +512,10 @@ fractal terminals end terminal/pty/person/ada/UUID
 `terminals new` prints the new terminal ID. It runs the host's preferred shell (`$SHELL`, falling
 back to `/bin/sh`) with no agent harness. An omitted `--cwd` (or `"."` through the API)
 starts in the launching host user's home directory. The runtime resolves that directory to an
-absolute path before passing it to PTY, including for remote clients. An explicit `--cwd` is
-passed unchanged. The shell does not restart after exit. `end` publishes a durable stop.
+absolute path before passing it to PTY, including for remote clients. If the host home cannot
+be resolved, it warns and retains `"."`; the shell still attempts to change to `$HOME`.
+An explicit `--cwd` is passed unchanged. The shell does not restart after exit.
+`end` publishes a durable stop.
 Only its creator may create or end its declaration.
 The client crates expose `terminal_create` and `terminal_end` (camel case in TypeScript and Swift).
 

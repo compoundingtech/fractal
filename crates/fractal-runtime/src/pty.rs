@@ -515,12 +515,19 @@ impl PtyRuntime {
         let home = if cwd == Path::new(".")
             && tags.get("st3.cwd").is_some_and(|value| value == "home")
         {
-            let home = std::env::home_dir().context("resolve default terminal home directory")?;
-            anyhow::ensure!(
-                home.is_absolute(),
-                "default terminal home directory must be absolute"
-            );
-            Some(home)
+            if let Some(home) = std::env::home_dir() {
+                anyhow::ensure!(
+                    home.is_absolute(),
+                    "default terminal home directory must be absolute"
+                );
+                Some(home)
+            } else {
+                tracing::warn!(
+                    runtime_id = id,
+                    "default terminal home is unavailable; retaining '.' for shell-side home resolution"
+                );
+                None
+            }
         } else {
             None
         };
