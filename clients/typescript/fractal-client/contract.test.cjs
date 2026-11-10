@@ -776,6 +776,40 @@ test('collection stream holds commands until the socket opens and passes frames 
     assert.deepEqual(socket.closed, [1000]);
 });
 
+test('collection native errors retain only NSError identity through plainError', async () => {
+    for (const [domain, code] of [['NSURLErrorDomain', -1009], ['SRWebSocketErrorDomain', 2132], ['NSPOSIXErrorDomain', 0]]) {
+        const socket = collectionSocket(), ends = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
+        await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: () => socket });
+        const onerror = socket.onerror;
+        const event = { domain, code, message: 'private credential', localizedDescription: 'private gateway', userInfo: { url: 'https://private.invalid' } };
+        onerror(event);
+        onerror(event);
+        assert.equal(ends.length, 1);
+        assert.ok(ends[0] instanceof Error);
+        assert.equal(ends[0].message, `The collections socket failed (${domain} ${code})`);
+        assert.equal(plainError(ends[0]), ends[0].message);
+        assert.doesNotMatch(JSON.stringify({ issue: plainError(ends[0]) }), /private|localizedDescription|userInfo/);
+        assert.equal(socket.onopen, null);
+        assert.equal(socket.onerror, null);
+    }
+});
+
+test('browser and incomplete native collection errors retain generic text without event messages', async () => {
+    for (const event of [undefined, null, {}, new Error('private browser failure'),
+        { message: 'private' }, { domain: 'NSURLErrorDomain' }, { code: -1009 },
+        { domain: 1, code: -1009 }, { domain: 'NSURLErrorDomain', code: '-1009' },
+        { domain: 'NSURLErrorDomain', code: NaN }, { domain: 'NSURLErrorDomain', code: Infinity },
+        { domain: 'NSURLErrorDomain', code: 1.5 }]) {
+        const socket = collectionSocket(), ends = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
+        await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: () => socket });
+        socket.onerror(event);
+        assert.equal(ends.length, 1);
+        assert.equal(plainError(ends[0]), 'The collections socket failed');
+    }
+});
+
 test('command observers see queued and direct commands only after socket.send', async () => {
     const socket = collectionSocket();
     const observed = [];

@@ -16,6 +16,9 @@
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
       "github:overengineeringstudio/effect-utils/15ff7fa8968469c2c99a647888a999f9d62ffde5";
+    mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
+    mergemaster.inputs.nixpkgs.follows = "nixpkgs";
+    mergemaster.inputs.effect-utils.follows = "effect-utils";
   };
 
   outputs =
@@ -27,6 +30,7 @@
       pty,
       fabric,
       effect-utils,
+      mergemaster,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
