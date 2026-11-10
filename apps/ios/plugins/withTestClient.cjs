@@ -48,8 +48,11 @@ module.exports = function withTestClient(config) {
         isa: 'XCBuildConfiguration', name, buildSettings: { ...settings },
       })), 'Release', `Build configuration list for PBXNativeTarget "${targetName}"`);
       const product = project.addProductFile(`${targetName}.xctest`, {
-        target: targetId, explicitFileType: 'wrapper.cfbundle',
+        target: targetId, sourceTree: 'BUILT_PRODUCTS_DIR',
       });
+      // Supplying explicitFileType to addProductFile appends the library's first
+      // cfbundle extension (.mdimporter). Set the type after the exact path exists.
+      objects.PBXFileReference[product.fileRef].explicitFileType = '"wrapper.cfbundle"';
       const nativeTarget = {
         isa: 'PBXNativeTarget', name: targetName, productName: targetName,
         productReference: product.fileRef,

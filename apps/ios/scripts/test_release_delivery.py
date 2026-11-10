@@ -186,7 +186,12 @@ if name == "xcrun":
             app = Path(next(arg for arg in args if arg.endswith(".app")))
             with (app / "Info.plist").open("rb") as file:
                 bundle = plistlib.load(file)
-            (root / "device-apps.json").write_text(json.dumps([{
+            installed = root / "device-apps.json"
+            existing = json.loads(installed.read_text()) if installed.exists() else [
+                {"bundleIdentifier": "com.compoundingtech.fractal", "bundleVersion": "0"}]
+            others = [record for record in existing
+                      if record["bundleIdentifier"] != bundle["CFBundleIdentifier"]]
+            installed.write_text(json.dumps([*others, {
                 "bundleIdentifier": bundle["CFBundleIdentifier"],
                 "bundleVersion": bundle["CFBundleVersion"],
             }]))
@@ -267,9 +272,15 @@ class ReleaseDeliveryTests(unittest.TestCase):
             self.assertIn("CODE_SIGN_STYLE=Manual", command["args"])
             self.assertNotIn("-allowProvisioningUpdates", command["args"])
         self.assertFalse(self.device_commands("install"))
+        normal_record = {"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18528"}
+        (self.root / "device-apps.json").write_text(json.dumps([normal_record]))
         self.reconcile()
         self.assertEqual(len(self.device_commands("install")), 1)
         self.assertIn(BUNDLE_ID + ".test", self.device_commands("launch")[0]["args"])
+        installed = json.loads((self.root / "device-apps.json").read_text())
+        self.assertEqual(len(installed), 2)
+        self.assertEqual([record for record in installed if record["bundleIdentifier"] == BUNDLE_ID],
+                         [normal_record])
 
     def test_cli_variant_overrides_environment_and_requires_test_profile(self):
         self.env["FRACTAL_IOS_VARIANT"] = "test"

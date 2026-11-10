@@ -556,7 +556,8 @@ app group `group.com.compoundingtech.fractal.test`, and sole keychain access gro
 `$(AppIdentifierPrefix)com.compoundingtech.fractal.test`. It keeps the same Expo
 project/workspace and release application source as daily. The readable build-time
 flag is `Constants.expoConfig.extra.testClientMode` in JavaScript and
-`FractalTestClientMode` in the app's Info.plist; both are false for dev/daily.
+`FractalTestClientMode` in the app's Info.plist; both are absent for dev/daily
+(absence means normal mode, preserving the normal configuration unchanged).
 This flag describes the binary, not enrollment or authorization. No command handlers
 or automatic enrollment are enabled by this preparation.
 
@@ -581,6 +582,12 @@ is `com.compoundingtech.fractal.test`; Xcode appends `.xctrunner`, giving
 `$(FRACTAL_IOS_TEST_APP_PROFILE)` and runner profile
 `$(FRACTAL_IOS_TEST_RUNNER_PROFILE)`. Johannes performs provisioning/signing setup;
 these commands do not create profiles or allow provisioning updates.
+
+After unsigned test prebuild, run `node scripts/assert_test_project.mjs` from
+`apps/ios` to assert the generated product reference is exactly
+`FractalTestControl.xctest` (not a Spotlight `.mdimporter`) and uses the
+UI-testing product type and expected runner base identity. This checks project
+generation only; it is not a signed/compiled runner receipt.
 
 After the applicable consent/signing gates, the command interface from `apps/ios`
 is below. Use the daily delivery lane to enforce its guards and regenerate native

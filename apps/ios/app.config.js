@@ -12,7 +12,7 @@ module.exports = () => {
   // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   return {
     ...base,
-    extra: { ...base.extra, ...(push ? { stIosPush: true } : {}), testClientMode: testClient },
+    ...((push || testClient) ? { extra: { ...base.extra, ...(push ? { stIosPush: true } : {}), ...(testClient ? { testClientMode: true } : {}) } } : {}),
     plugins: [
       ...(base.plugins ?? []),
       push
@@ -32,7 +32,7 @@ module.exports = () => {
       infoPlist: {
         ...base.ios.infoPlist,
         CFBundleDisplayName: testClient ? 'Fractal Test' : daily ? 'Fractal' : 'Fractal Dev',
-        FractalTestClientMode: testClient,
+        ...(testClient ? { FractalTestClientMode: true } : {}),
       },
     },
   };
