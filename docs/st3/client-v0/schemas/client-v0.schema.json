@@ -457,17 +457,76 @@
     "DeviceCommandRequest": {
       "description": "One expiring foreground command. Default TTL is 30000 ms, maximum 60000 ms; at most eight pending commands per device.",
       "oneOf": [
-        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.inspect"}, "args": {"$ref": "#/$defs/PhoneInspectArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
-        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.navigate"}, "args": {"$ref": "#/$defs/PhoneNavigateArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
-        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.message.read"}, "args": {"$ref": "#/$defs/PhoneMessageReadArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}}
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "grant_id": {"type": "string"}, "kind": {"const": "phone.inspect"}, "args": {"$ref": "#/$defs/PhoneInspectArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "grant_id": {"type": "string"}, "kind": {"const": "phone.navigate"}, "args": {"$ref": "#/$defs/PhoneNavigateArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "grant_id": {"type": "string"}, "kind": {"const": "phone.message.read"}, "args": {"$ref": "#/$defs/PhoneMessageReadArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}}
       ]
     },
     "DeviceCommandOutcome": {"enum": ["completed", "not-foreground", "expired", "refused", "failed"]},
     "DeviceCommandState": {"enum": ["pending", "delivered", "completed", "not-foreground", "expired", "refused", "failed"]},
+    "ClientVisibleItem": {
+      "type": "object", "additionalProperties": false, "required": ["id", "title", "body"],
+      "properties": {"id": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}}
+    },
+    "ClientVisibleState": {
+      "type": "object", "additionalProperties": false, "required": ["route", "screen", "visible_item_ids", "opened_item"],
+      "properties": {"route": {"type": "string"}, "screen": {"type": "string"}, "visible_item_ids": {"type": "array", "items": {"type": "string"}}, "opened_item": {"anyOf": [{"$ref": "#/$defs/ClientVisibleItem"}, {"type": "null"}]}}
+    },
+    "ClientResultBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["purpose", "command_kind", "device", "session", "grant_id", "run_id", "command_id", "outcome", "error_code", "visible_state"],
+      "properties": {
+        "purpose": {"const": "client.device-result.v1"}, "command_kind": {"enum": ["phone.inspect", "phone.navigate"]},
+        "device": {"type": "string"}, "session": {"type": "string"}, "grant_id": {"type": "string"}, "run_id": {"type": "string"}, "command_id": {"type": "string"},
+        "outcome": {"$ref": "#/$defs/DeviceCommandOutcome"}, "error_code": {"type": ["string", "null"]}, "visible_state": {"$ref": "#/$defs/ClientVisibleState"}
+      }
+    },
+    "ClientControlGrant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["grant_id", "run_id", "device", "session", "actor_agent", "verbs", "screens", "max_commands", "expires_at", "state"],
+      "properties": {
+        "grant_id": {"type": "string"}, "run_id": {"type": "string"}, "device": {"type": "string"}, "session": {"type": "string"}, "actor_agent": {"type": "string"},
+        "verbs": {"type": "array", "items": {"type": "string"}}, "screens": {"type": "array", "items": {"type": "string"}},
+        "item_id": {"type": "string"},
+        "max_commands": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "expires_at": {"$ref": "#/$defs/Timestamp"}, "state": {"type": "string"}
+      }
+    },
+    "ClientControlRefusal": {"enum": ["device-not-test-client", "grant-missing", "grant-expired", "screen-not-granted", "verb-not-granted", "budget-exhausted", "actor-not-granted"]},
+    "ClientTestEnrollment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["device", "kind", "enrolledBy", "consentRef", "packetDigest", "host", "instance", "pairingSubject", "publicKey", "session"],
+      "properties": {
+        "device": {"type": "string"}, "kind": {"enum": ["ios", "web", "tui"]}, "enrolledBy": {"type": "string"}, "consentRef": {"type": "string"},
+        "packetDigest": {"type": "string"}, "host": {"type": "string"}, "instance": {"type": "string"}, "pairingSubject": {"type": "string"}, "publicKey": {"type": "string"}, "session": {"type": "string"}
+      }
+    },
+    "ClientTestRevocation": {
+      "type": "object", "additionalProperties": false, "required": ["device", "enrollmentId", "revokedBy"],
+      "properties": {"device": {"type": "string"}, "enrollmentId": {"type": "string"}, "revokedBy": {"type": "string"}}
+    },
+    "ClientCommandReceipt": {
+      "type": "object", "additionalProperties": false, "required": ["commandId", "terminalState", "issuer", "device", "commandKind", "verifiedResultSignature", "signedResult"],
+      "properties": {
+        "commandId": {"type": "string"}, "terminalState": {"$ref": "#/$defs/DeviceCommandOutcome"}, "issuer": {"type": "string"}, "device": {"type": "string"},
+        "session": {"type": "string"}, "grantId": {"type": "string"}, "runId": {"type": "string"}, "commandKind": {"type": "string"},
+        "screen": {"type": "string"}, "reason": {"$ref": "#/$defs/ClientControlRefusal"},
+        "verifiedResultSignature": {"anyOf": [{"$ref": "#/$defs/DeviceSignature"}, {"type": "null"}]}, "signedResult": {"anyOf": [{"$ref": "#/$defs/ClientResultBinding"}, {"type": "null"}]}
+      }
+    },
     "DeviceResult": {
       "type": "object", "additionalProperties": false, "required": ["command_id", "outcome"],
-      "properties": {"command_id": {"type": "string", "pattern": "^device-command/.+"}, "outcome": {"$ref": "#/$defs/DeviceCommandOutcome"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}},
+      "properties": {"command_id": {"type": "string", "pattern": "^device-command/.+"}, "outcome": {"$ref": "#/$defs/DeviceCommandOutcome"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}, "binding": {"$ref": "#/$defs/ClientResultBinding"}, "signature": {"$ref": "#/$defs/DeviceSignature"}},
       "description": "Terminal phone report; authenticated pairing supplies the device identity. The daemon clock adjudicates expiry."
+    },
+    "ClientControlGrantLifecycle": {
+      "allOf": [{"$ref": "#/$defs/ResourceHeader"}], "type": "object",
+      "required": ["id", "kind", "revision", "updated_at", "grant_id", "run_id", "device", "session", "state", "reason", "sequence"],
+      "properties": {
+        "kind": {"const": "client-control-grant-lifecycle"}, "grant_id": {"type": "string"}, "item_id": {"type": "string"},
+        "run_id": {"type": "string"}, "device": {"type": "string"}, "session": {"type": "string"},
+        "state": {"enum": ["started", "ended", "revoked"]}, "reason": {"type": "string"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
     },
     "DeviceCommand": {
       "allOf": [{"$ref": "#/$defs/ResourceHeader"}],
@@ -481,6 +540,8 @@
         "device_id": {"type": "string", "pattern": "^device/.+"},
         "session_actor": {"$ref": "#/$defs/Id"}, "issued_by": {"$ref": "#/$defs/Id"},
         "issued_at": {"$ref": "#/$defs/Timestamp"}, "expires_at": {"$ref": "#/$defs/Timestamp"},
+        "grant_id": {"type": "string"}, "run_id": {"type": "string"}, "control_grant": {"$ref": "#/$defs/ClientControlGrant"},
+        "receipt_claim_id": {"type": "string"},
         "state": {"$ref": "#/$defs/DeviceCommandState"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
       },
       "oneOf": [
@@ -691,6 +752,7 @@
       "machine",
       "device",
       "device-command",
+      "client-control-grant-lifecycle",
       "operation",
       "history",
       "session",
@@ -3121,6 +3183,7 @@
         {
           "$ref": "#/$defs/DeviceCommand"
         },
+        {"$ref": "#/$defs/ClientControlGrantLifecycle"},
         {
           "$ref": "#/$defs/Operation"
         },

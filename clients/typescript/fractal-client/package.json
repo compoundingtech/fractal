@@ -5,8 +5,8 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --test contract.test.cjs schema.test.cjs fabric.test.cjs",
-    "test:contract": "node --test contract.test.cjs",
+    "test": "node --test contract.test.cjs schema.test.cjs fabric.test.cjs client-control.test.cjs",
+    "test:contract": "node --test contract.test.cjs client-control.test.cjs",
     "test:schema": "node --test schema.test.cjs",
     "typecheck": "pnpm run typecheck:client && pnpm run typecheck:schema",
     "typecheck:client": "tsc -p tsconfig.json",
