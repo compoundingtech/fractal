@@ -166,6 +166,25 @@ mod identifier_query_tests {
     }
 }
 
+fn child_context(
+    parent: &MissionRunView,
+    parent_step_run: &str,
+    default_selector: Option<WorkSelector>,
+    started_by: Option<String>,
+) -> ChildMissionContext {
+    ChildMissionContext {
+        root_revision: parent.root_revision.clone(),
+        root_run_id: parent
+            .root_mission_run
+            .strip_prefix("mission-run/")
+            .unwrap_or(&parent.root_mission_run)
+            .to_owned(),
+        parent_step_run: normalize_step_run(parent_step_run),
+        default_selector,
+        started_by,
+    }
+}
+
 /// Render a copy; the signed revision and execution spec remain physical.
 fn public_mission_spec(connection: &Connection, body: &str) -> Result<MissionSpec> {
     let mut mission: MissionSpec = serde_json::from_str(body)?;
@@ -1539,6 +1558,15 @@ pub trait MissionsStore {
             parent_step_run: &str,
             default_selector: Option<&WorkSelector>,
         ) -> Result<MissionRunView, FractalError>;
+    /// A child run a program step starts: the parent run starts it, so its creation is written
+    /// as `mission-run/PARENT` and it holds at most its parent's authority
+    /// (docs/st3/program-engine.md §3). The requester stays the parent's.
+    fn create_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+        ) -> Result<MissionRunView, FractalError>;
     /// An occurrence belongs to its schedule, regardless of the requesting member or revision.
     fn scheduled_mission_run_subject(schedule: &str, occurrence: u64) -> String;
     fn create_scheduled_mission_run(
@@ -2865,16 +2893,21 @@ impl MissionsStore for Store {
         ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_inner(
             request,
-            Some(ChildMissionContext {
-                root_revision: parent.root_revision.clone(),
-                root_run_id: parent
-                    .root_mission_run
-                    .strip_prefix("mission-run/")
-                    .unwrap_or(&parent.root_mission_run)
-                    .to_owned(),
-                parent_step_run: normalize_step_run(parent_step_run),
-                default_selector: default_selector.cloned(),
-            }),
+            Some(child_context(parent, parent_step_run, default_selector.cloned(), None)),
+            None,
+            None,
+        )
+    }
+
+    fn create_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+        ) -> Result<MissionRunView, FractalError> {
+        self.create_mission_run_inner(
+            request,
+            Some(child_context(parent, parent_step_run, None, Some(parent.subject.clone()))),
             None,
             None,
         )
@@ -2910,6 +2943,7 @@ impl MissionsStore for Store {
                 .into(),
             parent_step_run: normalize_step_run(schedule),
             default_selector: None,
+            started_by: None,
         });
         self.create_mission_run_inner(request, child, Some(&subject), None)
     }

@@ -188,6 +188,19 @@ Mission-owned runtime declarations follow their owner lifetime; independent top-
 
 Within a fleet, an agent may publish, start, and revise missions and move agent queues as itself without a separate grant. This is broad authority, not isolation: review declarations before publication and give agents only access you intend them to use. A bound harness must retain its own identity; free mode does not allow it to impersonate a person or bypass operation-specific fences, human review, or a claimed producing step.
 
+A mission run is the exception. A program step acts as `mission-run/RUN` and holds only what its
+mission's `authority` block grants, intersected with the authority of whoever started the run. The
+daemon's `[programs]` table says what a write outside it does:
+
+```toml
+[programs]
+authority = "audit"   # the default: the write proceeds and `rule.audited` records it on `rule/run-authority`
+# authority = "enforce"   # the write is refused with `run-authority-denied`
+```
+
+Read the audit log with `fractal rules audit run-authority` before you enforce. The setting is read
+when the daemon starts.
+
 ## Definitions do not start work
 
 Publication saves a definition; it does not create a run. Start it explicitly with `fractal missions start`. To make a new run wait for another run to complete, use `--after RUN`; a failed or cancelled prerequisite is not successful completion. See [Missions in practice](../guides/missions-in-practice.md#queue-follow-on-work) for the runnable sequence.

@@ -67,6 +67,7 @@ pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
 pub mod run_credentials;
+pub mod run_authority;
 pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -346,6 +347,8 @@ mod status_summary_tests;
 mod run_eta_tests;
 #[cfg(test)]
 mod run_credentials_tests;
+#[cfg(test)]
+mod run_authority_tests;
 #[cfg(test)]
 mod run_eta_review_tests;
 pub mod client_summary;
@@ -2411,6 +2414,10 @@ pub struct ChildMissionContext {
     pub root_run_id: String,
     pub parent_step_run: String,
     pub default_selector: Option<WorkSelector>,
+    /// Who starts the child when it is not its requester: `mission-run/PARENT` for a child a
+    /// program starts. Its creation claims are written as this actor, and run authority takes it
+    /// as the child's starter (docs/st3/program-engine.md §3).
+    pub started_by: Option<String>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -11525,6 +11532,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    run_authority::admit_tx(transaction, origin, actor, kind, subject, &fields)
+        .map_err(anyhow::Error::new)?;
     human_review_reassignment::admit_reassignment(transaction, kind, &fields)
         .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
