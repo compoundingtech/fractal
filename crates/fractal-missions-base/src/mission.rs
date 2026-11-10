@@ -9,8 +9,8 @@ use crate::declaration_syntax::*;
 use crate::model::{
     BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopAttentionSpec, LoopExhaustionSpec,
     LoopSpec, LoopStopSpec, MetricSource, MetricSpec, MissionInputKind, MissionInputSpec,
-    MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, FractalError, StepSpec,
-    UsedMissionSpec, WorkSelector,
+    MissionSpec, MissionState, ProductSpec, ProgramSpec, RetrySpec, RevisionCutover, FractalError,
+    StepSpec, UsedMissionSpec, WorkSelector,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -843,6 +843,7 @@ fn parse_loop_group(
         produces_mission: None,
         uses_mission: None,
         after_run: None,
+        program: None,
         gates: Vec::new(),
         nested_mission: None,
         loop_spec: Some(Box::new(loop_spec)),
@@ -1327,6 +1328,7 @@ fn parse_step(
     let mut produces_mission = None;
     let mut uses_mission = None;
     let mut after_run = None;
+    let mut program = None;
     let mut gates = Vec::new();
     let mut nested_mission = None;
     let mut retry = RetrySpec::default();
@@ -1426,6 +1428,7 @@ fn parse_step(
                 "produces-mission" => produces_mission = Some(parse_produced_mission(child)?),
                 "uses-mission" => uses_mission = Some(parse_used_mission(child)?),
                 "after-run" => after_run = Some(parse_after_run(child)?),
+                "program" => program = Some(parse_program(child)?),
                 "gate" => {
                     let gate = crate::gate_parse::parse_gate(child, default_host)?;
                     if matches!(gate, GateSpec::Deadline { .. }) {
@@ -1480,6 +1483,36 @@ fn parse_step(
         }
         agentless = true;
     }
+    if program.is_some() {
+        // The program engine owns the outcome: nothing else may complete or fail the step.
+        if assigned_to.is_some() || !available_to.is_empty() {
+            return Err(FractalError::new(
+                "conflicting-work-selector",
+                format!("step `{path}` runs a program, so it cannot select an agent"),
+            ));
+        }
+        if !gates.is_empty()
+            || !products.is_empty()
+            || produces_mission.is_some()
+            || uses_mission.is_some()
+            || after_run.is_some()
+            || nested_mission.is_some()
+        {
+            return Err(FractalError::new(
+                "program-step-outcome",
+                format!("step `{path}` runs a program, which alone decides its outcome; remove its gates, products, nested or used missions and after-run"),
+            ));
+        }
+        if finally {
+            // Cancellation cleanup ends agentless final work that has no runtime process; a
+            // program compensates inside its body instead.
+            return Err(FractalError::new(
+                "program-step-outcome",
+                format!("step `{path}` runs a program, so it cannot be a finally step; compensate inside the program"),
+            ));
+        }
+        agentless = true;
+    }
     if agentless
         && gates
             .iter()
@@ -1530,6 +1563,7 @@ fn parse_step(
         produces_mission,
         uses_mission,
         after_run,
+        program,
         gates,
         nested_mission,
         loop_spec: None,
@@ -2326,6 +2360,31 @@ fn parse_after_run(node: &KdlNode) -> Result<String, FractalError> {
     Ok(run)
 }
 
+/// `program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"?`: the bundle's path, the exact
+/// bytes it must have, and how long it may go without journal progress.
+fn parse_program(node: &KdlNode) -> Result<ProgramSpec, FractalError> {
+    ensure_only_properties(node, &["sha256", "stalled-after"])?;
+    let bundle = first_string(node)?;
+    if !bundle.starts_with('/') {
+        return Err(FractalError::new(
+            "invalid-program",
+            format!("program bundle `{bundle}` must be an absolute path"),
+        ));
+    }
+    let bundle_hash = property_string(node, "sha256")?.unwrap_or_default();
+    if bundle_hash.len() != 64 || !bundle_hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return Err(FractalError::new(
+            "invalid-program",
+            "a program needs sha256=\"<64 lowercase hex digits>\" of its bundle",
+        ));
+    }
+    let stalled_after_ms = property_string(node, "stalled-after")?.map(|value| parse_duration(&value)).transpose()?;
+    if stalled_after_ms == Some(0) {
+        return Err(FractalError::new("invalid-program", "a program's stalled-after must be greater than zero"));
+    }
+    Ok(ProgramSpec { bundle, bundle_hash, stalled_after_ms })
+}
+
 /// The step that a run started with `--after RUN` waits in before its other work starts.
 pub const AFTER_RUN_STEP: &str = "after-run";
 
@@ -2375,6 +2434,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
         produces_mission: None,
         uses_mission: None,
         after_run: Some(after_run_subject(run)),
+        program: None,
         gates: Vec::new(),
         nested_mission: None,
         loop_spec: None,

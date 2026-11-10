@@ -105,6 +105,7 @@ mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod program_bundles;
 mod validate_cli;
 mod work_cli;
 mod waiting_on_cli;
@@ -3489,11 +3490,14 @@ async fn run_owned_set_apply(
         confirm_retire: args.confirm_retire,
         expected_subjects: Default::default(),
     };
+    // Read and check the bundles first, so a dry run refuses a stale bundle too.
+    let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
     let mut request = Request {
         intent,
         options,
         actor: args.actor,
         idempotency_key: uuid::Uuid::now_v7().to_string(),
+        program_bundles: BTreeMap::new(),
     };
     let preview: Preview = client.post("/v1/sets/preview", &request).await?;
     if args.dry_run {
@@ -3519,6 +3523,7 @@ async fn run_owned_set_apply(
         return Ok(());
     }
     request.options.expected_subjects = preview.expected_subjects;
+    request.program_bundles = program_bundles;
     let response: Value = client.post("/v1/sets/apply", &request).await?;
     print_value(&response, json_output)
 }
@@ -8010,6 +8015,8 @@ async fn publish_mission_intent(
     args: MissionPublishArgs,
     json_output: bool,
 ) -> Result<()> {
+    // Read and check the bundles first, so a dry run refuses a stale bundle too.
+    let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
     let mission: MissionResponse = client
         .post(
             "/v1/intent/mission",
@@ -8050,6 +8057,7 @@ async fn publish_mission_intent(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(args.actor),
+                program_bundles,
             },
         )
         .await?;
@@ -8654,6 +8662,7 @@ async fn publish_text_with_expected(
     actor: String,
     expected: Option<(&str, &[String])>,
 ) -> Result<ApplyResponse> {
+    let program_bundles = program_bundles::program_bundles(&kdl)?;
     let intent = IntentInput {
         kdl,
         source_name: Some(source_name),
@@ -8688,6 +8697,7 @@ async fn publish_text_with_expected(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(actor.clone()),
+                program_bundles,
             },
         )
         .await
