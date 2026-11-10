@@ -141,6 +141,49 @@
         "type": "github"
       }
     },
+    "fractal-fixture": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794265163,
+        "narHash": "sha256-pGJRiUHcongVBrYEWT2w3TZTS8UdcZJjHRJvTDhrpYg=",
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "e2721e52463428b4ff655addee129cecd2839763",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "e2721e52463428b4ff655addee129cecd2839763",
+        "type": "github"
+      }
+    },
+    "mergemaster": {
+      "inputs": {
+        "effect-utils": [
+          "effect-utils"
+        ],
+        "fractal-fixture": "fractal-fixture",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "python-oracle": "python-oracle"
+      },
+      "locked": {
+        "lastModified": 1794298270,
+        "narHash": "sha256-UeHYs08Nzqy50cvlWu1n5Z0bR2I/J2Ectj7ztd5gfNI=",
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "cff667cd53bdb6c024f9d7a06259b8f9a3fbb0cb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "ref": "v0.6.0",
+        "repo": "mergemaster",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1789178647,
@@ -276,12 +319,30 @@
         "type": "github"
       }
     },
+    "python-oracle": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793953851,
+        "narHash": "sha256-NL/NWSn+YfpwP7h+CGZkeNmRh9hnQOH3OkF9GtyPXgM=",
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "1392a516e969be46d9516d904b76a4db98c55030",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "1392a516e969be46d9516d904b76a4db98c55030",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "effect-utils": "effect-utils",
         "fabric": "fabric",
         "fenix": "fenix",
         "flake-utils": "flake-utils_2",
+        "mergemaster": "mergemaster",
         "nixpkgs": "nixpkgs_3",
         "pty": "pty"
       }

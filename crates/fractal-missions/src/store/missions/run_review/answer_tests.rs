@@ -220,3 +220,113 @@ fn agent_review_reassignment_admission_and_imported_fold_are_fenced() {
     let accepted = append(&store, &input, true).unwrap();
     assert_eq!(accepted.actor.as_deref(), Some(FREE));
 }
+
+fn database_state(connection: &Connection) -> BTreeMap<String, Vec<Vec<String>>> {
+    const TABLES_SQL: &str = "SELECT name FROM sqlite_schema WHERE type='table'";
+    let tables = connection
+        .prepare(/* sqlite-large-value: allow-for-now lv-hc04950ca3e3d owner=fractal_missions::store::missions::run_review::answer_tests TODO=trace-statement-and-value-representation */ TABLES_SQL)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    tables
+        .into_iter()
+        .map(|table| {
+            let mut statement = connection
+                .prepare(/* sqlite-large-value: allow-for-now lv-h21a64752ecb4 owner=fractal_missions::store::missions::run_review::answer_tests TODO=trace-statement-and-value-representation */ &format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))
+                .unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.sort();
+            (table, rows)
+        })
+        .collect()
+}
+
+#[test]
+fn agent_review_answer_transaction_settles_retries_and_changed_requests() {
+    let (store, mut input, _) = fixture_answer(&[]);
+    input.idempotency_key = Some("answer-once".into());
+    let original = append(&store, &input, true).unwrap();
+    let before = database_state(&store.connection.write());
+    assert_eq!(append(&store, &input, true).unwrap().id, original.id);
+    assert_eq!(database_state(&store.connection.write()), before);
+    for rejected in [false, true] {
+        let mut changed = input.clone();
+        if rejected {
+            changed.fields.insert("decision".into(), json!("rejected"));
+            changed.fields.insert("verdict".into(), json!("fail"));
+            changed
+                .fields
+                .insert("reason".into(), json!("Needs revision"));
+        } else {
+            changed
+                .fields
+                .insert("evidence".into(), json!({"proof":"Different evidence"}));
+        }
+        assert_eq!(
+            append(&store, &changed, true).unwrap_err().code,
+            "idempotency-mismatch"
+        );
+        assert_eq!(database_state(&store.connection.write()), before);
+    }
+}
+
+#[test]
+fn agent_review_answer_transaction_post_insert_error_rolls_back_before_outer_commit() {
+    let (store, mut input, _) = fixture_answer(&[]);
+    input.idempotency_key = Some("post-insert-error".into());
+    let request = store
+        .claim_by_id(input.fields["request"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let signature = smallclaims::principal::ClaimSignature::sign(
+        &key,
+        &smallclaims::principal::content_digest(
+            &request.subject,
+            &request.kind,
+            request.actor.as_deref(),
+            &request.body,
+        ),
+        PERSON,
+        None,
+        vec![],
+        0,
+    );
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        // A genuine signature on an existing claim consumes this nonce.
+        smallclaims::store::principals::store_claim_signature_tx(&tx, &request.id, &signature)
+            .unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hde1a4495a8b4 owner=fractal_missions::store::missions::run_review::answer_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO expected_claim_signatures(subject,kind,actor,signature) VALUES(?1,?2,?3,?4)",
+            params![input.subject, input.kind, input.actor, serde_json::to_string(&signature).unwrap()]).unwrap();
+        tx.commit().unwrap();
+    }
+    let before = database_state(&store.connection.write());
+    // append() commits the outer transaction even when the writer returns an error.
+    assert_eq!(
+        append(&store, &input, true).unwrap_err().code,
+        "device-signature-replayed"
+    );
+    assert_eq!(database_state(&store.connection.write()), before);
+    let operation = smallclaims::store::claim_operation(&input)
+        .unwrap()
+        .unwrap()
+        .0;
+    assert!(
+        smallclaims::store::operation_tx(&store.connection.write(), &operation)
+            .unwrap()
+            .is_none()
+    );
+}
