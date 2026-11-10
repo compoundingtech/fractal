@@ -52,6 +52,10 @@ impl Harness {
         let store = Arc::new(Store::open(&root.path().join("store.sqlite"), "assistant-native").unwrap());
         store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69").unwrap();
         store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        Self::with_store(root, store)
+    }
+
+    fn with_store(root: tempfile::TempDir, store: Arc<Store>) -> Self {
         let source = format!("version 2\nagent \"example-worker.local\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"native-mission\" state=\"ready\" {{ goal \"Native integration mission\"; }}", root.path());
         store.apply_internal(&fractal_daemon::graph::parse_intent(&source, "assistant-native").unwrap(), "native-seed").unwrap();
         // There is no daemon task in this harness. Register its production publication
@@ -180,6 +184,26 @@ impl Harness {
             MessageSendParameters { to: to.into(), content: "Native assistant message".into(), title: None,
                 in_reply_to: None, session_id: None, tags: vec![], kind: MessageKind::Wake,
                 attachments: vec![], signature: None }).unwrap()
+    }
+
+    async fn mcp(&self, paired: &AssistantPairedSession) -> (Router, tokio::task::JoinHandle<()>) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let socket = self.root.path().join(format!("{}.sock", uuid::Uuid::new_v4()));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let gateway = self.fabric.clone();
+        let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+        let credential = self.root.path().join(uuid::Uuid::new_v4().to_string());
+        std::fs::write(&credential, &paired.credential).unwrap();
+        std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+        (fractal_chatgpt::http_router(fractal_chatgpt::Adapter::new(&socket, &credential).unwrap()), server)
+    }
+
+    async fn reply(&self, to: &str, key: &str, text: &str, reply_to: Option<&str>) -> fractal_daemon::model::ClaimRecord {
+        let mut body = json!({"from":AGENT,"to":to,"content":text,"idempotency_key":key});
+        if let Some(reply_to) = reply_to { body["in_reply_to"] = json!(reply_to); }
+        let receipt = self.owner("POST", "/v1/messages", &body).await;
+        self.state.store.latest_claim(receipt["value"]["subject"].as_str().unwrap(),
+            Some("message.sent")).unwrap().unwrap()
     }
 
     fn expire(&self, paired: &AssistantPairedSession) {
@@ -833,4 +857,255 @@ async fn read_only_mcp_grant_cannot_send_or_answer_and_appends_no_mutation() {
     assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
     assert!(h.state.store.step_run(&ask).unwrap().unwrap().person_answers.is_empty());
     assert!(h.state.store.latest_claim(&ask, Some("work.person-done")).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn mcp_canonical_replies_are_recipient_scoped_bounded_and_survive_sender_restart() {
+    let h = Harness::new();
+    let paired = h.pair().await;
+    let other = h.pair().await;
+    let foreign = h.pair_principal(AssistantPrincipal::Mcp).await;
+    h.state.store.append_claim(&ClaimInput {
+        subject: AGENT.into(), kind: "runtime.observed".into(), actor: Some(AGENT.into()),
+        fields: serde_json::from_value(json!({"status":"running","runtime_id":"original-reply-runtime",
+            "incarnation_id":"original-reply-runtime:i1","terminal":false})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    // Empty, system-only gate histories occupy the first native conversation page.
+    // Recipient reply discovery must not scan only that page to find canonical ACKs.
+    for index in 0..12 {
+        let agent = format!("agent/aaa-gate-{index:02}");
+        h.state.store.append_claim(&ClaimInput {
+            subject: agent.clone(), kind: "runtime.observed".into(), actor: Some(agent),
+            fields: serde_json::from_value(json!({"status":"waiting",
+                "runtime_id":format!("gate-{index:02}"),
+                "incarnation_id":format!("gate-{index:02}:i1"),"terminal":false})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    let send = h.message(AGENT, "canonical-reply-send").await;
+    let (status, sent) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &send).await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let original = sent["value"]["affected_ids"].as_array().unwrap().iter()
+        .filter_map(Value::as_str).find(|id| id.starts_with("message/")).unwrap();
+    let ack = format!("ACK-canonical-{}", uuid::Uuid::new_v4());
+    let text = format!("{ack}\n{}", "Canonical agent reply. é🚀 ".repeat(900));
+    assert!(text.len() > 16 * 1024);
+    let reply = h.reply("assistant/chatgpt", "canonical-reply", &text, Some(original)).await;
+    let foreign_reply = h.reply("assistant/mcp", "foreign-canonical-reply", "FOREIGN-REPLY-SECRET", None).await;
+    let (app, server) = h.mcp(&paired).await;
+    let (other_app, other_server) = h.mcp(&other).await;
+    let (foreign_app, foreign_server) = h.mcp(&foreign).await;
+    let (error, listed) = mcp_call(&app, "fractal_conversations_list", json!({"replies":true})).await;
+    assert!(!error, "{listed}");
+    for secret in [ack.as_str(), "Canonical agent reply.", "FOREIGN-REPLY-SECRET"] {
+        assert!(!listed.to_string().contains(secret));
+    }
+    let items = listed["value"]["items"].as_array().unwrap();
+    assert!(items.iter().all(|item| item["to"] == "assistant/chatgpt"
+        && item.get("text").is_none() && item.get("content").is_none()));
+    assert!(!items.iter().any(|item| item["message_id"] == foreign_reply.subject));
+    let item = items.iter().find(|item| item["message_id"] == reply.subject).unwrap();
+    assert_eq!(item["agent_id"], AGENT);
+    assert_eq!(item["from"], AGENT);
+    assert_eq!(item["reply_to"], original);
+    assert!(!item["sent_at"].is_null());
+    let handle = item["read"].clone();
+    assert_eq!(handle["session_id"], "session/assistant-replies");
+    assert_eq!(handle["revision"], reply.id);
+    assert_eq!(handle["start"], 0);
+    assert!(handle["end"].as_u64().unwrap() <= 512);
+    let (error, content) = mcp_call(&app, "fractal_conversation_read", handle.clone()).await;
+    assert!(!error, "{content}");
+    assert!(content["value"]["text"].as_str().unwrap().starts_with(&ack), "{content}");
+    for key in ["agent_id", "session_id", "reference", "revision", "start", "end"] {
+        assert_eq!(content["value"][key], handle[key], "{key}");
+    }
+    let mut complete = content["value"]["text"].as_str().unwrap().to_owned();
+    let mut chunk = content;
+    while !chunk["value"]["next_range"].is_null() {
+        let next = &chunk["value"]["next_range"];
+        assert_eq!(next["start"], chunk["value"]["end"]);
+        assert!(next["end"].as_u64().unwrap() > next["start"].as_u64().unwrap());
+        let mut continuation = handle.clone();
+        continuation["start"] = next["start"].clone();
+        continuation["end"] = next["end"].clone();
+        let (error, continued) = mcp_call(&app, "fractal_conversation_read", continuation).await;
+        assert!(!error, "{continued}");
+        assert_eq!(continued["value"]["reference"], handle["reference"]);
+        assert_eq!(continued["value"]["revision"], reply.id);
+        complete.push_str(continued["value"]["text"].as_str().unwrap());
+        assert!(complete.len() <= text.len(), "continuation must make bounded progress");
+        chunk = continued;
+    }
+    assert_eq!(complete, text);
+    for denied_app in [&other_app, &foreign_app] {
+        let (error, denied) = mcp_call(denied_app, "fractal_conversation_read", handle.clone()).await;
+        assert!(error, "{denied}");
+        assert!(!denied.to_string().contains(&ack));
+    }
+    let (error, foreign_list) = mcp_call(&foreign_app, "fractal_conversations_list", json!({"replies":true})).await;
+    assert!(!error, "{foreign_list}");
+    assert!(foreign_list["value"]["items"].as_array().unwrap().iter()
+        .all(|item| item["to"] == "assistant/mcp" && item["message_id"] != reply.subject));
+    for (field, value) in [
+        ("reference", json!(foreign_reply.subject)),
+        ("reference", json!(format!("{}x", handle["reference"].as_str().unwrap()))),
+        ("revision", json!(foreign_reply.id)),
+        ("agent_id", json!("agent/foreign-worker.local")),
+    ] {
+        let mut tampered = handle.clone();
+        tampered[field] = value;
+        let (error, denied) = mcp_call(&app, "fractal_conversation_read", tampered).await;
+        assert!(error, "{field}: {denied}");
+        assert!(!denied.to_string().contains(&ack));
+        assert!(!denied.to_string().contains("FOREIGN-REPLY-SECRET"));
+    }
+    for selector in ["recipient", "person", "principal"] {
+        let mut arguments = json!({"replies":true});
+        arguments[selector] = json!("assistant/mcp");
+        let (error, denied) = mcp_call(&app, "fractal_conversations_list", arguments).await;
+        assert!(error, "{selector}: {denied}");
+    }
+    let (error, tiny) = mcp_call(&app, "fractal_conversations_list",
+        json!({"replies":true,"max_response_bytes":1})).await;
+    assert!(error, "a nonempty discovery page cannot fit a one-byte budget: {tiny}");
+    assert!(!tiny.to_string().contains(&ack));
+    let (error, bounded) = mcp_call(&app, "fractal_conversations_list",
+        json!({"replies":true,"limit":1000000})).await;
+    assert!(error, "oversized reply pages must be refused: {bounded}");
+    assert!(!bounded.to_string().contains(&ack));
+    h.state.store.append_claim(&ClaimInput {
+        subject: AGENT.into(), kind: "runtime.observed".into(), actor: Some(AGENT.into()),
+        fields: serde_json::from_value(json!({"status":"running","runtime_id":"restarted-reply-runtime",
+            "incarnation_id":"restarted-reply-runtime:i2","terminal":false})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let (error, restarted) = mcp_call(&app, "fractal_conversation_read", handle.clone()).await;
+    assert!(!error, "{restarted}");
+    assert!(restarted["value"]["text"].as_str().unwrap().starts_with(&ack));
+    assert_eq!(restarted["value"]["revision"], reply.id);
+    h.policy(&paired, scopes()).await;
+    let (error, denied) = mcp_call(&app, "fractal_conversation_read", handle.clone()).await;
+    assert!(error, "old policy handle: {denied}");
+    let (error, refreshed) = mcp_call(&app, "fractal_conversations_list", json!({"replies":true})).await;
+    assert!(!error, "{refreshed}");
+    let refreshed_handle = refreshed["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["message_id"] == reply.subject).unwrap()["read"].clone();
+    let (error, other_list) = mcp_call(&other_app, "fractal_conversations_list", json!({"replies":true})).await;
+    assert!(!error, "{other_list}");
+    let other_handle = other_list["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["message_id"] == reply.subject).unwrap()["read"].clone();
+    let (error, other_content) = mcp_call(&other_app, "fractal_conversation_read", other_handle.clone()).await;
+    assert!(!error, "{other_content}");
+    h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
+    h.expire(&other);
+    for (denied_app, replay) in [(&app, refreshed_handle), (&other_app, other_handle)] {
+        for (tool, arguments) in [
+            ("fractal_conversations_list", json!({"replies":true})),
+            ("fractal_conversation_read", replay),
+        ] {
+            let (error, denied) = mcp_call(denied_app, tool, arguments).await;
+            assert!(error, "{tool}: {denied}");
+            assert!(!denied.to_string().contains(&ack));
+        }
+    }
+    server.abort();
+    other_server.abort();
+    foreign_server.abort();
+}
+
+#[tokio::test]
+async fn signed_old_reader_ack_upgrades_through_normal_admission_into_mcp_readback() {
+    use fractal_daemon::model::ReplicationInventory;
+    const FLEET: &str = "3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69";
+    let source = Store::open_memory("reply-source").unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    source.set_member_key(Some(key.clone())).unwrap();
+    let ack = format!("ACK-signed-upgrade-{}", uuid::Uuid::new_v4());
+    let claim = source.append_claim(&ClaimInput {
+        subject: "message/signed-upgrade-ack".into(), kind: "message.sent".into(), actor: Some(AGENT.into()),
+        fields: serde_json::from_value(json!({"from":AGENT,"to":"assistant/chatgpt",
+            "content":ack,"status":"sent"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut exchange = source.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+    let position = exchange.envelopes.iter().position(|envelope| {
+        let payload: smallclaims::claim::ReplicaEnvelopePayload =
+            ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+        payload.batch.claims.iter().any(|candidate| candidate.id == claim.id)
+    }).unwrap();
+    let original = exchange.envelopes.remove(position);
+    let mut ack_exchange = exchange.clone();
+    ack_exchange.envelopes = vec![original.clone()];
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("store.sqlite");
+    let older = Store::open(&path, "assistant-native").unwrap();
+    older.bind_fleet(FLEET).unwrap();
+    let mut registry = fractal_schema::registry().clone();
+    registry.subjects.remove("assistant");
+    older.set_claim_registry(registry);
+    older.set_member_key(Some(key.clone())).unwrap();
+    older.pin_fleet_anchor(key.public()).unwrap();
+    older.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
+    older.append_claim(&ClaimInput {
+        subject: "host/reply-source".into(), kind: "fleet.member-admitted".into(), actor: None,
+        fields: serde_json::from_value(json!({"fleet_id":FLEET,"member_key":key.public(),
+            "via":"invite","mode":"listening"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    older.receive_replication_exchange("reply-source", FLEET, &exchange).unwrap();
+    let bootstrap = older.validate_replication_backlog().unwrap();
+    assert_eq!((bootstrap.invalid, bootstrap.held), (0, 0));
+    assert!(matches!(older.fleet_membership().unwrap().window("reply-source", original.sequence),
+        smallclaims::fleet::Window::Keyed(_)));
+    older.receive_replication_exchange("reply-source", FLEET, &ack_exchange).unwrap();
+    let rejected = older.validate_replication_backlog().unwrap();
+    assert_eq!((rejected.valid, rejected.invalid, rejected.held), (0, 1, 0));
+    let records = older.replica_records(true).unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(records[0].error_message.as_deref().unwrap().contains("violates invalid-subject-reference:"));
+    assert!(older.message(&claim.subject).unwrap().is_none());
+    drop(older);
+    // Reopening with the current registry is the upgrade: no repair, resend, DB edit or migration.
+    let upgraded = Arc::new(Store::open(&path, "assistant-native").unwrap());
+    let admitted = upgraded.validate_replication_backlog().unwrap();
+    assert_eq!((admitted.valid, admitted.invalid, admitted.held), (1, 0, 0));
+    upgraded.project_replication_backlog().unwrap();
+    let recovered = upgraded.latest_claim(&claim.subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(recovered.id, claim.id);
+    assert_eq!(recovered.batch_id, claim.batch_id);
+    assert_eq!(recovered.origin, claim.origin);
+    assert_eq!(recovered.actor, claim.actor);
+    assert_eq!(recovered.body, claim.body);
+    assert_eq!(recovered.predecessors, claim.predecessors);
+    assert_eq!(recovered.accepted_at_unix_ms, claim.accepted_at_unix_ms);
+    let relay = upgraded.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap();
+    let retained = relay.envelopes.iter().find(|envelope| envelope.writer == original.writer
+        && envelope.sequence == original.sequence && envelope.hash == original.hash).unwrap();
+    assert_eq!(retained.payload.bytes().unwrap(), original.payload.bytes().unwrap());
+    assert_eq!(retained.previous_hash, original.previous_hash);
+    assert_eq!(retained.member_key, original.member_key);
+    assert_eq!(retained.signature, original.signature);
+    assert!(retained.signature.is_some());
+    assert_eq!(retained.accepted_at_unix_ms, original.accepted_at_unix_ms);
+    let h = Harness::with_store(root, upgraded);
+    let paired = h.pair().await;
+    let (app, server) = h.mcp(&paired).await;
+    let (error, listed) = mcp_call(&app, "fractal_conversations_list", json!({"replies":true})).await;
+    assert!(!error, "{listed}");
+    assert!(!listed.to_string().contains(&ack));
+    let item = listed["value"]["items"].as_array().unwrap().iter()
+        .find(|item| item["message_id"] == claim.subject).unwrap();
+    assert_eq!(item["from"], AGENT);
+    assert_eq!(item["to"], "assistant/chatgpt");
+    assert_eq!(item["read"]["revision"], claim.id);
+    let (error, content) = mcp_call(&app, "fractal_conversation_read", item["read"].clone()).await;
+    assert!(!error, "{content}");
+    assert_eq!(content["value"]["text"], ack);
+    assert_eq!(content["value"]["revision"], claim.id);
+    let converged = h.state.store.validate_replication_backlog().unwrap();
+    assert_eq!((converged.valid, converged.invalid, converged.held), (0, 0, 0));
+    server.abort();
 }

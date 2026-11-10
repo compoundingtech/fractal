@@ -11,6 +11,136 @@ pub use fractal_store::store::conversation_reads::*;
 pub use fractal_store::store::conversation_reads::{Owner, Owners};
 pub use fractal_store::store::messages_shard::stream_reads::{self, StreamAfter};
 
+/// Metadata of the original canonical sent claim, never a lifecycle revision or body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssistantReplyHeader {
+    pub message_id: String,
+    pub claim_id: String,
+    pub from: String,
+    pub to: String,
+    pub in_reply_to: Option<String>,
+    pub accepted_at_unix_ms: u128,
+    pub text_bytes: usize,
+}
+
+fn assistant_reply_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantReplyHeader> {
+    let time: String = row.get(5)?;
+    Ok(AssistantReplyHeader {
+        message_id: row.get(0)?,
+        claim_id: row.get(1)?,
+        from: row.get(2)?,
+        to: row.get(3)?,
+        in_reply_to: row.get(4)?,
+        accepted_at_unix_ms: time.parse().map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+            5, rusqlite::types::Type::Text, Box::new(error)))?,
+        text_bytes: row.get(6)?,
+    })
+}
+
+// The expression matches the recipient index in both stores. Text stays inside SQLite;
+// only its byte length leaves the engine. Select the first canonical send, not later status.
+fn assistant_reply_sql(selection: &str) -> String {
+    smallclaims::store::canonical_sql(&format!(
+        "SELECT claims.subject, claims.id,
+            json_extract(body, CASE WHEN json_type(body,'$.fields') IS NULL THEN '$.from' ELSE '$.fields.from' END),
+            CASE WHEN json_type(body,'$.fields') IS NULL THEN json_extract(body,'$.to') ELSE json_extract(body,'$.fields.to') END,
+            json_extract(body, CASE WHEN json_type(body,'$.fields') IS NULL THEN '$.in_reply_to' ELSE '$.fields.in_reply_to' END),
+            accepted_at_unix_ms,
+            length(CAST(json_extract(body, CASE WHEN json_type(body,'$.fields') IS NULL THEN '$.content' ELSE '$.fields.content' END) AS BLOB))
+         FROM claims {selection}
+           AND json_extract(body, CASE WHEN json_type(body,'$.fields') IS NULL THEN '$.from' ELSE '$.fields.from' END) GLOB 'agent/*'
+           AND json_type(body, CASE WHEN json_type(body,'$.fields') IS NULL THEN '$.content' ELSE '$.fields.content' END)='text'
+           AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+           AND claims.id=(SELECT sent.id FROM claims sent
+               WHERE sent.subject=claims.subject AND sent.kind='message.sent'
+                 AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=sent.id AND state='repaired')
+               ORDER BY CANONICAL_ASC(sent) LIMIT 1)"
+    ))
+}
+
+fn assistant_reply_source_page(
+    connection: &Connection, principal: &str, through: u64,
+    after: Option<&(u128, String)>, count: usize, shard: bool,
+) -> Result<Vec<AssistantReplyHeader>> {
+    let cursor = after.map(|(time, _)| time.to_string());
+    let overlap = if shard {
+        " AND NOT EXISTS(SELECT 1 FROM assistant_reply_graph.claims AS graph_sent
+            WHERE graph_sent.subject=claims.subject AND graph_sent.kind='message.sent')"
+    } else { "" };
+    let query = format!("{} ORDER BY length(accepted_at_unix_ms) DESC,
+        accepted_at_unix_ms DESC, subject DESC LIMIT ?5",
+        assistant_reply_sql(&format!("INDEXED BY claims_assistant_reply_page WHERE kind='message.sent'
+            AND CASE WHEN json_type(body,'$.fields') IS NULL THEN json_extract(body,'$.to') ELSE json_extract(body,'$.fields.to') END=?1
+            AND store_index<=?2
+            AND (length(accepted_at_unix_ms),accepted_at_unix_ms,subject) <
+                (?3,?4,?6){overlap}")));
+    let rows = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb63e1da4f970 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &query)?.query_map(
+        params![principal, through, cursor.as_ref().map_or(40, String::len),
+            cursor.as_deref().unwrap_or("9999999999999999999999999999999999999999"),
+            count, after.map_or("", |(_, id)| id.as_str())],
+        assistant_reply_row,
+    )?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Keep a read-only graph attachment on each pooled shard reader for indexed overlap exclusion.
+/// No graph rows or payloads are copied into the shard or materialized in Rust.
+fn assistant_reply_attach_graph(shard: &Connection, graph: &Connection) -> Result<()> {
+    let attached: bool = shard.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='assistant_reply_graph')",
+        [], |row| row.get(0),
+    )?;
+    if !attached {
+        let path: String = graph.query_row(
+            "SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get(0),
+        )?;
+        anyhow::ensure!(!path.is_empty(), "messages shard requires a file-backed graph");
+        let path = path.replace('%', "%25").replace('?', "%3F").replace('#', "%23");
+        shard.execute(/* sqlite-large-value: allow-for-now lv-h6568b273bfd7 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "ATTACH DATABASE ?1 AS assistant_reply_graph", [format!("file:{path}?mode=ro")])?;
+    }
+    Ok(())
+}
+
+fn assistant_reply_source_header(connection: &Connection, id: &str) -> Result<Option<AssistantReplyHeader>> {
+    let query = assistant_reply_sql("WHERE subject=?1 AND kind='message.sent'
+        AND CASE WHEN json_type(body,'$.fields') IS NULL THEN json_extract(body,'$.to') ELSE json_extract(body,'$.fields.to') END
+            IN ('assistant/chatgpt','assistant/mcp')");
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5c711d96c789 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &query)?.query_row(/* sqlite-large-value: allow-for-now lv-heeef7413dc1a owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [id], assistant_reply_row).optional()?)
+}
+
+fn assistant_reply_source_range(connection: &Connection, claim_id: &str, start: usize, end: usize) -> Result<Option<String>> {
+    let selected = connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-h72d87eb7ebc5 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */
+        "WITH message AS (
+            SELECT json_extract(body, CASE WHEN json_type(body,'$.fields') IS NULL
+                THEN '$.content' ELSE '$.fields.content' END) AS text
+            FROM claims WHERE id=?1 AND kind='message.sent'
+              AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))
+         SELECT substr(CAST(text AS BLOB),?2,?3),
+             ?2>length(CAST(text AS BLOB))
+               OR hex(substr(CAST(text AS BLOB),?2,1)) NOT BETWEEN '80' AND 'BF'
+         FROM message WHERE typeof(text)='text' AND length(CAST(text AS BLOB))>=?4"
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h2704d57879ed owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![claim_id, start + 1, end - start, end],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, bool>(1)?))).optional()?;
+    let bytes = match selected {
+        Some((bytes, boundary)) => {
+            anyhow::ensure!(boundary, "reply range start is not a UTF-8 boundary");
+            Some(bytes)
+        }
+        None => None,
+    };
+    bytes.map(|bytes| match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(error) if error.utf8_error().error_len().is_none() => {
+            let valid = error.utf8_error().valid_up_to();
+            let mut bytes = error.into_bytes();
+            bytes.truncate(valid);
+            Ok(String::from_utf8(bytes)?)
+        }
+        Err(error) => Err(error.into()),
+    }).transpose()
+}
+
 // Keep the existing physical owner window before selecting the kinds the fallback renders.
 // Filtering kinds before LIMIT would incorrectly bring old entries back into the view.
 const TIMELINE_OWNER_IDS: &str = "WITH owner_window AS (
@@ -136,6 +266,14 @@ pub fn owners_from_connection(connection: &Connection, through: u64) -> Result<O
 }
 
 pub trait ConversationReadsStore {
+    /// Recipient-only metadata, newest accepted time then message ID, with limit+1 lookahead.
+    /// The graph cut and optional shard cut pin both sources; the captured shard cut is returned.
+    fn assistant_reply_headers_page(&self, principal: &str, cut: (u64, Option<u64>),
+        after: Option<&(u128, String)>, limit: usize) -> Result<(Vec<AssistantReplyHeader>, u64)>;
+    fn assistant_reply_header(&self, message_id: &str) -> Result<Option<AssistantReplyHeader>>;
+    /// At most 16 KiB; start must be a UTF-8 boundary, a partial final codepoint is omitted.
+    /// `claim_id` must still be the canonical header's immutable sent identity.
+    fn assistant_reply_text_range(&self, message_id: &str, claim_id: &str, start: usize, end: usize) -> Result<Option<String>>;
     /// Read one immutable canonical message's text without copying an oversized payload.
     /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
     fn conversation_message_text_bounded(
@@ -222,6 +360,58 @@ pub trait ConversationReadsStore {
 }
 
 impl ConversationReadsStore for Store {
+    fn assistant_reply_headers_page(&self, principal: &str, cut: (u64, Option<u64>),
+        after: Option<&(u128, String)>, limit: usize) -> Result<(Vec<AssistantReplyHeader>, u64)> {
+        let shard = fractal_store::store::messages_shard::shard(self);
+        let shard_cut = match cut.1 {
+            Some(through) => through,
+            None => match &shard {
+                Some(shard) => shard.readers.get().prepare_cached(
+                    "SELECT COALESCE(MAX(store_index),0) FROM claims WHERE kind='message.sent'"
+                )?.query_row(/* sqlite-large-value: allow-for-now lv-hfb705e540146 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?,
+                None => 0,
+            },
+        };
+        if !matches!(principal, "assistant/chatgpt" | "assistant/mcp") {
+            return Ok((Vec::new(), shard_cut));
+        }
+        let count = limit.saturating_add(1);
+        let graph = self.readers.get();
+        let mut headers = assistant_reply_source_page(&graph, principal, cut.0, after, count, false)?;
+        if let Some(shard) = shard {
+            let connection = shard.readers.get();
+            assistant_reply_attach_graph(&connection, &graph)?;
+            headers.extend(assistant_reply_source_page(&connection, principal, shard_cut, after, count, true)?);
+        }
+        headers.sort_by(|a, b| (b.accepted_at_unix_ms, &b.message_id).cmp(&(a.accepted_at_unix_ms, &a.message_id)));
+        headers.truncate(count);
+        Ok((headers, shard_cut))
+    }
+
+    fn assistant_reply_header(&self, message_id: &str) -> Result<Option<AssistantReplyHeader>> {
+        let header = assistant_reply_source_header(&self.readers.get(), message_id)?;
+        if header.is_some() || fractal_store::store::messages_shard::graph_sent(self, message_id)? {
+            return Ok(header);
+        }
+        match fractal_store::store::messages_shard::shard(self) {
+            Some(shard) => assistant_reply_source_header(&shard.readers.get(), message_id),
+            None => Ok(None),
+        }
+    }
+
+    fn assistant_reply_text_range(&self, message_id: &str, claim_id: &str, start: usize, end: usize) -> Result<Option<String>> {
+        anyhow::ensure!(end >= start && end - start <= 16_384, "invalid reply byte range");
+        anyhow::ensure!(end <= i64::MAX as usize, "reply byte range is too large");
+        let Some(header) = self.assistant_reply_header(message_id)? else { return Ok(None); };
+        if header.claim_id != claim_id { return Ok(None); }
+        if fractal_store::store::messages_shard::graph_sent(self, message_id)? {
+            assistant_reply_source_range(&self.readers.get(), &header.claim_id, start, end)
+        } else if let Some(shard) = fractal_store::store::messages_shard::shard(self) {
+            assistant_reply_source_range(&shard.readers.get(), &header.claim_id, start, end)
+        } else {
+            Ok(None)
+        }
+    }
 
     /// Read one immutable canonical message's text without copying an oversized payload.
     /// `Some((size, None))` distinguishes a budget refusal from a missing/non-text claim.
@@ -240,7 +430,7 @@ impl ConversationReadsStore for Store {
     fn conversation_local_position(&self) -> Result<u64> {
         Ok(self.readers.get().prepare_cached(
             "SELECT COALESCE(MAX(id),0) FROM local_observations",
-        )?.query_row(/* sqlite-large-value: allow-for-now lv-hfb705e540146 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+        )?.query_row(/* sqlite-large-value: allow-for-now lv-h861b807ca0ff owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
     }
 
     fn conversation_changed_at(
@@ -658,6 +848,104 @@ pub use crate::store::conversation_reads_tests_shared_seats::*;
 #[allow(unused_imports)]
 pub use crate::store::conversation_reads_tests_shared_seats::{append};
     use super::*;
+
+    #[test]
+    fn assistant_reply_headers_are_recipient_only_keyset_metadata() {
+        let store = Store::open_memory("node").unwrap();
+        let text = format!("{}é", "x".repeat(20_000));
+        let mut original = String::new();
+        store.connection.batched(|tx| -> Result<()> {
+            for (id, from, to, time, legacy) in [
+                ("a", "agent/departed", "assistant/chatgpt", "9", false),
+                ("b", "agent/departed", "assistant/chatgpt", "10", true),
+                ("c", "agent/departed", "assistant/chatgpt", "10", false),
+                ("mcp", "agent/departed", "assistant/mcp", "11", false),
+                ("person", "person/operator", "assistant/chatgpt", "12", false),
+                ("other", "agent/departed", "assistant/chatgpt-extra", "13", false),
+            ] {
+                let fields = json!({"from":from,"to":to,"content":text,"in_reply_to":"message/request","status":"sent"});
+                let body = if legacy { fields } else { json!({"fields":fields}) };
+                let claim = synthetic_owner_history_row(tx, "node", &format!("message/{id}"),
+                    "message.sent", &body, &[])?;
+                tx.execute("UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2", params![time, claim.id])?;
+                if id == "c" { original = claim.id; }
+            }
+            Ok(())
+        }).unwrap().unwrap();
+        // No agent identity/incarnation is present: sent-claim evidence is sufficient.
+        let cut = store.index().unwrap();
+        let (first, shard_cut) = store.assistant_reply_headers_page("assistant/chatgpt", (cut, None), None, 1).unwrap();
+        assert_eq!(shard_cut, 0);
+        assert_eq!(first.iter().map(|h| h.message_id.as_str()).collect::<Vec<_>>(), ["message/c", "message/b"]);
+        assert_eq!(first[0].claim_id, original);
+        assert_eq!(first[0].text_bytes, text.len());
+        assert_eq!(first[0].in_reply_to.as_deref(), Some("message/request"));
+        let after = (first[0].accepted_at_unix_ms, first[0].message_id.clone());
+        let (next, _) = store.assistant_reply_headers_page("assistant/chatgpt", (cut, Some(shard_cut)), Some(&after), 1).unwrap();
+        assert_eq!(next.iter().map(|h| h.message_id.as_str()).collect::<Vec<_>>(), ["message/b", "message/a"]);
+        let (mcp, _) = store.assistant_reply_headers_page("assistant/mcp", (cut, None), None, 10).unwrap();
+        assert_eq!(mcp.len(), 1);
+        assert_eq!(mcp[0].message_id, "message/mcp");
+        assert!(store.assistant_reply_header("message/person").unwrap().is_none());
+        assert!(store.assistant_reply_header("message/other").unwrap().is_none());
+        assert!(store.assistant_reply_headers_page("agent/departed", (cut, None), None, 10).unwrap().0.is_empty());
+        assert_eq!(store.assistant_reply_header("message/c").unwrap(), Some(first[0].clone()));
+        assert_eq!(store.assistant_reply_text_range("message/c", &original, 0, 512).unwrap().unwrap(), "x".repeat(512));
+        assert_eq!(store.assistant_reply_text_range("message/c", &original, 20_000, 20_001).unwrap().as_deref(), Some(""));
+        assert_eq!(store.assistant_reply_text_range("message/c", &original, 20_000, 20_002).unwrap().as_deref(), Some("é"));
+        assert!(store.assistant_reply_text_range("message/c", &original, 20_001, 20_002).is_err());
+        assert!(store.assistant_reply_text_range("message/c", &original, 0, 16_385).is_err());
+        assert!(store.assistant_reply_text_range("message/c", "wrong-claim", 0, 512).unwrap().is_none());
+        store.connection.batched(|tx| -> Result<()> {
+            let replacement = synthetic_owner_history_row(tx, "node", "message/c", "message.sent",
+                &json!({"fields":{"from":"agent/old","to":"assistant/chatgpt","content":"later send","status":"sent"}}), &[])?;
+            tx.execute("UPDATE claims SET accepted_at_unix_ms='100' WHERE id=?1", [&replacement.id])?;
+            Ok(())
+        }).unwrap().unwrap();
+        assert_eq!(store.assistant_reply_header("message/c").unwrap().unwrap().claim_id, original);
+        assert_eq!(store.assistant_reply_text_range("message/c", &original, 0, 512).unwrap().unwrap(), "x".repeat(512));
+    }
+
+    #[test]
+    fn assistant_reply_headers_merge_shard_and_graph_with_pinned_cuts() {
+        use fractal_store::store::messages_shard;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+        let shard = messages_shard::open(&store, root.path()).unwrap();
+        let graph = append(&store, "message/graph-reply", "message.sent",
+            json!({"from":"agent/old","to":"assistant/chatgpt","content":"graph","status":"sent"}));
+        let stream = |id: &str, to: &str| shard.append_claim(&smallclaims::claim::ClaimInput {
+            subject: id.into(), kind: "message.sent".into(), actor: Some("agent/old".into()),
+            fields: serde_json::from_value(json!({"from":"agent/old","to":to,"content":"stream é","status":"sent"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let sent = stream("message/stream-reply", "assistant/chatgpt");
+        stream("message/stream-mcp", "assistant/mcp");
+        // More graph-owned shard shadows than a small page can hold. Their graph recipient
+        // differs, so dropping shadows after LIMIT would prematurely end ChatGPT discovery.
+        for index in 0..8 {
+            let id = format!("message/shadow-{index}");
+            append(&store, &id, "message.sent",
+                json!({"from":"agent/old","to":"assistant/mcp","content":"graph-owned","status":"sent"}));
+            stream(&id, "assistant/chatgpt");
+        }
+        let cut = store.index().unwrap();
+        let (headers, shard_cut) = store.assistant_reply_headers_page("assistant/chatgpt", (cut, None), None, 10).unwrap();
+        assert_eq!(headers.len(), 2);
+        let stream_header = headers.iter().find(|header| header.message_id == sent.subject).unwrap();
+        assert_eq!(stream_header.claim_id, sent.id);
+        assert_eq!(stream_header.text_bytes, "stream é".len());
+        assert_eq!(store.assistant_reply_header(&sent.subject).unwrap().as_ref(), Some(stream_header));
+        assert_eq!(store.assistant_reply_text_range(&sent.subject, &sent.id, 0, 7).unwrap().as_deref(), Some("stream "));
+        assert_eq!(store.assistant_reply_headers_page("assistant/chatgpt", (cut, Some(shard_cut)), None, 1).unwrap().0, headers);
+        stream("message/late-shard", "assistant/chatgpt");
+        append(&store, "message/late-graph", "message.sent",
+            json!({"from":"agent/old","to":"assistant/chatgpt","content":"late","status":"sent"}));
+        let (pinned, _) = store.assistant_reply_headers_page("assistant/chatgpt", (cut, Some(shard_cut)), None, 10).unwrap();
+        assert_eq!(pinned, headers);
+        assert!(pinned.iter().any(|header| header.claim_id == graph.id));
+        assert_eq!(store.assistant_reply_headers_page("assistant/chatgpt", (store.index().unwrap(), None), None, 10).unwrap().0.len(), 4);
+    }
 
 
     /// Synthetic historical SQL rows exercise legacy kinds/shapes that current admission

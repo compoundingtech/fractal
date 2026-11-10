@@ -796,7 +796,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h67f03eb2d120 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -841,6 +841,12 @@ ON claims(json_extract(body, '$.fields.from'), length(accepted_at_unix_ms), acce
 WHERE kind='message.sent';
 CREATE INDEX IF NOT EXISTS claims_message_to_activity_time_index
 ON claims(json_extract(body, '$.fields.to'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='message.sent';
+-- Recipient-scoped immutable reply discovery, including legacy root-shaped sends.
+CREATE INDEX IF NOT EXISTS claims_assistant_reply_page
+ON claims(
+    CASE WHEN json_type(body,'$.fields') IS NULL THEN json_extract(body,'$.to') ELSE json_extract(body,'$.fields.to') END,
+    length(accepted_at_unix_ms), accepted_at_unix_ms, subject)
 WHERE kind='message.sent';
 CREATE INDEX IF NOT EXISTS claims_timeline_activity_time_index
 ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
