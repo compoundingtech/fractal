@@ -113,6 +113,48 @@ fn validate_work_write_actor(actor: &str) -> Result<(), FractalError> {
     Ok(())
 }
 
+/// An exec moves its step's clock only while it is the exec that agentless step declared for
+/// its current attempt and the step is working. The daemon has already matched the caller to
+/// the exec's live launch. A step with a worker keeps its clock with that worker's lease.
+fn exec_owns_attempt_tx(
+    transaction: &Transaction<'_>,
+    exec: &str,
+    subject: &str,
+    step: &StepRunView,
+) -> Result<(), FractalError> {
+    let declared_attempt: Option<Option<String>> = transaction
+        .query_row(
+            "SELECT json_extract(member, '$.environment.ST_ATTEMPT') FROM desired
+             WHERE subject=?1 AND kind='exec' AND owner_step=?2",
+            params![exec, subject],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some(declared_attempt) = declared_attempt.filter(|_| step.agentless) else {
+        return Err(FractalError::new(
+            "work-not-available",
+            format!("`{exec}` is not an exec of the agentless step `{subject}`"),
+        ));
+    };
+    if declared_attempt != Some(step.attempt.to_string()) {
+        return Err(FractalError::new(
+            "stale-work-attempt",
+            format!(
+                "`{exec}` was declared for another attempt of `{subject}`, which is on attempt {}",
+                step.attempt
+            ),
+        ));
+    }
+    if step.status != "working" {
+        return Err(FractalError::new(
+            "work-not-running",
+            format!("step run `{subject}` is {}; only a working step's clock runs", step.status),
+        ));
+    }
+    Ok(())
+}
+
 // One query preserves the native collection's indexed latest/live probes and shallow
 // key sort. Assistant membership matches reads::ident before pagination/hydration:
 // mission/ contributes eight allowed ASCII bytes; '-' is literal at the GLOB class end.
@@ -6021,6 +6063,14 @@ impl MissionsStore for Store {
         let actor = request.actor.as_deref().ok_or_else(|| {
             FractalError::new("missing-work-actor", "a work action needs an actor")
         })?;
+        // A step's own exec holds no claim; it only stops and restarts its step's clock.
+        let exec = actor.starts_with("exec/");
+        if exec && !matches!(action, "wait" | "resume") {
+            return Err(FractalError::new(
+                "exec-work-action",
+                "an exec only stops and restarts its own step's execution clock: `work wait` and `work resume`",
+            ));
+        }
         let requested_incarnation = request
             .incarnation
             .as_deref()
@@ -6036,8 +6086,13 @@ impl MissionsStore for Store {
         let committed = self
             .connection
             .batched(|transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
-                let actor = physical_actor(transaction, actor)?;
-                validate_work_write_actor(&actor)?;
+                let actor = if exec {
+                    actor.to_owned()
+                } else {
+                    let actor = physical_actor(transaction, actor)?;
+                    validate_work_write_actor(&actor)?;
+                    actor
+                };
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?
@@ -6160,13 +6215,17 @@ impl MissionsStore for Store {
                 if action == "claim" && adhoc_work::pending_handoff(transaction, &current)? {
                     return Err(FractalError::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
                 }
-                let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
-                    || current.available_to.iter().any(|candidate| candidate == &actor);
-                if current.agentless || !eligible {
-                    return Err(FractalError::new(
-                        "work-not-available",
-                        format!("`{subject}` is not available to `{actor}`"),
-                    ));
+                if exec {
+                    exec_owns_attempt_tx(transaction, &actor, &subject, &current)?;
+                } else {
+                    let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
+                        || current.available_to.iter().any(|candidate| candidate == &actor);
+                    if current.agentless || !eligible {
+                        return Err(FractalError::new(
+                            "work-not-available",
+                            format!("`{subject}` is not available to `{actor}`"),
+                        ));
+                    }
                 }
                 if action == "claim" {
                     let mut statement = transaction
@@ -6257,7 +6316,8 @@ impl MissionsStore for Store {
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
-                if action != "claim"
+                if !exec
+                    && action != "claim"
                     && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
                 {
                     return Err(FractalError::new(
@@ -6341,6 +6401,10 @@ impl MissionsStore for Store {
                         effective_incarnation,
                         Some(now + 600_000),
                     ),
+                    // An agentless step has no lease: its exec's record keeps the step as it is.
+                    "wait" | "resume" if exec => {
+                        (current.status.as_str(), current.worker_reported, None, None, None)
+                    }
                     // A wait or a resume is a progress record that moves the execution clock.
                     "wait" | "resume" => (
                         "working",
