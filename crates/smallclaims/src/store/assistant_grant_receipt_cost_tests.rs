@@ -42,9 +42,10 @@ fn complete_signature_receipt_cost(store: &Store, signature: &ReplicaEnvelopeSig
 fn receipt_projection_work_state(connection: &Connection) -> Vec<Vec<Vec<SqlValue>>> {
     [
         "SELECT id,applied_generation FROM assistant_grant_membership_state ORDER BY id",
-        "SELECT claim_id,position,record_rowid,member_key FROM assistant_grant_auth_cursor ORDER BY claim_id",
+        "SELECT claim_id,position,record_rowid,member_key,membership_start FROM assistant_grant_auth_cursor ORDER BY claim_id",
         "SELECT claim_id FROM assistant_grant_dirty ORDER BY claim_id",
-        "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position FROM assistant_grant_additions ORDER BY id",
+        "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim FROM assistant_grant_additions ORDER BY id",
+        "SELECT writer,claim_id FROM assistant_grant_auth_work ORDER BY writer,claim_id",
     ].into_iter().map(|sql| {
         let mut statement = connection.prepare(sql).unwrap();
         let columns = statement.column_count();
@@ -70,7 +71,7 @@ fn fresh_nonmember_proof_receipt_has_constant_complete_transaction_vm_cost() {
         // A proof from outside the writer's window must neither reset this
         // checkpoint nor consume/recreate its work, even for the same envelope.
         connection.execute(
-            "INSERT INTO assistant_grant_auth_cursor SELECT claim_id,position,rowid,?2 FROM replica_records WHERE claim_id=?1 LIMIT 1",
+            "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) SELECT claim_id,position,rowid,?2,0 FROM replica_records WHERE claim_id=?1 LIMIT 1",
             params![grant.id, key.public()],
         ).unwrap();
         connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();

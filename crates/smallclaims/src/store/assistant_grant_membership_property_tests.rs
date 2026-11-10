@@ -930,8 +930,8 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
     }
     if matches!(coverage, AlternateProofCoverage::FutureOnly) {
         let cursor = || target.readers.get().query_row(
-            "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
-            [&grant.id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?)),
+            "SELECT position,record_rowid,membership_start,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+            [&grant.id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?)),
         ).optional().unwrap();
         let mut previous = cursor();
         let mut completed_at = None;
@@ -1060,4 +1060,153 @@ fn newly_admitted_earlier_key_restores_demoted_row_from_existing_signature() {
     for seed in 1..=4 {
         admitted_recheck_finds_alternate_proof(seed, AlternateProofCoverage::AfterDemotion);
     }
+}
+
+// Real past-covering admissions must visit the small set of grant rows needing
+// authentication, not replay this writer's unrelated (or established) history.
+fn past_covering_addition_backlog(unrelated: usize) -> (Store, Vec<ClaimRecord>, Vec<ClaimRecord>, usize) {
+    let (anchor, anchor_key) = source();
+    let peer_key = Arc::new(MemberKey::generate().unwrap().0);
+    let peer = node("peer", Some(anchor_key.public()));
+    peer.set_member_key(Some(peer_key.clone())).unwrap();
+    let target = node("reader", Some(anchor_key.public()));
+    append(&anchor, "host/peer", "fleet.member-admitted", json!({
+        "member_key": peer_key.public(), "via": "member", "sponsor": "anchor",
+        "writer_floor": 0, "mode": "listening"
+    }));
+    receive(&peer, &export(&anchor, &peer));
+    receive(&target, &export(&anchor, &target));
+    for first in (0..unrelated).step_by(32) {
+        for index in first..(first + 32).min(unrelated) {
+            append(&peer, &format!("custom/unrelated/{index}"), "custom.unrelated.event",
+                json!({"index": index}));
+        }
+        receive(&target, &export(&peer, &target));
+    }
+    let established: Vec<_> = (0..3).map(|index| {
+        let suffix = format!("{:024x}", index + 100);
+        append(&peer, &format!("custom/client/assistant-v1-{suffix}"), GRANTED,
+            fixture_fields(&suffix, "assistant", 'a'))
+    }).collect();
+    receive(&target, &export(&peer, &target));
+    let needy: Vec<_> = (0..2).map(|index| {
+        let suffix = format!("{:024x}", index + 200);
+        append(&peer, &format!("custom/client/assistant-v1-{suffix}"), GRANTED,
+            fixture_fields(&suffix, "assistant", 'b'))
+    }).collect();
+    receive_pre_projection_unsigned_history(&target, &export(&peer, &target));
+    assert_established_grants_ready(&target, &established);
+    for grant in &needy {
+        assert_bearer_rejected(&target, grant);
+    }
+    let receipts: usize = target.readers.get().query_row(
+        "SELECT COUNT(*) FROM replica_records WHERE writer='peer'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(receipts >= unrelated + established.len() + needy.len());
+    let additions = 24;
+    for _ in 0..additions {
+        let key = MemberKey::generate().unwrap().0;
+        append(&anchor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": key.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 0, "mode": "listening"
+        }));
+    }
+    receive_without_authority_maintenance(&target, &export(&anchor, &target));
+    (target, established, needy, additions)
+}
+
+#[test]
+fn many_past_covering_additions_visit_needy_grants_not_unrelated_receipts() {
+    for unrelated in [64, 512] {
+        let (target, established, needy, additions) = past_covering_addition_backlog(unrelated);
+        target.connection.write().execute_batch(
+            "CREATE TEMP TABLE addition_work (unit INTEGER);
+             CREATE TEMP TRIGGER count_addition_updates AFTER UPDATE ON assistant_grant_additions
+             BEGIN INSERT INTO addition_work VALUES(1); END;
+             CREATE TEMP TRIGGER count_addition_completion AFTER DELETE ON assistant_grant_additions
+             BEGIN INSERT INTO addition_work VALUES(1); END;",
+        ).unwrap();
+        authority::take_authentication_attempts();
+        authority::take_authentication_claims();
+        // Apply the real membership delta, then use one-unit transactions so
+        // the completion bound cannot hide receipt scans inside a large slice.
+        target.advance_assistant_grant_authority_backfill().unwrap();
+        let bound = additions * (needy.len() * 4 + 2) + 8;
+        let mut completed = false;
+        for _ in 0..bound {
+            let mut connection = target.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let done = authority::backfill_slice(&transaction, Duration::ZERO).unwrap();
+            transaction.commit().unwrap();
+            drop(connection);
+            assert_established_grants_ready(&target, &established);
+            if done {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed,
+            "{unrelated} unrelated receipts exhausted a grant-row-proportional work bound");
+        let work: usize = target.readers.get().query_row(
+            "SELECT COUNT(*) FROM addition_work", [], |row| row.get(0),
+        ).unwrap();
+        assert!(work >= additions, "fixture did not exercise every real admission");
+        assert!(work <= bound,
+            "addition work scaled with {unrelated} raw receipts rather than {} needy rows: {work}",
+            needy.len());
+        assert_eq!(target.readers.get().query_row(
+            "SELECT COUNT(*) FROM assistant_grant_additions", [], |row| row.get::<_,usize>(0),
+        ).unwrap(), 0);
+        let refreshed = authority::take_authentication_claims();
+        assert!(refreshed.iter().all(|id| needy.iter().any(|claim| &claim.id == id)),
+            "past-covering additions reauthenticated established rows: {refreshed:?}");
+        for grant in &needy {
+            assert_bearer_rejected(&target, grant);
+        }
+        assert_windows(&target, &target, "past-covering additions over unrelated history");
+    }
+}
+
+#[test]
+fn ordinary_dirty_subject_is_not_starved_by_past_covering_addition_backlog() {
+    let (target, established, _, _) = past_covering_addition_backlog(256);
+    // Preparing membership also consumes a normal slice; enough real addition
+    // work must remain to distinguish fairness from merely draining the queue.
+    target.advance_assistant_grant_authority_backfill().unwrap();
+    let grant = &established[0];
+    let mut connection = target.connection.write();
+    let queued: usize = connection.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_additions", [], |row| row.get(0),
+    ).unwrap();
+    assert!(queued > 4, "fixture needs a sustained addition backlog");
+    connection.execute(
+        "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
+    ).unwrap();
+    assert!(authority::subject_ready(&connection, &grant.subject).is_err());
+    authority::take_authentication_claims();
+    let mut serviced = false;
+    for _ in 0..4 {
+        let transaction = connection.transaction().unwrap();
+        assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
+        transaction.commit().unwrap();
+        let dirty: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
+            [&grant.id], |row| row.get(0),
+        ).unwrap();
+        if !dirty {
+            serviced = true;
+            break;
+        }
+    }
+    assert!(serviced, "ordinary dirty subject starved behind addition tasks");
+    assert!(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_additions)",
+        [], |row| row.get::<_,bool>(0),
+    ).unwrap(), "dirty work only progressed after the addition backlog drained");
+    assert!(authority::take_authentication_claims().contains(&grant.id));
+    assert!(authority::subject_ready(&connection, &grant.subject).is_ok());
+    assert!(authority::contains(&connection, &grant.id).unwrap());
+    drop(connection);
+    assert_windows(&target, &target, "dirty subject serviced during addition backlog");
 }

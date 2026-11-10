@@ -864,7 +864,7 @@ fn dirty_claim_flood_is_limited_to_sixty_four_refreshes_per_transaction() {
 fn authentication_key_cost(connection: &Connection, signature: &ReplicaEnvelopeSignature) -> (usize,i32,i32) {
     let mut statement = connection.prepare(authority::AUTHENTICATION_KEYS_QUERY).unwrap();
     let rows = statement.query_map(
-        params![signature.writer,signature.sequence,signature.hash,"",authority::MEMBERSHIP_KEYS_PER_REFRESH],
+        params![signature.writer,signature.sequence,signature.hash,-1,"",authority::MEMBERSHIP_KEYS_PER_REFRESH],
         |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)),
     ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     (rows.len(),statement.get_status(StatementStatus::VmStep),statement.get_status(StatementStatus::FullscanStep))
@@ -963,6 +963,105 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
         }
         transaction.commit().unwrap();
     }
+}
+
+#[test]
+fn key_only_authentication_cursor_migration_requeues_without_trusting_old_position() {
+    let store = node("issuer",None);
+    let grant = append(&store,SUBJECT,GRANTED,fields());
+    drain_authority(&store);
+    let connection = store.connection.write();
+    connection.execute_batch(
+        "ALTER TABLE assistant_grant_auth_cursor DROP COLUMN membership_start;"
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO assistant_grant_auth_cursor VALUES(?1,9223372036854775807,9223372036854775807,'~stale')",
+        [&grant.id]).unwrap();
+    authority::install(&connection,"issuer").unwrap();
+    assert!(!connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)",
+        [&grant.id], |row| row.get::<_,bool>(0)).unwrap());
+    assert!(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
+        [&grant.id], |row| row.get::<_,bool>(0)).unwrap(),
+        "migration must retain the interrupted authentication obligation");
+    connection.execute(
+        "INSERT INTO assistant_grant_auth_cursor VALUES(?1,7,9,'new-checkpoint',3)",
+        [&grant.id]).unwrap();
+    authority::install(&connection,"issuer").unwrap();
+    let cursor: (i64,i64,String,i64) = connection.query_row(
+        "SELECT position,record_rowid,member_key,membership_start FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
+    assert_eq!(cursor,(7,9,"new-checkpoint".into(),3),
+        "installing the current schema must preserve resumable work");
+}
+
+#[test]
+fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_of_seek() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    let grant = append(&source,SUBJECT,GRANTED,fields());
+    let exchange = export(&source,&target);
+    receive_pre_projection_unsigned_history(&target, &exchange);
+    let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
+            params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
+    }).unwrap();
+    assert!(signature.sequence>0);
+    let mut connection = target.connection.write();
+    // Put the real key after all expired windows by start, not member-key order.
+    connection.execute(
+        "UPDATE assistant_grant_membership_windows SET start=?2 WHERE writer=?1 AND member_key=?3",
+        params![signature.writer,signature.sequence,signature.member_key]).unwrap();
+    for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*3+1) {
+        connection.execute(
+            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,0)",
+            params![signature.writer,format!("~expired/{index:08}")]).unwrap();
+    }
+    insert_raw_signature(&connection,&signature);
+    let before = authentication_key_cost(&connection,&signature);
+    assert_eq!(before.0,authority::MEMBERSHIP_KEYS_PER_REFRESH);
+    assert_eq!(before.2,0);
+    for index in 0..4096 {
+        connection.execute(
+            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
+            params![signature.writer,format!("!future/{index:08}"),signature.sequence+1]).unwrap();
+    }
+    assert_eq!(authentication_key_cost(&connection,&signature),before,
+        "future-only windows entered the candidate seek");
+    let mut previous = (-1,String::new());
+    for page in 0..4 {
+        let transaction = connection.transaction().unwrap();
+        let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
+        if page<3 {
+            assert!(!done,"expired candidates must consume their own page budget");
+            let cursor: (i64,String) = transaction.query_row(
+                "SELECT membership_start,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+                [&grant.id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert!(cursor>previous,"window cursor did not advance monotonically");
+            previous = cursor;
+            assert!(!authority::contains(&transaction,&grant.id).unwrap());
+        } else {
+            assert!(done);
+            assert!(authority::contains(&transaction,&grant.id).unwrap());
+        }
+        transaction.commit().unwrap();
+    }
+    // The signature remains cryptographically valid, but an expired window
+    // must never authenticate it during a subsequent proof recheck.
+    connection.execute(
+        "UPDATE assistant_grant_membership_windows SET start=0,end=0 WHERE writer=?1 AND member_key=?2",
+        params![signature.writer,signature.member_key]).unwrap();
+    connection.execute(
+        "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(
+        "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    drop(connection);
+    drain_authority(&target);
+    assert!(!authority::contains(&target.readers.get(),&grant.id).unwrap(),
+        "an expired window authenticated a valid signature");
 }
 
 #[test]
@@ -1147,7 +1246,7 @@ fn dirty_and_auth_cursor_work_fence_only_their_subject_on_every_read_path() {
     assert_subject_fenced(&connection, &grant, &independent);
     connection.execute("DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [&grant.id]).unwrap();
     connection.execute(
-        "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key) VALUES(?1,0,0,'')",
+        "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) VALUES(?1,0,0,'',-1)",
         [&grant.id],
     ).unwrap();
     assert_subject_fenced(&connection, &grant, &independent);
@@ -1223,6 +1322,39 @@ fn subject_readiness_seeks_only_its_indexed_obligations_with_large_unrelated_que
     }
     assert_eq!(cost(&grant.subject),fenced);
     assert_eq!(cost(&independent.subject),clean);
+}
+
+#[test]
+fn legacy_membership_dirty_obligations_migrate_idempotently_to_verifier_rechecks() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    let grant = append(&source,SUBJECT,GRANTED,fields());
+    receive_pre_projection_unsigned_history(&target,&export(&source,&target));
+    let connection = target.connection.write();
+    connection.execute_batch(
+        "CREATE TABLE assistant_grant_membership_dirty (
+           writer TEXT PRIMARY KEY, sequence INTEGER NOT NULL, claim_id TEXT NOT NULL);"
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO assistant_grant_membership_dirty VALUES(?1,-1,'')", [&grant.origin],
+    ).unwrap();
+    for _ in 0..2 {
+        authority::install(&connection,"reader").unwrap();
+        assert!(!connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='assistant_grant_membership_dirty')",
+            [], |row| row.get::<_,bool>(0),
+        ).unwrap());
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+            [&grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap());
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_work WHERE writer=?1 AND claim_id=?2)",
+            params![grant.origin,grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap());
+        assert!(authority::subject_ready(&connection,SUBJECT).is_err());
+    }
 }
 
 include!("assistant_grant_receipt_cost_tests.rs");

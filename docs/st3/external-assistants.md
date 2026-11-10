@@ -246,16 +246,23 @@ clear that obligation, including when revalidation changes a record to invalid
 or repaired and refreshes its envelope in the same transaction. Only maintenance
 using current membership can discharge it after verification finishes; partial
 authentication pages retain the obligation and subject fence.
-Coverage additions queue durable writer/key/range tasks with independent monotone
-receipt cursors, capped at the writer's current stored receipt frontier. A
-future-only addition creates no historical work. Each task visits one receipt
-header per budget unit and verifies only its named key for unauthenticated or
-in-flight claims; success records the real verified proof. Original authentication
-cursors never rewind for membership additions, and ordinary key pages exclude
-windows that do not cover the receipt sequence. A key learned below an existing
-cursor can therefore restore a demoted row without repeatedly restarting a
-mid-page recheck. Total addition work is linear in stored receipts in the newly
-covered range; unrelated receipt headers consume units but do not authenticate.
+Coverage additions queue durable writer/key/range tasks, capped at the writer's
+stored receipt frontier; future-only additions create no historical work. Tasks
+seek only grant claims needing authentication through a body-free writer/claim
+work index, maintained atomically with unauthenticated rows and cursor/recheck
+obligations. Each task then seeks that claim's own receipts in the added range.
+One claim selection, receipt attempt or claim completion consumes a budget unit;
+unrelated history is never enumerated. Total work is proportional to needing
+grant rows and their own matching receipts, not all writer receipts. Ordinary
+dirty authentication receives the first half of each transaction with a durable
+round-robin cursor, so an addition backlog cannot keep dirty subjects fenced.
+Original authentication cursors never rewind for membership additions. Key
+pages seek `(writer,start,member_key)` with start at or below the receipt sequence;
+expired windows are filtered after the fixed candidate limit and still consume
+the budget. A key learned below a cursor can restore a demoted row through its
+independent addition task. On upgrade, committed legacy writer-retry obligations
+become durable verifier rechecks before their old queue is dropped. Old key-only
+cursors are requeued rather than interpreted in the new start/key ordering.
 Subject readiness starts with indexed subject claims and probes the queued
 obligations by their keys; unrelated queue growth does not cause a queue scan.
 It is not constant cost: a subject with many claims or matching proof/range
