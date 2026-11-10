@@ -2240,10 +2240,10 @@ fn client_items_digest(collection: &str, items: &[Value]) -> anyhow::Result<Stri
         }
     }
     let bytes = if collection == "launches" || (collection.starts_with("launches/") && collection.ends_with("/variants")) {
-        let mut serializer = serde_json::Serializer::new(Vec::new());
+        let mut serializer = serde_json::Serializer::new(Vec::with_capacity(128));
         let mut sequence = serializer.serialize_seq(Some(items.len()))?;
         for value in items { sequence.serialize_element(&HashValue { value, visualization: false })?; }
-        sequence.end()?;
+        serde::ser::SerializeSeq::end(sequence)?;
         serializer.into_inner()
     } else {
         serde_json::to_vec(items)?
