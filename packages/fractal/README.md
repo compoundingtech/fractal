@@ -5,7 +5,7 @@ Typed authoring for Fractal declarations: agents, missions, schedules and object
 | Entrypoint | Runtime | Contents |
 |---|---|---|
 | `fractal` | isomorphic | The `Fractal` authoring namespace; declaration schemas and the KDL lowering (`agent`, `mission`, `schedule`, `objectiveNode` nodes, `emit`, `fractalKdl`) as named exports |
-| `fractal/tree` | Node | `loadSubjectTree` plus the define forms and reference types |
+| `fractal/tree` | Node | `loadSubjectTree`, `programMission`, the define forms and reference types |
 | `fractal/testing` | Node | `scratchDaemonLayer`, an isolated daemon for conformance tests |
 | `fractal/effect` | Bun program host, isomorphic | The `Fractal` namespace with the program forms of `mission` and `step`, plus `ask`, `run`, `command`, `env`, `cwd` and `Worker`; the host contract (`ProgramEntry`, `HostContextV1`) as named exports |
 
@@ -75,7 +75,7 @@ The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc
 
 ## Loading and rendering
 
-`loadSubjectTree({ root, context })` imports every declaration module below `root`, lowers typed references to IDs without copying authored step and gate handles, assembles missions with `missionWire`, decodes the result with the strict schemas, and checks objectives with `Fractal.objective`. Render a loaded subject with the named exports:
+`loadSubjectTree({ root, context, bundleDir? })` imports every declaration module below `root`, lowers typed references to IDs without copying authored step and gate handles, assembles missions with `missionWire`, decodes the result with the strict schemas, and checks objectives with `Fractal.objective`. Program missions are bundled into `bundleDir` (see [Publishing a program](#publishing-a-program)). Render a loaded subject with the named exports:
 
 ```ts
 import { agent, emit, mission, objectiveNode } from 'fractal'
@@ -131,7 +131,32 @@ export default Fractal.mission(
 
 Every `input` field must be required and encode to a string, since each one is a native `input "name" kind="text"`; a payload that does not decode refuses the run with `InvalidInput`. Without `error`, a step or program journals any tagged error as `_tag` plus its fields and the step fails with that plain object (typed `Journaled<E>`), live and on replay, so `catchTag` matches; an untagged error is a defect. With `error`, the schema rebuilds the error as its class, which a program's `error` class needs. Only one fiber may use a step id: concurrent branches would take `id#n` keys in completion order, which replay does not reproduce, so a second branch using the id is a defect. A journal entry the daemon refuses ends the attempt with a defect that the body cannot catch.
 
-A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`; `fixtures/programs/factory/land-program` is the factory's landing program, and `src/program-bundle.unit.test.ts` runs its `bun build --target=bun` bundle. Bundling a program and rendering its `program` step declaration are not part of `loadSubjectTree` yet.
+A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`. `fixtures/programs/factory/land-program` is the factory's landing program; `src/program-bundle.unit.test.ts` runs its bundle against an in-memory host.
+
+### Publishing a program
+
+`loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Bun names inlined modules by their path from the tree root, so the same tree and lockfile give the same bytes wherever they are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:
+
+```kdl
+mission "factory/land-program" report-to="agent/factory" state="ready" timeout="2h" {
+  concurrent-runs max=8
+  input "change" kind="text"
+  input "reviewer" kind="text"
+  goal "Land one change on main and prove it live, or leave main as it was."
+  authority {
+    publish "scratch/*"
+    start "factory/step/review"
+    write "resource/factory/*"
+  }
+  step "program" timeout="2h" {
+    program "/bundles/<sha256>.mjs" sha256="<sha256>" stalled-after="10m"
+  }
+}
+```
+
+The intent's `timeout` bounds the mission and its program step, `stalledAfter` becomes the program's `stalled-after`, `concurrentRuns` becomes `concurrent-runs max=N`, and `authority` (`publish`, `start`, `revise` and `write` rules, rendered in canonical order) becomes the run authority block. `fractal validate` checks the KDL and that each bundle still has its pinned sha256; `fractal apply` publishes the mission and carries the bundle to the daemon. `fixtures/land-program.kdl` is the landing program's rendering; after an intended change to the program or to code its bundle inlines, `FRACTAL_UPDATE_GOLDENS=1 pnpm --filter fractal test` rewrites it.
+
+A loader that walks its own tree renders one program mission the same way with `programMission({ root, file, definition, bundleDir, bun? })`: `file` is a `mission.ts` below the tree `root`, `definition` its default export, and the subject ID its real directory below `root`'s real path. The result is `{ kdl, bundle, sha256 }`, the bytes `loadSubjectTree` would render for that subject.
 
 ## Checks
 
