@@ -362,6 +362,38 @@ def git(*args, cwd=None, env=None, check=True, stdin=None):
     return done
 
 
+def hydrate_commit(directory, commit):
+    """Unprivileged preparation: local upload-pack cannot lazy-fetch historical blobs."""
+    def missing_objects():
+        return [line[1:] for line in
+                git('rev-list', '--objects', '--missing=print', commit, cwd=directory,
+                    env={'GIT_NO_LAZY_FETCH': '1'}).stdout.decode().splitlines()
+                if line.startswith('?')]
+
+    missing = missing_objects()
+    if not missing:
+        return
+    remotes = [match.group(1) for line in git('config', '--list', cwd=directory).stdout.decode().splitlines()
+               if (match := re.fullmatch(r'remote\.(.+)\.promisor=true', line))]
+    if not remotes:
+        raise Failure(f'cannot hydrate {len(missing)} missing objects before signing: no promisor remote')
+    while missing:
+        before = set(missing)
+        for offset in range(0, len(missing), 200):
+            batch = missing[offset:offset + 200]
+            try:
+                git('-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+                    '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--quiet',
+                    '--no-tags', '--no-write-fetch-head', '--no-auto-maintenance',
+                    '--no-recurse-submodules', '--filter=blob:none', '--stdin', remotes[0],
+                    cwd=directory, stdin=(''.join(oid + '\n' for oid in batch)).encode())
+            except Failure as error:
+                raise Failure(f'cannot hydrate missing objects before signing: {error}') from error
+        missing = missing_objects()
+        if missing and set(missing) >= before:
+            raise Failure(f'cannot hydrate {len(missing)} missing objects before signing: fetch made no progress')
+
+
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for base runners copied alone.
 def config_path(base, name):
     for directory in ('.fractal', '.st'):
@@ -3755,6 +3787,8 @@ def run_main(argv, cleanup):
             round_number, round_started = top_up, time.monotonic()  # 0: the run itself; then the top-ups, including a handed-over round
             target, target_lock = None, None
             while True:
+                # Use the caller's normal git context, never the key-bearing signer's.
+                hydrate_commit(directory, commit)
                 tools = {}
                 for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
                     path = Path(scratch) / name
