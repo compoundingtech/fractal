@@ -6,7 +6,15 @@ import { Effect, FileSystem, Schema } from 'effect'
 import { parse } from '@overeng/kdl'
 
 import type { PinnedMissionRef } from './define.ts'
-import { AgentSchema, MissionSchema, missionWire, type MissionInput, SubjectId } from './mod.ts'
+import {
+  AgentSchema,
+  emit,
+  mission as missionNode,
+  MissionSchema,
+  missionWire,
+  type MissionInput,
+  SubjectId,
+} from './mod.ts'
 import { bundleProgram } from './program-bundler.ts'
 import { ProgramEntry } from './program-engine.ts'
 import { programInputNames, type InputSchema, type ProgramIntent } from './program.ts'
@@ -341,6 +349,32 @@ const programDeclaration = Effect.fnUntraced(function* ({
   }
 })
 
+/** Lowers a mission intent's references and decodes the native mission it declares. */
+const decodeMission = Effect.fnUntraced(function* ({
+  root,
+  path,
+  kind,
+  intent,
+}: {
+  readonly root: string
+  readonly path: string
+  readonly kind: Exclude<SubjectKind, 'agent'>
+  readonly intent: unknown
+}) {
+  const invalid = (cause: unknown) =>
+    new SubjectTreeError({ path, message: `Invalid ${kind} declaration`, cause })
+  const lowered = yield* lowerReferences({ root, path, intent })
+  const wire = yield* Effect.try({
+    // Trusted module authoring is validated by missionWire's strict schemas; the
+    // boundary assertion preserves templates/handles until assembly, not a wire cast.
+    try: () => missionWire(lowered as MissionInput<string>),
+    catch: invalid,
+  })
+  return yield* Schema.decodeEffect(MissionSchema, { onExcessProperty: 'error' })(wire).pipe(
+    Effect.mapError(invalid),
+  )
+})
+
 const loadModule = Effect.fnUntraced(function* <C>({
   root,
   file,
@@ -412,13 +446,15 @@ const loadModule = Effect.fnUntraced(function* <C>({
       message: `Declared id ${String(identified.id)} must equal the subject directory ${id}`,
     })
   }
-  const invalid = (cause: unknown) =>
-    new SubjectTreeError({ path, message: `Invalid ${kind} declaration`, cause })
-  const lowered = yield* lowerReferences({ root, path, intent: identified })
   if (kind === 'agent') {
+    const lowered = yield* lowerReferences({ root, path, intent: identified })
     const agent = yield* Schema.decodeUnknownEffect(AgentSchema, { onExcessProperty: 'error' })(
       lowered,
-    ).pipe(Effect.mapError(invalid))
+    ).pipe(
+      Effect.mapError(
+        (cause) => new SubjectTreeError({ path, message: `Invalid ${kind} declaration`, cause }),
+      ),
+    )
     const subject: Subject = {
       kind,
       id,
@@ -427,15 +463,7 @@ const loadModule = Effect.fnUntraced(function* <C>({
     }
     return subject
   }
-  const wire = yield* Effect.try({
-    // Trusted module authoring is validated by missionWire's strict schemas; the
-    // boundary assertion preserves templates/handles until assembly, not a wire cast.
-    try: () => missionWire(lowered as MissionInput<string>),
-    catch: invalid,
-  })
-  const mission = yield* Schema.decodeEffect(MissionSchema, { onExcessProperty: 'error' })(
-    wire,
-  ).pipe(Effect.mapError(invalid))
+  const mission = yield* decodeMission({ root, path, kind, intent: identified })
   if ((mission.schedule !== undefined) !== (kind === 'schedule')) {
     return yield* new SubjectTreeError({ path, message: scheduleMismatch[kind] })
   }
@@ -446,6 +474,64 @@ const loadModule = Effect.fnUntraced(function* <C>({
     declaration: { _tag: 'Module', intent: mission, exports },
   }
   return subject
+})
+
+/**
+ * Bundles one program mission (`Fractal.mission(intent, program)` from `fractal/effect`) and
+ * renders its native declaration exactly as `loadSubjectTree` loads that subject, for a loader
+ * that walks its own tree. `definition` is the default export of `file`, a module below `root`;
+ * `id` is its subject ID. The bundle is built from `root` and written to `bundleDir` as
+ * `<sha256>.mjs`.
+ */
+export const programMission = Effect.fn('fractal.programMission')(function* ({
+  root,
+  file,
+  id,
+  definition,
+  bundleDir,
+  bun = 'bun',
+}: {
+  readonly root: string
+  readonly file: string
+  readonly id: string
+  readonly definition: unknown
+  readonly bundleDir: string
+  readonly bun?: string
+}) {
+  const path = relative(root, file).split(sep).join('/')
+  if (isAbsolute(bundleDir) === false) {
+    return yield* new SubjectTreeError({
+      path: bundleDir,
+      message: 'bundleDir must be an absolute directory',
+    })
+  }
+  if (
+    typeof definition !== 'object' ||
+    definition === null ||
+    ProgramEntry in definition === false ||
+    'intent' in definition === false
+  ) {
+    return yield* new SubjectTreeError({
+      path,
+      message: 'The default export is not a program mission',
+    })
+  }
+  const subject = yield* Schema.decodeUnknownEffect(SubjectId)(id).pipe(
+    Effect.mapError(
+      (cause) => new SubjectTreeError({ path, message: `${id} is not a subject ID`, cause }),
+    ),
+  )
+  const declaration = yield* programDeclaration({
+    root,
+    file,
+    path,
+    id: subject,
+    intent: definition.intent as ProgramIntent<InputSchema, Schema.Codec<unknown>, undefined>,
+    programs: { bundleDir, bun },
+  })
+  const intent = yield* decodeMission({ root, path, kind: 'mission', intent: declaration })
+  const { bundle, sha256 } = declaration.steps[0].program
+  return { kdl: emit([missionNode(intent as MissionInput<string>)]), bundle, sha256 }
 })
 
 const loadKdl = Effect.fnUntraced(function* ({

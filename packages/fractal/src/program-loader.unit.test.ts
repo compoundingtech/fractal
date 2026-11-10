@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { NodeFileSystem } from '@effect/platform-node'
 import { describe, expect, it } from '@effect/vitest'
@@ -11,7 +11,7 @@ import { Effect } from 'effect'
 
 import { emit, mission, type MissionInput } from './mod.ts'
 import { bundleProgram } from './program-bundler.ts'
-import { loadSubjectTree } from './tree.ts'
+import { loadSubjectTree, programMission } from './tree.ts'
 
 const reportTo = { id: 'factory' }
 const sha256 = 'a'.repeat(64)
@@ -158,6 +158,25 @@ describe('program missions', () => {
           readFileSync(join(first, `${a.sha256}.mjs`)),
         )
       }),
+    120_000,
+  )
+
+  it.effect(
+    'render the same through programMission for a loader that walks its own tree',
+    () =>
+      Effect.gen(function* () {
+        const bundleDir = scratch()
+        const { kdl, sha256 } = yield* renderLanding(bundleDir)
+        const file = join(programs, 'factory/land-program/mission.ts')
+        const module = yield* Effect.promise(
+          (): Promise<{ readonly default: unknown }> => import(pathToFileURL(file).href),
+        )
+        const options = { root: programs, file, id: 'factory/land-program', bundleDir }
+        const rendered = yield* programMission({ ...options, definition: module.default })
+        expect(rendered).toEqual({ kdl, bundle: join(bundleDir, `${sha256}.mjs`), sha256 })
+        const refused = yield* programMission({ ...options, definition: {} }).pipe(Effect.flip)
+        expect(refused.message).toBe('The default export is not a program mission')
+      }).pipe(Effect.provide(NodeFileSystem.layer)),
     120_000,
   )
 

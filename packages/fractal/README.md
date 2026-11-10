@@ -5,7 +5,7 @@ Typed authoring for Fractal declarations: agents, missions and schedules kept as
 | Entrypoint | Runtime | Contents |
 |---|---|---|
 | `fractal` | isomorphic | The `Fractal` authoring namespace; declaration schemas and the KDL lowering (`agent`, `mission`, `schedule` nodes, `emit`, `fractalKdl`) as named exports |
-| `fractal/tree` | Node | `loadSubjectTree` plus the define forms and reference types |
+| `fractal/tree` | Node | `loadSubjectTree`, `programMission`, the define forms and reference types |
 | `fractal/testing` | Node | `scratchDaemonLayer`, an isolated daemon for conformance tests |
 | `fractal/effect` | Bun program host, isomorphic | The `Fractal` namespace with the program forms of `mission` and `step`, plus `ask`, `run`, `command`, `env`, `cwd` and `Worker`; the host contract (`ProgramEntry`, `HostContextV1`) as named exports |
 
@@ -125,6 +125,8 @@ mission "factory/land-program" report-to="agent/factory" state="ready" timeout="
 ```
 
 The intent's `timeout` bounds the mission and its program step, `stalledAfter` becomes the program's `stalled-after`, `concurrentRuns` becomes `concurrent-runs max=N`, and `authority` (`publish`, `start`, `revise` and `write` rules, rendered in canonical order) becomes the run authority block. `fractal validate` checks the KDL and that each bundle still has its pinned sha256; `fractal apply` publishes the mission and carries the bundle to the daemon. `fixtures/land-program.kdl` is the landing program's rendering; after an intended change to the program or to code its bundle inlines, `FRACTAL_UPDATE_GOLDENS=1 pnpm --filter fractal test` rewrites it.
+
+A loader that walks its own tree renders one program mission the same way with `programMission({ root, file, id, definition, bundleDir, bun? })`: `definition` is the default export of `file`, `id` its subject ID, and the result is `{ kdl, bundle, sha256 }`, the bytes `loadSubjectTree` would render for that subject.
 
 ## Checks
 
