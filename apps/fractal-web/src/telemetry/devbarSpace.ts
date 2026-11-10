@@ -3,7 +3,7 @@ const spaceProperty = '--wf-devbar-space'
 
 /** Measures only the bar's row: a panel opening above it overlays the workspace and reserves nothing. */
 export const reserveDevbarSpace = (host: HTMLElement): (() => void) => {
-  const strip = host.querySelector<HTMLElement>('[role="group"][aria-label="Developer bar"]')
+  const strip = host.querySelector<HTMLElement>('[role="toolbar"][aria-label="Developer bar"]')
   if (strip === null) return () => undefined
   const style = host.ownerDocument.body.style
   const measure = () => style.setProperty(spaceProperty, `${strip.getBoundingClientRect().height}px`)
