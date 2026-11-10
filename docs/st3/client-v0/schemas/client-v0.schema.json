@@ -640,6 +640,10 @@
       "pairing-route-not-allowed",
       "pairing-result-pending",
       "pairing-result-expired",
+      "pairing-request-conflict",
+      "pairing-wait-busy",
+      "pairing-rejected",
+      "pairing-expired",
       "suspend-authored-session-selection",
       "stale-fence",
       "cursor-gap",
@@ -4386,14 +4390,37 @@
       "properties": { "state": { "const": "admission-pending" }, "pairing_id": { "$ref": "#/$defs/Id" } }
     },
     "PairingExchangeRequest": {
-      "description": "One UTF-8 JSON envelope per Fabric exchange message. Request IDs are unique per attempt. Only capabilities, claim, complete and ack are allowed; complete requires a successful claim.",
+      "description": "One UTF-8 JSON envelope per Fabric exchange message. A request_id is single-use per attempt and op: identical body digest replays the retained reply or rejoins the in-flight wait; different digest refuses pairing-request-conflict. A new request_id for an already successful complete refuses pairing-claim-invalid without another grant. Only capabilities, claim, approval-wait, complete and ack are allowed; complete requires a successful claim.",
       "type": "object", "additionalProperties": false, "required": ["v", "request_id", "op", "body"],
-      "properties": { "v": { "const": 1 }, "request_id": { "type": "string", "minLength": 1 }, "op": { "enum": ["capabilities", "claim", "complete", "ack"] }, "body": {} },
+      "properties": { "v": { "const": 1 }, "request_id": { "type": "string", "minLength": 1 }, "op": { "enum": ["capabilities", "claim", "approval-wait", "complete", "ack"] }, "body": {} },
       "oneOf": [
         { "properties": { "op": { "const": "capabilities" }, "body": { "type": "object", "additionalProperties": false } } },
         { "properties": { "op": { "const": "claim" }, "body": { "$ref": "#/$defs/PairingKeyClaim" } } },
+        { "properties": { "op": { "const": "approval-wait" }, "body": { "$ref": "#/$defs/PairingApprovalWaitRequest" } } },
         { "properties": { "op": { "const": "complete" }, "body": { "$ref": "#/$defs/PairingComplete" } } },
         { "properties": { "op": { "const": "ack" }, "body": { "type": "object", "additionalProperties": false, "required": ["request_id"], "properties": { "request_id": { "type": "string", "minLength": 1 } } } } }
+      ]
+    },
+    "PairingApprovalWaitRequest": {
+      "description": "Envelope body for approval-wait. Fingerprint must equal the claimed key. No authority is conveyed. Subscribe before reading durable approval/expiry. Reply once at approval, refusal, or absolute permit deadline; no continuation token. At most one outstanding wait per attempt; a new concurrent request ID refuses pairing-wait-busy. After restart an identical request replays from durable state.",
+      "type": "object", "additionalProperties": false, "required": ["pairing_id", "key_fingerprint"],
+      "properties": { "pairing_id": { "$ref": "#/$defs/Id" }, "key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" } }
+    },
+    "PairingApprovalWaitApproved": {
+      "type": "object", "additionalProperties": false, "required": ["status", "key_fingerprint", "approved_at"],
+      "properties": { "status": { "const": "approved" }, "key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }, "approved_at": { "$ref": "#/$defs/Timestamp" } }
+    },
+    "PairingApprovalWaitRefusal": {
+      "type": "object", "additionalProperties": false, "required": ["code"],
+      "properties": { "code": { "enum": ["pairing-rejected", "pairing-expired", "pairing-key-mismatch", "pairing-wait-busy"] }, "message": { "type": "string" } }
+    },
+    "PairingApprovalWaitReply": {
+      "description": "Exactly one reply derived from durable local-person approval, never an unsolicited push on the claim request ID.",
+      "type": "object", "additionalProperties": false, "required": ["v", "request_id", "ok"],
+      "properties": { "v": { "const": 1 }, "request_id": { "type": "string", "minLength": 1 }, "ok": { "type": "boolean" }, "body": { "$ref": "#/$defs/PairingApprovalWaitApproved" }, "refusal": { "$ref": "#/$defs/PairingApprovalWaitRefusal" } },
+      "oneOf": [
+        { "required": ["body"], "properties": { "ok": { "const": true }, "refusal": false } },
+        { "required": ["refusal"], "properties": { "ok": { "const": false }, "body": false } }
       ]
     },
     "PairingExchangeRefusal": {
@@ -4403,7 +4430,7 @@
     "PairingExchangeReply": {
       "description": "Completion returns admission-pending, never a usable completion body. A typed refusal is queued until ack or the permit deadline, then the attempt is rejected. Ack has no authority effect.",
       "type": "object", "additionalProperties": false, "required": ["v", "request_id", "ok"],
-      "properties": { "v": { "const": 1 }, "request_id": { "type": "string" }, "ok": { "type": "boolean" }, "body": { "oneOf": [{ "$ref": "#/$defs/PairingAdvertisement" }, { "$ref": "#/$defs/PairingKeyStatus" }, { "$ref": "#/$defs/PairingAdmissionPending" }, { "type": "object", "additionalProperties": false }] }, "refusal": { "$ref": "#/$defs/PairingExchangeRefusal" } },
+      "properties": { "v": { "const": 1 }, "request_id": { "type": "string", "minLength": 1 }, "ok": { "type": "boolean" }, "body": { "oneOf": [{ "$ref": "#/$defs/PairingAdvertisement" }, { "$ref": "#/$defs/PairingKeyStatus" }, { "$ref": "#/$defs/PairingApprovalWaitApproved" }, { "$ref": "#/$defs/PairingAdmissionPending" }, { "type": "object", "additionalProperties": false }] }, "refusal": { "anyOf": [{ "$ref": "#/$defs/PairingExchangeRefusal" }, { "$ref": "#/$defs/PairingApprovalWaitRefusal" }] } },
       "oneOf": [
         { "required": ["body"], "properties": { "ok": { "const": true }, "refusal": false } },
         { "required": ["refusal"], "properties": { "ok": { "const": false }, "body": false } }

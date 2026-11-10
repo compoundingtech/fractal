@@ -1,0 +1,29 @@
+{
+  "description": "Schema fixtures plus normative replay scenarios. Request ID is single-use per attempt and op: identical body digest replays retained reply or rejoins in-flight wait; changed digest refuses pairing-request-conflict. A new complete ID after successful completion refuses pairing-claim-invalid without another grant.",
+  "cases": [
+    {"name":"valid wait request","schema":"PairingExchangeRequest","valid":true,"value":{"v":1,"request_id":"wait-1","op":"approval-wait","body":{"pairing_id":"pairing/example","key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
+    {"name":"missing fingerprint","schema":"PairingExchangeRequest","valid":false,"value":{"v":1,"request_id":"wait-1","op":"approval-wait","body":{"pairing_id":"pairing/example"}}},
+    {"name":"missing pairing ID","schema":"PairingExchangeRequest","valid":false,"value":{"v":1,"request_id":"wait-1","op":"approval-wait","body":{"key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
+    {"name":"malformed fingerprint","schema":"PairingExchangeRequest","valid":false,"value":{"v":1,"request_id":"wait-1","op":"approval-wait","body":{"pairing_id":"pairing/example","key_fingerprint":"sha256:short"}}},
+    {"name":"authority field not permitted","schema":"PairingExchangeRequest","valid":false,"value":{"v":1,"request_id":"wait-1","op":"approval-wait","body":{"pairing_id":"pairing/example","key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","approve":true}}},
+    {"name":"missing request ID","schema":"PairingExchangeRequest","valid":false,"value":{"v":1,"op":"approval-wait","body":{"pairing_id":"pairing/example","key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
+    {"name":"valid durable approved reply","schema":"PairingApprovalWaitReply","valid":true,"value":{"v":1,"request_id":"wait-1","ok":true,"body":{"status":"approved","key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","approved_at":"2026-01-01T00:01:00Z"}}},
+    {"name":"approved missing timestamp","schema":"PairingApprovalWaitReply","valid":false,"value":{"v":1,"request_id":"wait-1","ok":true,"body":{"status":"approved","key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}},
+    {"name":"approved must not contain credential","schema":"PairingApprovalWaitReply","valid":false,"value":{"v":1,"request_id":"wait-1","ok":true,"body":{"status":"approved","key_fingerprint":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","approved_at":"2026-01-01T00:01:00Z","credential":"never-before-S3"}}},
+    {"name":"rejected refusal","schema":"PairingApprovalWaitReply","valid":true,"value":{"v":1,"request_id":"wait-1","ok":false,"refusal":{"code":"pairing-rejected"}}},
+    {"name":"expired refusal","schema":"PairingApprovalWaitReply","valid":true,"value":{"v":1,"request_id":"wait-1","ok":false,"refusal":{"code":"pairing-expired"}}},
+    {"name":"mismatched key refusal","schema":"PairingApprovalWaitReply","valid":true,"value":{"v":1,"request_id":"wait-1","ok":false,"refusal":{"code":"pairing-key-mismatch"}}},
+    {"name":"concurrent wait refusal","schema":"PairingApprovalWaitReply","valid":true,"value":{"v":1,"request_id":"wait-2","ok":false,"refusal":{"code":"pairing-wait-busy"}}},
+    {"name":"unrecognized wait refusal","schema":"PairingApprovalWaitReply","valid":false,"value":{"v":1,"request_id":"wait-1","ok":false,"refusal":{"code":"not-a-wait-refusal"}}},
+    {"name":"contradictory approved refusal","schema":"PairingApprovalWaitReply","valid":false,"value":{"v":1,"request_id":"wait-1","ok":true,"refusal":{"code":"pairing-rejected"}}},
+    {"name":"changed digest conflict envelope","schema":"PairingExchangeReply","valid":true,"value":{"v":1,"request_id":"wait-1","ok":false,"refusal":{"code":"pairing-request-conflict","message":"Request ID reused with a different body digest"}}}
+  ],
+  "replay_scenarios": [
+    {"name":"identical wait while held","same_attempt":true,"same_op":true,"same_request_id":true,"same_body_digest":true,"expected":"rejoin-in-flight-wait","new_reply_count":1},
+    {"name":"identical wait after reply","same_attempt":true,"same_op":true,"same_request_id":true,"same_body_digest":true,"expected":"retained-reply","new_authority":false},
+    {"name":"identical wait after daemon restart","same_attempt":true,"same_op":true,"same_request_id":true,"same_body_digest":true,"expected":"reply-from-durable-approval-state","in_memory_wait_authoritative":false},
+    {"name":"same request ID different digest","same_attempt":true,"same_op":true,"same_request_id":true,"same_body_digest":false,"expected_code":"pairing-request-conflict"},
+    {"name":"new concurrent approval wait","same_attempt":true,"same_op":true,"same_request_id":false,"wait_in_flight":true,"expected_code":"pairing-wait-busy"},
+    {"name":"new complete after successful complete","op":"complete","same_request_id":false,"previous_complete_succeeded":true,"expected_code":"pairing-claim-invalid","extra_grants":0}
+  ]
+}

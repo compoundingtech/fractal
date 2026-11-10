@@ -3627,8 +3627,12 @@ The permit grants exactly the isolated client service, inbound-only, and expires
 at the earlier of the challenge expiry and ten minutes after issue.
 
 Each exchange message is one UTF-8 JSON envelope:
-`{v:1, request_id, op, body}`. Request IDs cannot repeat within an attempt.
-Allowed operations are `capabilities`, `claim`, `complete`, and `ack`.
+`{v:1, request_id, op, body}`. A request ID is single-use per attempt and per op.
+An identical body digest gets the retained reply or rejoins the in-flight wait;
+the same ID with a different digest returns `pairing-request-conflict`.
+A new ID for an already successful complete returns `pairing-claim-invalid`,
+without a second grant.
+Allowed operations are `capabilities`, `claim`, `approval-wait`, `complete`, and `ack`.
 Other operations return `pairing-route-not-allowed`. Complete before a successful
 claim returns `pairing-claim-invalid`. Claim and complete retain their signed HTTP
 request bodies. Success is `{v:1, request_id, ok:true, body}`; refusal is
@@ -3637,6 +3641,35 @@ request bodies. Success is `{v:1, request_id, ok:true, body}`; refusal is
 After queuing a refusal, the server waits for `ack` with body
 `{request_id: REFUSED_REQUEST_ID}` or the permit deadline before rejecting.
 Ack has no authority effect.
+
+`approval-wait` uses body `{pairing_id,key_fingerprint}` in that envelope.
+The fingerprint must equal the claimed key. The op carries no authority:
+only the initiating issuer's local-person approval can approve. Subscribe to
+Fractal changes before reading durable approval and expiry state. If already
+approved, reply immediately; otherwise hold until approval, refusal or the absolute
+permit deadline (at most ten minutes). There is no continuation token.
+Return exactly one reply, whose success body is
+`{status:"approved",key_fingerprint,approved_at}` (RFC3339 timestamp), or whose
+typed refusal has code `pairing-rejected`, `pairing-expired`,
+`pairing-key-mismatch`, or `pairing-wait-busy`; refusal message is optional.
+Only one approval wait may be outstanding per attempt. A concurrent wait with a
+new request ID returns `pairing-wait-busy`. An identical request rejoins the wait
+or replays the reply; after restart, derive its answer from durable approval state.
+Never push an unsolicited approved reply on the claim's request ID.
+
+The client sequence is:
+1. Send `claim`, then use Fabric's bounded held receive for `awaiting-approval`
+   (or already `approved`).
+2. Send `approval-wait`, then use held receive. Re-arm receive only after the
+   previous hold ends. No immediate receive loops or status polling are allowed.
+   Fabric registers before checking the queue, holds at most the earlier of
+   30 seconds and permit deadline, and permits one held receive per attempt;
+   ordinary receive is unchanged.
+3. On approved, send complete once and receive admission-pending, then send
+   application ack BEFORE waiting for Fabric confirm, which erases the queues.
+   After confirmation, follow the S1–S5 result flow below.
+4. On refusal, send application ack; the owner rejects only after ack or deadline.
+
 
 The server stores the exact confirm request in S1 before calling Fabric confirm.
 The advertised completion NodeID must equal Fabric's authenticated bound NodeID.
