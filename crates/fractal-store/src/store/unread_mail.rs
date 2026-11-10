@@ -132,7 +132,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     )?;
     if !expiry_migrated {
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h5a7c3523223f owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
+            /* sqlite-large-value: allow-for-now lv-hb7fe422f0e26 owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
              INSERT OR IGNORE INTO unread_mail_pending
              SELECT subject FROM claims WHERE kind='message.expired'
                AND NOT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1');
