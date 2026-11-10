@@ -17,6 +17,10 @@ Wire-independent source preparation only. **Application test mode remains disabl
 
 Colocated tests cover crypto/storage, foreground, suppression, indicator states, grant refusals, fixture refusals and independent DOM comparisons. `conversation/alerts/AnswerAlert.integration.test.tsx` exercises the SHIPPED AnswerAlert render path and asserts exact single-element title/question rendering without pressing any answer. Internal module inputs are not daemon wire schemas.
 
+D-5 integration assertions in that shipped-renderer test run `DataSourceProvider -> LiveAgentAlerts -> AnswerAlert` with recording `alertActions.act` and `prompts.respond` source ports, not mocked data hooks. Both structured choices and feedback/decision-words Send controls remain in the DOM, with no activation/input/submit events or confirmation state, across inspect/navigation, wrong-item and refused answer/close/read commands. Both port request logs must remain empty after EVERY command. This is a deterministic source-port test, not a fixture journey; its unit-only fixture source never supplies the real journey UI.
+
+The real-browser transport guard independently records/rejects attempted `/v1/client/actions` writes at `fixtureNoAnswerGuard.ts:25-36`, including successfully blocked attempts. It does not by itself prove that answer controls were never activated, so the shipped-control assertions above are separate. `useAlertAnswers.ts` is absent on this main base: equivalent coverage through that hook is tied to `37083821b6` and is added when that native-detail group lands; current tests do not claim to execute the absent hook.
+
 ## Integration dependencies
 
 Dependency decisions below refer to the read-only integration snapshot `ff956ae72b26d92be285b3d7ca245f2afb9e4f0e`; file paths are relative to `apps/fractal-web/src`. KEEP means required behavior, not permission to cherry-pick. No dependency was cherry-picked here.
