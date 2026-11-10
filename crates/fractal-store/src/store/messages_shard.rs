@@ -397,7 +397,13 @@ fn record_lifecycle_checked(
     // A replayed or earlier step settles to what is recorded, as a graph receipt does. An
     // admitted step is recorded wherever the item stands, as the graph appends its claim, so the
     // receipt it names exists.
+    if kind == "message.staged" && current <= 1 {
+        super::staging_attempts::record(&transaction, subject, smallclaims::store::now_ms()).map_err(internal)?;
+    }
     if checked && rank <= current && !custody_reread && !late_consumption {
+        if kind == "message.staged" && current == 1 {
+            transaction.commit().map_err(internal)?;
+        }
         return Ok(false);
     }
     // Forward steps follow the graph's message transitions, so a stream item moves as the same
@@ -749,6 +755,7 @@ impl Runtime for MessagesRuntime {
 
     fn create_schema(&self, connection: &Connection) -> anyhow::Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        super::staging_attempts::backfill(connection, true, smallclaims::store::now_ms())?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbed1ce264b3a owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_operations::LOCAL_SCHEMA)?;
         Ok(())

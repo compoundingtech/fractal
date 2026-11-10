@@ -191,6 +191,18 @@ Older TypeScript `ReadSchema.Message.state` decoders use a closed literal union 
 Upgrading the generated union may require consumers to add an exhaustive `expired` arm.
 No harness receipt or automatic expiry writer is changed.
 
+Staging freshness is retained in `local_staging_attempts.last_attempt_at` in the owner's
+graph or messages-shard database. This table is owner-local and is **not replicated**.
+Restaging advances only that time, preserving the first receipt and its idempotent outcome.
+Readers tolerate a database without the table; missing freshness is not proof of no attempt.
+The forward-only backfill runs once, using table creation as its atomic completion marker.
+Only old unresolved staged rows start at `max(recorded time, migration time)`: their old
+binary may have discarded retry times. This can delay their eventual expiry once by up to
+seven days. Resolved rows retain their recorded attempt time; never-offered mail and silent
+`waits_for_turn` mail retain their original acceptance time. This step installs no expiry
+writer. The separate writer rollout must obtain freshness through an **answered owner read**;
+an old owner build, timeout, or unreachable owner must hold mail rather than prove absence.
+
 Claude distinguishes native queue acceptance (`queue-operation/enqueue`, which records
 `delivered`) from consumption (a user transcript entry, including `isMeta`, or an explicit
 `queue-operation/remove` with `reason: absorbed_mid_turn`, which records `read`). Receipt matching

@@ -197,6 +197,7 @@ impl FractalRuntime {
         migrate_local_usage_seen(connection)?;
         // Before the projection backfills, which fold marks in.
         message_marks::create_table(connection)?;
+        staging_attempts::backfill(connection, false, now_ms())?;
         message_outbox::create_table(connection)?;
         stream_mirror::create_table(connection)?;
         relayed_closes::create_table(connection)?;
