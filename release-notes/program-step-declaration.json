@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "ApplyRequest and the owned-set apply request gain an optional `program_bundles` map (sha256 -> base64), omitted when empty, so older clients and daemons are unaffected unless a mission declares a program. /v1/intent/apply and /v1/sets/apply accept bodies up to 32 MiB. A publication of a program whose blob this member does not hold is refused with `missing-program-bundle`; `fractal apply`, `apply --dry-run` and `fractal validate` refuse a bundle whose bytes no longer match its sha256. A member whose build predates `program` reads a published program mission without the field, so its revision hash differs and it quarantines the revision: publish program missions only once every member runs this build."
+    "detail": "ApplyRequest and the owned-set apply request gain an optional `program_bundles` map (sha256 -> base64), omitted when empty, so older clients and daemons are unaffected unless a mission declares a program. /v1/intent/apply and /v1/sets/apply accept bodies up to 32 MiB. A publication of a program whose blob this member does not hold is refused with `missing-program-bundle`; `fractal apply`, `apply --dry-run` and `fractal validate` refuse a bundle whose bytes no longer match its sha256. A member whose build predates `program` would read a published program mission without the field and quarantine the revision, so each daemon now advertises `mission_program=1` on `daemon.started` and a revision with a program step is refused with `mission-program-unavailable` (also an `apply --dry-run` blocker) until every current member advertises it."
   },
   "downtime": {
     "status": "none",

@@ -35,7 +35,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
 
 fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
-    let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, inputs,
+    let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, authority, inputs,
         max_active_runs, timeout_ms: _, report_to: _, stalled_after_ms: _, report_stalls: _,
         report_completed: _, revision_owners: _, revisions_human_only: _, revision_reviewer: _,
         revision_cutover: _, declarations_kdl: _, capacity, work_selector, completion, goals,
@@ -70,6 +70,10 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
             comment(&mut resource, "authored URI edge; locator is not stored in the published revision");
         }
         children.push(resource);
+    }
+    if !authority.is_empty() {
+        children.push(block(node("authority", []),
+            authority.iter().map(|grant| text(grant.verb.as_str(), &grant.pattern)).collect()));
     }
     for input in inputs.values() {
         if parent.is_some_and(|parent| parent.inputs.contains_key(&input.name)
@@ -212,6 +216,22 @@ mod tests {
             declared-lane "check"
             declared-budgets { cpu-seconds 300; token-budget 100000; memory-max "8G"; disk-max "20G"; attention "person/reviewer" asks=3; }
         }"#);
+    }
+
+    #[test]
+    fn canonical_mission_authority_round_trip() {
+        let source = r#"mission "test" state="ready" {
+            goal "Land one change."
+            authority { write "resource/factory/*"; publish "scratch/*"; start "factory/publish"; }
+            step "work" { agentless; }
+        }"#;
+        round_trip(source);
+        let rendered: KdlDocument = render_mission_kdl(&parse(source)).unwrap().text.parse().unwrap();
+        let rules = rendered.get("mission").unwrap().children().unwrap().get("authority").unwrap()
+            .children().unwrap().nodes().iter()
+            .map(|rule| format!("{} {}", rule.name().value(), rule.get(0).unwrap().as_string().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(rules, ["publish scratch/*", "start factory/publish", "write resource/factory/*"]);
     }
 
     #[test]
