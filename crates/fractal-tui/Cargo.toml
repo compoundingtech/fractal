@@ -20,6 +20,7 @@ fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ra
 fractal-mission-ui = { path = "../fractal-mission-ui", features = ["ratatui"] }
 fractal-ui-model = { path = "../fractal-ui-model" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
 uuid = { version = "1", features = ["v7"] }
 signal-hook = "0.3"
 serde_json = "1"

@@ -1548,6 +1548,7 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Effect::OpenTerminal { agent } => {
                     let (generation, wanted, serial) = attach.begin(&mut ui, &agent);
+                    let trace = attach.trace(&agent);
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
                     // give a direct stream.
@@ -1590,19 +1591,22 @@ pub fn run(context: Context) -> Result<()> {
                         let task_agent = agent.clone();
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
+                        let setup_owner = attach::SetupOwner::new(trace.clone());
                         let task = runtime.spawn(async move {
-                            // A shell has no other view to fall back to, and one started a moment ago
-                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            let mut setup_owner = setup_owner;
+                            // Discovery refusals may settle for a new shell. Capability timeouts
+                            // retry inside attach_terminal, keeping its selected incarnation.
                             let delays: &[Duration] = if agent.starts_with("terminal/") {
                                 &attach::RETRY_DELAYS
                             } else {
                                 &[]
                             };
-                            let attached = attach::phase("attach setup", attach::DEADLINE, async {
+                            let attached = attach::traced_phase(trace.as_ref(), "attach setup", attach::DEADLINE, async {
                                 let _permit = serial.acquire_owned().await
                                     .map_err(|_| "attach setup cancelled".to_owned())?;
                                 retry_attach(
                                     delays,
+                                    true,
                                     || wanted.load(Ordering::Relaxed),
                                     |reason| {
                                         let _ = tx.send(Fetched::AttachWaiting {
@@ -1619,10 +1623,16 @@ pub fn run(context: Context) -> Result<()> {
                                             &runtime_ids,
                                             owner.as_deref(),
                                             fallback,
+                                            trace.as_ref(),
                                         )
                                     },
                                 ).await
                             }).await;
+                            if let Err(reason) = &attached {
+                                if let Some(trace) = &trace {
+                                    trace.finish(if reason == "attach setup timed out" { "outer-deadline" } else { "setup-failed" });
+                                }
+                            }
                             // Its tab closed while it waited: nobody is left to hear the outcome.
                             if !wanted.load(Ordering::Relaxed) {
                                 if let Ok(direct) = attached { attach::close(direct); }
@@ -1636,8 +1646,11 @@ pub fn run(context: Context) -> Result<()> {
                                     runtime_ids,
                                     reason,
                                 },
-                            }) && let Fetched::Native { direct, .. } = error.0 {
-                                attach::close(direct);
+                            }) {
+                                if let Some(trace) = &trace { trace.finish("dispatch-unavailable"); }
+                                if let Fetched::Native { direct, .. } = error.0 { attach::close(direct); }
+                            } else {
+                                setup_owner.handed_off();
                             }
                         });
                         attach.tasks.insert(task_agent, task);
@@ -1965,6 +1978,9 @@ pub fn run(context: Context) -> Result<()> {
         attach.opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
+        for native in ui.terminal.iter().chain(ui.parked.iter()).filter_map(|view| view.native.as_ref()) {
+            native.frame_started();
+        }
         let mut links = Vec::new();
         let draw_started = Instant::now();
         terminal.draw(|frame| {
@@ -2033,6 +2049,9 @@ pub fn run(context: Context) -> Result<()> {
             || execute!(io::stdout(), EndSynchronizedUpdate),
             |target| ui.conversation_entry_visible(target),
         )?;
+        for native in ui.terminal.iter().chain(ui.parked.iter()).filter_map(|view| view.native.as_ref()) {
+            native.frame_rendered();
+        }
         ui.quality.live(extras.live);
         let top = u8::from(extras.live)
             | (u8::from(extras.offline.is_some()) << 1)
@@ -2115,6 +2134,7 @@ pub fn run(context: Context) -> Result<()> {
                     Some(&expected),
                     owner.as_deref(),
                     fallback,
+                    None,
                 )
                 .await;
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
@@ -3239,6 +3259,7 @@ mod tests {
                 .unwrap()
                 .block_on(retry_attach(
                     &vec![Duration::ZERO; delays],
+                    true,
                     || true,
                     |reason| said.push(reason.to_owned()),
                     || {
@@ -3284,9 +3305,56 @@ mod tests {
             Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
-        // Transient shell discovery may retry briefly, but a phase timeout is never retried.
+        // Capability issuance opens no PTY; upgrade cancellation has no cleanup receipt.
         assert_eq!(super::attach::RETRY_DELAYS.iter().sum::<Duration>(), Duration::from_secs(3));
+        assert!(super::worth_retrying("raw terminal capability timed out"));
+        assert!(!super::worth_retrying("raw terminal connect/upgrade (including auth and owner-open) timed out"));
+        assert!(!super::worth_retrying("raw terminal first-frame timed out"));
         assert!(!super::worth_retrying("raw terminal stream timed out"));
+    }
+
+    #[test]
+    fn setup_timeouts_retry_only_capability_and_drop_each_attempt_before_retry() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Cleanup(Arc<AtomicUsize>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time().build().unwrap();
+        for phase in [
+            attach::SetupPhase::Capability,
+            attach::SetupPhase::Upgrade,
+            attach::SetupPhase::FirstFrame,
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let cleaned = Arc::new(AtomicUsize::new(0));
+            let result: Result<(), String> = runtime.block_on(retry_attach(
+                &[Duration::ZERO; attach::RETRY_DELAYS.len()],
+                false,
+                || true,
+                |_| {},
+                || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(cleaned.load(Ordering::SeqCst), attempt,
+                        "the previous setup future must be dropped before another starts");
+                    let guard = Cleanup(cleaned.clone());
+                    async move {
+                        attach::phase(phase.name(), Duration::from_millis(1), async move {
+                            let _guard = guard;
+                            std::future::pending::<Result<(), String>>().await
+                        }).await
+                    }
+                },
+            ));
+            let reason = result.unwrap_err();
+            assert_eq!(attach::SetupPhase::timeout(&reason), Some(phase));
+            let expected = if phase.retry_safe() { 3 } else { 1 };
+            assert_eq!(attempts.load(Ordering::SeqCst), expected);
+            assert_eq!(cleaned.load(Ordering::SeqCst), expected);
+        }
+        assert_eq!(attach::SetupPhase::timeout("raw terminal stream timed out"), None);
+        assert_eq!(attach::SetupPhase::timeout("raw terminal capability refused"), None);
     }
 
     #[test]
@@ -3301,6 +3369,7 @@ mod tests {
             .unwrap()
             .block_on(retry_attach(
                 &[Duration::ZERO; 20],
+                true,
                 || wanted.get(),
                 |_| {
                     said += 1;
@@ -5080,6 +5149,9 @@ fn connecting_text(waited: Duration) -> String {
 /// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
 /// is gone, restarted or not allowed is not retried.
 fn worth_retrying(reason: &str) -> bool {
+    if let Some(phase) = attach::SetupPhase::timeout(reason) {
+        return phase.retry_safe();
+    }
     [
         "cannot tell yet which host",
         "cannot be reached right now",
@@ -5095,6 +5167,7 @@ fn worth_retrying(reason: &str) -> bool {
 /// as `wanted` says nobody is waiting any more (the tab was closed).
 async fn retry_attach<T, Fut>(
     delays: &[Duration],
+    transient_refusals: bool,
     wanted: impl Fn() -> bool,
     mut waiting: impl FnMut(&str),
     mut attempt: impl FnMut() -> Fut,
@@ -5105,7 +5178,8 @@ where
     let mut delays = delays.iter();
     loop {
         match attempt().await {
-            Err(reason) if worth_retrying(&reason) => match delays.next() {
+            Err(reason) if worth_retrying(&reason)
+                && (transient_refusals != attach::SetupPhase::timeout(&reason).is_some()) => match delays.next() {
                 Some(delay) if wanted() => {
                     waiting(&reason);
                     tokio::time::sleep(*delay).await;
@@ -5128,6 +5202,7 @@ async fn attach_known_then_direct(
     runtime_ids: &[String],
     owner: Option<&str>,
     fallback: bool,
+    trace: Option<&super::attach_trace::Trace>,
 ) -> Result<Direct, String> {
     if let Some((name, terminal, incarnation)) = known
         && !agent.starts_with("terminal/")
@@ -5135,10 +5210,10 @@ async fn attach_known_then_direct(
         // Once selected, keep this incarnation through every route failure. Rediscovery after
         // an error could silently attach a process that restarted in the meantime.
         return attach_terminal(
-            client, agent, (name, incarnation), &terminal, owner, None, fallback,
+            client, agent, (name, incarnation), &terminal, owner, None, fallback, trace,
         ).await;
     }
-    attach_direct(client, agent, runtime_ids, None, owner, fallback).await
+    attach_direct(client, agent, runtime_ids, None, owner, fallback, trace).await
 }
 
 async fn attach_direct(
@@ -5148,8 +5223,9 @@ async fn attach_direct(
     expected: Option<&str>,
     owner: Option<&str>,
     fallback: bool,
+    trace: Option<&super::attach_trace::Trace>,
 ) -> Result<Direct, String> {
-    let found = attach::phase("terminal discovery", attach::DISCOVERY, async {
+    let found = attach::traced_phase(trace, "terminal discovery", attach::DISCOVERY, async {
         let mut found = Vec::new();
         if subject.starts_with("terminal/") {
             // A shell just started may take a moment before its screen exists.
@@ -5207,6 +5283,7 @@ async fn attach_direct(
             owner.as_deref(),
             expected,
             fallback,
+            trace,
         )
         .await
         {
@@ -5229,9 +5306,10 @@ async fn attach_terminal(
     owner: Option<&str>,
     expected: Option<&str>,
     fallback: bool,
+    trace: Option<&super::attach_trace::Trace>,
 ) -> Result<Direct, String> {
     let (name, incarnation) = identity;
-    let opened = attach::phase("direct open", attach::DIRECT, direct::open(
+    let opened = attach::traced_phase(trace, "direct open", attach::DIRECT, direct::open(
         client,
         &direct::Terminal {
             subject,
@@ -5259,13 +5337,21 @@ async fn attach_terminal(
         }
         direct::Opened::UseGateway { route } => route,
     };
-    let attachment = attach::phase("raw terminal attachment", attach::GATEWAY, async {
-        client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
-            .await.map_err(|error| format!("{route}: {}", error.human()))
-    }).await?;
+    // Retry only this pre-open phase, not discovery: every attempt keeps the same incarnation.
+    let attachment = retry_attach(
+        &attach::RETRY_DELAYS,
+        false,
+        || true,
+        |_| {},
+        || attach::traced_phase(trace, attach::SetupPhase::Capability.name(), attach::GATEWAY, async {
+            client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
+                .await.map_err(|error| format!("{route}: {}", error.human()))
+        }),
+    ).await?;
     // An unused capability opens no PTY and expires on the server after 60 seconds.
-    // Once upgraded, dropping the stream cancels its bridge, including on task abort.
-    let stream = attach::phase("raw terminal stream", attach::GATEWAY, async {
+    // Cancelling this upgrade does not acknowledge completion of remote owner cleanup;
+    // unlike capability issuance, its timeout must not trigger another attachment.
+    let stream = attach::traced_phase(trace, attach::SetupPhase::Upgrade.name(), attach::GATEWAY, async {
         client.raw_terminal_stream(&attachment).await
             .map_err(|error| format!("{route}: {}", error.human()))
     }).await?;
