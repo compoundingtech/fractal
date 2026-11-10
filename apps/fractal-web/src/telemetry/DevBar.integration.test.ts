@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 /**
- * The recent-changes disclosure survives the move onto the shared developer bar: the real DevBar
- * composes the app's Changelog as a kit segment, the trigger carries the unseen indicator, opening
- * acknowledges and loads prose, Escape closes only the popover and returns focus to the trigger,
- * and an overflowed segment's unseen state is mirrored on the kit's +N control.
+ * Build identity and recent changes share one developer-bar entry: the real DevBar composes the
+ * kit's build identity disclosure with the app's changelog, the trigger carries the unseen
+ * indicator, intent only prefetches, opening shows identity, acknowledges and loads prose, Escape
+ * closes only the popover and returns focus to the trigger, and an overflowed entry's unseen state
+ * is mirrored on the kit's +N control.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { installNativePopover } from '../testNativePopover.ts'
 import type * as ChangelogModule from '../changelog/build.ts'
 
 const fixture = vi.hoisted(() => ({
@@ -53,6 +55,7 @@ vi.mock('../changelog/build.ts', () => ({
 }))
 
 let unmount: (() => Promise<void>) | undefined
+let restorePopover: (() => void) | undefined
 
 beforeEach(() => {
   fixture.wait = undefined
@@ -61,8 +64,7 @@ beforeEach(() => {
   fixture.loaded = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
-  // React Aria and the overflow focus fallback use CSS.escape; jsdom does not supply it.
-  vi.stubGlobal('CSS', { escape: (value: string) => Array.from(value, (char) => /[a-zA-Z0-9_-]/.test(char) ? char : `\\${char.codePointAt(0)?.toString(16)} `).join('') })
+  restorePopover = installNativePopover()
   window.localStorage.clear()
 })
 
@@ -71,6 +73,8 @@ afterEach(async () => {
   unmount = undefined
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  restorePopover?.()
+  restorePopover = undefined
 })
 
 /** Fresh modules per test: the bar's preference registry and seen cursor are module singletons. */
@@ -88,20 +92,24 @@ const mount = async () => {
   return { act: React.act, host }
 }
 
-const changelogTrigger = (host: HTMLElement) => {
-  const trigger = host.querySelector<HTMLButtonElement>('[data-devbar-segment="changelog"] [data-devbar-segment-content] button')
-  if (trigger === null) throw new Error('changelog trigger did not mount in its devbar segment')
+const buildTrigger = (host: HTMLElement) => {
+  const trigger = host.querySelector<HTMLButtonElement>('[data-devbar-segment="build"] [data-devbar-segment-content] button[aria-haspopup="dialog"]')
+  if (trigger === null) throw new Error('build trigger did not mount in its devbar segment')
   return trigger
 }
-const recentChanges = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Recent changes"]')
+/** The popover content mounts only while open. */
+const buildPopover = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Build and changes"] [data-devbar-build-changes]')
+const unseenName = /^Build identity: 1234567 · n\/a, show Build and changes, unseen changes$/
+const seenName = /^Build identity: 1234567 · n\/a, show Build and changes$/
 
-it('opens recent changes from the devbar segment, acknowledges them, and closes on Escape with focus restored', async () => {
+it('opens build identity and recent changes from one devbar trigger, acknowledges them, and closes on Escape with focus restored', async () => {
   const { act, host } = await mount()
-  const trigger = changelogTrigger(host)
-  expect(trigger.getAttribute('aria-label')).toBe('Changes, unread')
-  expect(trigger.querySelector('[data-testid="changelog-unseen"]')).not.toBeNull()
+  const trigger = buildTrigger(host)
+  expect(trigger.getAttribute('aria-label')).toMatch(unseenName)
+  expect(trigger.querySelector('[data-devbar-unseen]')).not.toBeNull()
+  expect(host.querySelectorAll('button[aria-haspopup="dialog"][aria-label^="Build identity"]')).toHaveLength(1)
 
-  // A kit panel stays open underneath; Escape must close only the changelog popover.
+  // A kit panel stays open underneath; Escape must close only the build popover.
   const counters = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Counters')
   await act(async () => counters?.click())
   expect(host.querySelector('section[aria-label="Counters"]')).not.toBeNull()
@@ -110,42 +118,47 @@ it('opens recent changes from the devbar segment, acknowledges them, and closes 
   await act(async () => trigger.click())
   await vi.waitFor(async () => {
     await act(async () => {})
-    expect(recentChanges()?.textContent).toContain(fixture.title)
+    expect(buildPopover()?.textContent).toContain(fixture.title)
   })
-  expect(recentChanges()?.textContent).toContain("What's new")
-  expect(trigger.getAttribute('aria-label')).toBe('Changes')
-  expect(trigger.querySelector('[data-testid="changelog-unseen"]')).toBeNull()
+  expect(trigger.getAttribute('aria-expanded')).toBe('true')
+  expect(buildPopover()?.textContent).toContain('123456789abc')
+  expect(buildPopover()?.textContent).toContain(fixture.machineVersion)
+  expect(buildPopover()?.textContent).toContain("What's new")
+  expect(trigger.getAttribute('aria-label')).toMatch(seenName)
+  expect(trigger.querySelector('[data-devbar-unseen]')).toBeNull()
   const stored = JSON.parse(window.localStorage.getItem('wf.ui@1') ?? '{}')
   expect(stored.entries?.['changelog.fractal-web.main']?.value).toEqual({ visited: true, entryIds: [fixture.entryId] })
 
-  const dialog = recentChanges()!
-  await act(async () => { dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
+  const content = buildPopover()!
+  await act(async () => { content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
   await vi.waitFor(async () => {
     await act(async () => {})
-    expect(recentChanges()).toBeNull()
-    expect(document.activeElement).toBe(changelogTrigger(host))
+    expect(buildPopover()).toBeNull()
+    expect(document.activeElement).toBe(buildTrigger(host))
   })
+  expect(buildTrigger(host).getAttribute('aria-expanded')).toBe('false')
   expect(host.querySelector('section[aria-label="Counters"]')).not.toBeNull()
 }, 30_000)
 
 it('prefetches on focus without opening or acknowledging changes', async () => {
   const { act, host } = await mount()
   expect(fixture.loads).toBe(0)
-  await act(async () => changelogTrigger(host).focus())
+  await act(async () => buildTrigger(host).focus())
   expect(fixture.loads).toBe(1)
-  expect(recentChanges()).toBeNull()
-  expect(changelogTrigger(host).getAttribute('aria-label')).toBe('Changes, unread')
-  await act(async () => changelogTrigger(host).click())
-  expect(recentChanges()?.textContent).toContain(fixture.title)
-  expect(recentChanges()?.querySelector('[role="status"]')).toBeNull()
+  expect(buildPopover()).toBeNull()
+  expect(buildTrigger(host).getAttribute('aria-label')).toMatch(unseenName)
+  expect(JSON.parse(window.localStorage.getItem('wf.ui@1') ?? '{}').entries?.['changelog.fractal-web.main']).toBeUndefined()
+  await act(async () => buildTrigger(host).click())
+  expect(buildPopover()?.textContent).toContain(fixture.title)
+  expect(buildPopover()?.querySelector('[role="status"]')).toBeNull()
 }, 30_000)
 
 it('opens idle-prefetched code without an intermediate loading state', async () => {
   await (await import('../changelog/load.ts')).loadChangelog()
   const { act, host } = await mount()
-  await act(async () => changelogTrigger(host).click())
-  expect(recentChanges()?.textContent).toContain(fixture.title)
-  expect(recentChanges()?.querySelector('[role="status"]')).toBeNull()
+  await act(async () => buildTrigger(host).click())
+  expect(buildPopover()?.textContent).toContain(fixture.title)
+  expect(buildPopover()?.querySelector('[role="status"]')).toBeNull()
   expect(fixture.loads).toBe(1)
 }, 30_000)
 
@@ -154,28 +167,29 @@ it('opens immediately on a cold load and contains a failed chunk with retry', as
   fixture.wait = promise
   fixture.fail = true
   const { act, host } = await mount()
-  await act(async () => changelogTrigger(host).click())
-  expect(recentChanges()?.textContent).toContain('Loading recent changes')
+  await act(async () => buildTrigger(host).click())
+  expect(buildPopover()?.textContent).toContain('Loading recent changes')
   await act(async () => release())
   await vi.waitFor(async () => {
     await act(async () => {})
-    expect(recentChanges()?.textContent).toContain('workspace is unaffected')
+    expect(buildPopover()?.textContent).toContain('workspace is unaffected')
   })
   fixture.fail = false
-  const retry = [...recentChanges()!.querySelectorAll('button')].find(button => button.textContent === 'Retry')
+  const retry = [...buildPopover()!.querySelectorAll('button')].find(button => button.textContent === 'Retry')
   await act(async () => retry?.click())
   await vi.waitFor(async () => {
     await act(async () => {})
-    expect(recentChanges()?.textContent).toContain(fixture.title)
+    expect(buildPopover()?.textContent).toContain(fixture.title)
   })
 }, 30_000)
 
-it('mirrors the unseen indicator on the overflow control when the changelog segment is hidden', async () => {
+it('mirrors the unseen indicator on the overflow control when the build segment is hidden', async () => {
   // jsdom reports no row width, so any measured content overflows every segment.
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ width: 48, height: 20 }))
   const { host } = await mount()
   const overflow = host.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"][aria-label*="more status items"]')
-  expect(overflow?.getAttribute('aria-label')).toMatch(/: .*version, changelog, including unseen changes$/)
+  expect(overflow?.getAttribute('aria-label')).toMatch(/: .*build, including unseen changes$/)
+  expect(overflow?.getAttribute('aria-label')).not.toMatch(/\b(version|changelog)\b/)
   expect(overflow?.querySelector('[data-devbar-unseen]')).not.toBeNull()
 }, 30_000)
 
