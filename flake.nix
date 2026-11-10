@@ -16,6 +16,9 @@
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
       "github:overengineeringstudio/effect-utils/277dc6d9f7b226da58e526398ee450d877b6a4a1";
+    mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
+    mergemaster.inputs.nixpkgs.follows = "nixpkgs";
+    mergemaster.inputs.effect-utils.follows = "effect-utils";
   };
 
   outputs =
