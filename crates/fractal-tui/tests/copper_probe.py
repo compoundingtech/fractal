@@ -25,14 +25,22 @@ def main(root):
     def record(kind, **data):
         log.write(json.dumps({"kind": kind, **data}) + "\n")
 
-    def resized(*_):
-        rows, cols, px, py = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
-        record("resize", rows=rows, cols=cols, pixels=[px, py])
+    # The handler only notes a SIGWINCH and the loop records the size. A handler that wrote
+    # the log could interrupt the loop's own write to it, and Python ends the program on that
+    # reentrant buffered write.
+    resized = True
 
-    signal.signal(signal.SIGWINCH, resized)
-    resized()
+    def winch(*_):
+        nonlocal resized
+        resized = True
+
+    signal.signal(signal.SIGWINCH, winch)
     current = None
     while not (root / "stop").exists():
+        if resized:
+            resized = False
+            rows, cols, px, py = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+            record("resize", rows=rows, cols=cols, pixels=[px, py])
         try:
             request = json.loads((root / "request.json").read_text())
         except (FileNotFoundError, json.JSONDecodeError):

@@ -21,6 +21,7 @@ fn st3() -> &'static str {
 }
 mod process;
 use process::DaemonProcess;
+mod service_grants;
 
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
@@ -7969,13 +7970,13 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
 /// Leave the message `subject` from `from` in stopped `node`'s message outbox, refused
 /// `attempts` times already: what a sender that queues there (4c-3) leaves when its daemon stops
 /// before the drain, or when the member rolls back from it.
-fn leave_in_outbox(node: &Node, subject: &str, from: &str, attempts: i64) {
+fn leave_in_outbox(node: &Node, subject: &str, from: &str, to: &str, attempts: i64) {
     let claim = ClaimInput {
         subject: subject.into(),
         kind: "message.sent".into(),
         actor: Some(from.into()),
         fields: serde_json::from_value(json!({
-            "from": from, "to": "agent/fleet-reader", "content": "through the outbox", "status": "sent"
+            "from": from, "to": to, "content": "through the outbox", "status": "sent"
         }))
         .unwrap(),
         evidence: Vec::new(),
@@ -8012,7 +8013,7 @@ async fn graph_messages(node: &Node, subject: &str) -> usize {
 /// The previous release upgrades in place to a build with the message outbox, which stays empty:
 /// the release's mail reads the same, and a backup this build takes restores on the release.
 /// Rolled back, the release reads its mail beside the outbox. A release already owning that
-/// table drains the queued message; an older release leaves it until the next upgrade.
+/// table drains the queued message to its routed store; an older release leaves it until upgrade.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_back() {
@@ -8093,35 +8094,75 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     // an older release leaves it queued while continuing to read and send graph mail.
     o.stop();
     let left = "message/0000000000000e01";
-    leave_in_outbox(&o, left, "agent/fleet-sender", 0);
+    leave_in_outbox(&o, left, "agent/fleet-sender", "agent/fleet-reader", 0);
     o.start().await;
     let mut rolled_back = before.clone();
+    let mut release_drains_to_graph = false;
     if release_drains_outbox {
-        // The drain appends to the shard before it deletes the row. Alone, the release seals that
-        // batch only when something asks (a checkpoint, a peer, a leave), so count the claim itself.
+        // v0.3.31 rechecks recipient routing: this undeclared seat has no host,
+        // so the queued item goes to the graph rather than the shard.
+        // Older outbox baselines appended directly to the shard.
         wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
-        assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
-        assert_eq!(graph_messages(&o, left).await, 0, "the release drained the queued item to its shard, not the graph");
+        release_drains_to_graph = graph_messages(&o, left).await == 1;
+        if release_drains_to_graph {
+            assert_eq!(shard_file_claims(&o, left), 0, "the routed fallback must not duplicate mail in the shard");
+            before.push((left.to_owned(), "sent".to_owned()));
+            eprintln!(
+                "baseline release already reroutes outbox mail without a recipient host to the graph; \
+                 skipping only the historical shard-drain assertions"
+            );
+        } else {
+            assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
+            assert_eq!(graph_messages(&o, left).await, 0, "the release drained to one store only");
+        }
         rolled_back.push((left.to_owned(), "sent".to_owned()));
     }
     assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
     let third = send(&o, "rolled-back").await;
     before.push((third, "sent".to_owned()));
     rolled_back = before.clone();
-    if release_drains_outbox {
+    if release_drains_outbox && !release_drains_to_graph {
         rolled_back.push((left.to_owned(), "sent".to_owned()));
     }
     assert_eq!(listed(&o).await, rolled_back);
     assert_eq!(outbox(&o), if release_drains_outbox { Vec::<String>::new() } else { vec![left.to_owned()] });
 
-    // Upgrade again: the left message drains to the shard, once, and follows the graph's mail.
+    // Upgrade again: an existing copy stays in its one store. If the baseline left
+    // it queued, the candidate routes this undeclared recipient to the graph.
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
     wait_until("the upgraded member drains the outbox", 60, || async { outbox(&o).is_empty() }).await;
-    assert_eq!(stream_items(&o, left).await, 1);
-    assert_eq!(graph_messages(&o, left).await, 0);
-    before.push((left.to_owned(), "sent".to_owned()));
+    let left_in_graph = !release_drains_outbox || release_drains_to_graph;
+    assert_eq!(stream_items(&o, left).await, if left_in_graph { 0 } else { 1 });
+    assert_eq!(graph_messages(&o, left).await, if left_in_graph { 1 } else { 0 });
+    if !release_drains_to_graph {
+        before.push((left.to_owned(), "sent".to_owned()));
+    }
+    assert_eq!(listed(&o).await, before);
+
+    // Keep a candidate-only shard-drain control with an explicitly local recipient:
+    // routing hardening must not turn this test into a graph-only positive control.
+    let declaration = root.path().join("outbox-reader.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"outbox/reader\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root
+    )).unwrap();
+    o.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    o.stop();
+    let routed = "message/0000000000000e02";
+    leave_in_outbox(&o, routed, "agent/fleet-sender", "agent/outbox/reader", 0);
+    // Replaying the old outbox entry must not migrate or duplicate its existing copy.
+    leave_in_outbox(&o, left, "agent/fleet-sender", "agent/fleet-reader", 0);
+    o.start().await;
+    wait_until("the candidate drains routed and replayed mail", 60, || async { outbox(&o).is_empty() }).await;
+    assert_eq!(stream_items(&o, routed).await, 1);
+    assert_eq!(graph_messages(&o, routed).await, 0);
+    assert_eq!(stream_items(&o, left).await, if left_in_graph { 0 } else { 1 });
+    assert_eq!(graph_messages(&o, left).await, if left_in_graph { 1 } else { 0 });
+    let routed_mail: MessagePage = o.client()
+        .get("/v1/messages/page?to=agent/outbox/reader&include_closed=true").await.unwrap();
+    assert_eq!(routed_mail.items.iter().map(|item| item.subject.as_str()).collect::<Vec<_>>(), [routed]);
     assert_eq!(listed(&o).await, before);
 }
 
@@ -8144,9 +8185,9 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     let eligible = "message/0000000000000f02";
     let refused = "message/0000000000000f03";
     // The drain stopped after the shard append, before the delete.
-    leave_in_outbox(&n, held, "agent/fleet-sender", 0);
-    leave_in_outbox(&n, eligible, "agent/fleet-sender", 0);
-    leave_in_outbox(&n, refused, PERSON, fractal_store::store::message_outbox::ATTEMPTS - 1);
+    leave_in_outbox(&n, held, "agent/fleet-sender", "agent/fleet-reader", 0);
+    leave_in_outbox(&n, eligible, "agent/fleet-sender", "agent/fleet-reader", 0);
+    leave_in_outbox(&n, refused, PERSON, "agent/fleet-reader", fractal_store::store::message_outbox::ATTEMPTS - 1);
 
     n.start().await;
     wait_until("the startup drain empties the outbox but for the refused message", 30, || async {
@@ -8371,6 +8412,10 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
         wait_until("each member of this build counts all three", 60, || async { agent_mail_counted(node).await == 3 }).await;
     }
     assert_eq!(shard_file_claims(&a, items[0].0), 1, "the replayed send wrote nothing");
+    // Shard admission precedes the release's asynchronous mail-index mirror.
+    wait_until("the release counts what it mirrors", 60, || async {
+        agent_mail_counted(&o).await == if release_mirrors { 3 } else { 0 }
+    }).await;
     let release_counts = agent_mail_counted(&o).await;
     assert_eq!(release_counts, if release_mirrors { 3 } else { 0 }, "the release counts only what it mirrors");
     for node in [&a, &b, &o] {
@@ -8394,6 +8439,9 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     for node in [&a, &b] {
         wait_until("each member of this build counts the late item", 60, || async { agent_mail_counted(node).await == 4 }).await;
     }
+    wait_until("the rolled-back member counts what it mirrors", 60, || async {
+        agent_mail_counted(&o).await == if release_mirrors { 4 } else { 3 }
+    }).await;
     assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8671,6 +8719,160 @@ async fn previous_release_beside_members_that_send_each_message_once_across_stor
     if !release_inbox {
         wait_until("the rolled-back member's start no longer advertises it", 90, || async {
             !newest_start_advertises(&a, "o", "messages_stream_inbox").await
+        })
+        .await;
+    }
+    for node in [&a, &b, &o] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+}
+
+/// An agent's message to `to` through `POST /v1/messages` on `node`, under `key`: its receipt.
+async fn agent_send(node: &Node, to: &str, key: &str) -> Value {
+    node.client()
+        .post("/v1/messages", &json!({
+            "idempotency_key": key, "from": "agent/fleet-sender", "to": to, "content": format!("routed mail {key}"),
+        }))
+        .await
+        .unwrap()
+}
+
+/// Where `subject` is on `node`: (graph claims, shard items).
+async fn held(node: &Node, subject: &str) -> (usize, u64) {
+    (graph_sent_claims(node, subject).await, shard_file_claims(node, subject))
+}
+
+/// Mail routes to the stream where its recipient's host reads stream mail, beside a
+/// previous release that may already route sends (v0.3.31) or only read stream mail
+/// (v0.3.30; earlier releases advertise no inbox). Every message stays in one store
+/// and a retry replays it. Mail without a recipient host remains a graph claim.
+/// Upgrading always enables routing; rollback restores the baseline's routing behavior
+/// without losing the stream mail it holds.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_beside_members_that_route_mail_by_the_recipients_host() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "a").await;
+    let b = joined(root.path(), &a, "b", &[]).await;
+    b.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+    let mut o = Node::new(root.path(), "o");
+    o.binary = old.clone();
+    let code = a.invite("o", &[]);
+    let output = o.join(&code, &[]);
+    assert!(
+        output.status.success(),
+        "o failed to join:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    o.start().await;
+    wait_for_stream_peers(&a, &["b", "o"], 90).await;
+    let declaration = root.path().join("route-seats.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"route/o-seat\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\nagent \"route/b-seat\" {{ host \"b\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root, b.root
+    )).unwrap();
+    a.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    let (o_seat, b_seat) = ("agent/route/o-seat", "agent/route/b-seat");
+    for node in [&b, &o] {
+        wait_until("the seats' declarations replicate", 90, || async {
+            node.claims().await.iter().any(|claim| claim["subject"] == b_seat && claim["kind"] == "intent.desired")
+        })
+        .await;
+    }
+    wait_until("b's start advertises its inbox", 60, || async {
+        newest_start_advertises(&a, "b", "messages_stream_inbox").await
+    })
+    .await;
+    let release_inbox = newest_start_advertises(&a, "o", "messages_stream_inbox").await;
+    let base = fractal_daemon::store::messages_shard::STREAM_INDEX_BASE;
+
+    // To this build's seat: a stream item, which a retry replays.
+    let to_b = agent_send(&a, b_seat, "route-to-b").await;
+    let to_b_subject = to_b["subject"].as_str().unwrap().to_owned();
+    assert!(to_b["created_index"].as_u64().unwrap() > base, "{to_b}");
+    let again = agent_send(&a, b_seat, "route-to-b").await;
+    assert_eq!(again["already_sent"], true, "{again}");
+    assert_eq!(again["subject"], to_b_subject.as_str());
+    // To the release's seat: a stream item exactly when the release advertises its inbox.
+    let to_o = agent_send(&a, o_seat, "route-to-o").await;
+    let to_o_subject = to_o["subject"].as_str().unwrap().to_owned();
+    assert_eq!(to_o["created_index"].as_u64().unwrap() > base, release_inbox, "{to_o}");
+    // To a seat no declaration places: a graph claim.
+    let nowhere = agent_send(&a, "agent/route/nobody", "route-to-nobody").await;
+    let nowhere_subject = nowhere["subject"].as_str().unwrap().to_owned();
+    assert!(nowhere["created_index"].as_u64().unwrap() < base, "{nowhere}");
+    // Establish the release's routing capability only after it knows b's inbox.
+    wait_until("the release sees b's inbox advertisement", 60, || async {
+        newest_start_advertises(&o, "b", "messages_stream_inbox").await
+    }).await;
+    let from_o = agent_send(&o, b_seat, "route-from-o").await;
+    let from_o_subject = from_o["subject"].as_str().unwrap().to_owned();
+    let release_routes_stream = from_o["created_index"].as_u64().unwrap() > base;
+    let release_sent_store = if release_routes_stream {
+        eprintln!(
+            "baseline release already routes agent mail to advertised inboxes; \
+             skipping only the historical graph-only release-send assertions"
+        );
+        (0, 1)
+    } else {
+        assert!(from_o["created_index"].as_u64().unwrap() < base, "{from_o}");
+        (1, 0)
+    };
+
+    let o_held = if release_inbox { (0, 1) } else { (1, 0) };
+    for node in [&a, &b, &o] {
+        for (subject, expected) in [
+            (&to_b_subject, (0, 1)),
+            (&to_o_subject, o_held),
+            (&nowhere_subject, (1, 0)),
+            (&from_o_subject, release_sent_store),
+        ] {
+            wait_until("each message replicates to its one store", 90, || async { held(node, subject).await == expected }).await;
+        }
+    }
+    // b's seat sees both its messages, whichever store each is in.
+    let page: Value = b.client().get(&format!("/v1/messages?to={b_seat}")).await.unwrap();
+    let listed = page.as_array().unwrap().iter().map(|item| item["subject"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+    assert!(listed.contains(&to_b_subject) && listed.contains(&from_o_subject), "{page}");
+    if release_inbox {
+        wait_until("the release lists the stream mail routed to its seat", 60, || async {
+            client_listed(&o, false, 200).await.contains(&to_o_subject)
+        })
+        .await;
+    }
+
+    // Upgraded in place, the release routes its sends too.
+    o.stop();
+    o.binary = PathBuf::from(st3());
+    o.start().await;
+    wait_until("the upgraded member advertises its inbox", 90, || async {
+        newest_start_advertises(&a, "o", "messages_stream_inbox").await
+    })
+    .await;
+    let upgraded = agent_send(&o, b_seat, "route-from-upgraded-o").await;
+    assert!(upgraded["created_index"].as_u64().unwrap() > base, "{upgraded}");
+    // Rollback restores the release's observed routing capability, not an older
+    // release's graph-only behavior, while retaining every stream item.
+    o.stop();
+    o.binary = old;
+    o.start().await;
+    let rolled_back = agent_send(&o, b_seat, "route-from-rolled-back-o").await;
+    assert_eq!(rolled_back["created_index"].as_u64().unwrap() > base, release_routes_stream, "{rolled_back}");
+    let rolled_back_subject = rolled_back["subject"].as_str().unwrap().to_owned();
+    for node in [&a, &b, &o] {
+        wait_until("the rolled-back send reaches exactly its routed store", 90, || async {
+            held(node, &rolled_back_subject).await == release_sent_store
+        }).await;
+    }
+    if release_inbox {
+        wait_until("the rolled-back member still lists the stream mail it holds", 60, || async {
+            client_listed(&o, false, 200).await.contains(&to_o_subject)
         })
         .await;
     }

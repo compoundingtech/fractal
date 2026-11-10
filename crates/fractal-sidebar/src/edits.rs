@@ -22,9 +22,12 @@ pub enum Status { Intent, AwaitingPersistence, Sending, UnknownDelivery, Awaitin
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal { InvalidPlan, StaleFence, Unauthorized, DestinationMissing, Conflict, Storage }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effect { PersistPending, Send, ReadBase, PersistCompletion, PersistRemoval, Replan }
+pub enum Effect { PersistPending, Send(Delivery), ReadBase, PersistCompletion, PersistRemoval, Replan }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Persistence { Pending, Completion, Removal }
+/// Per-send provenance, never journaled. A restored request may already have applied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Delivery { First, #[default] Replay }
 pub enum Event {
     Plan { base: Base, plan: V2Plan, folder: Identity, membership: Identity },
     Persisted(Identity), CompletionPersisted(Identity), Ack(Identity), Unknown(Identity), Replay,
@@ -59,6 +62,8 @@ pub struct Edits {
     dependent: Option<Identity>,
     folder_completed: bool,
     used: Vec<Identity>,
+    #[serde(skip)]
+    next_delivery: Delivery,
 }
 fn invalid_record(message: &str) -> RestoreError {
     RestoreError::InvalidRecord(<serde_json::Error as serde::de::Error>::custom(message))
@@ -72,8 +77,9 @@ fn check_journal_size(size: usize) -> Result<(), serde_json::Error> {
 }
 impl Edits {
     pub fn new(scope: Scope, intent: MoveIntent) -> Self {
-        Self { scope, intent, status: Status::Intent, refusal: None, request: None, dependent: None, folder_completed: false, used: Vec::new() }
+        Self { scope, intent, status: Status::Intent, refusal: None, request: None, dependent: None, folder_completed: false, used: Vec::new(), next_delivery: Delivery::First }
     }
+    pub fn scope(&self) -> &Scope { &self.scope }
     pub fn intent(&self) -> Option<&MoveIntent> { (self.status != Status::Observed).then_some(&self.intent) }
     /// Send/replay effects always borrow this immutable request; never regenerate its identity/fence.
     pub fn request(&self) -> Option<&Request> { self.request.as_ref() }
@@ -166,6 +172,7 @@ impl Edits {
     fn stage(&mut self, identity: Identity, fence: Base, operations: Operations) -> Vec<Effect> {
         if !self.unused(&identity) { return self.refuse(Refusal::InvalidPlan); }
         self.used.push(identity.clone()); self.request = Some(Request { identity, fence, operations });
+        self.next_delivery = Delivery::First;
         self.status = Status::AwaitingPersistence; vec![Effect::PersistPending]
     }
     pub fn reduce(&mut self, event: Event) -> Vec<Effect> {
@@ -197,8 +204,10 @@ impl Edits {
             }
             Event::StorageFailed { identity, phase } if self.request.as_ref().is_some_and(|request| request.identity == identity)
                 && matches!((self.status, phase), (Status::AwaitingPersistence, Persistence::Pending) | (Status::AwaitingCompletionPersistence, Persistence::Completion)) => self.refuse(Refusal::Storage),
-            Event::Replay if self.status == Status::UnknownDelivery => { self.status = Status::Sending; vec![Effect::Send] }
-            Event::Persisted(id) if self.status == Status::AwaitingPersistence && self.request.as_ref().is_some_and(|request| request.identity == id) => { self.status = Status::Sending; vec![Effect::Send] }
+            Event::Replay if self.status == Status::UnknownDelivery => { self.status = Status::Sending; vec![Effect::Send(Delivery::Replay)] }
+            Event::Persisted(id) if self.status == Status::AwaitingPersistence && self.request.as_ref().is_some_and(|request| request.identity == id) => {
+                self.status = Status::Sending; vec![Effect::Send(std::mem::replace(&mut self.next_delivery, Delivery::Replay))]
+            }
             Event::CompletionPersisted(id) if self.status == Status::AwaitingCompletionPersistence && self.request.as_ref().is_some_and(|request| request.identity == id) => {
                 if self.dependent.is_some() { self.status = Status::AwaitingFreshBase; vec![Effect::ReadBase] }
                 else { self.status = Status::Observed; vec![Effect::PersistRemoval] }
@@ -235,7 +244,7 @@ mod tests {
     fn folder_first_requires_observation_persistence_and_fresh_fences() {
         let mut state = state(); stage(&mut state, true, true);
         assert!(matches!(state.request().unwrap().operations, Operations::Folders(_)));
-        assert_eq!(state.reduce(Event::Persisted(id(1))), vec![Effect::Send]);
+        assert_eq!(state.reduce(Event::Persisted(id(1))), vec![Effect::Send(Delivery::First)]);
         assert_eq!(state.reduce(Event::Ack(id(1))), vec![Effect::PersistPending, Effect::ReadBase]);
         assert!(state.intent().is_some()); assert!(state.reduce(Event::Fresh(base(2), Ok(members()))).is_empty());
         assert_eq!(state.reduce(Event::Observed(id(1))), vec![Effect::PersistCompletion]);
@@ -252,7 +261,7 @@ mod tests {
         assert!(matches!(state.request().unwrap().operations, Operations::Memberships(_)));
         assert_eq!(state.request().unwrap().fence, base(2));
         assert!(state.reduce(Event::Persisted(id(1))).is_empty());
-        assert_eq!(state.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
+        assert_eq!(state.reduce(Event::Persisted(id(2))), vec![Effect::Send(Delivery::First)]);
         state.reduce(Event::Ack(id(2))); assert!(state.intent().is_some());
         state.reduce(Event::Observed(id(2))); assert!(state.intent().is_some());
         assert_eq!(state.reduce(Event::CompletionPersisted(id(2))), vec![Effect::PersistRemoval]);
@@ -267,7 +276,7 @@ mod tests {
             for _ in 0..4 {
                 assert_eq!(state.reduce(Event::Unknown(identity.clone())), vec![Effect::PersistPending]);
                 assert_eq!(state.status, Status::UnknownDelivery);
-                assert_eq!(state.reduce(Event::Replay), vec![Effect::Send]); assert_eq!(state.request(), Some(&exact));
+                assert_eq!(state.reduce(Event::Replay), vec![Effect::Send(Delivery::Replay)]); assert_eq!(state.request(), Some(&exact));
             }
             state.reduce(Event::Refused(identity.clone(), Refusal::StaleFence));
             assert_eq!(state.status, Status::Refused); assert!(state.reduce(Event::Replay).is_empty());
@@ -397,7 +406,7 @@ mod tests {
                 for event in [Event::Persisted(id(99)), Event::Ack(id(2)), Event::Observed(id(2)), Event::CompletionPersisted(id(2))] {
                     assert!(restored.reduce(event).is_empty());
                 }
-                assert_eq!(restored.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
+                assert_eq!(restored.reduce(Event::Persisted(id(2))), vec![Effect::Send(Delivery::Replay)]);
                 assert_eq!(restored.request(), original.request());
                 assert!(restored.reduce(Event::Persisted(id(2))).is_empty());
             }
@@ -477,7 +486,7 @@ mod tests {
             assert!(state.reduce(Event::StorageFailed { identity: id(1), phase }).is_empty());
             assert_eq!(state.status, Status::AwaitingPersistence); assert_eq!(state.refusal, None);
         }
-        assert_eq!(state.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
+        assert_eq!(state.reduce(Event::Persisted(id(2))), vec![Effect::Send(Delivery::First)]);
     }
     fn refused_record(change: impl FnOnce(&mut serde_json::Value)) {
         let mut original = state(); stage(&mut original, true, true);

@@ -12,7 +12,7 @@ import { brotliCompressSync } from 'node:zlib'
 import { Option, Tracer } from 'effect'
 import { createFractalWebMiddleware, createFractalWebServer } from './core.mts'
 import type { FractalWebServer } from './core.mts'
-import { cleanHeaders, clientRoute } from './gateway.mts'
+import { cleanHeaders, clientRoute, upgradeClientHeaders } from './gateway.mts'
 import { traceparent } from './tracing.mts'
 // Assembled so the source itself never carries a literal bearer credential pair.
 const gatewayAuthorization = 'Bearer' + ' fx-auth'
@@ -43,7 +43,7 @@ const fixture = async (
   await writeFile(join(root, 'outside.txt'), 'not a public asset')
   await symlink(join(root, 'outside.txt'), join(dist, 'outside.txt'))
   const sockets = new Set<Duplex>()
-  const received: { path: string; auth?: string; cookie?: string; origin?: string; baggage?: string | string[]; trace?: string | string[]; state?: string | string[]; host?: string; body: string }[] = []
+  const received: { path: string; auth?: string; cookie?: string; origin?: string; baggage?: string | string[]; trace?: string | string[]; state?: string | string[]; client?: string | string[]; host?: string; body: string }[] = []
   const gateway = createServer((req, res) => { void (async () => {
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
@@ -54,7 +54,7 @@ const fixture = async (
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
     socket.on('error', () => undefined)
-    received.push({ path: req.url ?? '', auth: req.headers.authorization, cookie: req.headers.cookie, origin: req.headers.origin, baggage: req.headers.baggage, trace: req.headers.traceparent, state: req.headers.tracestate, body: 'upgrade' })
+    received.push({ path: req.url ?? '', auth: req.headers.authorization, cookie: req.headers.cookie, origin: req.headers.origin, baggage: req.headers.baggage, trace: req.headers.traceparent, state: req.headers.tracestate, client: req.headers['x-st3-client'], body: 'upgrade' })
     socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
     if (head.length) socket.write(head)
     socket.on('data', (chunk) => socket.write(chunk))
@@ -144,6 +144,53 @@ it('proxies only the paired client API, streams bodies and injects trusted crede
   expect(setup.received).toHaveLength(1)
   expect(setup.spans.some((span) => span.name === 'fractal.gateway.request')).toBe(true)
 })
+
+it.each([undefined, 'other=private', `other=private; fractal_device=${'a'.repeat(43)}; another=private`, 'fractal_device=invalid', `fractal_device=${'a'.repeat(43)}; fractal_device=${'b'.repeat(43)}`])('selects only the browser credential for HTTP and WebSocket (%s)', async cookie => {
+  const setup = await fixture()
+  const headers = cookie === undefined ? {} : { cookie }
+  await fetch(`${setup.base}/v1/client/capabilities`, { headers })
+  expect(await openUpgrade(setup.port, '/v1/client/stream', headers)).toContain('101')
+  const expected = cookie?.startsWith('other=private; fractal_device=') === true ? `Bearer ${'a'.repeat(43)}` : gatewayAuthorization
+  expect(setup.received).toHaveLength(2)
+  for (const request of setup.received) {
+    expect(request.auth).toBe(expected)
+    expect(request.cookie).toBeUndefined()
+  }
+})
+
+it.each([
+  '/v1/client/pairing/browser-requests',
+  '/v1/client/pairing/browser-requests/request/redeem',
+  '/v1/client/pairing/browser-requests/revoke-current',
+  '/v1/client/pairings',
+  '/v1/client/pairings/request/complete',
+  '/v1/client/pairings/request/complete/extra',
+  '/v1/client/pairing/browser-requests/request/redeem/',
+  '/v1/client/pairing/browser-requests/request/redeem/extra',
+  '/v1/client/%70airing/browser-requests',
+  '/%76%31/client/pairing/browser-requests',
+  '/v1/%63lient/pairings/request/complete',
+  '/v1/client/pairing%2Fbrowser-requests%2Frequest%2Fredeem',
+  '/v1/client/%2570airing/browser-requests',
+  '/v1//client/pairing/browser-requests',
+  '/v1/client//pairings/request/complete',
+  '//v1/client/pairing/browser-requests',
+  '/v1/client/pairing/%2e%2e/pairings/request/complete',
+  '/v1/client/Pairing/browser-requests/request/redeem',
+  '/v1/client/pAiRiNgS/request/complete',
+  '/v1/client/%50airing/browser-requests',
+  '/v1/client/%50aIrInGs/request/complete',
+])('never forwards raw pairing routes over HTTP or WebSocket (%s)', async path => {
+  // Even an otherwise admitted edge request must use the stricter cookie-only publisher wrapper.
+  const setup = await fixture()
+  expect(clientRoute(path)).toBe(false)
+  for (const method of ['GET', 'POST']) {
+    const response = await fetch(setup.base + path, { method, headers: { cookie: `fractal_device=${'a'.repeat(43)}` } })
+    expect(response.status).toBe(404)
+  }
+  expect(await openUpgrade(setup.port, path)).toContain('403 Forbidden')
+  expect(setup.received).toEqual([])
+})
 it.each([
   ['br, gzip', 'br'],
   ['gzip, br;q=0', 'gzip'],
@@ -231,7 +278,7 @@ it('continues valid HTTP context but never forwards invalid vendor state', async
 })
 it('continues browser WebSocket query context and strips it before the upstream handshake', async () => {
   const setup = await fixture()
-  const path = `/v1/client/collections/stream?kind=agent&cursor=a%2fb+%20&traceparent=${browserTraceparent}&tracestate=fixture%3Dbrowser`
+  const path = `/v1/client/collections/stream?kind=agent&cursor=a%2fb+%20&client=fractal-web%200.1.0%2Bbuild&traceparent=${browserTraceparent}&tracestate=fixture%3Dbrowser`
   expect(await openUpgrade(setup.port, path, {
     Authorization: browserAuthorization, Cookie: 'browser=secret', Origin: 'https://example.test', Baggage: 'private=browser',
   })).toContain('101 Switching Protocols')
@@ -243,6 +290,7 @@ it('continues browser WebSocket query context and strips it before the upstream 
   expect(setup.received).toEqual([expect.objectContaining({
     path: '/v1/client/collections/stream?kind=agent&cursor=a%2fb+%20', trace: traceparent(spans.gateway),
     state: 'fixture=browser', auth: gatewayAuthorization, cookie: undefined, origin: undefined, baggage: undefined,
+    client: 'fractal-web 0.1.0+build',
   })])
   expect(setup.received[0]?.trace).not.toBe(browserTraceparent)
   for (const span of [spans.server, spans.gateway]) {
@@ -286,6 +334,14 @@ it('rejects WebSocket query header injection while continuing its valid browser 
   expect(setup.received[0]).toEqual(expect.objectContaining({
     path: '/v1/client/collections/stream', trace: traceparent(spans.gateway), state: undefined,
   }))
+})
+
+it('accepts bounded upgrade client display metadata, preferring explicit headers', () => {
+  const path = '/v1/client/collections/stream?client=fractal-web%200.1.0%2Bbuild'
+  expect(upgradeClientHeaders({ headers: {}, url: path })).toEqual({ 'x-st3-client': 'fractal-web 0.1.0+build' })
+  expect(upgradeClientHeaders({ headers: { 'x-st3-client': 'explicit' }, url: path })).toEqual({})
+  for (const query of ['client=one&client=two', 'client=one%0D%0AX-Other%3Avalue', `client=${'x'.repeat(121)}`])
+    expect(upgradeClientHeaders({ headers: {}, url: `/v1/client/collections/stream?${query}` })).toEqual({})
 })
 it('fails closed for auth-hook refusal and failures, without tracing or proxying', async () => {
   const setup = await fixture(async (req) => { if (req.url === '/throws') throw new TypeError('auth failure'); return false })

@@ -7,7 +7,7 @@ fn sent(subject: &str, from: &str) -> ClaimInput {
         kind: "message.sent".into(),
         actor: Some(from.into()),
         fields: serde_json::from_value(json!({
-            "from": from, "to": "agent/cedar", "content": format!("about {subject}"), "status": "sent"
+            "from": from, "to": "agent/alder.cedar", "content": format!("about {subject}"), "status": "sent"
         }))
         .unwrap(),
         evidence: Vec::new(),
@@ -20,6 +20,9 @@ fn sent(subject: &str, from: &str) -> ClaimInput {
 fn graph_with_shard(root: &Path) -> Arc<Store> {
     let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), "alder").unwrap());
     messages_shard::open(&graph, root).unwrap();
+    // The recipient is a seat on this member, so mail to it routes to the stream.
+    let seat = crate::graph::parse_internal_intent("version 2\nagent \"cedar\" { host \"alder\"; command \"true\"; }", "alder").unwrap();
+    crate::store::card_fold_tests_shared_missions::declare(&graph, &seat, "outbox-recipient");
     graph
 }
 
@@ -121,36 +124,31 @@ fn a_repeat_with_the_same_subject_queues_one_row_and_sends_one_message() {
 }
 
 #[test]
-fn a_message_the_shard_refuses_ends_in_the_graph_and_holds_up_nothing() {
+fn a_message_the_stream_may_not_carry_drains_to_the_graph_and_holds_up_nothing() {
     let root = tempfile::tempdir().unwrap();
     let graph = graph_with_shard(root.path());
-    // A person's message stays a graph claim: the shard refuses it every time.
-    let refused = sent("message/outbox-a-person", "person/ada");
-    enqueue(&graph, &refused);
+    // A person's message is never routed to the stream, so the drain writes it to the graph.
+    let personal = sent("message/outbox-a-person", "person/ada");
+    enqueue(&graph, &personal);
     let later = sent("message/outbox-b-later", "agent/birch");
     enqueue(&graph, &later);
-    assert_eq!(message_outbox::drain(&graph).unwrap(), 1);
+    assert_eq!(message_outbox::drain(&graph).unwrap(), 2);
+    assert_eq!((graph_items(&graph, &personal.subject), shard_items(&graph, &personal.subject)), (1, 0));
     assert_eq!(shard_items(&graph, &later.subject), 1);
-    let [(subject, attempts, error)] = rows(&graph).try_into().unwrap();
-    assert_eq!((subject.as_str(), attempts), (refused.subject.as_str(), 1));
-    assert!(error.unwrap().starts_with("shard-kind-refused"));
-    for _ in 1..message_outbox::ATTEMPTS {
-        assert_eq!(message_outbox::drain(&graph).unwrap(), 0);
-    }
-    assert_eq!(rows(&graph)[0].1, message_outbox::ATTEMPTS);
-    // Refused often enough, it goes to the graph as a legacy claim.
-    assert_eq!(message_outbox::drain(&graph).unwrap(), 1);
-    assert_eq!(graph_items(&graph, &refused.subject), 1);
-    assert_eq!(shard_items(&graph, &refused.subject), 0);
     assert!(rows(&graph).is_empty());
 }
 
-/// New mail that follows a refused message drains alone; the refused one keeps its count.
+/// A message the shard refuses, here because an earlier send under its key wrote other content,
+/// stays with its error; new mail that follows it drains alone, and it keeps its count.
 #[test]
 fn a_fresh_drain_leaves_a_refused_message_to_its_retry() {
     let root = tempfile::tempdir().unwrap();
     let graph = graph_with_shard(root.path());
-    let refused = sent("message/outbox-a-person", "person/ada");
+    let mut earlier = sent("message/outbox-a-keyed", "agent/birch");
+    earlier.idempotency_key = Some("outbox-keyed".into());
+    messages_shard::shard(&graph).unwrap().append_claim(&earlier).unwrap();
+    let mut refused = earlier.clone();
+    refused.subject = "message/outbox-a-refused".into();
     enqueue(&graph, &refused);
     assert_eq!(message_outbox::drain_fresh(&graph).unwrap(), 0);
     for n in 0..message_outbox::ATTEMPTS {
@@ -159,8 +157,9 @@ fn a_fresh_drain_leaves_a_refused_message_to_its_retry() {
         assert_eq!(message_outbox::drain_fresh(&graph).unwrap(), 1);
         assert_eq!(shard_items(&graph, &later.subject), 1);
     }
-    let [(subject, attempts, _)] = rows(&graph).try_into().unwrap();
+    let [(subject, attempts, error)] = rows(&graph).try_into().unwrap();
     assert_eq!((subject.as_str(), attempts), (refused.subject.as_str(), 1));
+    assert!(error.unwrap().starts_with("idempotency-mismatch"));
     assert_eq!(graph_items(&graph, &refused.subject), 0);
 }
 

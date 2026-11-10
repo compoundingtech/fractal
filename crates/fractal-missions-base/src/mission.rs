@@ -269,6 +269,7 @@ fn parse_mission(
         .children()
         .ok_or_else(|| FractalError::new("empty-mission", format!("mission `{id}` has no steps")))?;
     unique_named_child(children, "provenance")?;
+    let admission = crate::declared_admission::parse(children, "mission", &format!("mission/{id}"))?;
     let mut inputs = BTreeMap::new();
     for input_node in children
         .nodes()
@@ -309,6 +310,7 @@ fn parse_mission(
     let mut capacity = None;
     for child in children.nodes() {
         match child.name().value() {
+            "declared-priority" | "declared-lane" | "declared-budgets" => {}
             "system" => {
                 if system {
                     return Err(FractalError::new(
@@ -554,14 +556,14 @@ fn parse_mission(
     }
     let declarations_kdl = declarations_document(declarations);
     let mut mission = MissionSpec {
-        declared_priority: None,
-        declared_lane: None,
-        declared_budgets: None,
         subject: format!("mission/{id}"),
         id,
         state,
         revision: String::new(),
         system,
+        declared_priority: admission.priority,
+        declared_lane: admission.lane,
+        declared_budgets: admission.budgets,
         resources,
         inputs,
         max_active_runs,
@@ -1330,6 +1332,7 @@ fn parse_step(
     let mut retry = RetrySpec::default();
     let mut revision_owners = Vec::new();
     if let Some(children) = node.children() {
+        crate::declared_admission::parse(children, "step", &format!("step/{path}"))?;
         let mut names = BTreeSet::new();
         let mut baseline_names = BTreeSet::new();
         let mut gate_names = BTreeSet::new();

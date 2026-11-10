@@ -161,10 +161,54 @@ pub async fn basis(
     ))
 }
 
+#[derive(Deserialize)]
+pub struct DecisionInputsQuery {
+    subject: String,
+}
+
+fn decision_inputs_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<FractalError>().is_some() {
+        error
+    } else {
+        crate::store::custom::fail(error.to_string()).into()
+    }
+}
+
+pub async fn decision_inputs(
+    State(state): State<AppState>,
+    Query(query): Query<DecisionInputsQuery>,
+) -> Result<Json<crate::store::custom::DecisionInputs>, ApiError> {
+    fractal_schema::registry().validate_subject(&query.subject)
+        .map_err(|error| client_v0::validation(error.message))?;
+    let result = blocking_store(move || {
+        state.store.decision_inputs(&query.subject).map_err(decision_inputs_error)
+    }).await?;
+    Ok(Json(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::tests_shared_client_v0_tests::get_request as client_json;
+
+    #[test]
+    fn decision_inputs_preserves_typed_refusals() {
+        let error = ApiError::internal(decision_inputs_error(
+            FractalError::new("decision-inputs-too-large", "history exceeds limits").into(),
+        ));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "decision-inputs-too-large");
+        assert_eq!(error.message, "history exceeds limits");
+    }
+
+    #[test]
+    fn decision_inputs_retains_invalid_claim_error_for_untyped_refusals() {
+        let error = ApiError::internal(decision_inputs_error(
+            anyhow::anyhow!("decision registration is unavailable"),
+        ));
+        assert_eq!(error.code, "invalid-custom-claim");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     fn test_state(root: &std::path::Path) -> AppState {
         let mut state = crate::api::tests_shared::state(root);
@@ -209,6 +253,55 @@ mod tests {
         assert_eq!(state.store.index().unwrap(), before);
     }
 
+    #[tokio::test]
+    async fn notice_legacy_rows_cannot_bypass_generic_list_pagination_or_detail() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        // Model cached rows from before namespace protection, including an alternate kind.
+        let connection = rusqlite::Connection::open(root.path().join("claims.sqlite3")).unwrap();
+        smallclaims::store::configure_projection_writer(&connection).unwrap();
+        for (subject, kind) in [
+            ("custom/attention/source/legacy", "garden.review"),
+            ("custom/attention/snapshot/legacy", "garden.review"),
+            ("custom/attention/control/legacy", "garden.review"),
+            ("custom/garden/review/v1/one", "garden.review"),
+            ("custom/garden/review/v1/two", "garden.review"),
+        ] {
+            let body = json!({
+                "id":subject, "kind":"custom-subject", "registered_kind":kind,
+                "schema_version":1, "registration":"legacy", "revision":"legacy",
+                "state":"ready", "fields":{}
+            });
+            connection.execute(
+                "INSERT INTO custom_sources (subject,registration,kind,revision,state,body,active,requested_at) VALUES (?1,'legacy',?2,'legacy','ready',?3,0,'0')",
+                rusqlite::params![subject, kind, body.to_string()],
+            ).unwrap();
+        }
+        drop(connection);
+        let before = state.store.index().unwrap();
+        let app = router(state.clone());
+        for filter in ["", "kind=garden.review&version=1&", "version=1&"] {
+            let route = format!("/v1/client/custom-subjects?{filter}limit=1");
+            let (status, page) = client_json(app.clone(), &route).await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            assert_eq!(page["items"].as_array().unwrap().len(), 1);
+            assert_eq!(page["items"][0]["id"], "custom/garden/review/v1/one");
+            assert_eq!(page["page"]["has_more"], true);
+            let cursor = page["page"]["next_cursor"].as_str().unwrap();
+            let (status, next) = client_json(app.clone(), &format!("{route}&cursor={cursor}")).await;
+            assert_eq!(status, StatusCode::OK, "{next}");
+            assert_eq!(next["items"].as_array().unwrap().len(), 1);
+            assert_eq!(next["items"][0]["id"], "custom/garden/review/v1/two");
+            assert_eq!(next["page"]["has_more"], false);
+        }
+        let (status, error) = client_json(
+            app, "/v1/client/custom-subjects/custom/attention/source/legacy",
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(error["details"]["reason"], "notices-unavailable");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
     fn legacy_claim(state: &AppState, subject: &str, kind: &str) -> ClaimRecord {
         // Model already-admitted old-peer history below today's notice write admission.
         let claim = state.store.connection.batched(|tx| crate::store::append_claim_tx(
@@ -224,9 +317,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let credential = "notice-history-paired-credential";
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/notice-history-pair".into(),
-            kind: "custom.client.pairing-completed".into(), actor: None,
+            kind: "custom.client.pairing-completed".into(), actor: Some("person/example".into()),
             fields: BTreeMap::from([
                 ("credential_hash".into(), json!(client_v0::credential_digest(credential))),
                 ("session_actor".into(), json!("client/notice-history")),

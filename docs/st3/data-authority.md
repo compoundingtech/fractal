@@ -7,6 +7,13 @@ have their own logical authority digests; local physical fields and caches are o
 
 The claim log and immutable blobs are the durable graph authority.
 
+Run-part rebuilds reuse prepared statements with bound claim values. They clear
+`projection:runs:<claim-id>` health rows only for the claims selected for replay,
+then retain a savepoint per claim: a handler failure rolls back only that claim
+and quarantines it. Terminalization still follows replay order; repeated terminal
+claims can change cancellation reasons and timestamps, so they cannot simply be
+deduplicated by run or generation.
+
 The `local_completion_health_v1_*` tables are member-local, rebuildable projections
 of retained claims and their ordering/repair metadata. Their candidate rows, pending
 work and hydration progress are not shared logical rows. They add no registry
@@ -341,6 +348,7 @@ order from the same admitted claims.
 | `local_usage_responses` | Local | Counted provider response IDs and times; deduplicates replay across harness incarnations. |
 | `local_usage_spend` | Local | Cumulative token and cost buckets; retained across observation-log trimming. |
 | `local_work_lease_renewals` | Local | Local lease extensions, re-applied after canonical replay. Durable replicated lease anchors remain shared. |
+| `local_work_wake_tags`, `local_work_wake_backfill` | Local derived state | Trigger-maintained recipient/work-tag/claim-id candidates and the persistent ceiling, cursor and completion of a bounded historical copy. Tag family prefixes are removed and attempt/epoch numbers are canonicalized to preserve wake parsing semantics. Rebuildable from claims; never replicated or included in shared projection digests. |
 | `message_index` | Shared projection | Shared message membership/closed fact. created_index is a local cache cursor. Subject order/onset/lifecycle must come from canonical message claims, never this cursor. |
 | `meta` | Local | Local schema/version/writer/cache/frontier bookkeeping; individual fleet-binding metadata copies do not turn the table into a shared projection. |
 | `mission_definitions` | Shared projection | Shared selected mission revision/state/claim. |

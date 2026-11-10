@@ -89,6 +89,7 @@ mod follow_tests;
 mod presentation;
 mod actor_contract;
 mod inspection_actor;
+mod pairing_qr;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
@@ -356,6 +357,11 @@ enum Command {
     Attention {
         #[command(subcommand)]
         command: AttentionCommand,
+    },
+    /// Inspect mission budgets.
+    Budgets {
+        #[command(subcommand)]
+        command: BudgetsCommand,
     },
     /// Assess fleet machines, health, and capacity.
     Machines(MachinesArgs),
@@ -2114,7 +2120,12 @@ struct ActivityArgs {
 }
 
 /// Observation-only device grant requested by `st devices pair --read-only`.
-const READ_ONLY_PAIRING_SCOPES: &[&str] = &["read.projections", "read.glasses", "terminal.read"];
+const READ_ONLY_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "read.glasses",
+    "read.arrangements",
+    "terminal.read",
+];
 
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
@@ -2125,6 +2136,20 @@ const ASSISTANT_GRANT_MAX_SECONDS: u64 = 2_592_000;
 enum DevicesCommand {
     /// List paired devices visible to the authenticated person.
     Ls,
+    /// Stage renewal of an audited device grant over the trusted local Unix socket.
+    RenewStage {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Device)))]
+        device_id: String,
+        /// Migration epoch authorized for this renewal.
+        #[arg(long)]
+        migration_epoch: String,
+        /// Explicit audited historical grant digest.
+        #[arg(long = "allow", value_name = "SHA256")]
+        allow_digest: String,
+        /// Renewal approval window in hours (maximum 168).
+        #[arg(long, default_value_t = 72, value_parser = clap::value_parser!(u64).range(1..=168))]
+        expires_in_hours: u64,
+    },
     /// Begin local pairing for one named person and device, or one assistant grant.
     Pair {
         /// Device name; optional only for `--assistant`, which defaults to the assistant name.
@@ -2133,15 +2158,18 @@ enum DevicesCommand {
         /// Delegate every current client scope to this trusted device.
         #[arg(long, conflicts_with = "assistant")]
         full_control: bool,
-        /// Delegate only observation: projections, glasses frames, and terminal output.
+        /// Delegate only observation: projections, glasses frames, sidebar arrangements, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
         /// Let this pairing grant the device this member's client gateway over Fabric (after
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
         fabric_gateway: bool,
-        /// Begin a revocable external-assistant grant instead of a person device.
-        #[arg(long, value_parser = parse_assistant_principal)]
+        /// Explicit phone-reachable gateway URL; show a pairing QR in an interactive terminal.
+        #[arg(long, value_parser = pairing_qr::parse_gateway, conflicts_with = "assistant")]
+        gateway: Option<reqwest::Url>,
+        /// Begin a revocable external-assistant grant (defaults to assistant/chatgpt).
+        #[arg(long, num_args = 0..=1, default_missing_value = "assistant/chatgpt", value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
         #[command(flatten)]
         grant: AssistantGrantTerms,
@@ -2276,9 +2304,9 @@ enum AssistantGrantCommand {
 
 #[derive(Args)]
 struct DevicesArgs {
-    /// Concrete human authority carried over the trusted local Unix boundary.
+    /// Local caller attribution; ordinary device administration requires a person.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
-    #[arg(long = "as", value_parser = parse_person_subject, global = true)]
+    #[arg(long = "as", value_parser = parse_actor_subject, global = true)]
     person: Option<String>,
     /// Include expired and revoked device history.
     #[arg(long)]
@@ -2353,6 +2381,8 @@ enum SubjectCommand {
         #[arg(long = "kind", required = true)]
         kinds: Vec<String>,
     },
+    /// Fold the complete immutable decision.tree history without creating asks.
+    Decisions { subject: String },
 
     /// Show one typed subject card.
     Show(SubjectShowArgs),
@@ -3943,6 +3973,26 @@ struct SubscriptionRequestArgs {
 }
 
 #[derive(Subcommand)]
+enum BudgetsCommand {
+    /// Read a mission's attention budget without charging it.
+    Attention {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Mission)))]
+        mission: String,
+        /// Act as this person or agent; defaults to the harness agent or configured person.
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_actor_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        actor: Option<String>,
+        /// Person whose attention budget to read; required for agent callers.
+        #[arg(long, value_parser = parse_person_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+        person: Option<String>,
+        /// Evaluate the budget at this Unix timestamp in milliseconds.
+        #[arg(long, value_name = "UNIX_MS")]
+        at: Option<u128>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AttentionCommand {
     /// List current alerts, then unread updates.
     Ls {
@@ -5221,6 +5271,7 @@ fn cli_main() -> ExitCode {
         cli_output::stdout().is_terminal(),
         crate::agent_environment_present(),
     ) {
+        fractal_client::set_client_name(fractal_tui::client_name());
         let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
             Err(error) => {
@@ -5305,8 +5356,13 @@ fn cli_main() -> ExitCode {
     if let Command::Demo { command } = cli.command {
         return run_demo(command);
     }
-    // Set the CLI identity only after the TUI path has chosen its stui client identity.
-    fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
+    // Set the CLI identity only after the TUI path has chosen its fractal-tui client identity.
+    let client_product = match &cli.command {
+        Command::Driver(_) => "fractal-driver",
+        Command::ReplicationWorker(_) => "fractal-replication-worker",
+        _ => "fractal",
+    };
+    fractal_client::set_client_name(format!("{client_product} {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
         record_daemon_commands(args);
     }
@@ -5958,6 +6014,16 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } => {
+            let response = attention_budget_client(
+                &endpoint, actor.as_deref(), config.person.as_deref(),
+            )?
+                .attention_budget(&mission, person.as_deref(), at)
+                .await?;
+            print_client_value(&response, cli.json)
+        }
         Command::Machines(args) => run_machines(&endpoint, args, cli.json).await,
         Command::Agents { command } => {
             run_agents(&endpoint, config.person.as_deref(), command, cli.json).await
@@ -5982,7 +6048,7 @@ async fn run(cli: Cli) -> Result<()> {
         }) => run_devices_fabric(&config, command, cli.json).await,
         Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
-            run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
+            run_devices(endpoint.clone(), &config, args, cli.json).await
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
@@ -6366,6 +6432,9 @@ fn guard_mutating_cli_actor(
         Command::Devices(args) => match args.command.as_ref() {
             Some(DevicesCommand::Pair { assistant: Some(_), .. })
             | Some(DevicesCommand::Grant { .. }) => Some(args.person.as_deref().unwrap_or("requester")),
+            Some(DevicesCommand::RenewStage { .. }) => Some(args.person.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("renewal staging needs explicit --as {own}")
+            })?),
             _ => None,
         },
         _ => None,
@@ -6967,6 +7036,8 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
+    store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
     }
@@ -7257,6 +7328,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
             open_daemon_store(&config, &state_identity)
         })
     })?);
+    store
+        .extension::<fractal_daemon::config::AgentPopulationEnabled>()
+        .0
+        .set(config.agent_population_enabled)
+        .map_err(|_| anyhow::anyhow!("population activation already initialized"))?;
+    store
+        .extension::<fractal_daemon::config::AgentPopulationRepositories>()
+        .0
+        .set(config.agent_population_repositories.clone())
+        .map_err(|_| anyhow::anyhow!("population repository registry already initialized"))?;
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
@@ -7378,7 +7459,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7451,6 +7532,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         owning_person: config.person.clone(),
+        browser_pairing_login: config.browser_pairing_login.clone(),
         store: store.clone(),
         seat_admission: Arc::default(),
         notify: notify.clone(),
@@ -7518,6 +7600,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.gate_runner_history", copy_gate_runner_history(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.work_wake_index", copy_work_wake_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
         std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
@@ -7526,19 +7609,22 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
-    spawn_stream_mirror(store.clone(), event_notify.clone());
+    fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
+    spawn_stream_mirror(store.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
     )));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
+    fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let rows = fractal_daemon::api::slo_rows(&store)?;
+                let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
         )));
@@ -7665,8 +7751,17 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     let bound = std::sync::atomic::AtomicUsize::new(0);
+    let agents_request_slo = std::sync::OnceLock::new();
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            agents_request_slo.get_or_init(|| fractal_daemon::api::start_agents_request_slo(
+                config.state_dir.clone(),
+                config.node.clone(),
+                // Measurement stays on everywhere; native delivery requires this exact member's opt-in.
+                config.agents_request_slo_fault.as_ref()
+                    .filter(|fault| fault.member == store.origin())
+                    .map(|fault| (store.clone(), fault.reviewer.clone())),
+            ));
             let activation_store = store.clone();
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
@@ -7740,28 +7835,48 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // then ends the process by that signal as it did before the daemon handled it.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let stop_agents_request_slo = || {
+        if let Some(slo) = agents_request_slo.get() {
+            slo.stop();
+        }
+    };
     let serving = async {
-        tokio::try_join!(
+        let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer, config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
+                Some(worker_observer),
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+                gateway_reserved, fabric_router(state).layer(web_status), None, None, ready,
             ),
-            web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()),
-        )
+            async {
+                let result = web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()).await;
+                // Stop before try_join drops the native listeners on a web error.
+                if result.is_err() {
+                    stop_agents_request_slo();
+                }
+                result
+            },
+        );
+        Err(served)
     };
-    let stopped = tokio::select! {
-        served = serving => Err(served),
-        _ = terminate.recv() => Ok(libc::SIGTERM),
-        _ = interrupt.recv() => Ok(libc::SIGINT),
+    let shutdown = async {
+        tokio::select! {
+            _ = terminate.recv() => Ok(libc::SIGTERM),
+            _ = interrupt.recv() => Ok(libc::SIGINT),
+        }
     };
+    let stopped = fractal_daemon::api::stop_before_listener_drop(
+        serving, shutdown, stop_agents_request_slo,
+    ).await;
+    drop(agents_request_slo);
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
+    let receipts_started = Instant::now();
     tokio::select! {
         flushed = receipts.shutdown() => if let Err(error) = flushed {
             stderr_message("fractal", format_args!("assistant read receipts failed to commit at shutdown: {}", error.message));
@@ -7769,9 +7884,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    stderr_message("fractal", format_args!("shutdown: receipt drain stage finished in {} ms", receipts_started.elapsed().as_millis()));
     // Leave the replication inventory for the next start, which extends it instead of reading
     // every envelope while its peers reconnect. A second stop signal skips it.
     let saving = store.clone();
+    let inventories_started = Instant::now();
     tokio::select! {
         saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
             stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
@@ -7779,7 +7896,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
     }
+    stderr_message("fractal", format_args!("shutdown: replication inventory save stage finished in {} ms", inventories_started.elapsed().as_millis()));
+    let telemetry_started = Instant::now();
     telemetry.shutdown();
+    stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
+    fractal_daemon::api::flush_ancestry_diagnostics();
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
@@ -9095,6 +9216,22 @@ fn trace_scalar(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// Keep the Unix acting identity separate from the report's recipient filter.
+/// Fabric credentials establish their own authority and need no local actor.
+fn attention_budget_client(
+    endpoint: &Endpoint,
+    explicit_actor: Option<&str>,
+    configured_person: Option<&str>,
+) -> Result<GeneratedClient> {
+    if matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
+        let actor = configured_actor(explicit_actor, configured_person, "budgets attention")?;
+        reject_foreign_agent_actor(&actor)?;
+        generated_client(endpoint, Some(&actor))
+    } else {
+        generated_client(endpoint, None)
+    }
+}
+
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
     let socket = match endpoint {
         Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix endpoint"),
@@ -9396,9 +9533,41 @@ async fn run_devices_fabric(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct DeviceRenewalStageRequest {
+    api_version: &'static str,
+    device_id: String,
+    migration_epoch: String,
+    allow_digest: String,
+    expires_in_hours: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct DeviceRenewalStageReceipt {
+    kind: String,
+    renewal_id: String,
+    expires_at: String,
+    allow_digest: String,
+}
+
+async fn stage_device_renewal(
+    endpoint: &Endpoint,
+    actor: &str,
+    request: DeviceRenewalStageRequest,
+) -> Result<DeviceRenewalStageReceipt> {
+    anyhow::ensure!(
+        matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)),
+        "device renewal staging requires the trusted local Unix socket"
+    );
+    let client = execution_client(endpoint, actor.to_owned())?;
+    client
+        .post("/v1/client/pairings/renewals/stage", &request)
+        .await
+}
+
 async fn run_devices(
     endpoint: Endpoint,
-    configured_person: Option<&str>,
+    config: &Config,
     args: DevicesArgs,
     json_output: bool,
 ) -> Result<()> {
@@ -9409,11 +9578,41 @@ async fn run_devices(
         limit,
         command,
     } = args;
+    let configured_person = config.person.as_deref();
+    // Refuse nonlocal staging before constructing a product client or issuing any request.
+    if let Some(DevicesCommand::RenewStage {
+        device_id,
+        migration_epoch,
+        allow_digest,
+        expires_in_hours,
+    }) = command {
+        let actor = configured_actor(person.as_deref(), configured_person, "devices renew-stage")?;
+        let receipt = stage_device_renewal(
+            &endpoint,
+            &actor,
+            DeviceRenewalStageRequest {
+                api_version: CLIENT_V0_API_VERSION,
+                device_id,
+                migration_epoch,
+                allow_digest,
+                expires_in_hours,
+            },
+        )
+        .await?;
+        if json_output {
+            print_value(&receipt, true)?;
+        } else {
+            println!("Renewal staged: {}", receipt.renewal_id);
+            println!("Expires at: {}", receipt.expires_at);
+        }
+        return Ok(());
+    }
     let person = configured_human(person.as_deref(), configured_person, "devices")?;
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),
         DevicesCommand::Fabric { .. } => unreachable!("handled without a client"),
+        DevicesCommand::RenewStage { .. } => unreachable!("handled before product client requests"),
         DevicesCommand::Ls => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,
@@ -9452,7 +9651,10 @@ async fn run_devices(
             let response = client
                 .pairing_begin(&PairingBegin::Assistant(AssistantPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name: device_name.unwrap_or_else(|| "ChatGPT".into()),
+                    device_name: device_name.unwrap_or_else(|| match assistant {
+                        AssistantPrincipal::Chatgpt => "ChatGPT".into(),
+                        AssistantPrincipal::Mcp => "MCP".into(),
+                    }),
                     assistant_id: assistant,
                     scopes: terms.scopes,
                     expires_in_seconds: Some(terms.expires_in_seconds),
@@ -9474,6 +9676,7 @@ async fn run_devices(
             full_control,
             read_only,
             fabric_gateway,
+            gateway,
             assistant: None,
             grant,
         } => {
@@ -9482,6 +9685,15 @@ async fn run_devices(
                 "--expires-in, --scope, --disclose-to-openai and --consent-evidence apply only to --assistant pairing"
             );
             let device_name = device_name.context("name the device to pair")?;
+            if let Some(gateway) = &gateway {
+                let local_member = client.capabilities().await?.snapshot.host_id;
+                pairing_qr::check_begin_member(gateway, &local_member, &config.peers)?;
+                if !pairing_qr::gateway_is_begin_member(gateway, &local_member).await? {
+                    eprintln!(
+                        "Warning: the gateway's final member cannot be verified; this pairing must be completed on {local_member}. Run the pair command on the gateway member if it is different."
+                    );
+                }
+            }
             let response = client
                 .pairing_begin_person(&PersonPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
@@ -9509,6 +9721,18 @@ async fn run_devices(
                     );
                 }
                 print!("{}", cli_help::pairing_next_steps(&person));
+                if let Some(qr) = pairing_qr::render(
+                    gateway.as_ref(),
+                    &response.value,
+                    json_output,
+                    std::io::stdout().is_terminal(),
+                    chrono::Utc::now().timestamp_millis(),
+                )? {
+                    print!("{qr}");
+                }
+                if gateway.is_none() {
+                    println!("Hint: --gateway <url> enables a pairing QR in an interactive terminal.");
+                }
             }
             Ok(())
         }
@@ -10365,6 +10589,9 @@ fn render_product_page_headed(
                 if let Some(usage) = &item.usage {
                     let _ = writeln!(output, "  usage {}", render_usage(usage));
                 }
+                if let Some(admission) = &item.declared_admission {
+                    render_declared_admission(&mut output, admission);
+                }
                 if item.runs_truncated {
                     let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
@@ -10643,11 +10870,13 @@ fn render_slo_list(rows: &[Value]) -> String {
                     text(row, "current"),
                     text(row, "window"),
                     left(row),
+                    text(row, "source"),
+                    text(row, "host"),
                 ]
             })
             .collect::<Vec<_>>();
-        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT"].map(str::to_owned);
-        let widths: Vec<usize> = (0..6)
+        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT", "SOURCE", "HOST"].map(str::to_owned);
+        let widths: Vec<usize> = (0..8)
             .map(|column| {
                 std::iter::once(&header)
                     .chain(&table)
@@ -10761,6 +10990,9 @@ fn render_slo_explanation(row: &Value) -> String {
     let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
+    if row["source"].is_string() {
+        let _ = writeln!(output, "SOURCE   {} · {}", text("source"), text("host"));
+    }
     if let Some(left) = row["remaining_percent"].as_f64() {
         let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
@@ -11448,6 +11680,21 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 ))
                 .await?;
             print_value(&result, json_output)
+        }
+        SubjectCommand::Decisions { subject } => {
+            let snapshot: fractal_daemon::store::custom::DecisionInputs = client.get(&format!(
+                "/v1/custom/decision-inputs?subject={}", urlencoding::encode(&subject),
+            )).await?;
+            let basis = snapshot.basis;
+            let inputs = snapshot.claims.into_iter().enumerate().map(|(order, claim)| {
+                fractal_schema::custom::decisions::Claim {
+                    id: claim.id, kind: claim.kind, actor: claim.actor,
+                    order: order as u64,
+                    fields: claim.body.get("fields").unwrap_or(&claim.body).clone(),
+                }
+            }).collect::<Vec<_>>();
+            let folded = fractal_schema::custom::decisions::fold(&subject, &inputs, basis);
+            print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
             if args.references {
@@ -14469,7 +14716,36 @@ fn render_client_agent(
     for runtime in &agent.runtime_ids {
         let _ = writeln!(output, "RUNTIME      {runtime}");
     }
+    if let Some(admission) = &agent.declared_admission {
+        render_declared_admission(&mut output, admission);
+    }
     output
+}
+
+fn render_declared_admission(output: &mut String, admission: &fractal_client::DeclaredAdmission) {
+    use std::fmt::Write as _;
+    let _ = writeln!(output, "Declared admission — declared, not enforced.");
+    let _ = writeln!(output, "st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+    if let Some(priority) = &admission.priority {
+        let _ = writeln!(output, "  priority: {priority}");
+    }
+    if let Some(lane) = &admission.lane {
+        let _ = writeln!(output, "  lane: {lane}");
+    }
+    if let Some(budgets) = &admission.budgets {
+        if let Some(seconds) = budgets.cpu_seconds {
+            let _ = writeln!(output, "  cpu_seconds: {seconds}");
+        }
+        if let Some(memory) = &budgets.memory_max {
+            let _ = writeln!(output, "  memory_max: {memory}");
+        }
+        if let Some(disk) = &budgets.disk_max {
+            let _ = writeln!(output, "  disk_max: {disk}");
+        }
+        if let Some(tokens) = budgets.token_budget {
+            let _ = writeln!(output, "  token_budget: {tokens}");
+        }
+    }
 }
 
 /// One line naming a running subagent: what it does, its type, and, given the time, when it
@@ -15040,7 +15316,7 @@ async fn current_agent_incarnation(client: &Client, actor: &str) -> Result<Optio
     };
     let status: StatusResponse = client
         .get(&format!(
-            "/v1/status?subject={}",
+            "/v1/status?subject={}&summary=true",
             urlencoding::encode(&subject)
         ))
         .await?;
@@ -15086,7 +15362,7 @@ fn current_local_pty_incarnation(actor: &str) -> Result<Option<String>> {
 async fn current_local_agent_incarnation(client: &Client, actor: &str) -> Result<Option<String>> {
     let status: StatusResponse = client
         .get(&format!(
-            "/v1/status?subject={}",
+            "/v1/status?subject={}&summary=true",
             urlencoding::encode(actor)
         ))
         .await?;
@@ -17494,7 +17770,7 @@ async fn remove_confirmed_ended_channel_todo_outbox(
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
     let status: Result<StatusResponse> = client.get(&format!(
-        "/v1/status?subject={}", urlencoding::encode(subject),
+        "/v1/status?subject={}&summary=true", urlencoding::encode(subject),
     )).await;
     let status = match status {
         Ok(status) => status,
@@ -20884,6 +21160,27 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
     }
 }
 
+/// Each turn copies at most one fixed page, releases the background writer loan, then yields.
+/// The writer's background admission gives foreground work priority; there is no sleep polling.
+async fn copy_work_wake_history(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.work_wake_index", || {
+                fractal_daemon::store::wake_lookup::advance(&page_store)
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::task::yield_now().await,
+            error => {
+                stderr_message("fractal", format_args!("work wake index copy stopped: {error:?}; doctor reports the retained cursor"));
+                return;
+            }
+        }
+    }
+}
+
 /// Copy the gate requests older than the live gate-runner triggers, a page per writer loan with
 /// a pause between, after the API serves. Until it completes, the reconciler lists gate runners
 /// from the claims.
@@ -20980,7 +21277,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 /// start, which catches up on what a crash left unmirrored, then after each shard commit. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
-fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
+fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>, state_dir: PathBuf) {
     const RETRY: Duration = Duration::from_secs(30);
     let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
         return;
@@ -20993,6 +21290,10 @@ fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
         let _observer = observer;
         loop {
             receiver.borrow_and_update();
+            // The shard's dialers wake on the replication file, as the graph's do: a stream item
+            // this member wrote goes out to its recipient's host at once, not at the worker's
+            // next timer. An item a peer pushed wakes them too, which finds nothing new to send.
+            let _ = fs::write(state_dir.join("replication.wake"), format!("{}\n", uuid::Uuid::now_v7()));
             let mirror_store = store.clone();
             let mirrored = mirror_store.connection.write_workers().spawn_blocking(move || {
                 fractal_daemon::task_cpu::blocking("messages.stream_mirror", || {

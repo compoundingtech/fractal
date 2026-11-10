@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, Heading, Modal, ModalOverlay, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { DetailsPane, DetailsWhy } from '@fractal/ui/assistant-ui'
 import type { DetailsLayoutIntent, DetailsVariants } from '@fractal/ui/assistant-ui'
+import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
 import type { SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-status.ts'
 import { colorVars as c, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
@@ -12,7 +13,7 @@ import { syncLineNextChange } from '@fractal/ui/assistant-ui/sync-status'
 import { earliestChange, formatRelative, nextRelativeChange } from '@fractal/ui/human-time/format'
 import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts'
 import type { UseDetailsSupplement } from '../extensions/contract.ts'
-import type { Feed } from '../data/source.ts'
+import { credentialExpiredMessage, credentialNotice, type Feed } from '../data/source.ts'
 import { useNativeDetails } from './useNativeDetails.ts'
 import { detailsWithSupplement } from './detailsSupplement.ts'
 import { ChangesInspector } from './ChangesInspector.tsx'
@@ -72,12 +73,14 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
 
 /** Plain reasons for a refused or failed subagent-activity read; the source's own detail is diagnostic only. */
 const supplementUnavailableReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable' }>['reason'], string> = {
+  unauthorized: credentialExpiredMessage,
   ungranted: "This device doesn't have access to subagent activity.",
   unsupported: "Subagent activity isn't reported for this session.",
   failed: "Subagent activity couldn't be loaded.",
 }
 /** Why retained subagent activity is shown instead of a newer read. */
 const supplementStaleReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable' }>['reason'], string> = {
+  unauthorized: credentialExpiredMessage,
   ungranted: 'This device no longer has access to newer subagent activity, so earlier activity is shown.',
   unsupported: "Newer subagent activity isn't reported for this session, so earlier activity is shown.",
   failed: "The latest update couldn't be loaded, so earlier activity is shown.",
@@ -135,13 +138,14 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
     syncLineNextChange({ status, label: 'agent details', now, observedAt: native.observedAt ?? requestedAt }),
     receivedAt === undefined ? undefined : nextRelativeChange(receivedAt, now),
   ]))
-  const activity = native.harness !== 'omp' ? undefined
+  const activity = credentialNotice(supplement) ? { summary: credentialExpiredMessage, reasons: [] } : native.harness !== 'omp' ? undefined
     : supplement._tag === 'Waiting' ? { summary: 'Loading subagent activity…', reasons: [] }
       : supplement._tag === 'Unavailable' ? { summary: "Subagent activity isn't available for this session.", reasons: [supplementUnavailableReason[supplement.reason]] }
         : supplement.freshness === 'stale' ? {
           summary: `Subagent activity may be out of date${receivedAt === undefined ? '' : ` (last updated ${formatRelative(receivedAt, now)})`}.`,
           reasons: [supplement.error === undefined ? 'An update is still loading, so earlier activity is shown.' : supplementStaleReason[supplement.error.reason]],
         } : undefined
+  if (native.credentialNotice) return <SystemNotice kind="error" connection title={native.credentialNotice} />
   return <div ref={portalContainer} {...stylex.props(styles.content)}>
     {activity !== undefined && <div data-details-supplement data-details-supplement-state={supplement._tag} {...stylex.props(styles.note)}>
       <span role="status" data-details-supplement-summary {...stylex.props(styles.noteSummary)}>{activity.summary}</span>

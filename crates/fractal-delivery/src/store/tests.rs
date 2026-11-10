@@ -150,48 +150,11 @@ fn local_subscription_deferral_survives_a_daemon_restart() {
     );
 }
 
-/// `claims_since_only_quiet_notifications` as one query, as it was before it read its answer from
-/// `claims_since_waking_kind`: every quiet-notification answer below must agree with it.
-fn legacy_only_quiet(store: &Store, after_index: u64) -> bool {
-    let (total, other): (u64, u64) = store.readers.get().query_row(
-        "SELECT COUNT(*), COUNT(*) FILTER (
-             WHERE kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
-                                'sekret.called', 'sekret.exited', 'sekret.refused',
-                                'sekret.changed')
-               AND NOT (
-                 kind IN ('message.sent', 'message.staged', 'message.delivered',
-                          'message.read', 'message.closed')
-                 AND EXISTS (
-                   SELECT 1 FROM claims sent
-                   WHERE sent.subject=claims.subject AND sent.kind='message.sent'
-                 )
-                 AND NOT EXISTS (
-                   SELECT 1 FROM claims sent
-                   WHERE sent.subject=claims.subject AND sent.kind='message.sent'
-                     AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
-                 )
-               )
-         )
-         FROM claims WHERE store_index > ?1",
-        [after_index],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
-    total != 0 && other == 0
-}
-
-/// The quiet-notification answer after `after_index`, checked against the legacy query.
-fn quiet(store: &Store, after_index: u64) -> bool {
-    let answer = store.claims_since_only_quiet_notifications(after_index).unwrap();
-    assert_eq!(answer, legacy_only_quiet(store, after_index), "after store index {after_index}");
-    answer
-}
-
 #[test]
 fn quiet_claim_detection_requires_only_usage_or_renewal_since_cursor() {
     let store = Store::open_memory("node").unwrap();
     let before = store.index().unwrap();
-    assert!(!quiet(&store, before));
-    assert_eq!(store.claims_since_waking_kind(before).unwrap(), (false, None));
+    assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
     let append = |kind| {
         let mut connection = store.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
@@ -226,17 +189,15 @@ fn quiet_claim_detection_requires_only_usage_or_renewal_since_cursor() {
     };
     append("harness.usage");
     append("work.renewed");
-    assert!(quiet(&store, before));
-    assert_eq!(store.claims_since_waking_kind(before).unwrap().1, None);
+    assert!(store.claims_since_only_quiet_notifications(before).unwrap());
     let after_quiet = store.index().unwrap();
     append("harness.observed");
-    assert!(!quiet(&store, before));
+    assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
     assert!(
-        !quiet(&store, after_quiet)
+        !store
+            .claims_since_only_quiet_notifications(after_quiet)
+            .unwrap()
     );
-    // The wake is named by the one claim that is not quiet, though the quiet ones outnumber it.
-    assert_eq!(store.claims_since_waking_kind(before).unwrap().1.as_deref(), Some("harness.observed"));
-    assert_eq!(store.claims_since_waking_kind(after_quiet).unwrap().1.as_deref(), Some("harness.observed"));
 }
 
 #[test]
@@ -272,8 +233,7 @@ fn only_work_wake_messages_count_as_reconciler_changes() {
             json!({"status": status}),
         );
     }
-    assert!(quiet(&store, before));
-    assert_eq!(store.claims_since_waking_kind(before).unwrap().1, None);
+    assert!(store.claims_since_only_quiet_notifications(before).unwrap());
     // A work wake does, and so does the lifecycle of a message this store has not seen sent.
     let before = store.index().unwrap();
     append(
@@ -281,50 +241,13 @@ fn only_work_wake_messages_count_as_reconciler_changes() {
         "message.sent",
         sent(json!(["st3-work:step-run/test/work"])),
     );
-    assert!(!quiet(&store, before));
-    assert_eq!(store.claims_since_waking_kind(before).unwrap().1.as_deref(), Some("message.sent"));
+    assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
     let before = store.index().unwrap();
     append("message/wake", "message.read", json!({"status": "read"}));
-    assert!(!quiet(&store, before));
-    assert_eq!(store.claims_since_waking_kind(before).unwrap().1.as_deref(), Some("message.read"));
+    assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
     let before = store.index().unwrap();
     append("message/unseen", "message.read", json!({"status": "read"}));
-    assert!(!quiet(&store, before));
-    assert_eq!(store.claims_since_waking_kind(before).unwrap().1.as_deref(), Some("message.read"));
-}
-
-#[test]
-fn the_quiet_answer_is_unchanged_from_every_cursor_of_a_mixed_run() {
-    let store = Store::open_memory("node").unwrap();
-    let append = |subject: &str, kind: &str, fields: Value| {
-        let mut connection = store.connection.lock().unwrap();
-        let transaction = connection.transaction().unwrap();
-        append_claim_tx(&transaction, &store.origin, subject, kind, Some("agent/node.test"),
-            &json!({"fields": fields}), &[], None).unwrap();
-        transaction.commit().unwrap();
-    };
-    let sent = |tags: Value| json!({"from": "person/example", "to": "agent/node.test",
-        "content": "A note.", "status": "sent", "tags": tags});
-    let mut cursors = vec![store.index().unwrap()];
-    let mut add = |subject: &str, kind: &str, fields: Value| {
-        append(subject, kind, fields);
-        cursors.push(store.index().unwrap());
-    };
-    add("agent/node.test", "harness.usage",
-        json!({"driver": "codex", "incarnation_id": "current", "semantics": "response", "total_tokens": 1}));
-    add("message/talk", "message.sent", sent(json!(["chat"])));
-    add("message/talk", "message.read", json!({"status": "read"}));
-    add("agent/node.test", "harness.observed", json!({"driver": "codex", "incarnation_id": "current", "state": "ready"}));
-    add("message/wake", "message.sent", sent(json!(["st3-work:step-run/test/work"])));
-    add("message/unseen", "message.read", json!({"status": "read"}));
-    // A quiet tail: the cursors inside it see only quiet claims.
-    add("message/talk", "message.closed", json!({"status": "closed"}));
-    add("agent/node.test", "harness.usage",
-        json!({"driver": "codex", "incarnation_id": "current", "semantics": "response", "total_tokens": 2}));
-    // From each cursor, the latest included, which has no new claim at all.
-    let answers = cursors.iter().map(|cursor| quiet(&store, *cursor)).collect::<Vec<_>>();
-    assert!(answers.contains(&true) && answers.contains(&false), "{answers:?}");
-    assert!(!answers.last().unwrap(), "nothing new is not quiet");
+    assert!(!store.claims_since_only_quiet_notifications(before).unwrap());
 }
 
 #[test]

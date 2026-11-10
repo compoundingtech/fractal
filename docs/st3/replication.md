@@ -42,8 +42,8 @@ and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
 Installed services restart automatically. Without services, start
 `fractal replication-worker` first, retain its PID, then start
-`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
-generation before listening; this option is refused for service-managed daemons. A manual
+`fractal up --replication-worker-pid PID`. On Linux and macOS the daemon captures
+that process generation before listening; this option is refused for service-managed daemons. A manual
 worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
@@ -65,7 +65,7 @@ a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
 
-On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+On Linux and macOS worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
 `/v1/internal/seat-freshness/reads`, `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
 Unix connector's kernel-observed process generation with the replication worker.
 Services use the supervisor-observed worker; foreground operation uses the explicitly
@@ -86,12 +86,30 @@ Deploy with observe first. Before enabling enforce on a member, retain at least
 classes, including worker restarts. Review unexpected would-refuse entries before
 changing that member's configuration; roll enforcement out one member at a time.
 
-On macOS these routes retain existing admission and emit `unverified-platform`,
-not an authentication success. The unbound local caller authority gap remains
-open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
-after PID reuse they can attribute a surviving socket to the wrong worker.
+On macOS the connector PID comes from `LOCAL_PEERPID`; `proc_pidinfo` supplies its
+birth time. The daemon revalidates that generation before accepting worker authority,
+including explicit foreground enrollment. Unavailable or stale evidence follows the
+same observe/enforce policy above, rather than bypassing it as `unverified-platform`.
+macOS has no pidfd: before/after birth-time checks narrow but cannot eliminate the
+PID reuse window. A surviving socket and reused PID are not a permanently pinned identity.
 
-This Linux boundary does not protect against same-UID service-manager takeover or
+Local harness attribution on macOS walks ancestry using `proc_pidinfo` and reads
+`KERN_PROCARGS2` environment entries with nearest-process masking. Each process birth
+is checked before and after inspection. The connector's generation must also match its
+accept-time process witness before and after the walk; failed capture cannot produce
+a person or harness attribution. A positively observed effective-UID transition ends
+the cooperative walk as a person, preserving ordinary login-shell and SSH access.
+Linux reads effective UID from `/proc/PID/status`; macOS uses `PROC_PIDTBSDINFO`.
+If full BSD metadata is refused, `PROC_PIDT_SHORTBSDINFO` may establish ownership only;
+it supplies no generation witness and cannot authorize a same-UID process.
+Unreadable same-UID processes, unknown ownership, exited or changed processes fail closed.
+A completed same-UID walk without any identity variable is a person.
+On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
+Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
+sessions and actor/requester body impersonation; it does not deny every public request.
+The same macOS PID-reuse residual risk applies to this ancestry inspection.
+
+This boundary does not protect against same-UID service-manager takeover or
 ptrace of the trusted worker. User-service ownership and process debugging
 remain host trust assumptions; process pinning is not a separate-user sandbox.
 Operator fleet routes retain their existing local authority boundary.
@@ -378,7 +396,7 @@ recorded. A seat it left out, such as one whose declaration hasn't reached it ye
 host retries it a minute later without waiting for a commit, then less often while it stays owed,
 doubling up to every 15 minutes. An agent card's freshness and a
 mail hold read the latest of the replicated report, the local log, and that time. The card's
-90-second rule ages it, so a host that stops pushing reads stale.
+shared `HARNESS_OBSERVATION_FRESHNESS` window ages it, so a host that stops pushing reads stale.
 
 A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
 re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the

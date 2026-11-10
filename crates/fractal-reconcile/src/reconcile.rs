@@ -1335,6 +1335,8 @@ pub struct Reconciler<R = NativeRuntime> {
     gate_poll_runtimes: Arc<Mutex<BTreeSet<String>>>,
     /// What each item's last evaluation read, so a pass can tell what a change affects.
     pub incremental: crate::incremental::Incremental,
+    /// How far [`Self::observe_stream`] has read the messages shard; `None` until the first pass.
+    stream_seen: Mutex<Option<crate::store::messages_shard::mailbox_reads::StreamPosition>>,
     /// Fail a pass that makes a correction an incremental pass would have missed (tests).
     strict_incremental: bool,
     /// Skip items nothing changed for, between periodic full passes. Off in test reconcilers,
@@ -1585,6 +1587,7 @@ impl Reconciler<NativeRuntime> {
             gate_poll_armed: Arc::new(AtomicBool::new(false)),
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
+            stream_seen: Default::default(),
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
             session_starts: Arc::new(Mutex::new(HashMap::new())),
@@ -1788,6 +1791,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             gate_poll_armed: Arc::new(AtomicBool::new(false)),
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
+            stream_seen: Default::default(),
             strict_incremental: true,
             skip_unneeded: false,
             session_starts: Arc::new(Mutex::new(HashMap::new())),
@@ -2242,6 +2246,34 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Mark the items that read a stream item's mailbox or subject, as the change feed marks them
+    /// for a graph `message.sent` or lifecycle claim: the feed reads only the graph's file, and
+    /// mail routed to the messages shard (4c-2b) would otherwise reach these items only at the
+    /// next full pass. The first call only finds where the shard stands, as the first pass reads
+    /// every item.
+    fn observe_stream(&self) -> Result<()> {
+        use crate::store::messages_shard::mailbox_reads;
+        let mut seen = self.stream_seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(mut after) = *seen else {
+            *seen = Some(mailbox_reads::position(&self.store)?);
+            return Ok(());
+        };
+        loop {
+            let (next, changed, more) = mailbox_reads::wake_batch(&self.store, after, 1024)?;
+            for (subject, recipient) in changed {
+                if !recipient.is_empty() {
+                    self.incremental.touch(&format!("mailbox:{recipient}"));
+                }
+                self.incremental.touch(&subject);
+            }
+            after = next;
+            *seen = Some(after);
+            if !more {
+                return Ok(());
+            }
+        }
+    }
+
     /// Keep each GitHub watch this host declared true to its seat and deadline: stop the
     /// declaration of a watch that ended, end one whose seat is retired or fresh without a wake,
     /// end one whose deadline passed with a final wake, and start the standing observer again when
@@ -2253,7 +2285,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let daemon = format!("daemon/{}", self.host);
         // Earlier stages may change declarations or end watches. Observe those writes before
         // selecting; the evaluation then reads a fresh complete roster inside its read record.
-        if let Err(error) = self.incremental.observe(&self.store) {
+        if let Err(error) = self.incremental.observe(&self.store).and_then(|()| self.observe_stream()) {
             self.isolate(ITEM, &daemon, || Err::<(), _>(error));
             self.incremental.touch(ITEM);
             return;
@@ -2438,7 +2470,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let faults = {
             let mut phase = crate::reconcile_telemetry::phase("fault_snapshot");
-            let faults = self.store.fault_snapshot(now)?;
+            let faults = self.store.fault_delivery_snapshot(now)?;
             phase.items(faults.len());
             faults
         };
@@ -2990,6 +3022,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let observe_span = crate::reconcile_telemetry::phase("pass/changes");
         self.incremental.observe(&self.store)?;
+        self.observe_stream()?;
         self.incremental.observe_value(
             "publication-launch-evidence",
             format!("{:?}", self.store.publication_cache_epoch()),
@@ -4701,7 +4734,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         };
         let message_id = &hex::encode(sha2::Sha256::digest(done.as_bytes()))[..16];
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: format!("message/{message_id}"),
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),
@@ -9178,7 +9211,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
         }
         if let Some(attempt) = attempted.as_ref() {
-            let diagnostic = self.restart_admission_error(&subject.subject, attempt, previous)?;
+            let diagnostic = match self.verified_restart_exit(&subject.subject, attempt)? {
+                Some(detail) => Some(detail),
+                None => self.restart_admission_error(&subject.subject, attempt, previous)?,
+            };
             return self.fail_requested_restart(
                 subject,
                 member,
@@ -9234,6 +9270,45 @@ impl<R: RuntimeControl> Reconciler<R> {
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
         Ok(true)
+    }
+
+    /// A verified launch receipt belongs to its exact attempt, even if the PTY
+    /// disappears before the next reconciliation observation.
+    fn verified_restart_exit(
+        &self,
+        subject: &str,
+        attempt: &crate::model::ClaimRecord,
+    ) -> Result<Option<String>> {
+        let Some(operation) = attempt.body["fields"]["operation"].as_str() else {
+            return Ok(None);
+        };
+        // Start completion is a local observation, not a replicated claim. Include
+        // both storage classes so retained legacy receipts remain readable too.
+        let receipts = self.store.observations_for(subject, "runtime.action.succeeded")?;
+        let receipt = receipts.iter().rev().find(|claim| {
+            claim.body["fields"]["action"] == "start"
+                && claim.body["fields"]["operation_status"] == "verified"
+                && claim.body["fields"]["operation"] == operation
+                && crate::store::claim_log_order(claim) > crate::store::claim_log_order(attempt)
+        });
+        let Some(incarnation) = receipt
+            .and_then(|claim| claim.body["fields"]["incarnation_id"].as_str())
+        else {
+            return Ok(None);
+        };
+        // The live harness projection excludes exited runtimes. Read the retained
+        // driver report for this receipt's incarnation, not a live/work overlay.
+        let reports = self.store.observations_for(subject, "harness.observed")?;
+        let reason = reports
+            .iter()
+            .rev()
+            .find(|report| report.body["fields"]["incarnation_id"] == incarnation)
+            .filter(|report| report.body["fields"]["state"] == "ended")
+            .and_then(|report| report.body["fields"]["reason"].as_str());
+        Ok(Some(reason.map_or_else(
+            || "the replacement started successfully but is no longer observable".into(),
+            |reason| format!("the replacement started and then exited: {reason}"),
+        )))
     }
 
     /// A driver may publish its refusal and exit before the physical observation arrives.
@@ -14999,7 +15074,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             "Declared product missing: {}",
             view.title.as_deref().unwrap_or(&view.step)
         );
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: message_subject,
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),
@@ -16774,7 +16849,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..20]
         );
         let count = entries.len();
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: message_subject.clone(),
             kind: "message.sent".into(),
             actor: None,
@@ -19021,24 +19096,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// Wake reconciliation when a background identity measurement completes, counted as a
-    /// launch identity wake.
-    fn launch_input_wake(&self) -> &Arc<dyn Fn() + Send + Sync> {
-        self.launch_input_wake.get_or_init(|| {
-            let incremental = self.incremental.clone();
-            let notify = self.notify.clone();
-            let revision = self.file_watch_revision.clone();
-            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                incremental.touch("launch-identity");
-                crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::LaunchIdentity, None);
-                notify.notify_one();
-            });
-            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
-            wake
-        })
-    }
-
     fn watch_launch_inputs(&self, subject: &DesiredSubject) -> Result<()> {
         let item = format!("launch-inputs:{}", subject.subject);
         if !self.incremental.needs(&item, now_ms()) {
@@ -19047,7 +19104,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(());
         }
-        self.launch_input_wake();
+        self.launch_input_wake.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let revision = self.file_watch_revision.clone();
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                incremental.touch("launch-identity");
+                notify.notify_one();
+            });
+            fractal_drivers::harness_admission::watch_identity_measurements(Arc::downgrade(&wake));
+            wake
+        });
         let before = self.file_watch_revision.load(std::sync::atomic::Ordering::Acquire);
         let watch_error = std::cell::RefCell::new(None); // Identity errors and disappearing inputs remain unknown.
         let (result, reads) = smallclaims::touched::record(|| {
@@ -20029,7 +20097,7 @@ pub fn append_fault_message(
     if let Some(run) = &fault.mission_run {
         tags.push(format!("mission-run:{run}"));
     }
-    store.append_claim(&ClaimInput {
+    crate::store::message_routing::send(store, &ClaimInput {
         subject,
         kind: "message.sent".into(),
         actor: Some("daemon/runtime".into()),
@@ -20944,6 +21012,7 @@ pub mod tests {
     mod final_cancel_missing_assignee;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod stream_dirty_marking;
     mod standing_observer_stop;
     mod helper_launcher;
     mod bounded_loop_reads;
@@ -27012,29 +27081,6 @@ agent "import/omp/fixture" {{
             assert!(reconciler.incremental.needs("probe", now_ms()));
             fractal_drivers::harness_admission::identity_measurements_settled();
         }
-    }
-
-    #[tokio::test]
-    async fn a_completed_identity_measurement_is_counted_as_a_launch_identity_wake() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let wakes = || smallclaims::performance::snapshot()["reconciler_wakes"].as_array().unwrap().iter()
-            .find(|row| row["cause"] == "launch identity").map_or(0, |row| row["count"].as_u64().unwrap());
-        let notify = Arc::new(Notify::new());
-        let reconciler = Reconciler::new(Arc::new(Store::open_memory("node").unwrap()),
-            Arc::new(FakeRuntime::default()), "node".into(), notify.clone());
-        reconciler.launch_input_wake();
-        let root = tempfile::tempdir().unwrap();
-        let provider = root.path().join("provider");
-        std::fs::write(&provider, "provider bytes").unwrap();
-        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let before = wakes();
-        // An unmeasured executable is measured in the background, and its completion is the wake.
-        assert!(fractal_drivers::harness_admission::executable_identity_ready_with(&provider, &|_| unreachable!())
-            .unwrap().is_none());
-        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await
-            .expect("a completed measurement must wake reconciliation");
-        fractal_drivers::harness_admission::identity_measurements_settled();
-        assert!(wakes() > before, "the measurement's wake was not counted as a launch identity wake");
     }
 
     #[tokio::test]
