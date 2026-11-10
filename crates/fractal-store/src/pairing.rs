@@ -15,10 +15,18 @@ pub fn record_hash(origin: &str, actor: Option<&str>, fields: &Value) -> Result<
 
 pub const OPERATION_AUTHORIZED: &str = "client.operation-authorized";
 
+/// Authority-bearing records admitted only by their dedicated daemon operation.
+pub fn is_client_operation_kind(kind: &str) -> bool {
+    kind.starts_with("custom.client.pairing")
+        || kind.starts_with("custom.client.terminal")
+        || matches!(kind, "custom.client.test-enrolled" | "custom.client.test-revoked"
+            | "custom.client.control-granted" | "custom.client.control-revoked"
+            | "custom.client.control-consumed" | "custom.client.command-receipt")
+}
+
 /// Admission receipts use a separate subject so the operation's CAS head is unchanged.
 pub fn append_operation_receipt_tx(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
-    anyhow::ensure!(claim.kind.starts_with("custom.client.pairing")
-        || claim.kind.starts_with("custom.client.terminal"), "a client operation record is required");
+    anyhow::ensure!(is_client_operation_kind(&claim.kind), "a client operation record is required");
     let hash = record_hash(&claim.origin, claim.actor.as_deref(), &claim.body["fields"])?;
     let mut fields = serde_json::json!({
         "record_id":claim.id,
@@ -240,7 +248,7 @@ fn legacy_allowance_deadline(
 
 impl Store {
     pub fn append_client_operation_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, crate::FractalError> {
-        if !input.kind.starts_with("custom.client.pairing") && !input.kind.starts_with("custom.client.terminal") {
+        if !is_client_operation_kind(&input.kind) {
             return Err(crate::FractalError::new("claim-write-forbidden", "a dedicated client operation record is required"));
         }
         crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
@@ -330,6 +338,32 @@ mod tests {
                 "credential_hash":"test-digest","expires_at_unix_ms":u64::MAX,"scopes":["read.projections"],
             })).unwrap(),
             evidence:vec![],expected_subject:None,idempotency_key:None,
+        }
+    }
+
+    #[test]
+    fn client_control_authority_requires_dedicated_durable_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("control.db");
+        for kind in ["custom.client.test-enrolled", "custom.client.test-revoked",
+            "custom.client.control-granted", "custom.client.control-revoked",
+            "custom.client.control-consumed", "custom.client.command-receipt"]
+        {
+            let store = Store::open(&path, "issuer").unwrap();
+            let input = ClaimInput {
+                subject: format!("client-control-grant/{kind}"), kind: kind.into(),
+                actor: Some("agent/test".into()),
+                fields: serde_json::from_value(json!({"grantId":"test","runId":"run/test"})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            let forged = store.append_claim(&input).unwrap();
+            assert!(!store.client_operation_is_trusted(&forged).unwrap());
+            let admitted = store.append_client_operation_claim(&input).unwrap();
+            assert!(store.client_operation_is_trusted(&admitted).unwrap());
+            drop(store);
+            let reopened = Store::open(&path, "issuer").unwrap();
+            assert!(reopened.client_operation_is_trusted(&admitted).unwrap());
+            assert!(!reopened.client_operation_is_trusted(&forged).unwrap());
         }
     }
 

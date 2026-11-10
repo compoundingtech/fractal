@@ -11466,7 +11466,7 @@ pub fn append_claim_tx(
         }
     }
     let canonical;
-    let body = if (kind.starts_with("custom.client.pairing") || kind.starts_with("custom.client.terminal"))
+    let body = if crate::pairing::is_client_operation_kind(kind)
         && !sorted(body) {
         canonical = smallclaims::hash::canonical_json_value(body);
         &canonical

@@ -5976,6 +5976,7 @@ async fn run(cli: Cli) -> Result<()> {
         if !args.peer.is_empty() {
             config.peers = args.peer;
         }
+        config.network_policy().require(fractal_daemon::config::NetworkOperation::Replication)?;
         config.apply_fleet_file()?;
         fractal_daemon::node_identity::resolve(&mut config)?;
         let mut telemetry =

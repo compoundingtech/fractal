@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Enroll and revoke isolated fixture clients through the daemon's Unix operator boundary",
+  "replay": {"status":"none","detail":"Enrollment and revocation read dedicated durable client-operation claims; existing pairing replay is unchanged."},
+  "schema": {"status":"changed","detail":"Adds custom.client.test-enrolled and custom.client.test-revoked with exact pairing/key, kind, host, instance, consentRef and packetDigest bindings. Dedicated operation admission also reserves the control grant and receipt claim kinds."},
+  "rules": {"status":"changed","detail":"Enrollment requires the daemon UID on its Unix socket and the local-only fixture principal. Pairings must use client-generated P-256 keys and read plus control.commands scopes, never control.messages. Consent references and packet digests are validated and cannot be reused."},
+  "compatibility": {"status":"changed","detail":"Ordinary pairings are never implicitly enrolled. Enrollment does not create keys or principal message-signing authority. Exact clients and local operators can revoke an enrollment."},
+  "downtime": {"status":"none","detail":"Source implementation performs no live setup, pairing, enrollment or service action."},
+  "manual": {"status":"changed","detail":"Before enrollment, the mission operator verifies an authenticated native ask approval matching the reviewed packet digest and scope. The fixture daemon attests the supplied reference without connecting to the main daemon."},
+  "recovery": {"status":"none","detail":"Revocation is durable and re-enrollment requires a fresh consent reference; it never resurrects an older grant."}
+}
