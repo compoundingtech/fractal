@@ -97,7 +97,10 @@ fn resolve_node_documents(node: &mut KdlNode, bindings: &BTreeMap<String, String
     let mission = node.name().value() == "mission";
     if let Some(children) = node.children_mut() {
         for child in children.nodes_mut() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 resolve_node_documents(child, bindings);
             }
         }
