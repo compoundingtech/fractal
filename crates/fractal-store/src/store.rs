@@ -11499,6 +11499,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    human_review_reassignment::admit_reassignment(transaction, kind, &fields)
+        .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
@@ -22760,6 +22762,41 @@ pub struct ClaimCommitContext<'a> {
     pub as_older_build: bool,
 }
 
+fn claim_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    operation: Option<&(String, String)>,
+) -> Result<Option<ClaimRecord>, FractalError> {
+    if let Some((operation_id, request_digest)) = operation {
+        if let Some((stored_digest, canonical_claim, state)) =
+            operation_tx(transaction, operation_id).map_err(internal)?
+        {
+            if state == "conflict" {
+                return Err(FractalError::new(
+                    "idempotency-conflict",
+                    "the replicated operation has conflicting requests",
+                )
+                .with_detail("operation_id", operation_id.clone()));
+            }
+            if stored_digest != *request_digest {
+                return Err(FractalError::new(
+                    "idempotency-mismatch",
+                    "the idempotency key already identifies a different request",
+                )
+                .with_detail("operation_id", operation_id.clone())
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest.clone()));
+            }
+            let claim = claim_by_id_tx(transaction, &canonical_claim)
+                .map_err(internal)?
+                .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
+            identities::check_receipt(transaction, &claim)?;
+            return Ok(Some(claim));
+        }
+        checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+    }
+    Ok(None)
+}
+
 pub fn append_claim_with_commit_context(
     graph: &GraphStore,
     input: &ClaimInput,
@@ -22889,33 +22926,8 @@ pub fn append_claim_with_commit_context(
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
             } else { false };
-            if let Some((operation_id, request_digest)) = &operation
-                && let Some((stored_digest, canonical_claim, state)) =
-                    operation_tx(transaction, operation_id).map_err(internal)?
-            {
-                if state == "conflict" {
-                    return Err(FractalError::new(
-                        "idempotency-conflict",
-                        "the replicated operation has conflicting requests",
-                    )
-                    .with_detail("operation_id", operation_id.clone()));
-                }
-                if stored_digest != *request_digest {
-                    return Err(FractalError::new(
-                        "idempotency-mismatch",
-                        "the idempotency key already identifies a different request",
-                    )
-                    .with_detail("operation_id", operation_id.clone())
-                    .with_detail("stored_digest", stored_digest)
-                    .with_detail("request_digest", request_digest.clone()));
-                }
-                let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
-                    .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
-                identities::check_receipt(transaction, &claim)?;
-                return Ok((claim,false));
-            }
-            if let Some((operation_id, request_digest)) = &operation {
-                checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+            if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+                return Ok((claim, false));
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.

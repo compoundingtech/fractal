@@ -12,7 +12,7 @@ pub struct ReviewOwnerSnapshot {
 }
 
 /// Only fractal-missions::store::missions::review_owner_snapshot may implement `load`.
-/// The caller owns this writer transaction and must roll it back on any error.
+/// A savepoint isolates every mutation, even if the caller commits after an error.
 /// Authentication remains the separate slice 16 boundary; this is not a public ingress.
 #[doc(hidden)]
 pub fn append_agent_review_answer_tx(
@@ -25,6 +25,10 @@ pub fn append_agent_review_answer_tx(
         &str,
     ) -> std::result::Result<ReviewOwnerSnapshot, FractalError>,
 ) -> std::result::Result<ClaimRecord, FractalError> {
+    let operation = identities::claim_operation(input)?;
+    if let Some(record) = claim_operation_outcome_tx(tx, operation.as_ref())? {
+        return Ok(record);
+    }
     let answer = incoming_answer(input)?;
     let record = claim_by_id_tx(tx, answer.binding.request)
         .map_err(internal)?
@@ -70,22 +74,39 @@ pub fn append_agent_review_answer_tx(
         }
     }
     let mut body = json!({"fields": input.fields, "evidence": input.evidence});
-    if let Some((id, request_digest)) = identities::claim_operation(input)? {
+    if let Some((id, request_digest)) = operation {
         body["_operation"] = json!({"id": id, "request_digest": request_digest});
     }
-    let record = append_claim_record_tx(
-        tx,
-        origin,
-        &input.subject,
-        &input.kind,
-        input.actor.as_deref(),
-        &body,
-        &predecessor.into_iter().collect::<Vec<_>>(),
-        None,
-    )
-    .map_err(internal)?;
-    insert_event(tx, record.store_index, &input.kind, &input.subject, &body).map_err(internal)?;
-    projectors::project_claim(projectors::APPEND, tx, &record).map_err(internal)?;
-    register_operation_tx(tx, &record).map_err(internal)?;
-    Ok(record)
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h9376410940d5 owner=fractal_store::store::agent_review_transaction TODO=trace-statement-and-value-representation */ "SAVEPOINT agent_review_answer")
+        .map_err(internal)?;
+    let result = (|| {
+        let record = append_claim_record_tx(
+            tx,
+            origin,
+            &input.subject,
+            &input.kind,
+            input.actor.as_deref(),
+            &body,
+            &predecessor.into_iter().collect::<Vec<_>>(),
+            None,
+        )
+        .map_err(claim_append_error)?;
+        insert_event(tx, record.store_index, &input.kind, &input.subject, &body)
+            .map_err(internal)?;
+        projectors::project_claim(projectors::APPEND, tx, &record).map_err(internal)?;
+        if !register_operation_tx(tx, &record).map_err(internal)? {
+            return Err(FractalError::new(
+                "idempotency-conflict",
+                "answer operation conflicts",
+            ));
+        }
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h25f2de100e85 owner=fractal_store::store::agent_review_transaction TODO=trace-statement-and-value-representation */ "RELEASE agent_review_answer")
+            .map_err(internal)?;
+        Ok(record)
+    })();
+    if result.is_err() {
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3bdff08c789 owner=fractal_store::store::agent_review_transaction TODO=trace-statement-and-value-representation */ "ROLLBACK TO agent_review_answer; RELEASE agent_review_answer")
+            .map_err(internal)?;
+    }
+    result
 }
