@@ -56,7 +56,9 @@ const withEntry = <V,>(map: ReadonlyMap<string, V>, key: string, value: V): Read
 export const hidesAlert = (state: AlertAnswersState, item: Native.Attention): boolean => {
   if (state.settled.has(item.id)) return true
   const pending = state.pending.get(item.id)
-  return pending !== undefined && (item.attention_kind !== 'harness-prompt' || pending.item.episode === item.episode)
+  return pending !== undefined && (item.attention_kind === 'harness-prompt'
+    ? pending.item.episode === item.episode
+    : pending.item.revision === item.revision)
 }
 
 export type AlertAnswers = ReturnType<typeof createAlertAnswers>
