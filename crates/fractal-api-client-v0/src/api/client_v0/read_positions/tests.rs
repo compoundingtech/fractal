@@ -100,7 +100,7 @@ async fn other_people_can_neither_read_nor_advance_a_persons_positions() {
         "kind":"subscribe","id":"read-positions","collection":"read-positions","person":ADA,"limit":10
     })).unwrap();
     assert_eq!(
-        collection_items(&state, &bob, &subscription, read_slots.clone().acquire_owned().await.unwrap()).await.unwrap_err().code,
+        collection_items(&state, &robin, &subscription, read_slots.clone().acquire_owned().await.unwrap()).await.unwrap_err().code,
         "forbidden"
     );
     let mut omitted = subscription.clone();

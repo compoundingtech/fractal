@@ -134,12 +134,12 @@ fn the_corpus_generates_valid_read_position_inputs() {
     world.tap(0);
     assert!(world.failures.is_empty(), "{:?}", world.failures);
     let expected = world.nodes[0].store.read_snapshot(|index| {
-        fractal_daemon::store::read_positions::read_positions_at(
+        fractal_store::store::read_positions::read_positions_at(
             &world.nodes[0].store.readers.get(), PERSON, index,
         )
     }).unwrap();
     let actual = world.oracle.read_snapshot(|index| {
-        fractal_daemon::store::read_positions::read_positions_at(
+        fractal_store::store::read_positions::read_positions_at(
             &world.oracle.readers.get(), PERSON, index,
         )
     }).unwrap();

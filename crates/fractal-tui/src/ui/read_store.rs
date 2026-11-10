@@ -371,7 +371,7 @@ mod tests {
         first.advance("agent/a", 10_000);
         let mut same = present(Some(ada), now);
         assert_eq!(same.due(now, true), [("agent/a".to_owned(), 10_000)]);
-        for other_scope in [bob, other] {
+        for other_scope in [robin, other] {
             let mut isolated = present(Some(other_scope), now);
             assert!(isolated.due(now, true).is_empty(), "another scope cannot replay this person's advances");
         }
