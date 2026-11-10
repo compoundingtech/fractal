@@ -418,11 +418,14 @@ pub trait PersonWorkStore {
 impl PersonWorkStore for Store {
 
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
+        let program = input.actor == crate::model::PROGRAM_ASKER;
         if !crate::model::person_subject(&input.person)
-            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing")
+            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing" || program)
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
+            // A program asks only on its own step.
+            || (program && (input.step.is_none() || input.new_run.is_some()))
         {
             return Err(FractalError::new(
                 "invalid-person-ask",
@@ -487,12 +490,20 @@ impl PersonWorkStore for Store {
                 Ok(proven && legacy["fields"]["step"] == origin_subject && legacy["fields"]["step_attempt"].as_u64() == Some(origin.attempt as u64)
                     && matches!(origin.status.as_str(), "ready" | "blocked" | "claimed" | "working"))
             }).transpose().map_err(internal)?.unwrap_or(false);
-            if step_owner_is_terminal_tx(tx, &origin_subject)?
-                || !declaration_live(tx, &input.actor).map_err(internal)?
-                || (!legacy_origin && (!matches!(origin.status.as_str(), "claimed" | "working")
-                || origin.claimant.as_deref() != Some(input.actor.as_str())
-                || origin.claim_incarnation != input.incarnation
-                || origin.claim_expires_at_unix_ms.is_none_or(|expiry| expiry <= now_ms()))) {
+            // A program step has no claimant: the daemon asks for the step's current attempt,
+            // which the request names as its incarnation (docs/st3/program-engine.md §6).
+            let stale = if program {
+                !origin.agentless
+                    || !matches!(origin.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
+                    || input.incarnation.as_deref() != Some(origin.attempt.to_string().as_str())
+            } else {
+                !declaration_live(tx, &input.actor).map_err(internal)?
+                    || (!legacy_origin && (!matches!(origin.status.as_str(), "claimed" | "working")
+                    || origin.claimant.as_deref() != Some(input.actor.as_str())
+                    || origin.claim_incarnation != input.incarnation
+                    || origin.claim_expires_at_unix_ms.is_none_or(|expiry| expiry <= now_ms())))
+            };
+            if step_owner_is_terminal_tx(tx, &origin_subject)? || stale {
                 return Err(FractalError::new("stale-work-ask", format!(
                     "cannot ask from step `{origin_subject}`: status `{}`, claimant `{}`, expected incarnation `{}`, given `{}`; only its live claimant can block this step. Refresh `work ls` and use its current claim and incarnation, or omit --step for an independent ask",
                     origin.status, origin.claimant.as_deref().unwrap_or("<none>"), origin.claim_incarnation.as_deref().unwrap_or("<none>"), input.incarnation.as_deref().unwrap_or("<none>"))));

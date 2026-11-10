@@ -3455,6 +3455,10 @@ pub struct PersonRenameReport {
     pub namespace_notice: String,
 }
 
+/// The requester of a program step's person asks (docs/st3/program-engine.md §6). The daemon asks
+/// on the program's behalf: a program step has no claimant, so its attempt fences the ask instead.
+pub const PROGRAM_ASKER: &str = "daemon/program";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersonAskRequest {
     #[serde(skip)]
