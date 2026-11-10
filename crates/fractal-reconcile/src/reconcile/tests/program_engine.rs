@@ -238,6 +238,14 @@ fn a_programs_effects_and_journal_act_as_its_run() {
     let credential = who.body["fields"]["value"].as_str().unwrap().to_owned();
     let binding = fixture.store.run_binding(&credential).unwrap();
     assert_eq!((binding.run.as_str(), binding.step_run.as_str(), binding.attempt), (started.run.as_str(), started.step.as_str(), 1));
+    // Passes over a running attempt mint nothing more, and the credential has no expiry of its own.
+    for _ in 0..5 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.run_credentials_issued_for_tests(&started.step), 1);
+    let capability = fixture.store.capability(&credential, crate::store::run_credentials::RUN_CREDENTIAL_KIND).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    assert!(capability.expires_at_unix_ms > now + 100 * 365 * 24 * 60 * 60 * 1000);
     std::fs::write(&started.gate, "").unwrap();
     fixture.until("the program completes", || fixture.status(&started.step) == "completed");
     assert_eq!(fixture.store.run_binding(&credential).unwrap_err().code, "run-credential-ended");
