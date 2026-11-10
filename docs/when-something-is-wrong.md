@@ -54,13 +54,49 @@ After upgrade, `first-frame` records the first successfully sent PTY byte chunk,
 with elapsed time measured from the splice's start and the terminal/incarnation
 in its `raw_terminal_stream` span. There are no per-frame debug events.
 
-The TUI's `terminal_attach_setup` DEBUG spans time capability issuance and the
-combined client connect/upgrade await, without increasing either 8-second budget.
+The TUI records an attempt UUID and target agent on every phase event. Its
+attempt-scoped lifecycle records a terminal outcome with the phase reached and
+elapsed time even on outer deadline expiry, selection changes, or drop; failures
+are INFO-level outcomes rather than completion-only DEBUG messages. Capability
+issuance and combined client connect/upgrade retain their 8-second budgets.
 Only a capability-issuance timeout retries automatically, at most twice after
 1 and 2 seconds, keeping the selected incarnation. Each cancelled issuance
 future is dropped before retry; an unused capability opens no PTY and expires
 after 60 seconds. Upgrade timeouts name that phase and offer Ctrl-R, without an
 automatic retry. The overall setup deadline and single-flight guard still apply.
+
+For a private, device-local reproduction log, launch the TUI with an absolute
+JSONL destination:
+
+```sh
+FRACTAL_TUI_ATTACH_TRACE_FILE="$HOME/raw-attach.jsonl" fractal ui --client
+```
+
+This file is the actual client diagnostic sink (`service="fractal-tui"`), not an
+OTEL export or daemon journal. It contains identifiers and timing, not terminal
+contents, credentials, or capabilities; treat it as private. Open the target pane
+without typing provider input. `first-frame-decoded` means the client decoded a
+PTY protocol frame; `first-screen-rendered` follows a native screen draw and
+successful synchronized terminal-frame completion. Neither is inferred from
+server first-byte timing.
+
+Use a separate file per TUI process. New files have mode 0600; an existing file
+must be a regular, single-link, non-symlink file owned by the current user with
+mode 0600, or logging stays disabled. Appends stop at 4 MiB without truncation.
+The sink is best-effort on I/O errors, size exhaustion, or lock contention; it
+never waits for another process's log lock. Records include `at_unix_ms` for
+server correlation and monotonic elapsed time for local phase duration.
+
+Server phase DEBUG events use the daemon's stderr sink. Under a user service,
+read its journal (for the standard deployment,
+`journalctl --user -u smalltalk.service`). Enable the relevant modules in the
+managed daemon's `RUST_LOG`, for example
+`info,fractal_api_client_v0::api::client_v0::raw_terminal=debug,fractal_api_core::api::client_v0::raw_terminal=debug,fractal_peer::peer=debug`.
+Changing a running service's environment requires its normal authorized
+deployment; the TUI does not change daemon logging or restart it. Existing OTEL
+request spans use `service.name="st-daemon"`; DEBUG stderr events are not exported
+by its INFO-and-above OTEL log filter. Correlate server terminal/incarnation and
+request times separately from the client attempt UUID.
 
 Endpoint resolution, Unix connect, and WebSocket upgrade are private generated
 client boundaries: they are **not separable without codegen** from this caller.
