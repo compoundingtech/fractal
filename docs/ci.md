@@ -1063,8 +1063,11 @@ with its own `/tmp`, and nothing the job started outlives it. The runner names a
 cache, use that Cargo home, and Cargo keeps its intermediate build files in a per-runner build
 directory, while sccache shares compiled crates between all runners and the Nix store is the
 machine's own. The machine's configuration lives in the private network repository.
-In GitHub Actions, both Rust dev shells use `scripts/ci-rustc-wrapper`: sccache's response-I/O
-fallback is enabled. A separate read-only `sccache --dist-status` preflight is bounded
+In GitHub Actions, both Rust dev shells default to `scripts/ci-rustc-wrapper`
+when `RUSTC_WRAPPER` is unset and neither `SCCACHE_CLIENT_SIDE` nor
+`SCCACHE_SERVER_UDS` names a host cache setup. Inherited wrappers (including an
+empty cache opt-out) and host cache settings are preserved. The CI wrapper enables
+sccache's response-I/O fallback. A separate read-only `sccache --dist-status` preflight is bounded
 to 15 seconds (five seconds to finish terminating it). A recognized preflight startup
 error or timeout disables caching for the rest of that job with a warning, before any
 compiler request is submitted. Signal statuses are preserved. Once compilation starts,
@@ -1471,14 +1474,14 @@ durable snapshots and successful-main-only baselines.
 
 Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
-Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
+Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with expired
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
 current offer's receipt sequence; and delivered-but-unread retention across native channel
 restart. Claude's missing-channel cases also require automatic recovery, attachment during
 recheck without replacing the seat, and durable parking after three failed replacements.
 Its MCP bootstrap cases answer initialization with the daemon offline or binding pending,
 attach and reconnect in the same child, preserve native receipts, and cancel attachment on EOF.
-The mailbox cases seed hour-old sent mail and recent staged and delivered-but-unread
+The mailbox cases seed sent mail older than the stream's seven-day cutoff and recent staged and delivered-but-unread
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 

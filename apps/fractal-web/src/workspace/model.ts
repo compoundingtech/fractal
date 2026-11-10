@@ -87,11 +87,13 @@ export const emptyWorkspace: WorkspaceState = {
 }
 
 /** Where a tab lands (`glass.rs::Drop`). */
-export type Drop =
+export const Drop = Schema.TaggedUnion({
   /** Into a group's strip, ending at this index. */
-  | { readonly _tag: 'Strip'; readonly group: string; readonly index: number }
+  Strip: { group: Schema.String, index: Schema.Int },
   /** A new split beside a group, holding the tab: before the group when `first`. */
-  | { readonly _tag: 'Edge'; readonly group: string; readonly side: Side; readonly first: boolean }
+  Edge: { group: Schema.String, side: Side, first: Schema.Boolean },
+})
+export type Drop = typeof Drop.Type
 
 export interface WireTab {
   readonly pane: string
@@ -113,21 +115,46 @@ export type ReceivedLayout =
   | { readonly id?: string; readonly tabs: readonly (WireTab & { readonly id?: string })[]; readonly active?: string | null }
   | { readonly split: Side; readonly children: readonly ReceivedLayout[]; readonly ratio?: number | undefined }
 
-export type Command =
-  | { readonly _tag: 'Open'; readonly pane: string; readonly activate?: boolean; readonly at?: Drop }
-  | { readonly _tag: 'Activate'; readonly id: string }
-  | { readonly _tag: 'FocusGroup'; readonly group: string }
-  | { readonly _tag: 'Cycle'; readonly by: 1 | -1 }
-  | { readonly _tag: 'ActivateIndex'; readonly index: number }
-  | { readonly _tag: 'ActivatePrevious' }
-  | { readonly _tag: 'Close'; readonly id: string }
-  | { readonly _tag: 'ReopenClosed' }
-  | { readonly _tag: 'Move'; readonly id: string; readonly to: Drop }
+export const ReceivedLayout: Schema.Codec<ReceivedLayout> = Schema.Union([
+  Schema.Struct({
+    id: Schema.optionalKey(Schema.String),
+    tabs: Schema.Array(Schema.Struct({
+      id: Schema.optionalKey(Schema.String),
+      pane: Schema.String,
+      title: Schema.optional(Schema.String),
+    })),
+    active: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  }),
+  Schema.Struct({
+    split: Side,
+    children: Schema.Array(Schema.suspend((): Schema.Codec<ReceivedLayout> => ReceivedLayout)),
+    ratio: Schema.optional(Schema.Finite),
+  }),
+])
+
+export const Command = Schema.TaggedUnion({
+  Open: { pane: Schema.String, activate: Schema.optionalKey(Schema.Boolean), at: Schema.optionalKey(Drop) },
+  Activate: { id: Schema.String },
+  FocusGroup: { group: Schema.String },
+  Cycle: { by: Schema.Literals([1, -1]) },
+  ActivateIndex: { index: Schema.Int },
+  ActivatePrevious: {},
+  Close: { id: Schema.String },
+  ReopenClosed: {},
+  Move: { id: Schema.String, to: Drop },
   /** `node` counts splits in tree order, the whole layout first (`layout.rs::Divider`). */
-  | { readonly _tag: 'SetRatio'; readonly node: number; readonly ratio: number }
-  | { readonly _tag: 'SetView'; readonly id: string; readonly view: TabView }
-  | { readonly _tag: 'SetPanel'; readonly panel: Partial<Panel> }
-  | { readonly _tag: 'Receive'; readonly layout: ReceivedLayout }
+  SetRatio: { node: Schema.Int, ratio: Schema.Finite },
+  SetView: { id: Schema.String, view: TabView },
+  SetPanel: {
+    panel: Schema.Struct({
+      open: Schema.optionalKey(Schema.Boolean),
+      tab: Schema.optionalKey(Schema.String),
+      width: Schema.optional(Schema.Finite),
+    }),
+  },
+  Receive: { layout: ReceivedLayout },
+})
+export type Command = typeof Command.Type
 
 export interface TransitionContext {
   readonly newId: () => string
@@ -379,7 +406,8 @@ const adopt = (state: WorkspaceState, received: ReceivedLayout, context: Transit
     ?? groups[0]!.id
   const ids = new Set(tabsOf(layout).map(tab => tab.id))
   const shown = activeTab({ layout, focus })?.id
-  const known = state.mru.filter(id => ids.has(id))
+  // A stored document can repeat an id; recency keeps its first, most recent, mention.
+  const known = [...new Set(state.mru)].filter(id => ids.has(id))
   const recent = shown === undefined ? known : touch(known, shown)
   return {
     ...state,

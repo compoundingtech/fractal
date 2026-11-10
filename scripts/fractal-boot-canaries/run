@@ -581,10 +581,10 @@ def age_mail_fixture(node, subject):
         connection.create_function("st_projection_change", 6, projection_change, deterministic=True)
         changed = connection.execute(
             "UPDATE claims SET accepted_at_unix_ms=? WHERE subject=? AND kind='message.sent'",
-            (str(time.time_ns() // 1_000_000 - 3_600_001), subject),
+            (str(time.time_ns() // 1_000_000 - 604_800_001), subject),
         ).rowcount
         if changed != 1:
-            fail("the hour-old fixture has no unique sent claim")
+            fail("the expired fixture has no unique sent claim")
 
 
 def suspend_and_resume(node, seats, harness):
@@ -621,7 +621,7 @@ def suspend_and_resume(node, seats, harness):
     # Mail to a suspended seat waits, and its restart policy does not wake it.
     sent = node.json("conversations", "send", subject, "--from", "person/eval",
                      "--subject", "while suspended", "--body", "boot canary suspended")["subject"]
-    # Old means the same one-hour age as the backlog; only this isolated fixture is changed.
+    # Beyond the stream's seven-day recovery cutoff; only this isolated fixture is changed.
     age_mail_fixture(node, sent)
     time.sleep(5)
     held = node.api("/v1/messages/read/" + sent) or {}
@@ -651,7 +651,7 @@ def suspend_and_resume(node, seats, harness):
             fail(f"the resumed omp was not given the staged transcript path {staged}: {argv}")
         if not Path(selected).is_symlink():
             fail(f"the staged transcript {selected} is no longer the symlink the control installed")
-    # Recent never-offered mail survives the boot, while hour-old mail stays listable.
+    # Recent never-offered mail survives the boot, while expired mail stays listable.
     until(lambda: (node.api("/v1/messages/read/" + recent) or {}).get("status") in ("read", "closed"),
           seats.bound, "the resumed seat did not recover recent unoffered mail")
     if native_offer_count(node, recent) != 1:

@@ -242,7 +242,7 @@ impl AccountsStore for Store {
     }
 
     fn candidates(&self, accounts: &[&AccountDecl], now: u128) -> Result<Vec<Candidate>> {
-        let limits = self.account_limits()?;
+        let limits = self.harness_account_limits()?;
         Ok(accounts
             .iter()
             .map(|account| {

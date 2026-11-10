@@ -197,6 +197,11 @@ Approved reads disclose data to the external model provider. A compromised execu
 
 ### Authority and lifecycle
 
+Person-scoped commands and the local person header require a local terminal on the daemon
+host. SSH sessions have no verifiable caller ancestry, so the daemon cannot distinguish a
+person from an agent and refuses person requests, including grant management. Run these
+commands from a local terminal on the same host; SSH sessions are not supported.
+
 - Supported principals are `assistant/chatgpt` and `assistant/mcp`, both with trusted class `external-assistant` and never person authority. Each grant's request audit actor is `<principal>/session/<grant-id>`; authoritative message and answer claim actors, message senders, and answer respondents retain that exact principal, not the owning person. Message and answer evidence retain `assistant_owner`, `assistant_session_actor`, and `assistant_grant_id` as on-behalf-of provenance, separate from person-delegation authority. Historical stored grants without an explicit principal default only to `assistant/chatgpt`.
 - Only the daemon's configured owning person through the trusted-local CLI over the Unix API may begin, inspect, renew, revoke, or change a grant. Missing owner configuration fails closed; remote clients, agents, assistants, and other people cannot manage grants. Deployment owner identity is external configuration, not a hardcoded public identity. Public examples and tests use the fixture owner `person/operator`.
 - "Owner" authority here means same-UID trusted-local socket access: the daemon's configured owning person acts through the local Unix client, and any process already running as the daemon's UID is trusted the same way. The `/proc` ancestry check distinguishes local from remote callers; it is not a security boundary against a hostile same-UID process, and A does not claim it to be one. The host's UID isolation is the boundary.
@@ -209,6 +214,44 @@ Approved reads disclose data to the external model provider. A compromised execu
 - Completion, authenticated assistant requests, renewal/policy changes, and revocation must reach the authoritative grant-issuer member. Replicated grants cannot establish current revocation/policy authority or enable cross-member proof replay.
 - Versioned assistant grant/revocation claims are separate from historical person claims. Credentials are stored authoritatively as digests, never bearers. Public projections must not expose credential digests. Rebuildable projections are not sole authorization authority.
 - Creation, completion, renewal, policy change, and revocation outcomes must retain issuer, actor, transport, timestamps, and claim references for audit. Logs and public CLI output must not expose bearer credentials or private keys.
+
+### Pairing verifier and recovery
+
+New `custom.client.assistant.v1.begun` claims store `verifier: "hmac-sha256-v1"`,
+`verifier_key_id` (the SHA-256 fingerprint of the member-local verifier secret),
+and an HMAC-SHA-256 `code_hash`. The MAC uses the shared person-pairing encoding:
+domain bytes `fractal/pairing-code-verifier/v1` (no NUL), the stored BEGUN
+`grant_id` including its full `assistant-grant/` prefix, then the code's UTF-8
+bytes, each prefixed by its byte length as an unsigned big-endian 32-bit integer,
+without normalization. Completion uses that stored grant ID, not the request's
+bare pairing ID. A verifier cannot be transplanted to another grant.
+
+The secret is shared with person pairing on the beginning member at
+`state_dir/pairing-verifier/key` (mode 0600, parent directory mode 0700).
+It never enters claims or replication and is excluded from logical claim backups;
+protect it separately from exported claims. Replicated claims alone do not permit
+offline code guessing against new keyed verifiers. This does not increase code
+entropy or replace the five-minute lifetime, single-use enforcement, or encrypted
+transport. Normal restarts retaining the same secret preserve live challenges.
+
+Only historical BEGUN claims with no `verifier` field may use the legacy unkeyed
+code digest, and only while unexpired with a challenge lifetime no longer than
+300,000 ms from the BEGUN claim's `accepted_at_unix_ms`. An unknown or malformed
+marker never falls back to the legacy digest. Such markers, a missing/replaced
+secret or mismatched `verifier_key_id`, and overlong legacy challenges return
+HTTP 403 `pairing-restart-required`, message `start pairing again`, without
+changing BEGUN or writing GRANTED, credentials, or completion state. The denied
+completion audit retains `denial_code: "pairing-restart-required"`. Begin again
+on the intended member; retrying the old code cannot recover the challenge.
+An incorrect code with the matching key remains
+`forbidden`. Restoring both claims and the original secret to an earlier state
+does not preserve single-use history.
+
+GRANTED claims remove `verifier`, `verifier_key_id`, `code_hash`, and
+`challenge_expires_at_unix_ms`. Bearer `credential_digest`/`credential_hash`
+storage and authentication are unchanged; completed grants need no migration.
+An older binary compares the keyed `code_hash` as an unkeyed digest and refuses
+pending keyed challenges as invalid; begin those pairings again after downgrade.
 
 ### Wire shape
 
