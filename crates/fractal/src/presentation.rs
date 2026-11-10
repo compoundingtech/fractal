@@ -11,6 +11,7 @@ use fractal_daemon::model::{
     AttentionItemView, MissionInputKind, MissionRunView, RevisionCutover, RevisionProposalView,
     RunGenerationView, StepRunView,
 };
+use fractal_daemon::program_journal::ProgramRunView;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OutputStyle {
@@ -170,6 +171,11 @@ pub(crate) fn render_mission_run(
         if let Some(fault) = &run.scheduler_fault {
             let _ = writeln!(output, "SCHEDULER FAULT  {fault}");
         }
+        for program in &run.programs {
+            if let Some(fault) = &program.fault {
+                let _ = writeln!(output, "PROGRAM FAULT  {} ({}): {}", program.path, fault.scope, fault.reason);
+            }
+        }
     }
     if !selected.inputs.is_empty() {
         let _ = writeln!(output);
@@ -187,7 +193,7 @@ pub(crate) fn render_mission_run(
     if selected.steps.is_empty() {
         let _ = writeln!(output, "  {}", style.muted("No steps."));
     } else {
-        render_run_steps(&mut output, selected, &children, "  ", style);
+        render_run_steps(&mut output, selected, &children, "  ", style, now_unix_ms);
     }
     output
 }
@@ -1272,6 +1278,7 @@ fn render_run_steps(
     children: &BTreeMap<&str, Vec<&MissionRunView>>,
     indent: &str,
     style: OutputStyle,
+    now_unix_ms: u128,
 ) {
     let base_depth = run
         .steps
@@ -1327,6 +1334,9 @@ fn render_run_steps(
                 let _ = writeln!(output, "{indent}    {reason}");
             }
         }
+        if let Some(program) = run.programs.iter().find(|program| program.step_run == step.subject) {
+            render_program(output, program, indent, style, now_unix_ms);
+        }
         let prefix = format!("{}/", step.step);
         let nested = run
             .steps
@@ -1371,9 +1381,70 @@ fn render_run_steps(
                 child.steps.len()
             );
             if !matches!(child.status.as_str(), "completed" | "cancelled") {
-                render_run_steps(output, child, children, &format!("{indent}    "), style);
+                render_run_steps(output, child, children, &format!("{indent}    "), style, now_unix_ms);
             }
         }
+    }
+}
+
+/// How many of a program's newest keys `missions show` lists; `--json` carries every key read.
+const PROGRAM_KEYS_SHOWN: usize = 12;
+
+/// A program step's journal: the innermost open key, then each key's latest status, newest last.
+fn render_program(
+    output: &mut String,
+    program: &ProgramRunView,
+    indent: &str,
+    style: OutputStyle,
+    now_unix_ms: u128,
+) {
+    let journal = &program.journal;
+    let current = match journal.innermost() {
+        Some(entry) => format!("running {}", entry.key),
+        None => "idle".to_owned(),
+    };
+    let _ = write!(output, "{indent}  ↳ program · {current} · {} keys", journal.entries.len());
+    if journal.truncated {
+        let _ = write!(output, "+");
+    }
+    if let Some(at) = journal.last_entry_at_unix_ms {
+        let _ = write!(output, " · last entry {}", relative_time(at, now_unix_ms));
+    }
+    let _ = writeln!(output);
+    let hidden = journal.entries.len().saturating_sub(PROGRAM_KEYS_SHOWN);
+    if hidden > 0 {
+        let _ = writeln!(output, "{indent}    … {hidden} earlier keys");
+    }
+    for entry in &journal.entries[hidden..] {
+        let mut line = format!(
+            "{indent}    {} {}",
+            style.status_value(&entry.status, format!("{:<9}", entry.status)),
+            entry.key
+        );
+        match (entry.ms, entry.started_at_unix_ms) {
+            (Some(ms), _) => {
+                let _ = write!(line, " · {}", program_duration(u128::from(ms)));
+            }
+            (None, Some(started)) if entry.status == "started" => {
+                let _ = write!(line, " · running {}", program_duration(now_unix_ms.saturating_sub(started)));
+            }
+            _ => {}
+        }
+        if let Some(child) = &entry.child {
+            let _ = write!(line, " · waits on {child}");
+        }
+        if let Some(error) = &entry.error {
+            let _ = write!(line, " · {}", glance(error));
+        }
+        let _ = writeln!(output, "{line}");
+    }
+}
+
+fn program_duration(ms: u128) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        fractal_daemon::waiting_on::describe_age(ms)
     }
 }
 
@@ -1697,6 +1768,7 @@ mod tests {
             updated_at_unix_ms: 2_000,
             steps,
             loops: Vec::new(),
+            programs: Vec::new(),
             stuck_gates: Vec::new(),
             scheduler_fault: None,
         }
@@ -2002,6 +2074,40 @@ mod tests {
         assert!(rendered.contains("loop best-of-n · running · round 2/5"));
         assert!(rendered.contains("2 parallel · 3 candidates · winner 2"));
         assert!(rendered.contains("best quality=0.75"));
+    }
+
+    #[test]
+    fn mission_view_shows_each_program_key_and_the_program_fault() {
+        use fractal_daemon::program_journal::{ProgramFault, ProgramJournal};
+        let program_step = step("step-run/demo-generation/land", "land", "working");
+        let mut root = run("mission-run/demo/run", None, vec![program_step]);
+        let rows = [
+            (serde_json::json!({"key": "review", "status": "started", "child": "mission-run/demo/review"}), 2_000),
+            (serde_json::json!({"key": "merge", "status": "failed", "ms": 900, "error": {"_tag": "Conflict"}}), 1_500),
+            (serde_json::json!({"key": "merge", "status": "started"}), 1_400),
+            (serde_json::json!({"key": "render", "status": "completed", "ms": 2_500}), 1_200),
+        ];
+        root.programs.push(ProgramRunView {
+            step_run: "step-run/demo-generation/land".into(),
+            path: "land".into(),
+            attempt: 1,
+            bundle_hash: "a".repeat(64),
+            stalled_after_ms: 600_000,
+            journal: ProgramJournal::fold(rows.iter().map(|(fields, at)| (fields, *at)), false),
+            fault: Some(ProgramFault {
+                scope: "program/stalled".into(),
+                reason: "no journal entry for 10m; open key `review`".into(),
+            }),
+        });
+
+        let rendered = render_mission_run(&root, &[root.clone()], OutputStyle::plain(), 62_000);
+
+        assert!(rendered.contains("PROGRAM FAULT  land (program/stalled): no journal entry for 10m; open key `review`\n"), "{rendered}");
+        assert!(rendered.contains("  ↳ program · running review · 3 keys · last entry 1m ago\n"), "{rendered}");
+        assert!(rendered.contains("    completed render · 2s\n"), "{rendered}");
+        assert!(rendered.contains("    failed    merge · 900ms · {\"_tag\":\"Conflict\"}\n"), "{rendered}");
+        assert!(rendered.contains("    started   review · running 1m · waits on mission-run/demo/review\n"), "{rendered}");
+        assert!(!rendered.contains("watching"), "{rendered}");
     }
 
     #[test]

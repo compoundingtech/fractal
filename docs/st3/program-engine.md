@@ -300,9 +300,16 @@ Choice: a child run. It needs no standing owner and reuses §6.
 
 ### 8. Visibility and stall detection
 
-- `missions show` and the run view project `program.step` claims under the program step: each key
-  with its latest status, duration and failure, and child runs linked by key.
-- `missions waiting-on` names the innermost open key: a running effect, a child run or an ask.
+- `missions show` (text and `--json`, field `programs`) projects the current attempt's
+  `program.step` claims under the program step: each key with its latest status, start and end,
+  duration (`ms`), typed failure, and the child run or ask it waits on (`child`). The view folds a
+  step's newest 200 entries and marks older ones `truncated`; the text lists the newest 12 keys.
+  The innermost open key is the most recently started key without a result.
+- `missions waiting-on` gives a program step the kind `program` (never `watching`) and names its
+  innermost open key: a running effect with how long it runs, or the child run or ask it waits on.
+  The published work row carries that key (`program`, `gate_kind: program`), read from the step's
+  newest 64 entries when the row is folded. A program step whose journal has no new entry within
+  its `stalled-after` (default 30 minutes) is `no-progress`, so its run is stalled.
 - Stalls: a program step whose journal shows no new entry within its `stalled-after` raises the
   run fault with scope `program/stalled`, naming the open key. A dead host that the engine cannot
   restart raises `program/host` on every program step it held, and so does a program worker the
