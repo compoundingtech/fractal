@@ -12,6 +12,7 @@ repo = Path(__file__).resolve().parent.parent
 SOURCE = 'a' * 40
 TAG = f'embed-{SOURCE}'
 TIMEOUT = "HTTP 504: We couldn't respond to your request in time. (https://api.github.com/repos/example/project/releases)"
+CANCEL = 'stream error: stream ID 17; CANCEL; received from peer'
 
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -142,6 +143,20 @@ def main():
         assert calls(['release']) == 0 and calls(['git', 'push']) == 0, current()
         done = publish(None, (['git', 'push'], 'before', 1, 'stale info: lease rejected'))
         assert done.returncode != 0 and calls(['release']) == 0, (done, current())
+
+        # HTTP/2 CANCEL uses the existing bounded retry and reconciliation path.
+        done = publish(None, (['release', 'create'], 'before', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 2, (done, current())
+        done = publish(None, (['release', 'create'], 'after', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 1, (done, current())
+        done = publish(None, (['release', 'create'], 'partial', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 1, (done, current())
+        assert calls(['release', 'delete-asset']) == 1 and calls(['release', 'upload']) == 2, current()
+        done = publish(None, (['release', 'create'], 'before', 99, CANCEL))
+        assert done.returncode != 0 and calls(['release', 'create']) == 4, (done, current())
+        # The final attempt is reconciled too, even without another retry remaining.
+        done = publish(None, (['release', 'create'], 'before', 3, CANCEL), (['release', 'create'], 'after', 1, CANCEL))
+        assert done.returncode == 0 and published() and calls(['release', 'create']) == 4, (done, current())
 
         # A create that made the draft and then timed out is continued: no "already exists".
         done = publish(None, (['release', 'create'], 'after', 1, TIMEOUT))

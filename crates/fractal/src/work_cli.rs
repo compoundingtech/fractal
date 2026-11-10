@@ -214,10 +214,7 @@ pub(super) async fn run_work(
                             format!("person-response:{}", uuid::Uuid::now_v7().simple())
                         }),
                         answer: (args.answer.is_some() || args.text.is_some()).then(|| {
-                            fractal_daemon::person_request::AnswerInput {
-                                id: args.answer,
-                                text: args.text,
-                            }
+                            fractal_daemon::person_request::AnswerInput { id: args.answer, text: args.text, option_notes: Vec::new() }
                         }),
                     },
                 )

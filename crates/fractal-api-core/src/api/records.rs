@@ -518,10 +518,7 @@ pub async fn resolve_attention(
                     evidence: vec![],
                     episode: Some(proof.episode.clone()),
                     delegation: Some(proof),
-                    answer: Some(crate::person_request::AnswerInput {
-                        id: Some("read".into()),
-                        text: None,
-                    }),
+                    answer: Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() }),
                     idempotency_key: request.idempotency_key,
                 },
                 false,

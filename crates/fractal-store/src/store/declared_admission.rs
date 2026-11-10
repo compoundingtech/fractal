@@ -1,9 +1,33 @@
 //! Publication compatibility only: declarations do not enforce admission or resource limits.
 use super::*;
 
-fn refused(reason: impl Into<String>) -> FractalError {
-    FractalError::new("declared-admission-feature-barrier", reason)
+/// A publication every active fleet member advertises support for before any of it is written.
+pub(super) struct FleetFeature {
+    /// The `daemon.started` `features` keys a supporting member sets to `1`.
+    pub keys: &'static [&'static str],
+    /// The refusal code.
+    pub code: &'static str,
+    /// What the refused publication carries, as refusal messages name it.
+    pub carries: &'static str,
 }
+
+impl FleetFeature {
+    fn refused(&self, reason: impl Into<String>) -> FractalError {
+        FractalError::new(self.code, reason)
+    }
+}
+
+const DECLARED_ADMISSION: FleetFeature = FleetFeature {
+    keys: &["declared_admission"],
+    code: "declared-admission-feature-barrier",
+    carries: "declared admission",
+};
+
+/// Attention asks additionally need every member to read them.
+const DECLARED_ATTENTION: FleetFeature = FleetFeature {
+    keys: &["declared_admission", "declared_attention"],
+    ..DECLARED_ADMISSION
+};
 
 fn declares_fields(value: &Value, attention_only: bool) -> bool {
     if attention_only {
@@ -128,7 +152,7 @@ pub(super) fn validate_publication(
     }) || intent.missions.values().any(|mission| declares_mission(mission, false));
     if declared {
         let attention = intent.missions.values().any(|mission| declares_mission(mission, true));
-        validate_fleet(connection, origin, attention)?;
+        validate_fleet(connection, origin, if attention { &DECLARED_ATTENTION } else { &DECLARED_ADMISSION })?;
     }
     Ok(())
 }
@@ -159,13 +183,17 @@ pub(super) fn validate_claim(
         _ => false,
     });
     if declares(false) {
-        validate_fleet(connection, origin, declares(true))?;
+        validate_fleet(connection, origin, if declares(true) { &DECLARED_ATTENTION } else { &DECLARED_ADMISSION })?;
     }
     Ok(())
 }
 
 /// The directive-notes barrier's signed membership policy, with no local-member exemption.
-fn validate_fleet(connection: &Connection, origin: &str, attention: bool) -> Result<(), FractalError> {
+pub(super) fn validate_fleet(
+    connection: &Connection,
+    origin: &str,
+    feature: &FleetFeature,
+) -> Result<(), FractalError> {
     let pending: bool = connection.query_row(/* sqlite-large-value: allow-for-now lv-h281752a36224 owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &format!(
         "SELECT EXISTS(SELECT 1 FROM claims c JOIN batches b ON b.id=c.batch_id
          LEFT JOIN replica_envelopes e ON e.batch_id=b.id
@@ -176,9 +204,10 @@ fn validate_fleet(connection: &Connection, origin: &str, attention: bool) -> Res
         smallclaims::store::FLEET_CLAIM_KINDS,
     ), [origin], |row| row.get(0)).map_err(internal)?;
     if pending {
-        return Err(refused(
-            "pending local fleet membership must be signed before publishing declared admission",
-        ));
+        return Err(feature.refused(format!(
+            "pending local fleet membership must be signed before publishing {}",
+            feature.carries
+        )));
     }
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     if membership.anchor().is_none()
@@ -187,9 +216,10 @@ fn validate_fleet(connection: &Connection, origin: &str, attention: bool) -> Res
             crate::fleet::MemberState::Current(_)
         )
     {
-        return Err(refused(
-            "declared admission requires anchored membership and an active local member; upgrade all members or fence legacy peers first",
-        ));
+        return Err(feature.refused(format!(
+            "{} requires anchored membership and an active local member; upgrade all members or fence legacy peers first",
+            feature.carries
+        )));
     }
     for member in membership
         .incarnations()
@@ -199,27 +229,30 @@ fn validate_fleet(connection: &Connection, origin: &str, attention: bool) -> Res
             membership.state(&member.name),
             crate::fleet::MemberState::Current(_)
         ) {
-            return Err(refused(
-                "conflicted fleet membership cannot enable declared admission",
-            ));
+            return Err(feature.refused(format!(
+                "conflicted fleet membership cannot enable {}",
+                feature.carries
+            )));
         }
         // Select the latest advertisement first; an unsigned or false replacement must not
         // fall back to an older positive advertisement, nor one from a previous incarnation.
-        let supported: Option<bool> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hf28a100ecf5a owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(claims.body,'$.fields.features.declared_admission')=1
-                 AND (?5=0 OR json_extract(claims.body,'$.fields.features.declared_attention')=1)
+        let supported: Option<bool> = connection.query_row(/* sqlite-large-value: allow-for-now lv-h1975c08b9306 owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT NOT EXISTS(SELECT 1 FROM json_each(?5) k
+                     WHERE json_extract(claims.body,'$.fields.features.'||k.value) IS NOT 1)
                  AND EXISTS(SELECT 1 FROM replica_envelopes e JOIN replica_envelope_signatures s
                      ON s.writer=e.writer AND s.sequence=e.sequence AND s.envelope_hash=e.envelope_hash
                      WHERE e.batch_id=batches.id AND s.member_key=?4)
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
                  AND batches.replica_sequence>=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-            params![format!("daemon/{}", member.name), member.name, member.start, member.member_key, attention], |row| row.get(0))
+            params![format!("daemon/{}", member.name), member.name, member.start, member.member_key,
+                serde_json::to_string(feature.keys).map_err(internal)?], |row| row.get(0))
             .optional().map_err(internal)?.flatten();
         if supported != Some(true) {
-            return Err(refused(format!(
-                "host/{} has not advertised anchored features.declared_admission=1{} for its active incarnation; upgrade or fence it before publishing declared admission",
-                member.name, if attention { " and features.declared_attention=1" } else { "" }
+            let advertised = feature.keys.iter().map(|key| format!("features.{key}=1")).collect::<Vec<_>>();
+            return Err(feature.refused(format!(
+                "host/{} has not advertised anchored {} for its active incarnation; upgrade or fence it before publishing {}",
+                member.name, advertised.join(" and "), feature.carries
             )));
         }
     }
@@ -235,7 +268,7 @@ fn validate_fleet(connection: &Connection, origin: &str, attention: bool) -> Res
         let mut previous = String::new();
         while let Some(writer) = statement.query_row(/* sqlite-large-value: allow-for-now lv-heae45914ca84 owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ [&previous], |row| row.get::<_, String>(0)).optional().map_err(internal)? {
             if !membership.is_keyed_writer(&writer) && !fenced.contains(&writer) {
-                return Err(refused(format!("legacy writer `{writer}` remains unfenced; feature advertisements do not establish complete legacy discovery")));
+                return Err(feature.refused(format!("legacy writer `{writer}` remains unfenced; feature advertisements do not establish complete legacy discovery")));
             }
             previous = writer;
         }

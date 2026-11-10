@@ -142,6 +142,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/custom/decision-inputs",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
+    ),
+    (
         "POST /v1/client/pairing/browser-requests",
         "interactive configured-owner pairing requires an authenticated publisher device and native person decision ask, absent from generated cost stores; browser_pairing_tests covers admission and pending limits; the pending count scans browser request history, whose growth is not measured here",
     ),
@@ -203,6 +207,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/harness-prompts/state",
         "one newest harness.observed read by its subject index and one answer read by its operation index",
+    ),
+    (
+        "GET /v1/client/attention-budget",
+        "ordinary read probes use a raw Unix person header, which this recipient-authenticated route rejects; the paired push fixture does not seed scaling mission/person native asks and lineage; attention_budget API tests cover scoped admission, recipient revalidation and text-free reports, but populated report cost is not measured here",
     ),
     // Aliases: the same handler as a measured route under the name a person reads.
     (
@@ -1037,6 +1045,9 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get("GET /v1/desired", "/v1/desired?subject={seat}"),
+    // Sparse kind selection must not walk every unrelated desired declaration.
+    get("GET /v1/desired", "/v1/desired?kind=mission&limit=1"),
     get(
         "GET /v1/resource-references/{*subject}",
         "/v1/resource-references/resource/bench/cost",
@@ -3522,7 +3533,14 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             }),
             ..cost
         };
-        costs.insert(probe.route.to_owned(), cost);
+        // Route coverage deduplicates by route, but both desired selection shapes need
+        // independent cost rows so the all-subject probe cannot hide the named probe.
+        let key = if probe.route == "GET /v1/desired" {
+            format!("{} ({})", probe.route, probe.path)
+        } else {
+            probe.route.to_owned()
+        };
+        costs.insert(key, cost);
     }
     // A real seat update invalidates its card between every read. Count only the read, using
     // the same canonical claim path as a driver; the warm probe above remains unchanged.

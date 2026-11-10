@@ -1474,14 +1474,14 @@ durable snapshots and successful-main-only baselines.
 
 Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
-Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
+Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with expired
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
 current offer's receipt sequence; and delivered-but-unread retention across native channel
 restart. Claude's missing-channel cases also require automatic recovery, attachment during
 recheck without replacing the seat, and durable parking after three failed replacements.
 Its MCP bootstrap cases answer initialization with the daemon offline or binding pending,
 attach and reconnect in the same child, preserve native receipts, and cancel attachment on EOF.
-The mailbox cases seed hour-old sent mail and recent staged and delivered-but-unread
+The mailbox cases seed sent mail older than the stream's seven-day cutoff and recent staged and delivered-but-unread
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 
@@ -1544,7 +1544,7 @@ queue it again. The merge train (`st lanes join smalltalk`) is retired.
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
 by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
-merge method `MERGE`, grouping strategy `HEADGREEN`, three entries building at once,
+merge method `MERGE`, grouping strategy `HEADGREEN`, five entries building at once,
 one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
 timeout. These are the generated configuration, not a live-settings observation.
 See [capacity tuning](#merge-overflow-and-daily-namespace-minutes).

@@ -396,7 +396,7 @@ recorded. A seat it left out, such as one whose declaration hasn't reached it ye
 host retries it a minute later without waiting for a commit, then less often while it stays owed,
 doubling up to every 15 minutes. An agent card's freshness and a
 mail hold read the latest of the replicated report, the local log, and that time. The card's
-90-second rule ages it, so a host that stops pushing reads stale.
+shared `HARNESS_OBSERVATION_FRESHNESS` window ages it, so a host that stops pushing reads stale.
 
 A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
 re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
@@ -1691,6 +1691,35 @@ or one crossing five seconds promotes retained boundaries to INFO with their
 original timestamps; subsequent client boundaries remain INFO. The client emits
 `client-send-start`, `connect-done`, `client-fresh-retry`,
 `client-headers-received`, and `client-failed`.
+The `client-failed` boundary also includes `peer` (the destination node name).
+
+Failed, unanswered, or overloaded worker backend exchange responses produce
+rate-limited stderr `fractal: replication exchange answer` lines with `correlation_id`, `peer`,
+`shard`, `outcome` (`failed`, `no-answer`, or `overload`), `code`, `phase`,
+`elapsed_ms`, `permit_wait_ms`, `local_receive_ms`, and `follow_up_export_ms`.
+`correlation_id=none` means the request did not carry a valid exchange UUID;
+an absent shard or unstarted measurement is `none`. Permit wait runs from request
+head arrival to permit acquisition. The receive/export split uses the retained
+job's original request clock, including on later polls; an unfinished phase reports
+its elapsed duration at the answer, not zero. `elapsed_ms` uses that same job clock
+(or the current request clock when admission is refused). Local receive failures
+also include `local_receive_http_status` when the typed error carries it.
+These lines contain machine metadata, never error bodies or free-form causes.
+
+The daemon receive handler produces rate-limited `fractal: replication receive error`
+stderr lines on backend errors with `route=/v1/internal/replication/receive`,
+`correlation_id` (a valid `x-fractal-exchange-id` header, otherwise `none`), and
+`code`. This is distinct from middleware request-duration logging. The handler
+does not currently expose a per-request gate/writer/apply/final-drain timing split.
+
+Both failure diagnostics use one shared bounded limiter per process: four fixed
+keys (worker failed, no-answer, overload, and daemon receive), one sample per key
+per 60 seconds. Peer names, shard IDs, correlation IDs, and error codes never
+create additional keys. Emitted samples append `suppressed=0`. On the next event,
+expired windows with suppressed repeats emit their original sample with
+`event=suppression-summary suppressed=N`; idle windows need no timer.
+Worker admission drops the exchange-jobs lock before formatting or writing these
+diagnostics; neither limiter nor exchange-jobs guards are held during stderr writes.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.

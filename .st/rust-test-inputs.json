@@ -43,6 +43,9 @@
     "examples/demos",
     "examples/fractal",
     "fixtures",
+    "packages/fractal/fixtures/daily-review.kdl",
+    "packages/fractal/fixtures/pr-landing.kdl",
+    "packages/fractal/fixtures/upstream-repin.kdl",
     "scripts",
     "slo"
    ]
@@ -299,6 +302,7 @@
    "extra": [
     "docs/st3/schema.md",
     "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree-v2.json",
     "examples/fractal/decision-tree.json"
    ]
   },
