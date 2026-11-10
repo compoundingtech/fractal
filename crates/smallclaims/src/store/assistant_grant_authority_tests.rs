@@ -1471,15 +1471,86 @@ fn dirty_work_before_saved_round_robin_cursor_is_serviced_in_the_same_slice() {
     let grant = append(&store,SUBJECT,GRANTED,fields());
     drain_authority(&store);
     let mut connection = store.connection.write();
-    connection.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)",
-        [format!("{}z",grant.id)],
-    ).unwrap();
     connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    let sequence: i64 = connection.query_row(
+        "SELECT sequence FROM assistant_grant_queue_owners WHERE queue='dirty' AND owner=?1",
+        [&grant.id], |row| row.get(0),
+    ).unwrap();
+    for key in ["assistant_grant_owner_cursor/dirty", "assistant_grant_owner_upper/dirty"] {
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            params![key,sequence+1],
+        ).unwrap();
+    }
     let transaction = connection.transaction().unwrap();
     assert!(authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
     assert!(authority::contains(&transaction,&grant.id).unwrap());
     transaction.commit().unwrap();
+}
+
+#[test]
+fn authenticated_proof_recheck_owner_finishes_despite_lower_and_between_id_arrivals() {
+    const BOUND: usize = 64;
+    let (source, key) = source();
+    let target = node("proof-owner-fairness", Some(key.public()));
+    let grant = append(&source, SUBJECT, GRANTED, fields());
+    receive(&target, &export(&source, &target));
+    let mut connection = target.connection.write();
+    assert!(authority::contains(&connection, &grant.id).unwrap());
+    let proof: (String,u64,String,i64) = connection.query_row(
+        "SELECT auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
+         FROM assistant_grant_pending WHERE claim_id=?1 AND authenticated=1",
+        [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).unwrap();
+    // The victim keeps its real signed claim and evidence. Controlled IDs exist
+    // only as stale queue owners whose missing claims should be retired.
+    connection.execute(
+        "INSERT INTO assistant_grant_proof_rechecks VALUES('!m/initial')", [],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id],
+    ).unwrap();
+    assert!(authority::subject_ready(&connection, SUBJECT).is_err());
+    let mut lifted = false;
+    for slice in 0..BOUND {
+        for prefix in ["!a/lower", "!t/between"] {
+            let id = format!("{prefix}/{slice:08}");
+            assert!(id.as_str()<grant.id.as_str());
+            connection.execute(
+                "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&id],
+            ).unwrap();
+        }
+        // Each visit commits independently: neither the owner turn nor the
+        // fixed round frontier may live only in a backfill invocation's memory.
+        let transaction = connection.transaction().unwrap();
+        assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
+        assert!(transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks
+             WHERE claim_id<>?1)", [&grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap(), "the victim must finish while unrelated rechecks remain");
+        let ready = authority::subject_ready(&transaction, SUBJECT).is_ok();
+        transaction.commit().unwrap();
+        if ready {
+            assert!(authority::contains(&connection, &grant.id).unwrap());
+            let rechecked: (String,u64,String,i64) = connection.query_row(
+                "SELECT auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
+                 FROM assistant_grant_pending WHERE claim_id=?1 AND authenticated=1",
+                [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            ).unwrap();
+            assert_eq!(rechecked, proof, "recheck lost the victim's genuine authentication evidence");
+            assert!(!connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+                [&grant.id], |row| row.get::<_,bool>(0),
+            ).unwrap(), "the subject fence lifted before its proof obligation retired");
+            lifted = true;
+            break;
+        }
+    }
+    assert!(lifted, "lower and between-ID arrivals starved the proof victim beyond {BOUND} ZERO slices");
+    assert!(!connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id='!m/initial')",
+        [], |row| row.get::<_,bool>(0),
+    ).unwrap(), "stale missing-claim rechecks must retire normally");
 }
 
 include!("assistant_grant_receipt_cost_tests.rs");

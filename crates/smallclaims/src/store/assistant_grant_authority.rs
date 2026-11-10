@@ -210,6 +210,7 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
     install_auth_cursor(connection)?;
     install_proof_invalidation_triggers(connection)?;
     install_auth_work(connection)?;
+    install_queue_owners(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f117dab1bdd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_local_origin',?1)", [local_origin])?;
     connection.execute_batch("RELEASE assistant_grant_upgrade")?;
     Ok(())
@@ -230,6 +231,106 @@ fn install_auth_cursor(connection: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+// Owner admission order is local maintenance state, never an attacker-controlled
+// content hash. Queue rows keep their existing schemas and inner page cursors.
+fn install_queue_owners(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS assistant_grant_queue_sequences (
+           queue TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS assistant_grant_queue_owners (
+           queue TEXT NOT NULL, owner TEXT NOT NULL, subowner TEXT NOT NULL,
+           sequence INTEGER NOT NULL, PRIMARY KEY(queue,owner,subowner),
+           UNIQUE(queue,sequence));"
+    )?;
+    let installed = fleet_meta(connection,"assistant_grant_queue_owners_installed")?.is_some();
+    for (queue,table,owner,subowner) in [
+        ("dirty","assistant_grant_dirty","claim_id","''"),
+        ("recheck","assistant_grant_proof_rechecks","claim_id","''"),
+        ("invalidation","assistant_grant_proof_invalidations","id","''"),
+        ("retraction","assistant_grant_retractions","id","''"),
+        ("addition","assistant_grant_additions","id","''"),
+        ("attachment","assistant_grant_attachments","claim_id","candidate_kind"),
+        ("witness","assistant_grant_attachment_witnesses","base_claim_id","''"),
+    ] {
+        connection.execute(
+            "INSERT OR IGNORE INTO assistant_grant_queue_sequences VALUES(?1,0)", [queue],
+        )?;
+        let new_subowner = if subowner=="''" { "''".to_owned() } else { format!("NEW.{subowner}") };
+        let old_subowner = if subowner=="''" { "''".to_owned() } else { format!("OLD.{subowner}") };
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS {table}_owner_insert AFTER INSERT ON {table}
+             WHEN NOT EXISTS(SELECT 1 FROM assistant_grant_queue_owners
+               WHERE queue='{queue}' AND owner=CAST(NEW.{owner} AS TEXT) AND subowner={new_subowner})
+             BEGIN
+               UPDATE assistant_grant_queue_sequences SET sequence=sequence+1 WHERE queue='{queue}';
+               INSERT INTO assistant_grant_queue_owners
+                 SELECT '{queue}',CAST(NEW.{owner} AS TEXT),{new_subowner},sequence
+                 FROM assistant_grant_queue_sequences WHERE queue='{queue}';
+             END;
+             CREATE TRIGGER IF NOT EXISTS {table}_owner_delete AFTER DELETE ON {table}
+             BEGIN
+               DELETE FROM assistant_grant_queue_owners WHERE queue='{queue}'
+                 AND owner=CAST(OLD.{owner} AS TEXT) AND subowner={old_subowner};
+             END;"
+        ))?;
+        if !installed {
+            // Only the existing work set is indexed once on upgrade; raw claim
+            // history and already-completed authority are never replayed.
+            connection.execute_batch(&format!(
+                "INSERT INTO assistant_grant_queue_owners
+                   SELECT '{queue}',CAST({owner} AS TEXT),{subowner},
+                     ROW_NUMBER() OVER(ORDER BY {owner},{subowner})
+                   FROM {table};
+                 UPDATE assistant_grant_queue_sequences SET sequence=COALESCE(
+                   (SELECT MAX(sequence) FROM assistant_grant_queue_owners WHERE queue='{queue}'),0)
+                   WHERE queue='{queue}';"
+            ))?;
+        }
+    }
+    connection.execute(
+        "DELETE FROM meta WHERE key IN ('assistant_grant_dirty_cursor','assistant_grant_attachment_witness_cursor')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('assistant_grant_queue_owners_installed','1')", [],
+    )?;
+    Ok(())
+}
+
+fn queue_owner(connection: &Connection, queue: &str) -> Result<Option<(String,String)>> {
+    let cursor_key = format!("assistant_grant_owner_cursor/{queue}");
+    let upper_key = format!("assistant_grant_owner_upper/{queue}");
+    let after = fleet_meta(connection,&cursor_key)?.and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+    let upper = fleet_meta(connection,&upper_key)?.and_then(|value| value.parse::<i64>().ok()).unwrap_or(0);
+    let seek = |after: i64, upper: i64| -> Result<Option<(String,String,i64)>> {
+        Ok(connection.query_row(
+            "SELECT owner,subowner,sequence FROM assistant_grant_queue_owners
+             WHERE queue=?1 AND sequence>?2 AND sequence<=?3 ORDER BY sequence LIMIT 1",
+            params![queue,after,upper], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional()?)
+    };
+    let candidate = match seek(after,upper)? {
+        Some(candidate) => Some(candidate),
+        None => {
+            let upper: i64 = connection.query_row(
+                "SELECT sequence FROM assistant_grant_queue_sequences WHERE queue=?1",
+                [queue], |row| row.get(0),
+            )?;
+            connection.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
+            )?;
+            seek(0,upper)?
+        }
+    };
+    let Some((owner,subowner,sequence)) = candidate else { return Ok(None); };
+    // The fixed round frontier excludes all later arrivals, including arrivals
+    // above the current cursor. An unfinished owner resumes next round.
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![cursor_key,sequence],
+    )?;
+    Ok(Some((owner,subowner)))
 }
 
 fn install_auth_work(connection: &Connection) -> Result<()> {
@@ -582,9 +683,10 @@ fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
 }
 
 fn attachment_one(connection: &Connection) -> Result<bool> {
+    let Some((owner,partition)) = queue_owner(connection,"attachment")? else { return Ok(false); };
     let task: Option<(String,String,String,String,String,String,String)> = connection.query_row(
         "SELECT claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id
-         FROM assistant_grant_attachments ORDER BY claim_id,candidate_kind LIMIT 1", [],
+         FROM assistant_grant_attachments WHERE claim_id=?1 AND candidate_kind=?2", params![owner,partition],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
     ).optional()?;
     let Some((id,kind,subject,origin,actor,after,upper)) = task else { return Ok(false); };
@@ -633,20 +735,11 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
 }
 
 fn attachment_witness_one(connection: &Connection) -> Result<bool> {
-    let after = fleet_meta(connection,"assistant_grant_attachment_witness_cursor")?.unwrap_or_default();
-    let seek = |after: &str| -> Result<Option<(String,String)>> {
-        Ok(connection.query_row(
-            "SELECT base_claim_id,grant_subject FROM assistant_grant_attachment_witnesses
-             WHERE base_claim_id>?1 ORDER BY base_claim_id LIMIT 1",
-            [after], |row| Ok((row.get(0)?,row.get(1)?)),
-        ).optional()?)
-    };
-    let candidate = match seek(&after)? {
-        Some(candidate) => Some(candidate),
-        None if !after.is_empty() => seek("")?,
-        None => None,
-    };
-    let Some((base,subject)) = candidate else { return Ok(false); };
+    let Some((base,_)) = queue_owner(connection,"witness")? else { return Ok(false); };
+    let subject: String = connection.query_row(
+        "SELECT grant_subject FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1",
+        [&base], |row| row.get(0),
+    )?;
     let pending: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=?1)",
         [&subject], |row| row.get(0),
@@ -654,10 +747,6 @@ fn attachment_witness_one(connection: &Connection) -> Result<bool> {
     if !pending {
         connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [&base])?;
     }
-    connection.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_attachment_witness_cursor',?1)",
-        [&base],
-    )?;
     Ok(true)
 }
 fn local_origin(connection: &Connection) -> Result<String> {
@@ -1049,9 +1138,10 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
 // history-sized dependent set. Indexed dispatch and real authentication consume
 // separate shared budget units. Only the verifier may discharge the latter.
 fn proof_invalidation_one(connection: &Connection) -> Result<bool> {
+    let Some((owner,_)) = queue_owner(connection,"invalidation")? else { return Ok(false); };
     let task: Option<(i64,String,u64,String,String,String)> = connection.query_row(
         "SELECT id,writer,sequence,envelope_hash,member_key,claim_id
-         FROM assistant_grant_proof_invalidations ORDER BY id LIMIT 1", [],
+         FROM assistant_grant_proof_invalidations WHERE id=?1", [&owner],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
     ).optional()?;
     let Some((task,writer,sequence,hash,key,cursor)) = task else { return Ok(false); };
@@ -1110,9 +1200,10 @@ fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, ke
 // Each addition seeks only indexed grant work, then that grant's own receipts.
 // A claim selection, receipt verification or completed claim costs one unit.
 fn addition_one(connection: &Connection) -> Result<bool> {
+    let Some((owner,_)) = queue_owner(connection,"addition")? else { return Ok(false); };
     let task: Option<(i64,String,String,u64,u64,i64,String,i64,String,String)> = connection.query_row(
         "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim
-         FROM assistant_grant_additions ORDER BY id LIMIT 1", [],
+         FROM assistant_grant_additions WHERE id=?1", [&owner],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)),
     ).optional()?;
     let Some((task,writer,key,lower,upper,sequence,hash,position,after,claim)) = task else { return Ok(false); };
@@ -1198,19 +1289,7 @@ fn refresh_recheck(connection: &Connection, claim: &str) -> Result<bool> {
 }
 
 fn dirty_one(connection: &Connection, membership_current: bool) -> Result<bool> {
-    let after = fleet_meta(connection,"assistant_grant_dirty_cursor")?.unwrap_or_default();
-    let seek = |after: &str| -> Result<Option<String>> {
-        Ok(connection.query_row(
-            "SELECT claim_id FROM assistant_grant_dirty WHERE claim_id>?1 ORDER BY claim_id LIMIT 1",
-            [after], |row| row.get(0),
-        ).optional()?)
-    };
-    let claim = match seek(&after)? {
-        Some(claim) => Some(claim),
-        None if !after.is_empty() => seek("")?,
-        None => None,
-    };
-    let Some(claim) = claim else { return Ok(false); };
+    let Some((claim,_)) = queue_owner(connection,"dirty")? else { return Ok(false); };
     let recheck_owned: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
         [&claim], |row| row.get(0),
@@ -1220,26 +1299,20 @@ fn dirty_one(connection: &Connection, membership_current: bool) -> Result<bool> 
     } else {
         refresh_claim_inner(connection,&claim,membership_current)?;
     }
-    connection.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
-    )?;
     Ok(true)
 }
 
 fn recheck_one(connection: &Connection) -> Result<bool> {
-    let claim: Option<String> = connection.query_row(
-        "SELECT claim_id FROM assistant_grant_proof_rechecks ORDER BY claim_id LIMIT 1",
-        [], |row| row.get(0),
-    ).optional()?;
-    let Some(claim) = claim else { return Ok(false); };
+    let Some((claim,_)) = queue_owner(connection,"recheck")? else { return Ok(false); };
     refresh_recheck(connection,&claim)?;
     Ok(true)
 }
 
 fn retraction_one(connection: &Connection) -> Result<bool> {
+    let Some((owner,_)) = queue_owner(connection,"retraction")? else { return Ok(false); };
     let task: Option<(i64,String,String,u64,u64,i64,String)> = connection.query_row(
         "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,claim_id
-         FROM assistant_grant_retractions ORDER BY id LIMIT 1", [],
+         FROM assistant_grant_retractions WHERE id=?1", [&owner],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
     ).optional()?;
     let Some((task,writer,key,lower,upper,sequence,id)) = task else { return Ok(false); };

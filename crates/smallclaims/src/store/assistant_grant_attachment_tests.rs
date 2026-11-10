@@ -507,11 +507,13 @@ fn ineligible_witness_prefix_consumes_bounded_visits_in_zero_and_full_slices() {
             ).unwrap();
         }
         connection.execute_batch(
-            "DELETE FROM meta WHERE key='assistant_grant_attachment_witness_cursor';
+            "DELETE FROM meta WHERE key IN ('assistant_grant_owner_cursor/witness','assistant_grant_owner_upper/witness');
              CREATE TEMP TABLE witness_visits (id INTEGER PRIMARY KEY, base_claim_id TEXT NOT NULL);
              CREATE TEMP TRIGGER witness_visit_counter AFTER INSERT ON main.meta
-             WHEN NEW.key='assistant_grant_attachment_witness_cursor' BEGIN
-                 INSERT INTO witness_visits(base_claim_id) VALUES(NEW.value);
+             WHEN NEW.key='assistant_grant_owner_cursor/witness' BEGIN
+                 INSERT INTO witness_visits(base_claim_id)
+                 SELECT owner FROM assistant_grant_queue_owners
+                 WHERE queue='witness' AND sequence=CAST(NEW.value AS INTEGER);
              END;",
         ).unwrap();
         let limit = if budget.is_zero() { 1 } else { authority::CLAIMS_PER_SLICE };
@@ -560,4 +562,81 @@ fn ineligible_witness_prefix_consumes_bounded_visits_in_zero_and_full_slices() {
         }
         assert!(finished, "bounded cleanup never reached the eligible tail");
     }
+}
+
+#[test]
+fn attachment_owner_turn_survives_reopen_and_lower_and_between_id_arrivals() {
+    const BOUND: usize = 256;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("attachment-owner-fairness.sqlite3");
+    let grant;
+    let policy;
+    {
+        let store = Store::open(&path, "attachment-owner-fairness", Arc::new(Plain)).unwrap();
+        grant = append(&store, SUBJECT, GRANTED, fields());
+        drain_authority(&store);
+        // Only queue fixtures have controlled IDs. The victim and its base are
+        // real local appends, with their ordinary content-derived claim IDs.
+        store.connection.write().execute(
+            "INSERT INTO assistant_grant_attachments
+             VALUES('!m/initial',?1,'attacker/subject','missing','missing','','')",
+            [GRANTED],
+        ).unwrap();
+        let mut value = fields();
+        value["expires_at_unix_ms"] = json!(20000);
+        policy = append(&store, SUBJECT, POLICY, value);
+        assert!(authority::subject_ready(&store.readers.get(), SUBJECT).is_err());
+    }
+    let mut connection = Connection::open(&path).unwrap();
+    attachment_install_counter(&connection);
+    let mut reopened = false;
+    let mut lifted = false;
+    for slice in 0..BOUND {
+        // New owners arrive both below the already visited attacker and in the
+        // hash interval before the victim. They must join a later arrival round,
+        // rather than continually extending the victim's current round.
+        for prefix in ["!a/lower", "!t/between"] {
+            let id = format!("{prefix}/{slice:08}");
+            assert!(id.as_str()<policy.id.as_str());
+            connection.execute(
+                "INSERT INTO assistant_grant_attachments
+                 VALUES(?1,?2,'attacker/subject','missing','missing','','')",
+                params![id,GRANTED],
+            ).unwrap();
+        }
+        let (_, work) = attachment_connection_slice(&mut connection, Duration::ZERO);
+        assert!(attachment_tasks(&connection)>0,
+            "victim must finish without draining continuously arriving unrelated owners");
+        if !reopened && work.candidates>0 {
+            let after: String = connection.query_row(
+                "SELECT after_claim_id FROM assistant_grant_attachments
+                 WHERE claim_id=?1 AND candidate_kind=?2",
+                params![policy.id,GRANTED], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(after, grant.id);
+            assert!(authority::subject_ready(&connection, SUBJECT).is_err());
+            // Reopening Store would itself perform maintenance. A raw reopen
+            // isolates the durable owner turn/frontier and the unfinished page.
+            drop(connection);
+            connection = Connection::open(&path).unwrap();
+            attachment_install_counter(&connection);
+            reopened = true;
+        }
+        if authority::subject_ready(&connection, SUBJECT).is_ok() {
+            assert!(authority::contains(&connection, &grant.id).unwrap());
+            assert!(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_authority
+                 WHERE claim_id=?1 AND base_claim_id=?2)",
+                params![policy.id,grant.id], |row| row.get::<_,bool>(0),
+            ).unwrap(), "the victim's actual policy attachment was skipped");
+            lifted = true;
+            break;
+        }
+    }
+    assert!(reopened, "regression never exercised an unfinished victim across reopen");
+    assert!(lifted, "lower and between-ID arrivals starved the attachment victim beyond {BOUND} ZERO slices");
+    assert!(!connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE claim_id='!m/initial')",
+        [], |row| row.get::<_,bool>(0),
+    ).unwrap(), "stale attacker owners must retire normally");
 }

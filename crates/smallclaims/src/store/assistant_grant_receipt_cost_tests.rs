@@ -48,6 +48,9 @@ fn receipt_projection_work_state(connection: &Connection) -> Vec<Vec<Vec<SqlValu
         "SELECT writer,claim_id FROM assistant_grant_auth_work ORDER BY writer,claim_id",
         "SELECT claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id FROM assistant_grant_attachments ORDER BY claim_id,candidate_kind",
         "SELECT base_claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record FROM assistant_grant_attachment_witnesses ORDER BY base_claim_id",
+        "SELECT queue,owner,subowner,sequence FROM assistant_grant_queue_owners ORDER BY queue,sequence",
+        "SELECT queue,sequence FROM assistant_grant_queue_sequences ORDER BY queue",
+        "SELECT key,value FROM meta WHERE key LIKE 'assistant_grant_owner_cursor/%' OR key LIKE 'assistant_grant_owner_upper/%' OR key='assistant_grant_maintenance_turn' ORDER BY key",
     ].into_iter().map(|sql| {
         let mut statement = connection.prepare(sql).unwrap();
         let columns = statement.column_count();

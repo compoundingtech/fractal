@@ -262,10 +262,16 @@ turn before a slice can end, including `Duration::ZERO`. Empty queues cost a
 bounded indexed probe each; dispatch visits at most eight queues per unit.
 Thus, absent demotion work, each runnable queue receives a unit within eight
 one-unit slices even under continuous arrivals to other queues. There are no
-per-queue slice reservations. Dirty authentication retains its own durable cursor.
-Late dirty work sorting before the saved cursor wraps within the same slice,
-without waiting for a later maintenance wakeup. Repeated cursor or recheck writes
-retain one work-set entry even under an outer SQL upsert's conflict policy.
+per-queue slice reservations. Every owner-based queue (the first seven turns)
+also uses a locally assigned monotone integer admission sequence, an indexed
+sequence cursor, and a fixed per-round upper frontier. Re-enqueuing an owner
+already present does not change its sequence. Each visit advances to the next
+owner even if that owner's authentication or pair cursor is unfinished. New
+arrivals, regardless of their content-hash ordering, wait behind the current
+round's owners. An owner present at round start receives a visit within that
+round's owner count; its own page cursor resumes on later rounds.
+Repeated cursor or recheck writes retain one work-set entry even under an outer
+SQL upsert's conflict policy.
 A claim with a durable proof recheck has exactly one authentication-cursor
 owner: the recheck verifier. Ordinary dirty dispatch invokes that same verifier
 step and discharges the obligation on completion, so even a one-unit or
@@ -290,12 +296,12 @@ usable. Late opposite claims create their own tasks, including pairs beyond an
 older task's high-water mark.
 
 The subject remains fenced until its attachment tasks and witness cleanup finish.
-Cleanup seeks exactly one witness by its persistent primary-key cursor before
+Cleanup seeks exactly one witness by its queue admission sequence before
 probing that subject's attachment index. It advances and charges the visit whether
 the witness is deleted or skipped because its own subject still has tasks.
 Unrelated attachment backlogs do not prevent eligible cleanup; a long ineligible
 prefix consumes separate bounded visits instead of an uncharged eligibility scan.
-The witness cursor wraps and prevents lower-ID arrivals repeatedly overtaking
+The fixed round frontier prevents new arrivals from repeatedly overtaking
 waiting witnesses.
 Before changing an effective base, maintenance retains its previous effective
 record as a conflict witness, so partially attached restrictive transitions cannot
@@ -306,10 +312,13 @@ doctor diagnostics report `authenticated grant attachment in progress` and
 storage can still be \(O(\text{bases}\times\text{transitions})\), but each
 transaction is bounded and its cursor survives restart.
 
-This adds empty task/witness tables and an index without changing projection
-version 1 or rescanning existing history. Earlier projection builds attached
-authenticated claims atomically, so their committed pairs need no replay;
-unfinished authentication/backfill continues through the new bounded tasks.
+This adds task/witness tables, a queue-owner admission registry and indexes without
+changing projection version 1 or rescanning raw history. Installation indexes only
+the already-queued owner set once; persistent queue insert/delete triggers keep it
+current atomically. Sequence counters survive queue retirement so deleted owners'
+positions cannot be reused. Earlier projection builds attached authenticated
+claims atomically, so their committed pairs need no replay; unfinished
+authentication/backfill continues through the new bounded tasks.
 
 Subject readiness starts with indexed subject claims and probes the queued
 obligations by their keys; unrelated queue growth does not cause a queue scan.
