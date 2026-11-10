@@ -275,22 +275,22 @@ mod tests {
         let plain = terminal_document("person/example", "one", &args, "host", ".", "key");
         assert!(!plain.contains("cd "), "{plain}");
         assert!(plain.contains("${SHELL:-/bin/sh}"), "{plain}");
-        let intent = crate::graph::parse_intent(&plain, "host").unwrap();
-        let member = intent.subjects["pty/person/example/one"]
-            .member
-            .as_ref()
-            .unwrap();
-        assert_eq!(member.cwd, ".");
-        assert_eq!(member.tags["st3.cwd"], "home");
+        let document = plain.parse::<KdlDocument>().unwrap();
+        let body = document.nodes()[1].children().unwrap();
+        let tags = body.get("tags").unwrap();
+        assert_eq!(
+            tags.get("st3.cwd").unwrap().value().as_string(),
+            Some("home")
+        );
         let placed = terminal_document("person/example", "two", &args, "host", "/srv/work", "key");
         assert!(!placed.contains("HOME"), "{placed}");
-        let intent = crate::graph::parse_intent(&placed, "host").unwrap();
-        let member = intent.subjects["pty/person/example/two"]
-            .member
-            .as_ref()
-            .unwrap();
-        assert_eq!(member.cwd, "/srv/work");
-        assert!(!member.tags.contains_key("st3.cwd"));
+        let document = placed.parse::<KdlDocument>().unwrap();
+        let body = document.nodes()[1].children().unwrap();
+        assert!(body.get("tags").unwrap().get("st3.cwd").is_none());
+        assert_eq!(
+            body.get("workspace").unwrap().get(0).unwrap().value().as_string(),
+            Some("/srv/work")
+        );
     }
     #[test]
     fn created_agents_use_checkout_for_new_and_existing_branches_and_keep_plain_workspaces() {
