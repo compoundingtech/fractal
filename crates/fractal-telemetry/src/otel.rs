@@ -282,11 +282,11 @@ pub fn record_conversation_relay_read(owner: &str, operation: &'static str, elap
 mod conversation_metrics_tests {
     #[test]
     fn owner_labels_are_bounded_to_the_configured_fleet() {
-        let label = |owner| super::conversation_owner(owner, "dev5", ["dev3", "dev4"].into_iter());
-        assert_eq!(label("host/dev5"), "local");
-        assert_eq!(label("host/dev3"), "host/dev3");
-        assert_eq!(label("host/dev4"), "host/dev4");
-        for owner in ["dev3", "host/new-peer", "session/secret", "host/", "host/dev3/session/id"] {
+        let label = |owner| super::conversation_owner(owner, "local-node", ["alpha", "beta"].into_iter());
+        assert_eq!(label("host/local-node"), "local");
+        assert_eq!(label("host/alpha"), "host/alpha");
+        assert_eq!(label("host/beta"), "host/beta");
+        for owner in ["alpha", "host/new-peer", "session/secret", "host/", "host/alpha/session/id"] {
             assert_eq!(label(owner), "unknown", "{owner}");
         }
     }
