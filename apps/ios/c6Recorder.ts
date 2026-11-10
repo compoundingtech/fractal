@@ -7,6 +7,7 @@ export type C6Row = {
   version: string; start: C6ObservedContext; end: C6ObservedContext; pathScope: 'module-global' | 'unknown'; pathFlag: 'changed' | 'unknown' | null; requestId: string | null; messageId: string | null;
   ackMs: number | null; echoMs: number | null; status: 'ok' | 'failed' | 'timeout' | 'invalid' | 'cancelled';
   errorCode: 'request-failed' | 'timeout' | 'route-changed' | 'cancelled' | null;
+  errorName: string | null;
 };
 export type C6Send = { signal: AbortSignal; request: (id: string) => void; ack: () => void; cleanup: (close: () => void) => void };
 export const C6_LIMIT = 200;
@@ -29,7 +30,7 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
     const pending = this.pending;
     if (own && pending && text.includes(`[C6:${pending.nonce}]`)) pending.observed(id);
   }
-  export(): string { return JSON.stringify({ schema: 'ios-c6.v1', rows: this.rows }, null, 2); }
+  export(): string { return JSON.stringify({ schema: 'ios-c6.v2', rows: this.rows }, null, 2); }
   async run(operation: C6Row['operation'], execute: (nonce: string, hooks: C6Send, sample: TSample) => Promise<void>): Promise<void> {
     if (this.busy) return;
     this.busy = true;
@@ -43,7 +44,7 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
         if (start.route === 'fabric' && !this.cancelled) start.observedPath = await this.ports.readFabricPath();
         const startRead = this.ports.snapshot();
         const began = this.ports.now();
-        const row: C6Row = { runId, blockId, index, operation, version: this.ports.version, start, end: start, pathScope: start.route === 'fabric' ? 'module-global' : 'unknown', pathFlag: null, requestId: null, messageId: null, ackMs: null, echoMs: null, status: 'ok', errorCode: null };
+        const row: C6Row = { runId, blockId, index, operation, version: this.ports.version, start, end: start, pathScope: start.route === 'fabric' ? 'module-global' : 'unknown', pathFlag: null, requestId: null, messageId: null, ackMs: null, echoMs: null, status: 'ok', errorCode: null, errorName: null };
         if (this.cancelled) {
           row.status = 'cancelled'; row.errorCode = 'cancelled';
         } else {
@@ -72,7 +73,8 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
                 timer = setTimeout(() => controller.abort(), this.ports.timeoutMs ?? C6_TIMEOUT_MS);
               }),
             ]);
-          } catch {
+          } catch (error) {
+            row.errorName = error instanceof Error ? error.name : null;
             row.status = this.cancelled ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'failed';
             row.errorCode = this.cancelled ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'request-failed';
           } finally {

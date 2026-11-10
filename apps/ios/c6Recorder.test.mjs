@@ -40,7 +40,7 @@ test('C6 status under the React Native AbortSignal polyfill', async t => {
     }
   });
   t.diagnostic(JSON.stringify({
-    rows: recorder.rows.map(({ status, errorCode, requestId, start, end }) => ({ status, errorCode, requestId, start, end })),
+    rows: recorder.rows.map(({ status, errorCode, errorName, requestId, start, end }) => ({ status, errorCode, errorName, requestId, start, end })),
     fetches, errors: errors.map(error => ({ name: error.name, message: error.message })),
   }));
   assert.equal(recorder.rows.length, 10);
@@ -49,10 +49,12 @@ test('C6 status under the React Native AbortSignal polyfill', async t => {
     assert.equal(errors.length, 10);
     assert(errors.every(error => error instanceof TypeError && /throwIfAborted/.test(error.message)));
     assert(recorder.rows.every(row => row.status === 'failed' && row.errorCode === 'request-failed' && row.requestId === null && row.start.route === 'tailscale' && row.end.route === 'tailscale'));
+    assert(recorder.rows.every(row => row.errorName === 'TypeError'));
   }
   assert.deepEqual(recorder.rows.map(row => row.status), Array(10).fill('ok'));
   assert.deepEqual(recorder.rows.map(row => row.requestId), Array.from({ length: 10 }, (_, index) => `request/c6-${index + 1}`));
   assert.equal(fetches, 10);
+  assert(recorder.rows.every(row => row.errorName === null));
 });
 
 const fixture = (timeoutMs = 20) => {
@@ -122,14 +124,15 @@ test('keeps ACK when echo is missing and never exports raw errors or message con
   assert(recorder.rows.every(row => row.status === 'timeout' && row.ackMs === 0 && row.echoMs === null));
   await recorder.run('status', async () => { throw new Error('secret https://credential@private.invalid message body'); });
   const exported = JSON.parse(recorder.export());
-  assert.equal(exported.schema, 'ios-c6.v1');
+  assert.equal(exported.schema, 'ios-c6.v2');
   assert.equal(exported.rows.length, 20);
-  assert.deepEqual(Object.keys(exported.rows[0]).sort(), ['runId', 'blockId', 'index', 'operation', 'version', 'start', 'end', 'pathScope', 'pathFlag', 'requestId', 'messageId', 'ackMs', 'echoMs', 'status', 'errorCode'].sort());
+  assert.deepEqual(Object.keys(exported.rows[0]).sort(), ['runId', 'blockId', 'index', 'operation', 'version', 'start', 'end', 'pathScope', 'pathFlag', 'requestId', 'messageId', 'ackMs', 'echoMs', 'status', 'errorCode', 'errorName'].sort());
   assert.deepEqual(Object.keys(exported.rows[0].start).sort(), ['observedPath', 'route']);
   assert.deepEqual(Object.keys(exported.rows[0].end).sort(), ['observedPath', 'route']);
   assert.equal(exported.rows[0].pathScope, 'unknown');
   assert(!/secret|credential|private.invalid|message body|nonce-3/.test(recorder.export()));
   assert(exported.rows.slice(10).every(row => row.status === 'failed' && row.errorCode === 'request-failed'));
+  assert(exported.rows.slice(10).every(row => row.errorName === 'Error'));
 });
 
 test('runs sequentially, refuses concurrent blocks and bounds retained rows', async () => {
