@@ -1873,9 +1873,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v18 adds durable expiry to kind selection, shifting the shared RNG schedule.
-/// Hosted run 42793993503 observed seeds 2 and 34 converge without trimming; the other fixed seeds trim.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Corpus v19 adds `program.step` to kind selection, shifting the shared RNG schedule. Hosted run
+/// 42865212282 observed every fixed seed trim but seeds 1 and 34, which wrote a keyed-only claim;
+/// burst run 42882912660 observed them trim once they no longer write one. That burst left seeds 55
+/// and 610 untrimmed: a lightly loaded runner diverges from hosted CI at the same commit (#6210).
+const NEVER_TRIMS: &[u64] = &[];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
