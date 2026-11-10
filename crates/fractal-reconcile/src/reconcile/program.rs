@@ -673,7 +673,8 @@ fn send_to(inner: &Inner, generation: u64, message: &Value) {
 /// True only when no process has this pid (`ESRCH`); any other answer keeps the leader alive.
 fn leader_gone(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
-    unsafe { libc::kill(pid, 0) } == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    let missing = unsafe { libc::kill(pid, 0) } == -1;
+    missing && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Queue one line for the live host. A host that is gone drops it; its programs resume on the next.
