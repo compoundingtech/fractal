@@ -1332,6 +1332,7 @@ fn parse_step(
     let mut retry = RetrySpec::default();
     let mut revision_owners = Vec::new();
     if let Some(children) = node.children() {
+        crate::declared_admission::parse(children, "step", &format!("step/{path}"))?;
         let mut names = BTreeSet::new();
         let mut baseline_names = BTreeSet::new();
         let mut gate_names = BTreeSet::new();

@@ -314,7 +314,7 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
     let path = directory.path().join("graph.db");
     let store = Store::open(&path, "node").unwrap();
     let append = |subject: &str, kind: &str| {
-        store.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,
@@ -322,7 +322,12 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        }).unwrap()
+        };
+        if kind.starts_with("custom.client.terminal") {
+            store.append_client_operation_claim(&input)
+        } else {
+            store.append_claim(&input)
+        }.unwrap()
     };
     let attached = append("custom/client/attachment-a", "custom.client.terminal-attached");
     append("custom/client/decoy", "custom.client.other");
@@ -355,8 +360,13 @@ proptest! {
         copies in 1usize..3,
     ) {
         let source = Store::open_memory("alder").unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet(TEST_FLEET).unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
         let append = |subject: &str, kind: &str, hash: &str| {
-            source.append_claim(&ClaimInput {
+            source.append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
                 actor: None,
@@ -374,6 +384,8 @@ proptest! {
         let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
         order.sort_by_key(|&index| (ranks[index], index));
         let target = Store::open_memory("birch").unwrap();
+        target.bind_fleet(TEST_FLEET).unwrap();
+        target.pin_fleet_anchor(key.public()).unwrap();
         for chunk in order.chunks(width) {
             let envelopes = chunk.iter().flat_map(|&index|
                 std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
@@ -1439,6 +1451,14 @@ fn a_late_claim_about_a_delivered_run_rebuilds_its_part_and_matches_a_replay() {
 fn late_claims_about_asks_owned_by_the_root_and_by_a_child_match_a_replay() {
     for owned_by_root in [true, false] {
         let shapes = tree_shapes();
+        for store in [&shapes.controller, &shapes.worker] {
+            let budget = store
+                .attention_request_count("front-desk", "person/test", now_ms())
+                .unwrap();
+            assert_eq!(budget.requests, 2);
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.root.subject), Some(&1));
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.children[0].subject), Some(&1));
+        }
         let ask = if owned_by_root { &shapes.root_ask } else { &shapes.child_ask };
         let ask = ask.subject.clone();
         let parts = late_claim_matches_a_replay(&shapes, |controller| {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep an untouched new web window from publishing an empty workspace over another window's open tabs.",
+  "replay": { "status": "none", "detail": "The workspace begins with its loaded state as the persistence baseline. An absent document starts with the empty workspace baseline." },
+  "schema": { "status": "none", "detail": "The workspace document format and storage key are unchanged." },
+  "rules": { "status": "none", "detail": "Only actual workspace changes are persisted. A stored document that needs repair keeps its existing repair behavior." },
+  "compatibility": { "status": "none", "detail": "Existing workspace documents and cross-window storage events keep their current format." },
+  "downtime": { "status": "none", "detail": "The change takes effect when the web client reloads." },
+  "manual": { "status": "none", "detail": "No migration or configuration change is required." },
+  "recovery": { "status": "none", "detail": "An ordinary web client rollback restores the previous behavior and keeps the same workspace documents." }
+}

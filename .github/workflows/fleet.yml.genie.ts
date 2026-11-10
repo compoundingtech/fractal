@@ -1,3 +1,4 @@
+import { withCompatArchives } from './compat-archive.ts'
 import { swiftClientJobs } from './swift-client.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { withQueueWatch } from './queue-watch.ts'
@@ -389,7 +390,8 @@ export const buildFleetWorkflow = (context: FleetBuildContext = { topology: 'eve
   const { pickRunnerJob, supportingStageRunsOn, primaryTestRunsOn, secondaryStageRunsOn, testBuildRunsOn } = workspaceRunners(context)
   const linuxStageJob = (args: Parameters<typeof baseLinuxStageJob>[0]) =>
     baseLinuxStageJob({ ...args, runsOn: args.runsOn ?? supportingStageRunsOn })
-  return scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(auditCaches({
+  // Finalize archive dependencies before admission guards and the queue observer inventory the graph.
+  return scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(withCompatArchives(auditCaches({
   name: 'Workspace CI',
   on: {
     pull_request: { types: readyPullRequestTypes },
@@ -966,6 +968,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
 }, {
   "hm-module-eval": "Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.",
   "swift-client-changes": "Classifies Git paths only; builds nothing.", "swift-client": "Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.", "evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
+)
 }
 
 export const fleetWorkflow = buildFleetWorkflow()

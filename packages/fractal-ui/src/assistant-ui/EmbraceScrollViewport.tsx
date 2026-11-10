@@ -53,14 +53,23 @@ export type ViewportAnchorHistory =
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
   private readonly states = new Map<string, ViewportState>()
+  private readonly folds = new Map<string, boolean>()
   private disposed = false
   get size(): number { return this.states.size }
+  /** A reader's work-log fold choice by turn. Bounded, since only recent turns are worth remembering. */
+  foldChoice(id: string): boolean | undefined { return this.folds.get(id) }
+  rememberFold(id: string, expanded: boolean): void {
+    if (this.disposed) return
+    this.folds.delete(id)
+    this.folds.set(id, expanded)
+    if (this.folds.size > 500) this.folds.delete(this.folds.keys().next().value!)
+  }
   get(key: string): ViewportState | undefined { return this.states.get(key) }
   save(key: string, state: ViewportState): void { if (!this.disposed) this.states.set(key, state) }
   retain(keys: ReadonlySet<string>): void { for (const key of this.states.keys()) if (!keys.has(key)) this.states.delete(key) }
   open(): void { this.disposed = false }
   /** Parent-first teardown must ignore late saves from unmounting viewports. */
-  dispose(): void { this.disposed = true; this.states.clear() }
+  dispose(): void { this.disposed = true; this.states.clear(); this.folds.clear() }
 }
 
 /** Viewports outside a store-owning surface keep memory only for their own mount. */

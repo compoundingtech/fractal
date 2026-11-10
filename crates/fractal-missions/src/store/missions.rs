@@ -6,6 +6,7 @@ use fractal_store::store::identities::resolve_reference_conn;
 use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
 
 mod run_review;
+pub mod step_history;
 #[doc(hidden)]
 pub use run_review::{
     ReviewOwnerSnapshot, review_owner_snapshot, validate_run_reviewer,
@@ -264,6 +265,37 @@ pub(crate) fn mission_step_timestamps_sql() -> String {
               'work.claimed','work.failed','work.person-done','work.person-cancelled')
          JOIN batches ON batches.id=claims.batch_id
          ORDER BY claims.subject, {CANONICAL_ORDER}"
+    )
+}
+
+/// Bounded per-kind suffixes for each selected step, including one boundary event. The inner
+/// index seek limits rows before reading bodies (including ordinary progress notes). Canonical
+/// sorting and folding therefore see at most `(CLAIMS_PER_KIND_LIMIT + 1) * kinds` rows per step.
+/// These are already-admitted claims, not pending envelopes. Like `step_timing_events` and
+/// `project_mission_run_update`, history accepts lifecycle claims from any admitted member:
+/// remote workers and the run owner can be different origins. Operation receipts deduplicate
+/// writes; they are not a second per-claim read-admission relation. This diagnostic fold grants
+/// no work authority and must not discard legitimate cross-member events by origin.
+pub(crate) fn mission_step_history_sql() -> String {
+    let kinds = step_history::STEP_HISTORY_KINDS.split(',').map(|kind| format!("({kind})"))
+        .collect::<Vec<_>>().join(",");
+    format!(
+        "WITH steps AS MATERIALIZED (
+             SELECT s.subject
+             FROM mission_runs r JOIN step_runs s INDEXED BY step_runs_run_index
+               ON s.run_id=r.id AND s.generation_id=r.current_generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1))),
+         kinds(kind) AS (VALUES {kinds})
+         SELECT claims.subject, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM steps CROSS JOIN kinds CROSS JOIN claims
+           ON claims.store_index IN (
+             SELECT recent.store_index FROM claims recent INDEXED BY claims_subject_kind_accepted_index
+             WHERE recent.subject=steps.subject AND recent.kind=kinds.kind
+             ORDER BY length(recent.accepted_at_unix_ms) DESC, recent.accepted_at_unix_ms DESC
+             LIMIT {limit})
+         JOIN batches ON batches.id=claims.batch_id
+         ORDER BY claims.subject, {CANONICAL_ORDER}",
+        limit = step_history::CLAIMS_PER_KIND_LIMIT + 1,
     )
 }
 
@@ -1724,6 +1756,11 @@ pub trait MissionsStore {
     fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
     /// Remaining duration from bounded, incrementally projected completed-run samples.
     fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>>;
+    /// Each remaining step's p25/p75 duration and sample count, for the steps that have samples.
+    fn mission_run_step_etas(&self, run: &str) -> Result<BTreeMap<String, (u64, u64, usize)>>;
+    /// Each current-generation step's attempts, waits and transitions in the runs in `runs`,
+    /// folded from its lifecycle claims as of `at_unix_ms` (`step_history`).
+    fn mission_step_histories_for_runs(&self, runs: &[String], at_unix_ms: u128) -> Result<BTreeMap<String, step_history::StepHistory>>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`. With
     /// `before`, only work in runs this host recorded before that store index (`stop_intake`).
@@ -2192,6 +2229,44 @@ fn set_step_state_guarded(
 impl MissionsStore for Store {
     fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>> {
         fractal_delivery::store::run_eta::read(&self.readers.get(), run, at_unix_ms)
+    }
+
+    fn mission_run_step_etas(&self, run: &str) -> Result<BTreeMap<String, (u64, u64, usize)>> {
+        fractal_delivery::store::run_eta::read_steps(&self.readers.get(), run)
+    }
+
+    fn mission_step_histories_for_runs(&self, runs: &[String], at_unix_ms: u128) -> Result<BTreeMap<String, step_history::StepHistory>> {
+        if runs.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd90c689f2276 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &mission_step_history_sql())?;
+        let rows = statement.query_map(params![serde_json::to_string(&runs)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?))
+        })?;
+        let mut events = BTreeMap::<String, Vec<(String, Value, u128)>>::new();
+        let mut counts = BTreeMap::<(String, String), usize>::new();
+        for row in rows {
+            let (subject, kind, body, at) = row?;
+            *counts.entry((subject.clone(), kind.clone())).or_default() += 1;
+            let body: Value = serde_json::from_str(&body)?;
+            // The bounded read also sees clockless notes, but they do not move the fold.
+            let relevant = kind != "work.progress" || body.pointer("/fields/clock").is_some();
+            let events = events.entry(subject).or_default();
+            if relevant {
+                events.push((kind, body, at.parse()?));
+            }
+        }
+        let holds = step_history::foreign_holds(&events);
+        Ok(events.iter().map(|(subject, events)| {
+            let holds = holds.get(subject).map_or(&[][..], Vec::as_slice);
+            let mut history = step_history::fold_step_history(events, holds, at_unix_ms);
+            history.complete &= !counts.iter().any(|((step, _), count)|
+                step == subject && *count > step_history::CLAIMS_PER_KIND_LIMIT);
+            (subject.clone(), history)
+        }).collect())
     }
 
 

@@ -472,13 +472,86 @@ marks it committed after the idempotent transition. A restart replays an
 admitted pending cut before reading the next publication. Keep this checkpoint
 across restart and rollback while using
 the same source identity. The fault reports weekly objective compliance.
-Short outage detection and the publisher's transport remain separate.
-Before enabling both for the same member, the deployment must correlate the
-early warning and weekly miss into one owner-facing case, with a new notice
-only when the case is promoted. Upgrade all fault readers before enabling
-the policy, since older readers do not recognize this no-fallback condition.
-This objective does not implement that
-delivery policy or its off-host availability fallback.
+Upgrade all fault readers before enabling the policy, since older readers do
+not recognize this no-fallback condition.
+
+Retained short readings are a separate, read-only opt-in via
+`retained_pairs_file`, a different root-controlled file in the same evidence
+directory. Its version-1 bundle contains up to four ordered `pairs`, each with
+the exact `weekly` document and a matching `short` document. Short documents
+carry version, objective, member, end_ms, observed_at_ms and up to five distinct
+minute observations (`at_ms`, `ready`) in the completed five-minute window.
+Missing minutes remain Unknown, not failed or successful. Usage reads never
+issue claims or advance either checkpoint.
+
+Set `shared_case = true` to replace independent weekly dispatch with one
+durable readiness case. This is off by default and requires retained pairs.
+Three failed minutes among at least four known minutes open an early phase;
+a proven weekly miss promotes that same case without changing its original
+owner. A weekly miss can also open a case directly. Each phase admits exactly
+one actionable owner notice. Optional `backup = "agent/example/backup"` selects
+a distinct, active agent for one held informational notice per phase, never
+an alternate owner. An unavailable backup cannot block owner delivery.
+Only one backup intent is retained per phase; undelivered informational intents
+are discarded on recovery rather than carried into later cases.
+Measured weekly recovery closes failure receipts without another owner notice;
+Unknown preserves the case. Pending legacy cuts are journaled and replayed
+through the legacy writer before reading a newer publication. Enabling the
+shared route uses drain-before-enable: every already-open weekly episode
+finishes under its existing writer and receives no shared-case primary notice.
+Only episodes opened after that drain belong to the shared sender.
+Fresh legacy-drain readings must strictly advance the durable case-journal
+cursor; older and equal cuts are not routed. Exact admitted pending work
+replays separately using its original observation clock.
+Receivers classify managed failures by their originating daemon and linked
+opening, independently of the receiver's local policy configuration.
+Committing recovery also advances the short-admission cursor through that
+weekly cut. A delayed companion at or before recovery cannot reopen the case,
+including after restart; a genuinely later short cut can open a new case.
+Keep `readiness-case.json` across
+restart: it journals phase transitions and notice intents before delivery and
+recognizes native receipts on replay. The legacy weekly checkpoint remains
+byte-for-byte unchanged while the shared route is enabled.
+
+Readiness operation receipts are accepted only when their daemon author,
+origin, subject and phase/notice fields match the intended record. An
+incompatible key occupant produces a visible operational conflict and a log
+entry, not a successful phase or a fatal sampling error. Continuation keys
+derive from the original key and the conflicting native claim ID; four such
+continuations are allowed. A longer chain leaves that operation pending while
+other notices and measured recovery continue. No secret or new journal state
+is needed to replay a continuation.
+Replicated operation conflicts remain occupied. Each read retains at most 16
+native occupants from a plain bounded seek of the existing operation-ID index;
+an extra row detects overflow. There is no receipt ranking or full-history sort.
+Expected receipts in the window are validated even on overflow. Without a
+matching receipt in the window, overflow blocks the operation, never marks it vacant.
+Existing continuations are searched before a new receipt is written. One shared
+64-visit allowance counts reads and occupant validations across all branches;
+exhaustion blocks that operation nonfatally. Conflict diagnostics and their log
+entry are deduplicated by the original operation key across replay and restart.
+No new index or startup migration is needed for bounded occupant discovery.
+Every receipt still requires full expected-record validation.
+A blocked phase lookup is not an absent failure: measured recovery remains
+incomplete, retaining the case and pending recovery even when an existing
+continuation receipt cannot be reached within the bounded window.
+
+**Disabling shared readiness cases**
+
+Do not turn off the sender with shared intents pending: receiving members
+continue to recognize managed phases and exclude them from generic delivery,
+independently of the sender's current configuration.
+
+1. Keep the executor's shared route enabled until its active case has measured
+   recovery and its journal has no pending phase transition or unrecorded owner
+   notices. Recovery discards undelivered informational backup intents.
+2. Inspect and resolve any reported readiness-operation conflicts before
+   disabling. A blocked receipt is not a completed notice.
+3. Disable `shared_case` and restart the selected executor only after that drain.
+   Retain the case journal and legacy weekly checkpoint across the change.
+4. If the sender was disabled prematurely, restore the same executor policy and
+   journal to finish admitted work first; do not delete or recreate the journal
+   to try to transfer pending delivery to generic receivers.
 
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
@@ -1371,3 +1444,64 @@ The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 
+
+### Agent-list performance fault delivery
+
+The GET agents objective measures the local member's completed eligible requests over seven days.
+A complete window with traffic is required. The objective is met when at least 95% succeed in
+100 ms or less. Measurement continues when the optional `agents_request_slo_fault` setting is
+absent. An explicit `member` must match the daemon origin and `reviewer` must name an active
+agent. The binding comes from the Factory response intent for `fractal-agents-success-fast`.
+
+Fault delivery is disabled by default. Keep the setting absent until the owner/member and
+reviewer assignment has been reviewed and a complete durable seven-day window exists.
+The Factory response proposal alone does not enable delivery; enabling the reviewed binding
+is a separate configuration decision.
+
+The doctor field `performance.agentsRequestSloShadow` reports the current counts along with
+`fault_pending`, `fault_quarantined`, `fault_delivery_blocked`, and `fault_outbox_overflow`.
+Use the daemon log for the blocked delivery error. To inspect the ledger directly, open
+`STATE/agents-request-slo-v1.sqlite3` read-only and query the following tables.
+
+```sql
+SELECT * FROM fault_outbox ORDER BY id;
+SELECT * FROM fault_quarantine ORDER BY id;
+SELECT * FROM fault_overflow;
+```
+
+A blocked head stays pending until the same reviewer becomes active and the graph can accept
+the native transition. Removing the setting pauses delivery and admission while measurements
+continue. Restoring the same binding resumes ordered replay. Enabling a different reviewer
+quarantines old pending intents before replay. A clock rewind quarantines pending cuts that used
+invalidated minutes. Quarantine keeps the latest 64 records for inspection and never replays them.
+The native episode is `slo-objective/NODE/fractal-agents-success-fast` on `daemon/NODE`.
+Inspect that episode and reconcile any open fault with its original reviewer.
+Changing the setting never reassigns an already-open fault.
+
+Before acknowledging a queued missed cut, the adapter delivers its notice through the existing
+native fault sender. A queued recovery cannot overtake that delivery, including when both cuts
+are replayed after a restart. Sender failure retains the missed cut and blocks later cuts;
+retrying after a sent notice reuses the native sender's episode idempotency key.
+
+Overflow means the 64-entry pending queue could not retain another transition. The daemon can
+replay retained entries but stops admitting new ones. The marker survives restart and changes to
+the binding. Before clearing it, an operator reviews the retained and quarantined decisions,
+records the accepted gap, and reconciles the native episode. Leave the marker in place if the
+episode or loss is still unresolved. Once the retained queue has drained, stop the daemon, back up
+the ledger, verify the `owner` row, and clear only the overflow marker in an explicit SQLite
+transaction. The conditional statement refuses to clear it while pending intents exist.
+
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM fault_overflow WHERE singleton = 1
+    AND NOT EXISTS (SELECT 1 FROM fault_outbox);
+SELECT changes() AS deleted_marker;
+SELECT EXISTS (SELECT 1 FROM fault_overflow) AS marker_present;
+COMMIT;
+```
+
+Confirm that one row was deleted, or independently confirm the marker was already absent.
+A zero-row deletion with the marker still present leaves delivery admission paused.
+
+Restarting with the binding enabled resumes admission at the next conclusive completed cut.
+An incomplete or zero-traffic window leaves the existing native fault unchanged.
