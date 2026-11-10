@@ -8,6 +8,7 @@ packages:
   - clients/typescript/fractal-declarations
   - clients/typescript/fractal-scenarios
   - clients/typescript/fractal-views
+  - packages/fractal
   - packages/fractal-sdk
   - packages/fractal-ui
 
@@ -19,6 +20,7 @@ overrides:
   "@overeng/effect-rpc-explorer-react": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-explorer-react"
   "@overeng/effect-rpc-observer": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-observer"
   "@overeng/effect-rust": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust"
+  "@overeng/kdl": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl"
   "@overeng/meters": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters"
   "@overeng/otel-browser": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-browser"
   "@overeng/otel-contract": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract"

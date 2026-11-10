@@ -6,11 +6,12 @@ order: 4
 
 # Missions and runs
 
-KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+KDL is the runnable format. TS samples declare the same file with the in-repo [`fractal` package](https://github.com/compoundingtech/fractal/tree/main/packages/fractal), which renders exactly the KDL shown; it is not published to npm yet. Effect mission samples show the program form, `Fractal.mission(intent, program)`, a roadmap API that does not run yet. Use KDL for the runnable commands in these guides.
 
 A **mission** declares goals, constraints, inputs, and the steps and checks needed to finish. A **run** is one execution pinned to an immutable mission revision.
 
 ```ts group=mission variant=effect
+// Roadmap: program-form missions do not run yet. The TS tab declares this mission as data.
 import { Effect } from 'effect'
 import { Fractal } from 'fractal/effect'
 import { worker } from '../worker'
@@ -36,34 +37,30 @@ export const mission = Fractal.mission(
 ```
 
 ```ts group=mission variant=ts
+// example/first-note/mission.ts
 import { Fractal } from 'fractal'
-import { worker } from '../worker'
 
-const ada = Fractal.person({ id: 'ada' })
+import worker from '../worker/agent.ts'
 
-export const mission = Fractal.mission(
-  {
-    id: 'example/first-note',
-    state: 'ready',
-    timeout: '1h',
-    reportTo: ada,
-    goal: 'A short project introduction exists in WELCOME.md.',
-  },
-  async () => {
-    await Fractal.Worker.provide(worker, async () => {
-      await Fractal.step({
-        id: 'write',
-        timeout: '15m',
-        goal: 'WELCOME.md contains the project introduction.',
-      })
-    })
-  },
-)
+export default Fractal.mission({
+  meta: import.meta,
+  state: 'ready',
+  reportTo: worker,
+  goal: 'A short project introduction exists in WELCOME.md.',
+  steps: [
+    {
+      id: 'write',
+      timeout: '15m',
+      assignedTo: worker,
+      goal: 'WELCOME.md contains the project introduction.',
+    },
+  ],
+})
 ```
 
 ```kdl group=mission variant=kdl
 version 2
-mission "example/first-note" state="ready" {
+mission "example/first-note" report-to="agent/example/worker" state="ready" {
   goal "A short project introduction exists in WELCOME.md."
   step "write" timeout="15m" {
     assigned-to "agent/example/worker"
