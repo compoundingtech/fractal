@@ -125,8 +125,12 @@ impl ProgramJournal {
 }
 
 /// A program step of a run, with its current attempt's journal, as `missions show` and the run
-/// view present it.
+/// view present it. The journal's fields sit at the top level.
+///
+/// Deserializing goes through `ProgramRunViewFields`: serde's `flatten` buffers the journal
+/// through a value type that cannot hold its `u128` timestamps.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(from = "ProgramRunViewFields")]
 pub struct ProgramRunView {
     pub step_run: String,
     pub path: String,
@@ -139,6 +143,41 @@ pub struct ProgramRunView {
     /// The open `program/stalled` or `program/host` fault on the step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<ProgramFault>,
+}
+
+/// [`ProgramRunView`]'s wire fields, with the journal's spelled out.
+#[derive(Deserialize)]
+struct ProgramRunViewFields {
+    step_run: String,
+    path: String,
+    attempt: u32,
+    bundle_hash: String,
+    stalled_after_ms: u64,
+    #[serde(default)]
+    entries: Vec<ProgramEntry>,
+    #[serde(default)]
+    open: Vec<String>,
+    #[serde(default)]
+    last_entry_at_unix_ms: Option<u128>,
+    #[serde(default)]
+    truncated: bool,
+    #[serde(default)]
+    fault: Option<ProgramFault>,
+}
+
+impl From<ProgramRunViewFields> for ProgramRunView {
+    fn from(fields: ProgramRunViewFields) -> Self {
+        let ProgramRunViewFields { step_run, path, attempt, bundle_hash, stalled_after_ms, entries, open, last_entry_at_unix_ms, truncated, fault } = fields;
+        Self {
+            step_run,
+            path,
+            attempt,
+            bundle_hash,
+            stalled_after_ms,
+            journal: ProgramJournal { entries, open, last_entry_at_unix_ms, truncated },
+            fault,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -210,5 +249,46 @@ mod tests {
         let error = journal.entries[0].error.as_deref().unwrap();
         assert_eq!(error.chars().count(), ERROR_CHARS + 1);
         assert!(journal.truncated && journal.open.is_empty());
+    }
+
+    fn timed_view() -> ProgramRunView {
+        let rows = [
+            (json!({"key": "merge", "status": "started", "child": "mission-run/child"}), 30),
+            (json!({"key": "render", "status": "completed", "ms": 120}), 20),
+            (json!({"key": "render", "status": "started"}), 10),
+        ];
+        ProgramRunView {
+            step_run: "step-run/g/run".into(),
+            path: "run".into(),
+            attempt: 1,
+            bundle_hash: "0".repeat(64),
+            stalled_after_ms: DEFAULT_STALLED_AFTER_MS,
+            journal: ProgramJournal::fold(rows.iter().map(|(fields, at)| (fields, *at)), false),
+            fault: Some(ProgramFault { scope: STALLED_FAULT_SCOPE.into(), reason: "no entry".into() }),
+        }
+    }
+
+    #[test]
+    fn a_program_run_view_keeps_its_journal_fields_at_the_top_level_and_round_trips() {
+        let view = timed_view();
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(value["last_entry_at_unix_ms"], 30);
+        assert_eq!(value["open"], json!(["merge"]));
+        assert_eq!(value["entries"][0]["started_at_unix_ms"], 10);
+        assert!(value.get("journal").is_none());
+        assert_eq!(serde_json::from_value::<ProgramRunView>(value).unwrap(), view);
+    }
+
+    #[test]
+    fn a_mission_run_page_with_a_timed_program_step_round_trips() {
+        let run = json!({
+            "subject": "mission-run/g", "id": "g", "mission": "m", "generation": "g",
+            "initial_revision": "1", "revision": "2", "root_revision": "1", "root_mission_run": "mission-run/g",
+            "workspace": "w", "requester": "person/owner", "mode": "run", "status": "running", "phase": "work",
+            "created_at_unix_ms": 1, "updated_at_unix_ms": 2, "programs": [timed_view()],
+        });
+        let page = json!({"runs": [run], "has_more": false, "frontier": 1});
+        let decoded = serde_json::from_value::<crate::model::MissionRunTreePage>(page).unwrap();
+        assert_eq!(decoded.runs[0].programs, [timed_view()]);
     }
 }
