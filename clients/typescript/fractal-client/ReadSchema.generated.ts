@@ -1668,6 +1668,22 @@ export const ClientConnections = /*#__PURE__*/ (() => Schema.Struct({
 export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
+export const ClientControlGrant = /*#__PURE__*/ (() => Schema.Struct({
+  "actor_agent": Schema.String,
+  "device": Schema.String,
+  "expires_at": Timestamp,
+  "grant_id": Schema.String,
+  "item_id": optionalKey(Schema.String),
+  "max_commands": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "run_id": Schema.String,
+  "screens": Schema.Array(Schema.String),
+  "session": Schema.String,
+  "state": Schema.String,
+  "verbs": Schema.Array(Schema.String)
+}).annotate({ identifier: "ClientControlGrant" }))()
+export type ClientControlGrant = typeof ClientControlGrant.Type
+export type ClientControlGrantEncoded = typeof ClientControlGrant.Encoded
+
 /** One conversation header field: its latest value, where it came from and when. */
 export const ConversationHeaderField = /*#__PURE__*/ (() => Schema.Struct({
   "as_of": Timestamp,
@@ -1896,9 +1912,9 @@ export type PhoneNavigateArgs = typeof PhoneNavigateArgs.Type
 export type PhoneNavigateArgsEncoded = typeof PhoneNavigateArgs.Encoded
 
 export const DeviceCommand = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "args": PhoneInspectArgs, "command_kind": Schema.Literal("phone.inspect"), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128))), "expires_at": Timestamp, "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "result": optionalKey(Schema.Unknown), "revision": Revision, "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp }),
-  Schema.Struct({ "args": PhoneNavigateArgs, "command_kind": Schema.Literal("phone.navigate"), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128))), "expires_at": Timestamp, "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "result": optionalKey(Schema.Unknown), "revision": Revision, "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp }),
-  Schema.Struct({ "args": PhoneMessageReadArgs, "command_kind": Schema.Literal("phone.message.read"), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128))), "expires_at": Timestamp, "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "result": optionalKey(Schema.Unknown), "revision": Revision, "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp })
+  Schema.Struct({ "args": PhoneInspectArgs, "command_kind": Schema.Literal("phone.inspect"), "control_grant": optionalKey(ClientControlGrant), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128))), "expires_at": Timestamp, "grant_id": optionalKey(Schema.String), "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "receipt_claim_id": optionalKey(Schema.String), "result": optionalKey(Schema.Unknown), "revision": Revision, "run_id": optionalKey(Schema.String), "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp }),
+  Schema.Struct({ "args": PhoneNavigateArgs, "command_kind": Schema.Literal("phone.navigate"), "control_grant": optionalKey(ClientControlGrant), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128))), "expires_at": Timestamp, "grant_id": optionalKey(Schema.String), "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "receipt_claim_id": optionalKey(Schema.String), "result": optionalKey(Schema.Unknown), "revision": Revision, "run_id": optionalKey(Schema.String), "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp }),
+  Schema.Struct({ "args": PhoneMessageReadArgs, "command_kind": Schema.Literal("phone.message.read"), "control_grant": optionalKey(ClientControlGrant), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128))), "expires_at": Timestamp, "grant_id": optionalKey(Schema.String), "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "receipt_claim_id": optionalKey(Schema.String), "result": optionalKey(Schema.Unknown), "revision": Revision, "run_id": optionalKey(Schema.String), "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp })
 ], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("command_kind")).annotate({ identifier: "DeviceCommand" }))()
 export type DeviceCommand = typeof DeviceCommand.Type
 export type DeviceCommandEncoded = typeof DeviceCommand.Encoded

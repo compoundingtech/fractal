@@ -19,15 +19,17 @@ public struct ClientTestRevocation: Codable, Sendable {
 }
 public struct ClientCommandReceipt: Codable, Sendable {
     public var commandId: String; public var terminalState: DeviceCommandOutcome
-    public var issuer: String; public var device: String; public var session: String
-    public var grantId: String; public var runId: String; public var commandKind: String
+    public var issuer: String; public var device: String; public var session: String?
+    public var grantId: String?; public var runId: String?; public var commandKind: String
+    public var screen: String?; public var reason: ClientControlRefusal?
     public var verifiedResultSignature: DeviceSignature?; public var signedResult: ClientResultBinding?
-    private enum CodingKeys: String, CodingKey { case commandId, terminalState, issuer, device, session, grantId, runId, commandKind, verifiedResultSignature, signedResult }
+    private enum CodingKeys: String, CodingKey { case commandId, terminalState, issuer, device, session, grantId, runId, commandKind, screen, reason, verifiedResultSignature, signedResult }
     public func encode(to encoder: Encoder) throws {
         var box = encoder.container(keyedBy: CodingKeys.self)
         try box.encode(commandId, forKey: .commandId); try box.encode(terminalState, forKey: .terminalState)
-        try box.encode(issuer, forKey: .issuer); try box.encode(device, forKey: .device); try box.encode(session, forKey: .session)
-        try box.encode(grantId, forKey: .grantId); try box.encode(runId, forKey: .runId); try box.encode(commandKind, forKey: .commandKind)
+        try box.encode(issuer, forKey: .issuer); try box.encode(device, forKey: .device); try box.encodeIfPresent(session, forKey: .session)
+        try box.encodeIfPresent(grantId, forKey: .grantId); try box.encodeIfPresent(runId, forKey: .runId); try box.encode(commandKind, forKey: .commandKind)
+        try box.encodeIfPresent(screen, forKey: .screen); try box.encodeIfPresent(reason, forKey: .reason)
         if let verifiedResultSignature { try box.encode(verifiedResultSignature, forKey: .verifiedResultSignature) }
         else { try box.encodeNil(forKey: .verifiedResultSignature) }
         if let signedResult { try box.encode(signedResult, forKey: .signedResult) }
@@ -78,6 +80,7 @@ public struct ClientResultBinding: Codable, Sendable, Equatable {
 public struct ClientControlGrant: Codable, Sendable, Equatable {
     public var grant_id: String; public var run_id: String; public var device: String; public var session: String; public var actor_agent: String
     public var verbs: [String]; public var screens: [String]; public var max_commands: UInt64; public var expires_at: String; public var state: String
+    public var item_id: String?
 }
 private func clientResultQuote(_ text: String) -> String {
     var result = "\""

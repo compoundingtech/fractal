@@ -62,6 +62,7 @@ pub struct ClientControlGrant {
     pub actor_agent: String,
     pub verbs: Vec<String>,
     pub screens: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub item_id: Option<String>,
     pub max_commands: u64,
     pub expires_at: String,
     pub state: String,

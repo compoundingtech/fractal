@@ -436,6 +436,7 @@ public actor FractalClient {
     /// Issue one expiring foreground command, without durable receipt or replay.
     public func deviceCommand(_ command: DeviceCommandRequest) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-commands", command) }
     public func deviceResult(_ result: DeviceResult) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-results", result) }
+    public func clientTestRevoke(device: String) async throws -> JSONValue { try await post("v1/client/test-clients/revoke", ["device": device]) }
 
     public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: fractalClientAPIVersion, deviceName: deviceName, personID: personID)) }
     public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }
