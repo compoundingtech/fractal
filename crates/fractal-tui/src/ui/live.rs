@@ -4260,6 +4260,7 @@ mod tests {
         let socket = root.path().join("read.sock");
         let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "read-position-test").unwrap());
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
