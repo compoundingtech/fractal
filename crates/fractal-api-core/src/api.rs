@@ -1129,9 +1129,8 @@ async fn response_envelope_unbounded(
         && request.uri().path() == "/v1/client/capabilities"
         && !request.headers().contains_key(axum::http::header::AUTHORIZATION)
     {
-        // The second capability goes only to a client that says it understands it
-        // (`?accepts=fabric-gateway-grant`): an older client validating this answer as exactly
-        // one `device-key-proofs` entry keeps getting exactly that.
+        // Optional capabilities go only to clients that advertise understanding them;
+        // older clients still receive their exact one-entry discovery response.
         let mut capabilities = vec![json!({"id":"device-key-proofs", "version":1, "state":"granted"})];
         if request
             .uri()
@@ -1139,6 +1138,11 @@ async fn response_envelope_unbounded(
             .is_some_and(|query| query.split('&').any(|pair| pair == "accepts=fabric-gateway-grant"))
         {
             capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
+        }
+        if request.uri().query().is_some_and(|query| {
+            query.split('&').any(|pair| pair == "accepts=pairing-key-binding")
+        }) {
+            capabilities.push(json!({"id":"pairing-key-binding", "version":1, "state":"granted"}));
         }
         return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
             .into_response();
@@ -2023,6 +2027,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "forbidden"
         | "pairing-origin-required"
         | "pairing-restart-required"
+        | "pairing-key-mismatch"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"

@@ -6,7 +6,8 @@ import type { PairingStore, PairingView } from './browserPairingState.ts'
 
 /**
  * Pairing for this browser, above the composer in the reading lane. It asks only where sending is not
- * already granted or Fractal refused a send, shows the code to approve in Fractal while it waits, and
+ * already granted or Fractal refused a send, shows the code to approve in Fractal (with the browser identity
+ * fingerprint when the host provides one) while it waits, and
  * offers to forget a paired browser. Hosts without browser pairing render nothing, leaving the composer as it was.
  */
 export function BrowserPairing({ store, messageSend }: { readonly store: PairingStore; readonly messageSend: 'granted' | 'ungranted' }) {
@@ -24,6 +25,11 @@ export function BrowserPairing({ store, messageSend }: { readonly store: Pairing
       <p role="status" {...stylex.props(styles.text)}>
         <span {...stylex.props(styles.title, content.danger === true && styles.danger)}>{content.title}</span>
         {content.code === undefined ? null : <span data-testid="pairing-code" {...stylex.props(styles.code)}>{content.code}</span>}
+        {content.fingerprint === undefined ? null
+          : <span data-testid="pairing-fingerprint" {...stylex.props(styles.fingerprint)}>
+            <span {...stylex.props(styles.fingerprintLabel)}>Browser identity fingerprint</span>
+            <span data-testid="pairing-fingerprint-value" {...stylex.props(styles.fingerprintValue)}>{content.fingerprint}</span>
+          </span>}
         {content.detail === undefined ? null : <span {...stylex.props(styles.detail)}>{content.detail}</span>}
       </p>
       {content.action === undefined ? null
@@ -36,6 +42,8 @@ interface Notice {
   readonly title: string
   readonly danger?: boolean
   readonly code?: string
+  /** Identifies this browser's pairing request next to the code; it is not a signing key. */
+  readonly fingerprint?: string
   readonly detail?: string
   readonly action?: { readonly label: string; readonly run: () => void; readonly primary?: boolean; readonly busy?: boolean }
 }
@@ -56,9 +64,10 @@ const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: 
     case 'Requesting':
       return { title: 'Requesting a pairing code…', action: { ...request, label: 'Requesting code…', busy: true } }
     case 'Pending':
-      return view.displayCode === undefined
-        ? { title: 'Approve in Fractal', detail: 'Waiting for approval. This page reloads once the browser is approved.' }
-        : { title: 'Approve in Fractal', code: view.displayCode, detail: 'Approve only if Fractal shows the code in the browser you are using. Browser labels and login names are not proof of who requested access.' }
+      if (view.displayCode === undefined) return { title: 'Approve in Fractal', detail: 'Waiting for approval. This page reloads once the browser is approved.' }
+      return view.deviceKeyFingerprint === undefined
+        ? { title: 'Approve in Fractal', code: view.displayCode, detail: 'Approve only if Fractal shows the code in the browser you are using. Browser labels and login names are not proof of who requested access.' }
+        : { title: 'Approve in Fractal', code: view.displayCode, fingerprint: view.deviceKeyFingerprint, detail: 'Approve only if Fractal shows this code and browser identity fingerprint for the browser you are using. Browser labels and login names are not proof of who requested access.' }
     case 'Ended':
       return view.outcome === 'denied'
         ? { title: 'Fractal declined this browser.', danger: true, detail: 'Request a new code if this was a mistake.', action: retry }
@@ -84,6 +93,9 @@ const styles = stylex.create({
   title: { color: ink.fg, fontWeight: t.weightMedium },
   danger: { color: tone.dangerFg },
   code: { paddingInline: spaceVars.xs, borderRadius: r.keyboard, backgroundColor: surface.controlFill, borderWidth: geometryVars.hairline, borderStyle: 'solid', borderColor: border.borderStrong, color: ink.fg, fontFamily: t.fontMono, fontSize: t.codeSize, fontVariantNumeric: 'tabular-nums', letterSpacing: t.trackingWide, userSelect: 'all' },
+  fingerprint: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: spaceVars.sm, flexBasis: '100%', minWidth: 0 },
+  fingerprintLabel: { color: ink.fgSoft },
+  fingerprintValue: { minWidth: 0, color: ink.fg, fontFamily: t.fontMono, fontSize: t.codeSize, overflowWrap: 'anywhere', userSelect: 'all' },
   detail: { flexBasis: '100%', color: ink.fgSoft, overflowWrap: 'anywhere' },
   button: { flexShrink: 0, height: geometryVars.controlSm, paddingInline: spaceVars.md, borderRadius: r.sm, borderWidth: geometryVars.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.denseSize, whiteSpace: 'nowrap', cursor: { default: 'pointer', ':disabled': 'default' }, opacity: { default: 1, ':disabled': 0.6 }, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': focusRing },
   primary: { borderColor: accent.primary, backgroundColor: accent.primary, color: accent.onPrimary, ':hover': { backgroundColor: accent.primaryHover } },

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
 use hmac::{Hmac, Mac as _};
+use base64::Engine as _;
 use sha2::{Digest as _, Sha256};
 
 pub const MARKER: &str = "hmac-sha256-v1";
@@ -22,6 +23,36 @@ pub fn restart() -> super::ApiError {
         message: "start pairing again".into(),
         details: Box::default(),
     }
+}
+
+/// Fingerprint the exact wire identity; no key decoding or normalization is applied.
+pub fn device_key_fingerprint(public_key: &str) -> String {
+    format!("sha256:{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(public_key.as_bytes())))
+}
+
+pub fn validate_device_key_fingerprint(fingerprint: Option<&str>) -> Result<(), super::ApiError> {
+    if let Some(fingerprint) = fingerprint {
+        fractal_client::device::validate_fingerprint(fingerprint)
+            .map_err(|_| super::validation("device_key_fingerprint must be a canonical sha256: fingerprint"))?;
+    }
+    Ok(())
+}
+
+/// Missing bindings remain readable during the additive rollout. Enforcement is a
+/// separate cutover after all pairing clients can prepare their key before approval.
+pub fn require_approved_key(fields: &serde_json::Value, public_key: &str) -> Result<(), super::ApiError> {
+    if let Some(approved) = fields.get("device_key_fingerprint") {
+        let actual = device_key_fingerprint(public_key);
+        if approved.as_str() != Some(actual.as_str()) {
+            return Err(super::ApiError {
+                status: super::StatusCode::FORBIDDEN,
+                code: "pairing-key-mismatch".into(),
+                message: "the device key does not match the approved fingerprint".into(),
+                details: Box::default(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Legacy verifiers are accepted only within the original bounded challenge window.

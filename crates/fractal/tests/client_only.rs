@@ -270,7 +270,7 @@ fn carrier_with_loss(
 }
 
 async fn pair(root: &Path, local: &Client, url: &str) {
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
@@ -411,7 +411,7 @@ async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_witho
         state.store.claim_verdict(&claim.id).unwrap(),
         smallclaims::principal::Verdict::Verified
     );
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,

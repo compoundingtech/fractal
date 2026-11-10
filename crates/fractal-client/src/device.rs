@@ -96,6 +96,22 @@ impl SigningKey {
         Self::from_pkcs8(algorithm, &bytes)
     }
 
+    /// Retain a key before requesting approval. Existing private keys are reused, never replaced.
+    pub fn prepare(algorithm: KeyAlgorithm, path: &Path) -> Result<Self> {
+        if open_private(path)?.is_some() {
+            return Self::import(algorithm, path);
+        }
+        let key = Self::generate(algorithm)?;
+        let parent = path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+        temporary.write_all(&key.decoded()?)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary.persist_noclobber(path).map_err(|error| error.error)?;
+        Ok(key)
+    }
+
     fn decoded(&self) -> Result<Vec<u8>> {
         URL_SAFE_NO_PAD
             .decode(&self.pkcs8)
@@ -752,6 +768,50 @@ pub fn validate_fingerprint(fingerprint: &str) -> Result<()> {
     Ok(())
 }
 
+/// SHA-256 of the exact device public-key UTF-8 string, not its decoded key bytes.
+pub fn device_key_fingerprint(public_key: &str) -> String {
+    format!("sha256:{}", URL_SAFE_NO_PAD.encode(Sha256::digest(public_key.as_bytes())))
+}
+
+fn supports_pairing_key_binding(capabilities: &serde_json::Value) -> bool {
+    matches!(capabilities["api_version"].as_str(), Some("st3.client.v0" | "fractal.client.v0"))
+        && capabilities["capabilities"].as_array().is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability["id"] == "pairing-key-binding"
+                    && capability["version"] == 1
+                    && capability["state"] == "granted"
+            })
+        })
+}
+
+/// Refuse bound pairing on members that could silently ignore the requested key binding.
+pub async fn require_pairing_key_binding(client: &Client) -> Result<()> {
+    let capabilities: serde_json::Value = client.get("/v1/client/capabilities?accepts=pairing-key-binding").await
+        .context("Read pairing-key-binding capability; the pairing code was not submitted")?;
+    ensure!(
+        supports_pairing_key_binding(&capabilities),
+        "Member must advertise pairing-key-binding v1; upgrade it before retrying. The pairing code was not submitted"
+    );
+    Ok(())
+}
+
+/// Check a retained key and member capability before the CLI reads or submits the code.
+pub async fn check_bound_completion(
+    endpoint: &str,
+    key: &SigningKey,
+    fingerprint: &str,
+    allow_public_http: bool,
+) -> Result<()> {
+    ensure!(
+        device_key_fingerprint(&key.public_key()?) == fingerprint,
+        "The retained key does not match --device-key-fingerprint"
+    );
+    let endpoint = validate_endpoint_with_http_policy(endpoint, allow_public_http)?;
+    let mut client = Client::fabric_pairing(&endpoint);
+    client.http = transport::client(&endpoint, allow_public_http)?;
+    require_pairing_key_binding(&client).await
+}
+
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 // Sunset: 60 days after the first release shipping this bridge. Pairing still sends st3.
 fn supports_device_key_proofs(capabilities: &serde_json::Value) -> bool {
@@ -982,6 +1042,41 @@ pub fn read_pairing_code() -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn device_fingerprint_hashes_exact_public_key_text() {
+        assert_eq!(
+            device_key_fingerprint("abc"),
+            "sha256:ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
+        );
+        assert_ne!(device_key_fingerprint("abc"), device_key_fingerprint("abc\n"));
+    }
+
+    #[test]
+    fn pairing_binding_requires_granted_version_one() {
+        let mut capabilities = serde_json::json!({
+            "api_version": "fractal.client.v0",
+            "capabilities": [{"id": "pairing-key-binding", "version": 1, "state": "granted"}]
+        });
+        assert!(supports_pairing_key_binding(&capabilities));
+        capabilities["capabilities"][0]["version"] = 2.into();
+        assert!(!supports_pairing_key_binding(&capabilities));
+        capabilities["capabilities"][0]["version"] = 1.into();
+        capabilities["capabilities"][0]["state"] = "denied".into();
+        assert!(!supports_pairing_key_binding(&capabilities));
+    }
+
+    #[test]
+    fn prepared_key_is_private_and_reused() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("device.pk8");
+        let first = SigningKey::prepare(KeyAlgorithm::P256, &path)?;
+        let second = SigningKey::prepare(KeyAlgorithm::P256, &path)?;
+        assert_eq!(first.public_key()?, second.public_key()?);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        assert!(SigningKey::prepare(KeyAlgorithm::Ed25519, &path).is_err());
+        Ok(())
+    }
+
     #[test]
     fn pairing_proof_advertisement_accepts_both_versions_without_weakening_proof_checks() {
         for version in ["st3.client.v0", "fractal.client.v0", "fractal.client.v1"] {

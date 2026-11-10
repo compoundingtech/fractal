@@ -143,7 +143,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     };
     for algorithm in ["ed25519", "p256"] {
         for import in [false, true] {
-            let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+            let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
             device_name: "CLI device".into(),
             person_id: "person/avery".into(),
             full_control: Some(true),
@@ -292,7 +292,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             );
         }
     }
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
@@ -323,7 +323,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     assert!(!loaded.devices[0].allow_public_http);
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
     person_id: "person/avery".into(), full_control: Some(true), scopes: None, fabric_gateway: None, }).await.unwrap().value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
     let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,

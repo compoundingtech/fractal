@@ -275,6 +275,10 @@ pub(super) fn pairing_next_steps(person: &str) -> String {
                 "Complete on the device",
                 "fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256".to_owned(),
             ),
+            (
+                "For key-bound approval",
+                "fractal devices complete MEMBER_URL PAIRING_ID --key-file PREPARED_KEY --algorithm ALGORITHM --device-key-fingerprint DEVICE_SHA256 --fingerprint PERSON_ROOT_SHA256".to_owned(),
+            ),
             ("Show paired devices", format!("fractal devices --as {person}")),
             (
                 "Pair again",

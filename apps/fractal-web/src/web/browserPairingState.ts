@@ -10,7 +10,8 @@ export type PairingView =
   /** `sendRefused`: Fractal refused a send for authorization, so the browser is asked to pair whatever its initial grants said. */
   | { readonly _tag: 'Unpaired'; readonly error?: string; readonly sendRefused?: true }
   | { readonly _tag: 'Requesting' }
-  | { readonly _tag: 'Pending'; readonly displayCode?: string }
+  /** `deviceKeyFingerprint` identifies this browser's request; hosts that predate it omit it, leaving the display code alone. */
+  | { readonly _tag: 'Pending'; readonly displayCode?: string; readonly deviceKeyFingerprint?: string }
   | { readonly _tag: 'Ended'; readonly outcome: 'denied' | 'expired' }
   | { readonly _tag: 'Paired'; readonly error?: string }
   | { readonly _tag: 'Forgetting' }
@@ -36,6 +37,12 @@ const failure = (action: string, error: unknown) => error instanceof PairingHttp
 
 const settled = (status: Exclude<BrowserPairingStatus, 'pending'>): PairingView =>
   status === 'paired' ? { _tag: 'Paired' } : status === 'unpaired' ? { _tag: 'Unpaired' } : { _tag: 'Ended', outcome: status }
+
+const pending = (displayCode: string | undefined, deviceKeyFingerprint: string | undefined): PairingView => ({
+  _tag: 'Pending',
+  ...(displayCode === undefined ? {} : { displayCode }),
+  ...(deviceKeyFingerprint === undefined ? {} : { deviceKeyFingerprint }),
+})
 
 export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollMs = pairingPollMs }: {
   readonly port: BrowserPairingPort
@@ -77,7 +84,7 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
     }
     if (at !== generation || view._tag !== 'Pending') return
     if (reply === undefined) set({ _tag: 'Hidden' })
-    else if (reply.status === 'pending') set({ _tag: 'Pending', displayCode: reply.displayCode ?? view.displayCode })
+    else if (reply.status === 'pending') set(pending(reply.displayCode ?? view.displayCode, reply.deviceKeyFingerprint ?? view.deviceKeyFingerprint))
     else if (reply.status === 'paired') changed()
     // A request that vanished without an answer can only be asked again, like an expired one.
     else set(reply.status === 'unpaired' ? { _tag: 'Ended', outcome: 'expired' } : settled(reply.status))
@@ -96,7 +103,7 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
     if (at !== generation) return
     if (reply?.credentialChanged === true) { changed(); return }
     set(reply === undefined ? { _tag: 'Hidden' }
-      : reply.status === 'pending' ? { _tag: 'Pending', ...(reply.displayCode === undefined ? {} : { displayCode: reply.displayCode }) }
+      : reply.status === 'pending' ? pending(reply.displayCode, reply.deviceKeyFingerprint)
       : reply.status === 'unpaired' && refused ? { _tag: 'Unpaired', sendRefused: true }
       : settled(reply.status))
   }
@@ -124,7 +131,7 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
       set({ _tag: 'Requesting' })
       try {
         const started = await port.start(deviceLabel())
-        if (at === generation) set({ _tag: 'Pending', displayCode: started.displayCode })
+        if (at === generation) set(pending(started.displayCode, started.deviceKeyFingerprint))
       } catch (error) {
         if (at === generation) set({ _tag: 'Unpaired', error: failure('request a pairing code', error) })
       }

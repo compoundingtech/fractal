@@ -317,8 +317,13 @@ export interface AttachmentPort {
 }
 
 export type BrowserPairingStatus = 'unpaired' | 'paired' | 'pending' | 'denied' | 'expired'
-/** `undefined` when this host does not offer browser pairing (HTTP 404). */
-export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus; readonly displayCode?: string | undefined; readonly credentialChanged?: boolean | undefined } | undefined
+/**
+ * `undefined` when this host does not offer browser pairing (HTTP 404). `deviceKeyFingerprint` identifies
+ * this browser's pairing request; hosts that predate it omit it.
+ */
+export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus; readonly displayCode?: string | undefined; readonly deviceKeyFingerprint?: string | undefined; readonly credentialChanged?: boolean | undefined } | undefined
+/** A new pairing request: the code to approve in Fractal, and the browser identity fingerprint when the host provides it. */
+export type BrowserPairingStarted = { readonly requestId: string; readonly displayCode: string; readonly deviceKeyFingerprint?: string | undefined }
 
 /**
  * Pairs this browser with the serving Fractal host (`/_fractal/pair/*`). The credential lives in a
@@ -326,7 +331,7 @@ export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus;
  */
 export interface BrowserPairingPort {
   readonly status: () => Promise<BrowserPairingStatusReply>
-  readonly start: (deviceLabel: string) => Promise<{ readonly requestId: string; readonly displayCode: string }>
+  readonly start: (deviceLabel: string) => Promise<BrowserPairingStarted>
   readonly forget: () => Promise<void>
 }
 

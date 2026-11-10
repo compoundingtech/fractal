@@ -50,13 +50,17 @@ const readBody = async (req: IncomingMessage): Promise<unknown> => {
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
 }
-interface PendingPair { requestId: string; requestKey: string; displayCode: string }
+/** Browser identity fingerprint from the daemon: `sha256:` plus unpadded base64url of a SHA-256 digest. Older daemons omit it. */
+const fingerprintPattern = /^sha256:[A-Za-z0-9_-]{43}$/
+const fingerprint = (value: unknown): { deviceKeyFingerprint?: string } =>
+  typeof value === 'string' && fingerprintPattern.test(value) ? { deviceKeyFingerprint: value } : {}
+interface PendingPair { requestId: string; requestKey: string; displayCode: string; deviceKeyFingerprint?: string }
 const pendingPair = (req: IncomingMessage): PendingPair | undefined => {
   try {
     const value: unknown = JSON.parse(Buffer.from(cookieValue(req.headers, pairCookie) ?? '', 'base64url').toString('utf8'))
     if (record(value) && typeof value.requestId === 'string' && value.requestId.length <= 200 &&
       typeof value.requestKey === 'string' && /^[a-f0-9]{64}$/.test(value.requestKey) && typeof value.displayCode === 'string')
-      return { requestId: value.requestId, requestKey: value.requestKey, displayCode: value.displayCode }
+      return { requestId: value.requestId, requestKey: value.requestKey, displayCode: value.displayCode, ...fingerprint(value.deviceKeyFingerprint) }
   } catch { /* Missing or malformed cookies are unpaired, never authority. */ }
   return undefined
 }
@@ -94,12 +98,14 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
       })
       const response = result.body
       if (result.status !== 200 && result.status !== 201) { json(res, result.status === 429 ? 429 : 502, { error: 'Could not request browser pairing' }); return }
-      if (!record(response) || typeof response.requestId !== 'string' || typeof response.displayCode !== 'string' || response.expiresAt === undefined) {
+      if (!record(response) || typeof response.requestId !== 'string' || typeof response.displayCode !== 'string' || response.expiresAt === undefined ||
+        (response.deviceKeyFingerprint !== undefined && (typeof response.deviceKeyFingerprint !== 'string' || !fingerprintPattern.test(response.deviceKeyFingerprint)))) {
         json(res, 502, { error: 'Invalid pairing response' }); return
       }
-      const pending = { requestId: response.requestId, requestKey, displayCode: response.displayCode }
+      const identity = fingerprint(response.deviceKeyFingerprint)
+      const pending = { requestId: response.requestId, requestKey, displayCode: response.displayCode, ...identity }
       res.setHeader('set-cookie', secureCookie(pairCookie, Buffer.from(JSON.stringify(pending)).toString('base64url'), 300))
-      json(res, 200, { requestId: response.requestId, displayCode: response.displayCode, expiresAt: response.expiresAt }); return
+      json(res, 200, { requestId: response.requestId, displayCode: response.displayCode, ...identity, expiresAt: response.expiresAt }); return
     }
     const bearer = browserBearer(req.headers)
     if (bearer !== undefined) {
@@ -120,7 +126,7 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
       res.setHeader('set-cookie', [secureCookie(deviceCookie, response.bearer, deviceLifetime), secureCookie(pairCookie, '', 0)])
       json(res, 200, { status: 'paired', credentialChanged: true }); return
     }
-    if (response.status === 'pending') { json(res, 200, { status: 'pending', displayCode: pending.displayCode }); return }
+    if (response.status === 'pending') { json(res, 200, { status: 'pending', displayCode: pending.displayCode, ...fingerprint(pending.deviceKeyFingerprint) }); return }
     if (response.status === 'denied' || response.status === 'expired') {
       res.setHeader('set-cookie', secureCookie(pairCookie, '', 0))
       json(res, 200, { status: response.status }); return

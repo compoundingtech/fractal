@@ -7272,6 +7272,42 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
 }
 
 #[test]
+fn pairing_key_preparation_and_binding_flags_are_additive() {
+    assert!(Cli::try_parse_from([
+        "fractal", "devices", "prepare", "--key-file", "/private/device.pk8",
+    ]).is_ok());
+    assert!(Cli::try_parse_from(["fractal", "devices", "prepare"]).is_err());
+    for assistant in [false, true] {
+        let mut pair = vec![
+            "fractal", "devices", "pair", "example-device",
+            "--device-key-fingerprint", "sha256:prepared-key",
+        ];
+        if assistant {
+            pair.push("--assistant");
+        }
+        let cli = Cli::try_parse_from(pair).unwrap();
+        assert!(matches!(cli.command, Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Pair { device_key_fingerprint: Some(fingerprint), .. }), ..
+        }) if fingerprint == "sha256:prepared-key"));
+        let mut complete = vec![
+            "fractal", "devices", "complete", "https://member.example", "pairing/example",
+            "--device-key-fingerprint", "sha256:prepared-key",
+        ];
+        if assistant {
+            complete.push("--assistant");
+        }
+        assert!(Cli::try_parse_from(complete.clone()).is_err());
+        complete.extend(["--key-file", "/private/device.pk8"]);
+        assert!(Cli::try_parse_from(complete).is_ok());
+    }
+    assert!(Cli::try_parse_from([
+        "fractal", "devices", "complete", "https://member.example", "pairing/example",
+        "--key-file", "/private/device.pk8", "--device-key-fingerprint", "sha256:prepared-key",
+        "--fingerprint", "sha256:person-root",
+    ]).is_ok(), "device and person-root fingerprints are distinct options");
+}
+
+#[test]
 fn legacy_publish_is_not_a_public_alias() {
     assert!(
         Cli::try_parse_from(["st3", "publish", "mission.kdl", "--as", "agent/operator"])

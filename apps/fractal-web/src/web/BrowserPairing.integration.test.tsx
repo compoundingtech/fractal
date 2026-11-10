@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ClientError, type FractalClient } from '@fractal/client'
-import type { BrowserPairingPort, BrowserPairingStatusReply } from '../data/source.ts'
+import type { BrowserPairingPort, BrowserPairingStarted, BrowserPairingStatusReply } from '../data/source.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -20,7 +20,7 @@ const fakePort = (initial: BrowserPairingStatusReply) => {
   const replies: BrowserPairingStatusReply[] = []
   const port = {
     status: vi.fn(async (): Promise<BrowserPairingStatusReply> => replies.length > 0 ? replies.shift() : initial),
-    start: vi.fn(async (_label: string) => ({ requestId: 'pair-request/1', displayCode: 'K7Q-4MX' })),
+    start: vi.fn(async (_label: string): Promise<BrowserPairingStarted> => ({ requestId: 'pair-request/1', displayCode: 'K7Q-4MX' })),
     forget: vi.fn(async () => {}),
   } satisfies BrowserPairingPort
   return { port, next: (reply: BrowserPairingStatusReply) => { replies.push(reply) } }
@@ -126,6 +126,38 @@ describe('BrowserPairing', () => {
     expect(notice()?.getAttribute('data-pairing-state')).toBe('Reloading')
     await poll()
     expect(port.status).toHaveBeenCalledTimes(3)
+  })
+
+  it('shows the browser identity fingerprint beside the code when the host provides one, and keeps it while pending', async () => {
+    const fingerprint = `sha256:${'A'.repeat(43)}`
+    const { port, next } = fakePort({ status: 'unpaired' })
+    port.start.mockResolvedValueOnce({ requestId: 'pair-request/1', displayCode: 'K7Q-4MX', deviceKeyFingerprint: fingerprint })
+    await mount(port)
+    await press('Enable sending on this browser')
+    expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('K7Q-4MX')
+    expect(container!.querySelector('[data-testid="pairing-fingerprint"]')?.textContent).toBe(`Browser identity fingerprint${fingerprint}`)
+    expect(text()).toContain('this code and browser identity fingerprint for the browser you are using')
+    expect(text()).not.toMatch(/signing/i)
+
+    // A host reply without the fingerprint keeps the one this request already showed.
+    next({ status: 'pending', displayCode: 'K7Q-4MX' })
+    await poll()
+    expect(container!.querySelector('[data-testid="pairing-fingerprint-value"]')?.textContent).toBe(fingerprint)
+  })
+
+  it('restores a pending fingerprint from an earlier visit, and shows only the code on hosts without one', async () => {
+    const fingerprint = `sha256:${'b'.repeat(43)}`
+    const { port } = fakePort({ status: 'pending', displayCode: 'ABC-123', deviceKeyFingerprint: fingerprint })
+    const { store } = await mount(port)
+    expect(store.snapshot()).toEqual({ _tag: 'Pending', displayCode: 'ABC-123', deviceKeyFingerprint: fingerprint })
+    expect(container!.querySelector('[data-testid="pairing-fingerprint-value"]')?.textContent).toBe(fingerprint)
+    act(() => root!.unmount())
+    container!.remove()
+
+    await mount(fakePort({ status: 'pending', displayCode: 'ABC-123' }).port)
+    expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('ABC-123')
+    expect(container!.querySelector('[data-testid="pairing-fingerprint"]')).toBeNull()
+    expect(text()).toContain('Approve only if Fractal shows the code in the browser you are using.')
   })
 
   it('asks a paired browser to pair again once Fractal refuses its send, keeping the draft', async () => {
@@ -256,6 +288,15 @@ describe('browserPairingPort', () => {
     await port.forget()
     expect(calls[1]!.url.pathname).toBe('/_fractal/pair/forget')
     expect(calls[1]!.init.method).toBe('POST')
+  })
+
+  it('decodes an optional browser identity fingerprint from start and status', async () => {
+    const fingerprint = `sha256:${'c'.repeat(43)}`
+    const { port } = recorded(url => url.pathname.endsWith('/start')
+      ? Response.json({ requestId: 'pair-request/1', displayCode: 'K7Q-4MX', deviceKeyFingerprint: fingerprint, expiresAt: '2030-01-01T00:00:00Z' })
+      : Response.json({ status: 'pending', displayCode: 'K7Q-4MX', deviceKeyFingerprint: fingerprint }))
+    expect(await port.start('Safari on iOS')).toEqual({ requestId: 'pair-request/1', displayCode: 'K7Q-4MX', deviceKeyFingerprint: fingerprint })
+    expect(await port.status()).toEqual({ status: 'pending', displayCode: 'K7Q-4MX', deviceKeyFingerprint: fingerprint })
   })
 })
 

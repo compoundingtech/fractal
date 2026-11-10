@@ -16,6 +16,8 @@ pub struct AssistantPairingBegin {
     api_version: String,
     device_name: String,
     assistant_id: String,
+    #[serde(default)]
+    device_key_fingerprint: Option<String>,
     scopes: Vec<String>,
     #[serde(default = "default_expiry")]
     expires_in_seconds: u64,
@@ -104,6 +106,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     let issuer = trusted_issuer(&state, &session)?;
     validate_policy(&request.api_version, &request.scopes, request.expires_in_seconds,
                     request.disclosure_consent, &request.consent_evidence)?;
+    pairing_verifier::validate_device_key_fingerprint(request.device_key_fingerprint.as_deref())?;
     if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
         return Err(forbidden("unsupported assistant read mode"));
     }
@@ -122,7 +125,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let expires = now + u128::from(request.expires_in_seconds) * 1000;
     let scopes: BTreeSet<_> = request.scopes.into_iter().collect();
-    append(&state, subject(&id)?, BEGUN, issuer, json!({
+    let mut begun_fields = json!({
         "version":1,"grant_id":grant_id,"principal":request.assistant_id,"sender_class":"external-assistant",
         "issuer":issuer,"device_name":request.device_name,"scopes":scopes,
         "expires_at_unix_ms":expires,"challenge_expires_at_unix_ms":now + pairing_verifier::CHALLENGE_TTL_MS,
@@ -131,7 +134,11 @@ async fn begin_inner(state: AppState, session: ClientSession,
         "minimal_read_mode":request.minimal_read_mode,"recipient_allowlist":[],
         "disclosure_consent":true,"consent_evidence":request.consent_evidence,
         "transport":session.transport,"timestamp":client_timestamp(now),"outcome":"created"
-    }), None)?;
+    });
+    if let Some(fingerprint) = request.device_key_fingerprint {
+        begun_fields["device_key_fingerprint"] = json!(fingerprint);
+    }
+    append(&state, subject(&id)?, BEGUN, issuer, begun_fields, None)?;
     signal_changed(&state);
     Ok(Json(json!({"kind":"pairing-challenge","pairing_id":format!("pairing/{id}"),
         "code":code,"expires_at":client_timestamp(now + pairing_verifier::CHALLENGE_TTL_MS),"grant_kind":"assistant",
@@ -174,6 +181,7 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
         || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= now {
         return Err(forbidden("assistant pairing code is invalid, expired, or already used"));
     }
+    pairing_verifier::require_approved_key(source, &request.device_public_key)?;
     // The key identifies this assistant only; do not enroll it into any person's signing chain.
     let key = device_signing_key(&request.device_public_key)
         .ok_or_else(|| validation("assistant completion requires a valid public key"))?;
@@ -893,5 +901,44 @@ mod tests {
         let paired=paired(&state).await;
         state.owning_person=Some("person/other".into());
         assert!(authenticate(&state,&credential_digest(paired["credential"].as_str().unwrap()),"unix").is_err());
+    }
+    #[tokio::test]
+    async fn assistant_bound_approval_rejects_a_copied_key_without_granting() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let approved = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32]);
+        let copied = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([8_u8;32]);
+        let fingerprint = pairing_verifier::device_key_fingerprint(&approved);
+        let mut approval = request();
+        approval.device_key_fingerprint = Some(fingerprint.clone());
+        let challenge = begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), approval).await.unwrap().0;
+        let id = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+        let wrong = PairingComplete {
+            api_version: CLIENT_API_VERSION.into(), code: challenge["code"].as_str().unwrap().into(),
+            device_public_key: copied, key_storage: None, fabric_node_id: None,
+        };
+        assert_eq!(complete(&state, id, &wrong, "fabric-loopback").await.unwrap_err().code, "pairing-key-mismatch");
+        assert!(latest(&state, &subject(id).unwrap(), GRANTED).unwrap().is_none());
+        let right = PairingComplete { device_public_key: approved.clone(), ..wrong };
+        let (first, second) = tokio::join!(
+            complete(&state, id, &right, "fabric-loopback"),
+            complete(&state, id, &right, "fabric-loopback"),
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        let granted = latest(&state, &subject(id).unwrap(), GRANTED).unwrap().unwrap();
+        assert_eq!(granted.body["fields"]["device_key_fingerprint"], fingerprint);
+        assert_eq!(granted.body["fields"]["device_public_key"], approved);
+        assert!(complete(&state, id, &right, "fabric-loopback").await.unwrap_err().message.contains("already used"));
+        assert!(state.store.claims_for_kind_at("principal.key-granted", None, true, 10).unwrap().claims.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assistant_begin_rejects_a_malformed_device_fingerprint() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let mut approval = request();
+        approval.device_key_fingerprint = Some("sha256:not-a-fingerprint".into());
+        assert_eq!(begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), approval).await.unwrap_err().code, "validation-failed");
+        assert!(state.store.claims_for_kind_at(BEGUN, None, true, 10).unwrap().claims.is_empty());
     }
 }

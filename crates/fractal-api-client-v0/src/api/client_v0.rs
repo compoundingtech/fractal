@@ -68,6 +68,8 @@ mod push_tests;
 #[cfg(test)]
 mod pairing_order_tests;
 #[cfg(test)]
+mod pairing_key_binding_tests;
+#[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
 mod conversation_follow_tests;
@@ -5637,6 +5639,9 @@ pub struct PairingBegin {
     api_version: String,
     device_name: String,
     person_id: String,
+    /// The intended device key, confirmed by this one local approval.
+    #[serde(default)]
+    device_key_fingerprint: Option<String>,
     full_control: Option<bool>,
     /// Narrows the default device grant; every entry must be a limited pairing scope.
     scopes: Option<Vec<String>>,
@@ -5680,6 +5685,7 @@ pub async fn pairing_begin(
             "the pairing request requires a valid version, device name, and concrete initiating person",
         ));
     }
+    pairing_verifier::validate_device_key_fingerprint(request.device_key_fingerprint.as_deref())?;
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -5746,6 +5752,9 @@ fn begin_person_challenge(
     let stored_pairing_id = begun_fields["pairing_id"].as_str().expect("pairing ID is a string");
     let code_hash = pairing_verifier::digest(&verifier_key, stored_pairing_id, &code);
     begun_fields.insert("code_hash".into(), Value::String(code_hash));
+    if let Some(fingerprint) = request.device_key_fingerprint {
+        begun_fields.insert("device_key_fingerprint".into(), Value::String(fingerprint));
+    }
     if fabric_gateway {
         begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
     }
@@ -6008,6 +6017,7 @@ pub async fn pairing_complete(
             "the pairing code is invalid, expired, or already used",
         ));
     }
+    pairing_verifier::require_approved_key(&begun.body["fields"], &request.device_public_key)?;
     // A Fabric grant needs the person's yes for this pairing, given when the code was made.
     let fabric_wanted = begun
         .body
@@ -6118,6 +6128,9 @@ pub async fn pairing_complete(
             ("delegated_scopes".into(), json!(scopes)),
             ("expires_at_unix_ms".into(), json!(expires_at)),
     ]);
+    if let Some(fingerprint) = begun.body["fields"].get("device_key_fingerprint") {
+        fields.insert("device_key_fingerprint".into(), fingerprint.clone());
+    }
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }

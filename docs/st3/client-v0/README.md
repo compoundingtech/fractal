@@ -1876,6 +1876,43 @@ socket. The selected concrete scopes are sealed into that pairing; existing limi
 not silently upgraded and must be re-paired, then revoked when no longer needed. Revocation takes
 effect for every subsequent request, including a new bounded terminal WebSocket exchange.
 
+Both `PersonPairingBegin` and `AssistantPairingBegin` accept optional
+`device_key_fingerprint`. Its canonical encoding is `sha256:` followed by
+base64url without padding of SHA-256 of the exact UTF-8 bytes of the public-key
+string that completion will submit as `device_public_key`. Hash the complete
+string, without PEM parsing, whitespace normalization, or newline changes.
+The trusted-local begin seals this fingerprint into the challenge; completion
+must supply the matching public key before any person credential or assistant
+grant is issued. This device-key binding is separate from the person-root
+fingerprint, which authenticates the delegating root rather than the new device.
+Completion with a different key returns nonretryable `pairing-key-mismatch`;
+it does not grant credentials.
+
+The `pairing-key-binding` version 1 capability advertises support. Anonymous
+discovery requests opt in with `/v1/client/capabilities?accepts=pairing-key-binding`;
+without that query, the legacy one-capability discovery response is unchanged.
+Clients must discover support before sending the optional begin field to older
+servers that reject unknown fields, and must not silently retry a requested
+bound pairing without its binding. This rollout is additive: omitted fingerprints
+preserve legacy person and assistant pairing, including existing pending challenges.
+Mandatory binding is a separate release, gated on shipped key-before-approval
+support in the iOS, browser, and CLI pairing artifacts. At that cutover, unbound
+begin and completion will return typed `pairing-key-binding-required`; this
+additive release does not enforce that refusal or close legacy unbound pairing.
+
+For bound CLI pairing, run `fractal devices prepare --key-file device-key.pk8`
+on the device first and retain that private file. Confirm the displayed
+device-key fingerprint on the trusted local machine with
+`fractal devices pair --device-key-fingerprint <device-fingerprint> "Device"`.
+Then complete on the device using that same `--key-file` and
+`--device-key-fingerprint`; the separate `--fingerprint` option still checks
+the person-root identity. Preparing the key is not an approval; the one local
+begin request approves the named key.
+
+Browser pairing retains its existing one owner ask and display code. The ask
+also names the SHA-256 fingerprint of the exact opaque identity `browser:<requestId>`,
+which the browser shows for comparison. This identity is not a signing key.
+
 Person challenges use 40-bit random codes with a 300-second expiry and independent random
 128-bit pairing IDs and begin-claim subjects, not IDs derived from the code. New
 `custom.client.pairing-begun` claims carry `verifier: "hmac-sha256-v1"`:
