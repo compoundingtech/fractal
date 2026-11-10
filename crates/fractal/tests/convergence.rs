@@ -1858,6 +1858,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// Corpus v18 adds durable expiry to kind selection, shifting the shared RNG schedule.
 /// Hosted run 42793993503 observed seeds 2 and 34 converge without trimming; the other fixed seeds trim.
 const NEVER_TRIMS: &[u64] = &[2, 34];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
