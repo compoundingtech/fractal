@@ -7,11 +7,50 @@ use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::{os::fd::AsRawFd as _, sync::Arc};
 
+/// Read a live Darwin process's parent PID, microsecond birth token and effective UID together.
+/// This numeric PID observation must be revalidated before authorizing its generation.
+#[cfg(target_os = "macos")]
+pub fn macos_process_identity(pid: u32) -> Result<(u32, u64, u32)> {
+    use anyhow::Context as _;
+    let pid_arg = i32::try_from(pid)?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // proc_pidinfo initializes this fixed-size buffer; reject partial results before reading it.
+    let count = unsafe {
+        libc::proc_pidinfo(pid_arg, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    anyhow::ensure!(count == size, "Darwin process generation is unavailable");
+    // A full result initializes proc_bsdinfo without requesting another user's task details.
+    let info = unsafe { info.assume_init() };
+    anyhow::ensure!(info.pbi_pid == pid && info.pbi_status != 5, "Darwin process is terminal");
+    let birth = info.pbi_start_tvsec.checked_mul(1_000_000)
+        .and_then(|v| v.checked_add(info.pbi_start_tvusec))
+        .context("Darwin process birth overflow")?;
+    Ok((info.pbi_ppid, birth, info.pbi_uid))
+}
+
+/// Observe ownership only when full BSD process metadata is inaccessible.
+/// Short BSD info has no birth token and must never authorize a process generation.
+#[cfg(target_os = "macos")]
+pub fn macos_process_owner(pid: u32) -> Result<u32> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    // The kernel initializes this bounded buffer; accept only a complete result.
+    let count = unsafe {
+        libc::proc_pidinfo(i32::try_from(pid)?, libc::PROC_PIDT_SHORTBSDINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    anyhow::ensure!(count == size, "Darwin process ownership is unavailable");
+    // A full result initializes proc_bsdshortinfo.
+    let info = unsafe { info.assume_init() };
+    anyhow::ensure!(info.pbsi_pid == pid, "Darwin process ownership PID mismatch");
+    Ok(info.pbsi_uid)
+}
+
 /// The original connector's process generation. A socket may outlive this process.
 #[derive(Clone, Debug)]
 pub struct PeerProcessIdentity {
     pid: u32,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     start_token: u64,
     #[cfg(target_os = "linux")]
     pidfd: Arc<OwnedFd>,
@@ -45,6 +84,26 @@ impl PeerProcessIdentity {
         self.pid
     }
 
+    /// Accept-time generation token for diagnostic correlation, not fresh authority.
+    pub fn diagnostic_start_token(&self) -> Option<u64> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { Some(self.start_token) }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { None }
+    }
+
+    /// Match an inspected generation to the accept-time witness, including liveness.
+    pub fn validate_generation(&self, pid: u32, start_token: u64) -> Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            anyhow::ensure!(pid == self.pid && start_token == self.start_token,
+                "ancestry connector differs from the accepted process generation");
+            self.validate()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { let _ = (pid, start_token); anyhow::bail!("process generation witnesses unavailable") }
+    }
+
     /// Pin a process explicitly enrolled by the trusted launcher before listening.
     pub fn capture_pid(pid: u32) -> Result<Self> {
         #[cfg(target_os = "linux")]
@@ -54,7 +113,14 @@ impl PeerProcessIdentity {
             anyhow::ensure!(fd >= 0, "cannot pin enrolled worker: {}", std::io::Error::last_os_error());
             Self::capture(pid, unsafe { OwnedFd::from_raw_fd(fd as i32) })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            let (_, start_token, _) = macos_process_identity(pid)?;
+            let identity = Self { pid, start_token };
+            identity.validate()?;
+            Ok(identity)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         { let _ = pid; anyhow::bail!("worker process witnesses unavailable") }
     }
 
@@ -84,7 +150,13 @@ impl PeerProcessIdentity {
             anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector exited during validation");
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            let (_, token, _) = macos_process_identity(self.pid)?;
+            anyhow::ensure!(token == self.start_token, "socket connector exited or its PID was reused");
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
     }
 }
@@ -143,5 +215,19 @@ mod tests {
     fn peer_process_non_pidfd_descriptor_is_refused() {
         let descriptor = std::fs::File::open("/dev/null").unwrap();
         assert!(PeerProcessIdentity::capture(std::process::id(), descriptor.into()).is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn peer_process_changed_birth_token_is_refused() {
+        let mut identity = PeerProcessIdentity::capture_pid(std::process::id()).unwrap();
+        identity.validate().unwrap();
+        // Substitute a different birth for this PID without relying on actual PID reuse.
+        identity.start_token = identity.start_token.wrapping_add(1);
+        assert!(identity.validate().is_err());
     }
 }

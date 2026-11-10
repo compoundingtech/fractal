@@ -400,6 +400,7 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_601))
         .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -588,6 +589,7 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     let notify = Arc::new(Notify::new());
     let event_notify = watch::channel(0_u64).0;
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),

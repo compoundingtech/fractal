@@ -53,11 +53,16 @@ pub fn authenticate(
     let pairings = state.store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(|_| unavailable())?;
-    let paired = pairings.claims.iter().find(|claim| {
-        claim.origin == state.store.origin()
-            && claim.body.pointer("/fields/credential_hash").and_then(Value::as_str)
-                == Some(digest.as_str())
-    }).ok_or_else(denied)?;
+    let mut paired = None;
+    for claim in &pairings.claims {
+        if claim.origin == state.store.origin()
+            && claim.body.pointer("/fields/credential_hash").and_then(Value::as_str) == Some(digest.as_str())
+            && state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(|_| unavailable())? {
+            paired = Some(claim);
+            break;
+        }
+    }
+    let paired = paired.ok_or_else(denied)?;
     let field = |name: &str| paired.body.get("fields").and_then(|fields| fields.get(name))
         .and_then(Value::as_str).filter(|value| !value.is_empty());
     let person = field("person_id")

@@ -13,7 +13,8 @@ const server = await createServer({
   server: { middlewareMode: true },
 })
 after(() => server.close())
-const { Transcript, LiveActivity, transcriptInitialSourceRowCount } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+const { Transcript, LiveActivity } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+const { transcriptInitialSourceRowCount } = await server.ssrLoadModule('/src/assistant-ui/composition/transcript-window.ts')
 const { EmbraceRuntimeProvider } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 const { SendUnconfirmed } = await server.ssrLoadModule('/src/assistant-ui/composition/TranscriptFeedback.tsx')
 const { ThinkingRun } = await server.ssrLoadModule('/src/assistant-ui/composition/ThinkingEntry.tsx')
@@ -37,6 +38,13 @@ for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length
     assert.doesNotMatch(markup, /data-testid="transcript-empty"/)
     assert.match(markup, /data-testid="transcript-placeholder"/)
   }
+})
+
+test('the package keeps its transcript window exports and duration token', async () => {
+  const kit = await server.ssrLoadModule('/src/assistant-ui/index.ts')
+  assert.equal(kit.transcriptInitialSourceRowCount, transcriptInitialSourceRowCount)
+  assert.deepEqual(kit.transcriptMountedWindow, { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount })
+  assert.ok(kit.geometryVars.durationColumn)
 })
 
 test('live activity shares compact header durations and host-supplied waiting state', () => {
@@ -172,7 +180,10 @@ test('the optional host footer renders once per finished turn as its last child,
   assert.match(markup, /model-one · 100 tokens · \$0\.01<\/footer><\/section>/)
   assert.match(markup, /data-testid="live-work"/)
   assert.doesNotMatch(markup, /model-two/)
-  assert.match(markup, /data-item-id="without-facts"[^>]*><\/section>/)
+  // A turn without facts gets no footer: its section ends with no host footer inside it.
+  const withoutFacts = markup.split('data-item-id="without-facts"')[1]?.split('data-testid="transcript-turn"')[0] ?? ''
+  assert.notEqual(withoutFacts, '')
+  assert.doesNotMatch(withoutFacts, /host-turn-footer/)
   // Once the same turn finishes, its footer appears.
   turns[1] = { ...turns[1], work: { ...turns[1].work, running: false } }
   assert.match(render(renderTurnFooter), /model-two · 200 tokens · \$0\.02<\/footer><\/section>/)

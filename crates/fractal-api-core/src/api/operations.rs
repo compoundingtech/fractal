@@ -513,6 +513,7 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let dir = crate::slo_history::dir(&state.state_dir);
     let rows = blocking_store(move || {
         let mut rows = slo_rows(&store)?;
+        rows.extend(crate::readiness_slo::current(&store));
         add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
         add_tones(&mut rows);
         Ok(rows)
@@ -653,6 +654,11 @@ pub struct StatusQuery {
     /// Only the subject's current harness; see `Store::status_harness_only`.
     #[serde(default)]
     harness_only: bool,
+    /// For a seat (`agent/`) without `owner_run`: only its declaration, status and incarnation;
+    /// see `Store::status_summary_at`. Any other read, and a daemon older than this, answers with
+    /// the full reduction.
+    #[serde(default)]
+    summary: bool,
 }
 
 pub async fn resource_referrers(
@@ -699,6 +705,10 @@ pub async fn status(
                 ).with_detail("reason", "notices-unavailable")));
             }
             store.status_harness_only(subject)?
+        } else if query.summary && !query.history && query.owner_run.is_none()
+            && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
+        {
+            store.status_summary_at(subject, query.at_index)?
         } else {
             store.status_for_generic_reads(
                 subject.as_deref(), query.owner_run.as_deref(), query.at_index, query.history,

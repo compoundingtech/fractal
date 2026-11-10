@@ -9,7 +9,7 @@ fields, so they cannot disagree.
 
 | Card | Rule |
 | --- | --- |
-| `state: running` | The harness reported `ready`, `idle` or `working` inside the freshness window (90 s), even when the runtime row still says `pending`. A seat can outlive its row. A seat whose runtime row is stuck and whose last report is an idle one older than 90 s but newer than a heartbeat (11 minutes) reads `waiting`, like any other live idle seat; it is never `down`. |
+| `state: running` | The harness reported `ready`, `idle` or `working` inside the shared `HARNESS_OBSERVATION_FRESHNESS` window (five-minute refresh plus thirty seconds), even when the runtime row still says `pending`. A seat can outlive its row. A seat whose runtime row is stuck and whose last report is an idle one older than that window but newer than a heartbeat (11 minutes) reads `waiting`, like any other live idle seat; it is never `down`. |
 | `state: desired` / `starting` | A declared seat inside its launch window (two minutes from its last runtime claim, or from its declaration if it never reported). |
 | `state: down`, `down_since` | A declared seat with no running session and no harness report within a heartbeat (11 minutes; a driver at an empty prompt reports every five minutes) once the launch window has passed. `down_since` is when it last reported after its launch, or when it began waiting if it never has; the report time is the driver's own clock value, so a driver with a skewed clock moves `down_since` by the same amount. Never shown as starting, working or idle. |
 | `current_work[].holder_down_since` | Set on every step a `down` seat holds: the step's progress and activity were written by a holder that has no session. |
@@ -37,8 +37,8 @@ they learn to print the reason.
 
 ## A seat that dies mid-turn
 
-Keeping a stale `working` report means the card no longer lapses it after 90 seconds. What ends
-it is the runtime row: the reconciler on the seat's host observes its pty and driver on every pass
+Keeping a stale `working` report means the card never lapses it just because its observation ages.
+What ends it is the runtime row: the reconciler on the seat's host observes its pty and driver on every pass
 and writes `exited` or `vanished`, after which the card reads `stopped` or `failed`, not
 `running` (`a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row`). If that
 reconciler is not running, or never writes the row, the card keeps `running`/`working` and

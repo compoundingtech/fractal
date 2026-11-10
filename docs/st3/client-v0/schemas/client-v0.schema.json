@@ -23,6 +23,32 @@
     { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "AttentionBudgetDeclared": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["state", "asks"], "properties": {"state": {"const": "declared"}, "asks": {"type": "integer", "minimum": 0}}},
+        {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"const": "undeclared"}}}
+      ]
+    },
+    "AttentionBudgetRequestRef": {
+      "type": "object", "additionalProperties": false, "required": ["claim_id", "subject"],
+      "properties": {"claim_id": {"type": "string"}, "subject": {"type": "string"}}
+    },
+    "AttentionBudgetReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mission", "person", "window_start_exclusive_unix_ms", "window_end_inclusive_unix_ms", "local_claim_index", "declared", "charged", "inclusive", "not_charged", "unattributed_for_person", "fleet_complete", "request_refs", "request_refs_complete"],
+      "properties": {
+        "mission": {"type": "string"}, "person": {"type": "string"},
+        "window_start_exclusive_unix_ms": {"type": "integer", "minimum": 0},
+        "window_end_inclusive_unix_ms": {"type": "integer", "minimum": 0},
+        "local_claim_index": {"type": "integer", "minimum": 0},
+        "declared": {"$ref": "#/$defs/AttentionBudgetDeclared"},
+        "charged": {"type": "integer", "minimum": 0}, "inclusive": {"type": "integer", "minimum": 0},
+        "not_charged": {"type": "integer", "minimum": 0}, "unattributed_for_person": {"type": "integer", "minimum": 0},
+        "fleet_complete": {"const": false},
+        "request_refs": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/AttentionBudgetRequestRef"}},
+        "request_refs_complete": {"type": "boolean"}
+      }
+    },
     "AgentRelatedRuns": {
       "type": "object", "required": ["kind", "agent_id", "as_of", "work_cut", "missions_cut", "total_rows", "truncated", "rows"],
       "properties": {
@@ -524,16 +550,27 @@
     "AgentLifecycle": {"anyOf": [{"enum": ["standing", "owner", "bounded"]}, {"type": "string"}], "description": "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown."},
     "DeclaredPriority": {"anyOf": [{"enum": ["background", "normal"]}, {"type": "string"}], "description": "Declared priority, not process priority. Readers retain future values as Unknown."},
     "DeclaredLane": {"anyOf": [{"enum": ["check", "build"]}, {"type": "string"}], "description": "Unordered declared lane. Readers retain future values as Unknown."},
+    "DeclaredAttentionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["person", "asks"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "asks": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      },
+      "description": "Mission-only declared asks to a person/<id>, in authored order. Data only: no counters, reservations, person resolution or enforcement."
+    },
     "DeclaredBudgets": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "attention": {"type": "array", "items": {"$ref": "#/$defs/DeclaredAttentionBudget"}},
         "cpu_seconds": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
         "memory_max": {"type": "string"},
         "disk_max": {"type": "string"},
         "token_budget": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
       },
-      "description": "Declared CPU seconds and input-plus-output tokens per seat incarnation or mission run, and peak memory/disk footprints. Scope labels create no counters, resets, aggregation, reservations or enforcement."
+      "description": "Declared mission-run totals, including all retries: accumulated CPU seconds and cost-weighted tokens, sum(tokens * class price / base input price), for input, output, cache writes including 1-hour writes, and cached reads. The unit is a base input token at the pricing version pinned at admission and recorded on the run, never repriced; unknown pricing reports unknown, never zero, and USD is reported alongside weighted tokens. Peak memory/disk have no accumulation window. Attention is mission-only asks per person/<id>, preserved in authored order and omitted when empty. New agent authoring accepts only memory/disk; historical agent reads retain all fields. Agents have no retry/run boundary or budget window; usage belongs to routing/quota/SLO accounting. Step-run windows are a future extension. These are data-only definitions: no counters, resets, aggregation, pricing capture, reporting, reservations or enforcement are implemented by declared admission."
     },
     "DeclaredAdmission": {
       "type": "object",
@@ -594,6 +631,8 @@
       "idempotency-conflict",
       "legacy-action-receipt-untrusted",
       "issuer-required",
+      "pairing-origin-required",
+      "pairing-restart-required",
       "suspend-authored-session-selection",
       "stale-fence",
       "cursor-gap",
@@ -794,7 +833,19 @@
         "revision": {"$ref": "#/$defs/Revision"},
         "published_at": {"type": "integer", "minimum": 0},
         "text": {"type": "string"},
-        "legacy": {"type": "boolean", "description": "Contains removed loop shapes that the current parser rejects."}
+        "legacy": {"type": "boolean", "description": "Contains removed loop shapes that the current parser rejects."},
+        "provenance": {"$ref": "#/$defs/MissionDeclarationProvenance"}
+      }
+    },
+    "MissionDeclarationProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "commit", "path"],
+      "description": "Where this revision's source lives, as its mission.provenance claim recorded it at first publication. Absent when the revision was published without provenance, and on older daemons. Inert text: nothing here is resolved or fetched.",
+      "properties": {
+        "repository": {"type": "string"},
+        "commit": {"type": "string", "pattern": "^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"},
+        "path": {"type": "string", "description": "Repository-relative path of the source file."},
+        "renderer": {"type": "string", "description": "What rendered the source into KDL, for example fractal-declarations."}
       }
     },
     "SubjectDefinition": {
@@ -842,6 +893,7 @@
             { "$ref": "#/$defs/DocumentReferences" },
             { "$ref": "#/$defs/SubjectDefinition" },
             { "$ref": "#/$defs/PublicationDefinition" },
+            { "$ref": "#/$defs/AttentionBudgetReport" },
             { "$ref": "#/$defs/MissionDeclaration" },
             { "$ref": "#/$defs/AgentWorkspace" },
             { "$ref": "#/$defs/Page" },
@@ -1988,7 +2040,77 @@
         "wake_reason": { "type": ["string", "null"], "description": "The deferral's blocked reason, or the observed wake failure when no deferral reason exists." },
         "wake": { "oneOf": [{ "$ref": "#/$defs/MissionWake" }, { "type": "null" }] },
         "claim_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
-        "nudged_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When st last nudged this held step's holder for idling with nothing set to wake it." }
+        "nudged_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
+        "attempts": { "type": "array", "items": { "$ref": "#/$defs/MissionStepAttempt" }, "description": "Mission detail only, on the runs it enriches (open runs, the latest finished run and a `?run=` run): each attempt of this step, oldest first, folded from its lifecycle claims. Absent elsewhere and on older daemons, which is not proof of one attempt." },
+        "waits": { "type": "array", "items": { "$ref": "#/$defs/MissionStepWait" }, "description": "Mission detail only, like attempts: the intervals this step waited, by start." },
+        "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." },
+        "history_complete": { "type": "boolean", "description": "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." },
+        "eta": { "$ref": "#/$defs/MissionStepEta" }
+      }
+    },
+    "MissionStepAttempt": {
+      "type": "object",
+      "required": ["n", "claimant", "started_at", "ended_at", "outcome"],
+      "properties": {
+        "n": { "type": "integer", "minimum": 1, "description": "The attempt number, as `attempt` counts it." },
+        "claimant": { "oneOf": [{ "$ref": "#/$defs/ActorRef" }, { "type": "null" }], "description": "Who last claimed the attempt; null for agentless execution or an attempt never claimed." },
+        "started_at": { "type": ["integer", "null"], "minimum": 0, "description": "First execution opening, in Unix milliseconds; a reclaim keeps it." },
+        "ended_at": { "type": ["integer", "null"], "minimum": 0, "description": "When the attempt ended (failure, terminal state, or the retry that opened the next attempt), in Unix milliseconds; null while running." },
+        "outcome": { "anyOf": [{ "enum": ["done", "failed", "cancelled", "running"] }, { "type": "string" }], "description": "running also covers a submission still awaiting verification. Clients treat an unknown word as running." },
+        "reason": { "type": "string", "description": "The failure or retry reason, when one was given." }
+      }
+    },
+    "MissionStepWait": {
+      "type": "object",
+      "required": ["kind", "attempt", "start", "end"],
+      "properties": {
+        "kind": { "anyOf": [{ "enum": ["you", "paused", "retry", "dependency", "queue"] }, { "type": "string" }], "description": "you: a person ask by or for this step, until answered or cancelled. paused: a wait the holder declared, until it resumed, a new claim, or its deadline. retry: a retry backoff, until the next claim or its not-before time. dependency: pending, until ready. queue: ready, until claimed. Clients treat an unknown kind as an opaque wait." },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "start": { "type": "integer", "minimum": 0, "description": "Unix milliseconds." },
+        "end": { "type": ["integer", "null"], "minimum": 0, "description": "Unix milliseconds; null while the wait is open." },
+        "until": { "type": "integer", "minimum": 0, "description": "The deadline the wait declared, in Unix milliseconds: a pause's wait-until or a retry's not-before." },
+        "reason": { "type": "string", "description": "The ask's title, the pause's summary or reason, or the retry reason." }
+      }
+    },
+    "MissionStepTransition": {
+      "type": "object",
+      "required": ["at", "status", "attempt", "event"],
+      "properties": {
+        "at": { "type": "integer", "minimum": 0, "description": "Unix milliseconds." },
+        "status": { "anyOf": [{ "enum": [
+          "waiting-person",
+          "waiting",
+          "ready",
+          "claimed",
+          "blocked",
+          "verifying",
+          "completed",
+          "failed",
+          "cancelled"
+        ] }, { "type": "string" }], "description": "The step's state after the event, in the WorkState vocabulary of `state`. Open, because it replays durable claims: a status word an older or newer writer recorded passes through. A repeat of the previous state and attempt is not listed again." },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "event": { "anyOf": [{ "enum": [
+          "state",
+          "carried",
+          "retried",
+          "claimed",
+          "submitted",
+          "failed",
+          "released",
+          "nudged"
+        ] }, { "type": "string" }], "description": "The claim behind it. nudged is a stall marker: st nudged an idle holder, and status repeats the state it found. Clients treat an unknown event as state." },
+        "reason": { "type": "string" },
+        "idle_since": { "type": "integer", "minimum": 0, "description": "nudged only: since when the holder had been idle, in Unix milliseconds." }
+      }
+    },
+    "MissionStepEta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["low_ms", "high_ms", "samples"],
+      "description": "Mission detail only, on a remaining step of an open run that has completed-run samples: its own p25/p75 duration from the samples the run eta reads. Present per step even when another step's missing samples keep the run eta null. Absent for a step without samples, a finished step or run, and on older daemons.",
+      "properties": {
+        "low_ms": { "type": "integer", "minimum": 0, "description": "p25 duration in milliseconds." },
+        "high_ms": { "type": "integer", "minimum": 0, "description": "p75 duration in milliseconds." },
+        "samples": { "type": "integer", "minimum": 1 }
       }
     },
     "MissionWake": {
@@ -2280,7 +2402,7 @@
             "harness_state": { "type": ["string", "null"], "description": "Observed harness state; stale idle is indeterminate. Desired state and declared work status remain separate." },
             "background_jobs": { "type": ["integer", "null"], "minimum": 0, "description": "Background job count from the selected current-incarnation harness state report; zero is known empty, null is unknown." },
             "since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When this observed state began in this runtime incarnation. Same-state observations never reset it." },
-            "observation": { "enum": ["current", "stale", "missing"], "description": "Stale after 90 seconds without a new observation; missing when this runtime has no observation." },
+            "observation": { "enum": ["current", "stale", "missing"], "description": "Stale after the shared harness observation freshness window without a new observation; missing when this runtime has no observation." },
             "harness_error_state": { "type": ["string", "null"], "description": "Known actionable harness error: needs-login. Login keeps the legacy unauthenticated harness_state for older clients; older daemons omit this optional detail." },
             "end_reason": {"oneOf": [{"$ref": "#/$defs/AgentEndReason"}, {"type": "null"}], "description": "Derived terminal reason; absent when evidence is missing or stale. Never infer completion from absence."},
             "blocked_on": { "type": ["string", "null"], "description": "Current incarnation's harness blocking axis; human means a person must answer before it continues." },
@@ -3522,7 +3644,7 @@
         "ask": {"$ref": "#/$defs/Id"},
         "status": {"enum": ["completed", "cancelled"]},
         "summary": {"type": "string"},
-        "respondent": {"$ref": "#/$defs/RespondentRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it."},
+        "respondent": {"$ref": "#/$defs/RespondentRef", "description": "The actual answering principal, including assistant/chatgpt or assistant/mcp for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it."},
         "acted_for": {"$ref": "#/$defs/Id", "description": "The person whose prior instruction the agent respondent recorded."},
         "sender_class": {"type": "string", "description": "External assistant attribution when the response was submitted through an assistant grant."},
         "assistant_grant_id": {"$ref": "#/$defs/Id", "description": "The assistant grant that authorized the response."},
@@ -3802,7 +3924,7 @@
         "membership_revision": { "$ref": "#/$defs/Revision" }
       }
     },
-    "AssistantPrincipal": { "enum": ["assistant/chatgpt"] },
+    "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },
     "AssistantSenderClass": { "enum": ["external-assistant"] },
     "AssistantScope": { "enum": [
       "read.assistant.summary",
@@ -3825,7 +3947,7 @@
         "id": { "$ref": "#/$defs/Id" },
         "principal": { "$ref": "#/$defs/AssistantPrincipal" },
         "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
-        "session_actor": { "type": "string", "pattern": "^assistant/chatgpt/session/.+$" },
+        "session_actor": { "type": "string", "pattern": "^assistant/(?:chatgpt|mcp)/session/.+$" },
         "device_id": { "$ref": "#/$defs/Id" },
         "key_id": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the canonical device public-key string; never a credential digest." },
         "issuer": { "$ref": "#/$defs/PersonId", "description": "Daemon-configured owning person, sealed by the authoritative grant-issuer member at trusted-local begin." },
@@ -3975,7 +4097,7 @@
       "required": ["issuer", "identity", "assistant_id", "grant_id", "policy_revision", "key_id", "approval_id", "execution_id", "projection", "parameters", "max_response_bytes", "request_digest", "expires_at_unix_ms", "nonce"],
       "properties": {
         "issuer": { "$ref": "#/$defs/PersonId" },
-        "identity": { "const": "chatgpt" },
+        "identity": { "enum": ["chatgpt", "mcp"] },
         "assistant_id": { "$ref": "#/$defs/AssistantPrincipal" },
         "grant_id": { "$ref": "#/$defs/Id" },
         "policy_revision": { "type": "integer", "minimum": 1 },
@@ -4231,7 +4353,7 @@
         "principal": { "$ref": "#/$defs/AssistantPrincipal" },
         "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
         "device_id": { "$ref": "#/$defs/Id" },
-        "session_actor": { "type": "string", "pattern": "^assistant/chatgpt/session/.+$" },
+        "session_actor": { "type": "string", "pattern": "^assistant/(?:chatgpt|mcp)/session/.+$" },
         "credential": { "x-st-codec": "redacted", "type": "string", "minLength": 32 },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_at": { "$ref": "#/$defs/Timestamp" },
@@ -4434,7 +4556,7 @@
         "retryable": { "type": "boolean" },
         "retry_after_ms": { "x-st-codec": "duration-ms", "type": "integer", "minimum": 0 },
         "applied": { "type": "string", "enum": ["none", "unknown"] },
-        "details": { "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
+        "details": { "$comment": "HTTP 403 forbidden uses reason credential-rejected for unknown, expired or revoked paired-device credentials, not missing scopes. Older daemons may omit it; details remains open.", "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
       }
     },
     "SubscribeTraceContext": {

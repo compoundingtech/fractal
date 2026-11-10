@@ -67,23 +67,29 @@ impl Services {
     }
 }
 
+fn candidate_names(old: &str, home_manager_name: Option<&str>) -> Vec<String> {
+    let mut names = vec![old.to_owned(), old.replacen("st3", "fractal", 1)];
+    if let Some(name) = home_manager_name {
+        names.push(name.to_owned());
+    }
+    names
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn native() -> Result<Services> {
     #[cfg(target_os = "linux")]
-    let old = [service_name(), replication_service_name()];
+    let old = {
+        let default_instance = crate::instance::current().is_none();
+        // Home Manager uses smalltalk names for both default-instance services.
+        [
+            (service_name(), default_instance.then_some("smalltalk.service")),
+            (replication_service_name(), default_instance.then_some("smalltalk-replication.service")),
+        ]
+    };
     #[cfg(target_os = "macos")]
-    let old = [service_label(), replication_service_label()];
-    let resolve = |old: &str| -> Result<ServiceStatus> {
-        let new = old.replacen("st3", "fractal", 1);
-        #[cfg(target_os = "linux")]
-        let mut names = vec![old.to_owned(), new];
-        #[cfg(target_os = "macos")]
-        let names = vec![old.to_owned(), new];
-        // Home Manager writes smalltalk.service rather than the CLI's st3.service.
-        #[cfg(target_os = "linux")]
-        if crate::instance::current().is_none() && old == service_name() {
-            names.push("smalltalk.service".into());
-        }
+    let old = [(service_label(), None), (replication_service_label(), None)];
+    let resolve = |(old, home_manager_name): (&str, Option<&str>)| -> Result<ServiceStatus> {
+        let names = candidate_names(old, home_manager_name);
         select(names.iter().map(|name| {
             #[cfg(target_os = "linux")]
             {
@@ -132,6 +138,7 @@ mod tests {
             ("com.compoundingtech.st3", "com.compoundingtech.fractal"),
             ("com.compoundingtech.st3.replication", "com.compoundingtech.fractal.replication"),
             ("smalltalk.service", "fractal.service"),
+            ("smalltalk-replication.service", "fractal-replication.service"),
             ("st3-instance-try.service", "fractal-instance-try.service")] {
             for (old_exists, new_exists, expected) in [
                 (true, false, Some(old)), (false, true, Some(new)),
@@ -153,6 +160,24 @@ mod tests {
     }
 
     #[test]
+    fn home_manager_replication_is_resolved_when_installed_or_running() {
+        let names = candidate_names("st3-replication.service", Some("smalltalk-replication.service"));
+        assert_eq!(names, ["st3-replication.service", "fractal-replication.service", "smalltalk-replication.service"]);
+        for (installed, running) in [(true, false), (false, true), (true, true)] {
+            let selected = select(names.iter().map(|name| {
+                let home_manager = name == "smalltalk-replication.service";
+                status(name, home_manager && installed, home_manager && running)
+            }).collect()).unwrap();
+            assert_eq!(selected.name, "smalltalk-replication.service");
+            assert_eq!((selected.installed, selected.running), (installed, running));
+        }
+        assert_eq!(
+            candidate_names("st3-replication-instance-try.service", None),
+            ["st3-replication-instance-try.service", "fractal-replication-instance-try.service"],
+        );
+    }
+
+    #[test]
     fn legacy_coexistence_preserves_the_cli_target_and_allows_install() {
         let daemon = select(vec![
             status("st3.service", true, false),
@@ -160,9 +185,15 @@ mod tests {
             status("smalltalk.service", true, true),
         ]).unwrap();
         assert_eq!(daemon.name, "st3.service");
+        let replication = select(vec![
+            status("st3-replication.service", true, false),
+            status("fractal-replication.service", false, false),
+            status("smalltalk-replication.service", true, true),
+        ]).unwrap();
+        assert_eq!(replication.name, "st3-replication.service");
         assert!(allow_install(&Services {
             daemon,
-            replication: status("st3-replication.service", false, false),
+            replication,
         }).is_ok());
     }
 
@@ -170,7 +201,7 @@ mod tests {
     fn home_manager_only_install_is_allowed() {
         assert!(allow_install(&Services {
             daemon: status("smalltalk.service", true, true),
-            replication: status("st3-replication.service", false, false),
+            replication: status("smalltalk-replication.service", true, true),
         }).is_ok());
     }
 
@@ -179,6 +210,10 @@ mod tests {
         assert!(check_conflicts([
             &status("smalltalk.service", true, false),
             &status("fractal-replication.service", true, false),
+        ]).is_err());
+        assert!(check_conflicts([
+            &status("fractal.service", true, false),
+            &status("smalltalk-replication.service", true, false),
         ]).is_err());
         assert!(allow_install(&Services {
             daemon: status("fractal.service", true, false),

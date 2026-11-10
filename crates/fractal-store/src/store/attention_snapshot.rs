@@ -9,6 +9,89 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
+/// The visible item and its routing policy, taken from the same failure claim.
+#[derive(Clone, serde::Serialize)]
+pub(super) struct OperationalFault {
+    pub(super) item: AttentionItemView,
+    pub(super) explicit_reviewer_only: bool,
+    pub(super) suppress_generic_delivery: bool,
+}
+
+/// Phase routing is an origin-attested property of the canonical failure, not of
+/// the member which happens to project it or of an episode prefix alone.
+fn readiness_phase_delivery(
+    kind: &str,
+    actor: Option<&str>,
+    source: &str,
+    origin: &str,
+    condition: Option<&str>,
+    reviewer: Option<&str>,
+    episode: &str,
+) -> bool {
+    if kind != "operational.failure"
+        || actor != Some("daemon/runtime")
+        || source.strip_prefix("daemon/") != Some(origin)
+        || condition != Some(API_READINESS_SLO_MISSED)
+        || !reviewer.is_some_and(readiness_phase_reviewer)
+    {
+        return false;
+    }
+    let mut segments = episode.split('/');
+    if segments.next() != Some("slo-objective")
+        || segments.next() != Some("readiness-case")
+        || segments.next() != Some(origin)
+        || segments.next() != Some("fractal-api-readiness")
+    {
+        return false;
+    }
+    let (Some(member), Some(cut), None) = (segments.next(), segments.next(), segments.next()) else {
+        return false;
+    };
+    !member.is_empty()
+        && member.len() <= 64
+        && member
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        && cut.parse::<u64>().is_ok_and(|minute| {
+            minute > 0 && minute % 60_000 == 0 && minute.to_string() == cut
+        })
+}
+
+fn readiness_phase_reviewer(reviewer: &str) -> bool {
+    reviewer.strip_prefix("agent/").is_some_and(|id| {
+        !id.is_empty() && id.len() <= 128 && id.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".."
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    })
+}
+
+fn valid_opening_claim_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn linked_readiness_reviewer<'a>(
+    origin: &str,
+    episode: &str,
+    opening: &'a ClaimRecord,
+) -> Option<&'a str> {
+    let fields = &opening.body["fields"];
+    let reviewer = fields["reviewer"].as_str()?;
+    (opening.origin == origin
+        && fields["episode"].as_str() == Some(episode)
+        && opening.body["evidence"].as_array().is_some_and(Vec::is_empty)
+        && readiness_phase_delivery(
+            &opening.kind,
+            opening.actor.as_deref(),
+            &opening.subject,
+            &opening.origin,
+            fields["condition"].as_str(),
+            Some(reviewer),
+            episode,
+        ))
+    .then_some(reviewer)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
 
@@ -105,22 +188,42 @@ impl Store {
         person: Option<&str>,
         now: u128,
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
-        let eventual = self.attention_snapshot(person, u128::MAX)?;
+        // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
+        // upper bound to -1 by passing u128::MAX through that reducer.
+        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
         let connection = self.readers.get();
-        let mut starts = Vec::with_capacity(eventual.len());
-        for item in &eventual {
-            let mut starts_at = item.requested_at_unix_ms;
-            if item.kind == "person-step"
-                && let Some(ask) = person_work::request(&connection, &item.subject)?
-            {
-                starts_at = starts_at.max(ask.accepted_at_unix_ms);
-            }
-            starts.push(starts_at);
-        }
+        let subjects: BTreeSet<_> = eventual.iter()
+            .filter(|item| item.kind == "person-step")
+            .map(|item| item.subject.as_str())
+            .collect();
+        let accepted: BTreeMap<String, u128> = if subjects.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha8edfbce8177 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT claims.subject, claims.accepted_at_unix_ms
+                 FROM json_each(?1) requested JOIN claims ON claims.id=(
+                   SELECT claims.id FROM claims
+                   WHERE claims.subject=requested.value AND claims.kind='work.person-asked'
+                   ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+            ))?;
+            query.query_map([serde_json::to_string(&subjects)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?.map(|row| {
+                let (subject, at) = row?;
+                Ok((subject, at.parse()?))
+            }).collect::<Result<_>>()?
+        };
         let mut valid_until = None;
         let rows = eventual
             .into_iter()
-            .zip(starts)
+            .map(|item| {
+                let starts_at = if item.kind == "person-step" {
+                    item.requested_at_unix_ms.max(accepted.get(&item.subject).copied().unwrap_or(0))
+                } else {
+                    item.requested_at_unix_ms
+                };
+                (item, starts_at)
+            })
             .filter(|(_, starts_at)| {
                 if *starts_at > now {
                     valid_until =
@@ -341,6 +444,12 @@ impl Store {
         Ok(if holders.len() == 1 { holders.pop() } else { None })
     }
 
+    /// Is the selected reviewer still an active declaration? Runtime reachability is separate.
+    pub fn fault_reviewer_is_declared(&self, reviewer: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        fault_reviewer_is_declared(&connection, reviewer)
+    }
+
     /// The agent that owns `fault`: the agent it names, as a broken gate names the agent that
     /// published it, else the agent assigned to the failed step, else the requester of its run
     /// or of a run above it when that is an agent, else `fallback`. Only a live agent
@@ -349,16 +458,19 @@ impl Store {
         &self,
         fault: &AttentionItemView,
         fallback: Option<&str>,
+        explicit_reviewer_only: bool,
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
         let owns = |agent: &str| -> Result<bool> {
-            Ok(agent.starts_with("agent/")
-                && agent != fault.subject
-                && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
-                && person_work::declaration_live(&connection, agent)?)
+            Ok(agent != fault.subject && fault_reviewer_is_declared(&connection, agent)?)
         };
         if owns(&fault.person)? {
             return Ok(Some(fault.person.clone()));
+        }
+        // An explicitly owned SLO fault keeps its recorded reviewer.
+        // A stopped or retired declaration makes it undeliverable, not generic.
+        if explicit_reviewer_only {
+            return Ok(None);
         }
         let mut step = fault.step.clone().or_else(|| {
             fault
@@ -480,6 +592,7 @@ impl Store {
             .map_err(internal)?
             .ok_or_else(|| FractalError::new("internal", "the failure was not recorded"))
     }
+
 
     pub fn operational_failure(
         &self,
@@ -1253,7 +1366,7 @@ impl Store {
         let mut items = self.operational_fault_families(person, as_of)?;
         let failures = self.operational_failures()?;
         for failure in &failures {
-            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?);
+            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?.map(|fault| fault.item));
         }
         Ok((items, failures))
     }
@@ -1281,7 +1394,7 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
         incarnations: &mut BTreeMap<String, Option<String>>,
-    ) -> Result<Option<AttentionItemView>> {
+    ) -> Result<Option<OperationalFault>> {
         if failure.requested_at_unix_ms > as_of {
             smallclaims::touched::note_due(failure.requested_at_unix_ms);
         }
@@ -1498,7 +1611,66 @@ impl Store {
                 attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
             ];
         }
-        Ok(Some(item))
+        let explicit_reviewer_only = source.starts_with("daemon/")
+            && claim.kind == "operational.failure"
+            && (f["condition"] == API_READINESS_SLO_MISSED
+                || f["condition"] == AGENTS_REQUEST_SLO_MISSED);
+        let phase_case = readiness_phase_delivery(
+            &claim.kind,
+            claim.actor.as_deref(),
+            source,
+            &claim.origin,
+            f["condition"].as_str(),
+            f["reviewer"].as_str(),
+            &failure.subject,
+        );
+        let suppress_generic_delivery = if phase_case {
+            match claim.body["evidence"].as_array().map(Vec::as_slice) {
+                Some([]) => true,
+                Some([early]) => {
+                    if let Some(id) = early.as_str().filter(|id| valid_opening_claim_id(id)) {
+                        match person_work::claim_in_cut(connection, id, || self.claim_by_id(id))? {
+                            Some(opening) => {
+                                let reviewer = linked_readiness_reviewer(
+                                    &claim.origin, &failure.subject, &opening,
+                                );
+                                if reviewer != Some(failure.reviewer.as_str()) {
+                                    item.person = reviewer.unwrap_or("person/operator").to_owned();
+                                    item.detail.push_str(
+                                        "\nReadiness notice routing is blocked by a contradictory opening claim.",
+                                    );
+                                }
+                                // The case namespace owns routing even if linkage is wrong.
+                                // Never fall through to a wake for the escalation's reviewer.
+                                true
+                            }
+                            None => {
+                                // Sparse replication can expose a later envelope first. Its
+                                // opening shares the source dependency recorded above.
+                                item.person = "person/operator".into();
+                                item.detail.push_str(
+                                    "\nReadiness notice routing awaits the linked opening claim.",
+                                );
+                                true
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if suppress_generic_delivery {
+            item.episode.clone_from(&failure.subject);
+        }
+        Ok(Some(OperationalFault {
+            item,
+            explicit_reviewer_only,
+            suppress_generic_delivery,
+        }))
     }
 
     fn current_exhausted_work_wake<const MINIMAL: bool>(
@@ -1712,6 +1884,12 @@ pub fn fault_agent_holders(connection: &Connection) -> Result<Vec<String>> {
         }
     }
     Ok(holders)
+}
+
+fn fault_reviewer_is_declared(connection: &Connection, reviewer: &str) -> Result<bool> {
+    Ok(reviewer.starts_with("agent/")
+        && current_desired_row(connection, reviewer)?.is_some_and(|row| row.kind == "agent")
+        && person_work::declaration_live(connection, reviewer)?)
 }
 
 /// Whether `desired` declares a running agent that handles faults.
@@ -3226,3 +3404,7 @@ mod native_prompt_tests {
         assert_eq!(resolve(answered.store_index), expected);
     }
 }
+
+#[cfg(test)]
+#[path = "readiness_phase_tests.rs"]
+mod readiness_phase_tests;

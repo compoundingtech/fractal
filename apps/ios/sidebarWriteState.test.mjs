@@ -13,10 +13,11 @@ const compound = { folders: [{ op: 'folder.rename', id: 'folder-a', name: 'Folde
 const plan = (edit = memberPlan, fence = base(1)) => ({ type: 'Plan', base: fence, plan: edit, folder: id(1), membership: id(2) });
 const event = (type, n = 2) => ({ type, identity: id(n) });
 const setup = (initial, storageFailure = false) => {
-  let raw = initial === undefined ? null : JSON.stringify({ version: 1, state: initial });
+  const { next_delivery, ...durable } = initial ?? {};
+  let raw = initial === undefined ? null : JSON.stringify({ version: 1, state: durable });
   const sent = [], effects = [];
   const storage = { getItem: async () => raw, setItem: async (_key, value) => { if (storageFailure) throw new Error('storage'); raw = value; }, removeItem: async () => { raw = null; } };
-  const host = new SidebarJournal(storage, scope, writeReducer, async (effect, state) => { effects.push(effect); if (effect === 'Send') sent.push(structuredClone(state.request)); });
+  const host = new SidebarJournal(storage, scope, writeReducer, async (effect, state) => { effects.push(effect); if (effect.type === 'Send') sent.push(structuredClone(state.request)); });
   return { host, storage, sent, effects, raw: () => raw };
 };
 const staged = (edit = memberPlan) => { const state = createWriteState(scope, intent); writeReducer.reduce(state, plan(edit)); return state; };

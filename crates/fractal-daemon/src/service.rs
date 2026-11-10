@@ -1702,6 +1702,8 @@ mod tests {
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
         quota_source: None,
+        usage_limits: None,
+        host_envelope_file: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
@@ -1711,6 +1713,8 @@ mod tests {
         seat_admission: None,
         lanes: None,
         person: None,
+        browser_pairing_login: None,
+        pairing_legacy_allowances: Vec::new(),
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),
@@ -1727,6 +1731,8 @@ mod tests {
             url: "http://127.0.0.1:31314".into(),
         }], planner: crate::model::PlannerSpec::default(), private_notes_catalogs: Vec::new(), observations: crate::config::ObservationsConfig::default(),
         github: crate::config::GithubConfig::default(),
+        agent_population_enabled: false,
+        agent_population_repositories: Vec::new(),
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
@@ -1736,6 +1742,8 @@ mod tests {
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         wait_for_peers_after_start: None,
+        readiness_slo: None,
+        agents_request_slo_fault: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);

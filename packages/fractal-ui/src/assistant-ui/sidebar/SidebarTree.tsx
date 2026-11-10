@@ -260,17 +260,20 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       return true
     }
     const rect = virtualizer.visibleRect
-    let offset = rect.y
+    const painted = props.stickyAncestors === false ? 0 : stickyInset.current
+    let inset = painted
     if (anchorMode.current === 'reveal') {
       const infos = ancestors.map(item => layout.getLayoutInfo(item.id))
       if (infos.some(info => info == null || info.estimatedSize)) return false
-      const inset = props.stickyAncestors === false ? 0 : Math.min(rect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
-      offset = Math.max(0, info.rect.y - inset)
-    } else {
-      const inset = props.stickyAncestors === false ? 0 : stickyInset.current
-      if (info.rect.y < rect.y + inset) offset = Math.max(0, info.rect.y - inset)
-      else if (info.rect.maxY > rect.maxY) offset = info.rect.maxY - rect.height
+      // A row clear of the painted stack stays where it is, so selecting it never moves the list under the pointer.
+      if (info.rect.y >= rect.y + painted && info.rect.maxY <= rect.maxY) return true
+      // A row that has to move also clears ancestors the stack has not painted yet.
+      if (props.stickyAncestors !== false) inset = Math.min(rect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
     }
+    let offset = rect.y
+    if (info.rect.y < rect.y + Math.max(painted, inset)) offset = Math.max(0, info.rect.y - inset)
+    // Never past the top constraint: a row taller than the space below the inset would otherwise alternate between both edges.
+    else if (info.rect.maxY > rect.maxY) offset = Math.min(info.rect.y - inset, info.rect.maxY - rect.height)
     if (Math.abs(rect.y - offset) > 0.5) scrollToLayoutKey(layout, key, viewport, info.rect.y - offset)
     return true
   })

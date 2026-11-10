@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Drive milestone and component-family Storybook data from scenario-kit slices, retaining isolated authored contract checks",
+  "replay": {"status": "none", "detail": "Story-side adapters only; runtime replay is unchanged."},
+  "schema": {"status": "none", "detail": "No persistent schema or stored data changes."},
+  "rules": {"status": "none", "detail": "No replication or checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Kit worlds are unchanged. Optional milestone thread history and conversation sync inputs preserve incomplete-history boundaries and real transport issues, attempts and countdowns; authored contracts retain their existing fallback presentation."},
+  "downtime": {"status": "none", "detail": "No deployed runtime changes."},
+  "manual": {"status": "none", "detail": "No operator action required. Unpinned milestone stories follow the scenario toolbar."},
+  "recovery": {"status": "none", "detail": "No state migration or recovery changes."}
+}

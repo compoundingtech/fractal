@@ -27,7 +27,7 @@ const work: WorkLogTurn = { running: true, failed: false, interrupted: false, du
 ] }
 const hint = 'Messages can be sent once this conversation loads.'
 const draft = 'Keep this retained draft'
-const failures = ['none', 'answer-meta', 'cold-composer', 'cold-slab', 'retained-reason', 'tool-rows', 'tool-overflow', 'run-gutter', 'thinking', 'thinking-ink', 'row-fade'] as const
+const failures = ['none', 'answer-meta', 'cold-composer', 'cold-slab', 'retained-reason', 'tool-rows', 'tool-overflow', 'run-inset', 'thinking', 'thinking-ink', 'row-fade'] as const
 /** WCAG contrast of a computed `rgb()`/`rgba()` ink over an opaque computed background, alpha composited first. */
 const contrast = (fg: string, bg: string) => {
   const [br, bgreen, bb] = bg.match(/[\d.]+/g)!.map(Number)
@@ -59,8 +59,8 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
     if (failure === 'retained-reason' && locked) { const reason = element('[aria-label="Retained draft example"] [data-testid="composer-reason"]'); reason.style.display = 'none'; element('[aria-label="Retained draft example"] textarea').removeAttribute('aria-describedby') }
     if (failure === 'tool-rows') element('[data-tool-status="success"] [data-call-duration]').textContent = 'OK · 2s'
     if (failure === 'tool-overflow') element('[data-tool-status="interrupted"] [data-call-word]').textContent = 'Interrupted after the retained cancellation request'
-    // The shipped R4 regression: the run state sat in the 80px end column, past the disclosure, in the gutter.
-    if (failure === 'run-gutter') { element('[data-tool-status="running"] [data-call-word]').textContent = ''; element('[data-tool-status="running"] [data-call-duration]').textContent = 'Running' }
+    // The reported regression: the run state stopped short of the edge where sibling durations end.
+    if (failure === 'run-inset') element('[data-tool-status="running"] [data-call-word]').style.marginInlineEnd = '86px'
     if (failure === 'thinking') element('[data-testid="thinking-body"]').style.marginInlineStart = '0'
     // The opposite scheme's muted ink: the dark value in light (the shipped 3.79:1 bug), the light value in dark.
     if (failure === 'thinking-ink') element('[data-testid="thinking-body"] p').style.color = scheme === 'light' ? '#818181' : '#66666e'
@@ -122,7 +122,9 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
     await new Promise(resolve => requestAnimationFrame(resolve))
   }
   await expect(header).toContainElement(copy)
-  await expect(header).toContainElement(answers[0]!.querySelector('time'))
+  // One timestamp per episode, at its head.
+  await expect(answers[0]!.querySelector('time')).toBeNull()
+  await expect(answers[0]!.closest('[data-testid="transcript-turn"]')!.querySelector('[data-testid="turn-time"]')).not.toBeNull()
   await expect(header.getBoundingClientRect().height).toBe(16)
   await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(markdown.getBoundingClientRect().top)
   await expect(answers[0]!.getBoundingClientRect().bottom - markdown.getBoundingClientRect().bottom).toBeLessThanOrEqual(2)
@@ -163,8 +165,8 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(within(retained).getByTestId('composer-reason').getBoundingClientRect().height).toBeGreaterThan(0)
   await expect(retainedField).toHaveAccessibleDescription(hint)
 
-  // 10, 12: success rows show the duration only; every chevron and duration column is pinned to the row end.
-  // R4: a running row says so in its word slot, in flow after the title and before the disclosure; its end column stays empty.
+  // 10, 12: success rows show the duration only; every chevron leads its row and every duration column is pinned to the row end.
+  // A running row says so in the shared metadata column, ending where sibling durations end; it has no measured duration.
   const tools = canvas.getByRole('region', { name: 'Tool row example' })
   const row = (status: string) => tools.querySelector<HTMLElement>(`[data-tool-status="${status}"]`)!.firstElementChild as HTMLElement
   const rows = Array.from(tools.querySelectorAll<HTMLElement>('[data-tool-status]'), entry => entry.firstElementChild as HTMLElement)
@@ -177,21 +179,23 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const runningWord = row('running').querySelector<HTMLElement>('[data-call-word]')!
   await expect(runningWord).toHaveTextContent(/^Running$/)
   await expect(row('running').querySelector('[data-call-duration]')).toHaveTextContent(/^$/)
+  await expect(Math.abs(runningWord.getBoundingClientRect().right - row('running').getBoundingClientRect().right)).toBeLessThan(0.5)
   await expect(runningWord.getBoundingClientRect().left).toBeGreaterThanOrEqual(row('running').querySelector('[data-call-title]')!.getBoundingClientRect().right)
-  await expect(runningWord.getBoundingClientRect().right).toBeLessThanOrEqual(row('running').children[3]!.getBoundingClientRect().left)
+  await expect(runningWord.getBoundingClientRect().right).toBeLessThanOrEqual(row('running').querySelector('[data-call-duration]')!.getBoundingClientRect().left)
   await expect(row('interrupted').querySelector('[data-call-word]')).toHaveTextContent(/^Interrupted$/)
   await expect(row('interrupted').querySelector('[data-call-duration]')).toHaveTextContent(/^59m 59s$/)
   await expect(row('error').querySelector('[data-call-word]')).toHaveTextContent(/^Failed$/)
   await expect(row('error').querySelector('[data-call-duration]')).toHaveTextContent(/^23h 59m$/)
-  const chevron = rows[0]!.children[3]!.getBoundingClientRect().left
+  const chevron = rows[0]!.children[0]!.getBoundingClientRect().left
   for (const entry of rows) {
     const box = entry.getBoundingClientRect()
     const duration = entry.querySelector<HTMLElement>('[data-call-duration]')!
     const word = entry.querySelector<HTMLElement>('[data-call-word]')!
     await expect(box.height).toBe(24)
-    await expect(Math.abs(entry.children[3]!.getBoundingClientRect().left - chevron)).toBeLessThan(0.5)
+    await expect(Math.abs(entry.children[0]!.getBoundingClientRect().left - chevron)).toBeLessThan(0.5)
+    await expect(Math.abs(chevron - box.left)).toBeLessThan(0.5)
     await expect(Math.abs(duration.getBoundingClientRect().right - box.right)).toBeLessThan(0.5)
-    await expect(duration.getBoundingClientRect().width).toBe(80)
+    await expect(entry.querySelector<HTMLElement>('[data-call-meta]')!.getBoundingClientRect().width).toBeGreaterThanOrEqual(80)
     await expect(duration.scrollWidth).toBeLessThanOrEqual(duration.clientWidth)
     await expect(word.scrollWidth).toBeLessThanOrEqual(word.clientWidth)
     await expect(entry.scrollWidth).toBeLessThanOrEqual(entry.clientWidth)

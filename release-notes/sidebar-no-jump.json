@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Selecting a sidebar row that is already in view no longer scrolls the list; a row out of view scrolls only as far as needed",
+  "replay": { "status": "none", "detail": "Web UI scroll behaviour only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "No runtime, wire or client changes." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the previous reveal scrolling." }
+}

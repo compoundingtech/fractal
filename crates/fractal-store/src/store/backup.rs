@@ -1,4 +1,4 @@
-//! Backup reads pin a pooled reader and page the sync envelopes; restore uses normal admission.
+//! Backup reads pin a pooled reader and page sync envelopes; restore revalidates source-admitted history.
 use super::*;
 use super::backup_format::{Header, PAGE, Record, RestoreReport, TableDigest, write_record};
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicaEnvelopeSignature};
@@ -29,7 +29,7 @@ impl Store {
             fleet_id: fleet_meta(&connection, "fleet_id")?,
             fleet_anchor: fleet_meta(&connection, "fleet_anchor_key")?,
             graph_digest: projection_digest::root(&digests),
-            log_digest: log_digest(self)?,
+            log_digest: log_digest_with_quarantine(self, !self.quarantined_operation_history()?.is_empty())?,
             tables: digests
                 .into_iter()
                 .map(|(name, digest)| {
@@ -163,6 +163,7 @@ impl Store {
         shard: Option<&GraphStore>,
     ) -> Result<Header> {
         let mut header = self.backup_header()?;
+        let quarantined = self.quarantined_operation_history()?;
         let shard_digest = match shard {
             Some(shard) => super::backup_shards::digest(shard)?,
             None => None,
@@ -177,6 +178,9 @@ impl Store {
         } else if !owned.is_empty() {
             header.version = super::backup_format::VERSION_WITH_BODIES;
         }
+        if !quarantined.is_empty() || header.ledgers.contains_key("replica_restore_quarantine") {
+            header.version = super::backup_format::VERSION_WITH_QUARANTINE;
+        }
         let mut hash = Sha256::new();
         write_record(output, &mut hash, &Record::Header(header.clone()))?;
         let mut after = (String::new(), 0_u64, String::new());
@@ -186,10 +190,10 @@ impl Store {
             let identities = connection
                 .prepare_cached(
                     "SELECT writer,sequence,envelope_hash FROM replica_envelopes
-                         WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
+                         WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND (batch_id IS NOT NULL OR ?5)
                          ORDER BY writer,sequence,envelope_hash LIMIT ?4",
                 )?
-                .query_map(params![after.0, after.1, after.2, PAGE], |r| {
+                .query_map(params![after.0, after.1, after.2, PAGE, !quarantined.is_empty()], |r| {
                     Ok(ReplicaEnvelopeId {
                         writer: r.get(0)?,
                         sequence: r.get(1)?,
@@ -283,7 +287,7 @@ impl Store {
                 )?;
             }
         }
-        self.check_backup_chains()?;
+        self.check_backup_chains(&quarantined)?;
         serde_json::to_writer(
             &mut *output,
             &Record::End {
@@ -422,6 +426,27 @@ impl Store {
         Ok(())
     }
 
+    fn quarantined_operation_history(&self) -> Result<BTreeMap<(String, u64, String), Option<String>>> {
+        let mut quarantined = BTreeMap::new();
+        {
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(
+                "SELECT envelopes.writer,envelopes.sequence,envelopes.payload,holds.reason FROM replica_envelopes AS envelopes LEFT JOIN replica_envelope_holds AS holds USING(writer,sequence,envelope_hash) WHERE envelopes.batch_id IS NULL",
+            )?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let payload: Vec<u8> = row.get(2)?;
+                let payload: smallclaims::claim::ReplicaEnvelopePayload =
+                    ciborium::from_reader(payload.as_slice()).map_err(|error| anyhow::anyhow!("backup contains unadmitted envelopes: {error}"))?;
+                anyhow::ensure!(row.get::<_, Option<String>>(3)?.as_deref() == Some("unsigned")
+                    && payload.batch.claims.iter().any(|claim| claim.kind == crate::pairing::OPERATION_AUTHORIZED),
+                    "backup contains an unadmitted envelope");
+                quarantined.insert((row.get::<_, String>(0)?, row.get::<_, u64>(1)?, payload.batch.hash), payload.batch.previous_hash);
+            }
+        }
+        Ok(quarantined)
+    }
+
     pub fn finish_backup_restore(
         &self,
         header: &Header,
@@ -429,20 +454,17 @@ impl Store {
         envelopes: u64,
         checkpoint: Option<&CheckpointManifest>,
     ) -> Result<RestoreReport> {
-        self.admit_restored_backlog()?;
+        let admission = self.admit_restored_backlog()?;
         self.apply_replication_repairs()?;
-        // Reject any undecodable or invalid envelope rather than silently restoring a partial log.
-        {
-            let connection = self.readers.get();
-            let unresolved: u64 = connection.query_row(
-                "SELECT COUNT(*) FROM replica_envelopes WHERE batch_id IS NULL",
-                [],
-                |r| r.get(0),
-            )?;
-            anyhow::ensure!(
-                unresolved == 0,
-                "backup contains {unresolved} unadmitted envelopes"
-            );
+        // Retain unsigned operation history without admitting its authority. All other
+        // undecodable or invalid history still prevents publication of the restored store.
+        let quarantined = self.quarantined_operation_history()?;
+        let operation_envelopes_quarantined = quarantined.len() as u64;
+        if operation_envelopes_quarantined > 0 {
+            anyhow::ensure!(admission.invalid == 0 && admission.unknown == 0,
+                "backup contains additional unadmitted claim history");
+            tracing::warn!(operation_envelopes_quarantined,
+                "restored operation history requires new pairing or terminal attachment");
         }
         // Normal admission is final: later membership claims do not revoke history
         // admitted before their arrival. Preserve that history, including doctor residue.
@@ -451,13 +473,13 @@ impl Store {
             self.restore_checkpoint_history(manifest)?;
             self.replay_replication_graph()?;
         }
-        self.check_backup_chains()?;
+        self.check_backup_chains(&quarantined)?;
         let actual = self.read_snapshot(|_| self.backup_header())?;
         anyhow::ensure!(
             actual.log_digest == header.log_digest,
             "restored envelope log digest differs from backup"
         );
-        if actual.registry_digest == header.registry_digest {
+        if operation_envelopes_quarantined == 0 && actual.registry_digest == header.registry_digest {
             anyhow::ensure!(
                 actual.tables.get("claim_sources") == header.tables.get("claim_sources"),
                 "restored claim source digest/count differs from backup: expected {:?}, got {:?}",
@@ -477,7 +499,7 @@ impl Store {
         }
         let projections_match =
             actual.graph_digest == header.graph_digest && actual.tables == header.tables;
-        if actual.source_schema == header.source_schema
+        if operation_envelopes_quarantined == 0 && actual.source_schema == header.source_schema
             && actual.registry_digest == header.registry_digest
         {
             anyhow::ensure!(
@@ -486,6 +508,12 @@ impl Store {
                 actual.tables.iter().filter(|(name, digest)| header.tables.get(*name) != Some(*digest)).map(|(name, _)| name).collect::<Vec<_>>()
             );
         }
+        // The mark is permanent and travels only in the archive's append-only ledger.
+        // Stamp after verifying the source ledger, before the staged store is published.
+        self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hbd09a1c36932 owner=fractal_store::store::backup TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_restore_quarantine(writer,sequence,envelope_hash) SELECT writer,sequence,envelope_hash FROM replica_envelopes WHERE batch_id IS NULL",
+            [],
+        )?;
         Ok(RestoreReport {
             writer: writer.into(),
             envelopes,
@@ -493,6 +521,7 @@ impl Store {
             source_graph_digest: header.graph_digest.clone(),
             log_digest: actual.log_digest,
             projections_match,
+            operation_envelopes_quarantined,
             tables: actual.tables,
             message_bodies_restored: 0,
             message_bodies_unmatched: 0,
@@ -512,7 +541,7 @@ impl Store {
         )?)
     }
 
-    fn check_backup_chains(&self) -> Result<()> {
+    fn check_backup_chains(&self, quarantined: &BTreeMap<(String, u64, String), Option<String>>) -> Result<()> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT rowid,origin,replica_sequence,previous_hash FROM batches
@@ -522,6 +551,16 @@ impl Store {
             "SELECT EXISTS(SELECT 1 FROM batches WHERE origin=?1 AND replica_sequence=?2 AND hash=?3)
                  OR EXISTS(SELECT 1 FROM checkpoint_envelopes WHERE writer=?1 AND sequence=?2)"
         )?;
+        for ((writer, sequence, _), link) in quarantined {
+            if let Some(link) = link {
+                anyhow::ensure!(*sequence > 0, "backup writer chain has an invalid root");
+                let retained: bool = predecessor.query_row(/* sqlite-large-value: allow-for-now lv-h339bbe5233fd owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ params![writer, sequence - 1, link], |row| row.get(0))?;
+                anyhow::ensure!(retained || quarantined.contains_key(&(writer.clone(), sequence - 1, link.clone())),
+                    "backup operation history has an incomplete writer chain");
+            } else {
+                anyhow::ensure!(*sequence <= 1, "backup writer chain has an invalid root");
+            }
+        }
         let mut after = 0_i64;
         loop {
             let page = statement
@@ -546,7 +585,7 @@ impl Store {
                     // removed by a verified checkpoint has only its certified wire identity left.
                     let found: bool =
                         predecessor.query_row(/* sqlite-large-value: allow-for-now lv-haf3f28b6f1dd owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ params![writer, sequence - 1, link], |r| r.get(0))?;
-                    if !found {
+                    if !found && !quarantined.contains_key(&(writer.clone(), sequence - 1, link.clone())) {
                         // Classify only a failure: the accepted path retains exactly its old
                         // two indexed existence probes and the same checkpoint coverage rule.
                         let retained: bool = connection.prepare_cached(
@@ -581,6 +620,11 @@ impl Store {
 /// The digest of a store's complete admitted envelope log, certified tombstones included: the
 /// graph's `log_digest`, and each shard's in the same form.
 pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
+    log_digest_with_quarantine(store, false)
+}
+
+// Only the archive adapter calls this with true, after validating every held envelope.
+fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> Result<String> {
     let connection = store.readers.get();
     let mut hash = Sha256::new();
     hash.update(INVENTORY_DIGEST_DOMAIN);
@@ -588,14 +632,14 @@ pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
     loop {
         // Both index seeks are bounded before the UNION sorts at most two pages.
         let identities = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-haea4d31a22af owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
-               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
+            /* sqlite-large-value: allow-for-now lv-h756acba9d94c owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
+               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND (batch_id IS NOT NULL OR ?5)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4),
              dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
                WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4)
              SELECT * FROM live UNION SELECT * FROM dropped ORDER BY writer,sequence,envelope_hash LIMIT ?4"
-        )?.query_map(params![after.0,after.1,after.2,PAGE], |r| Ok(ReplicaEnvelopeId {
+        )?.query_map(params![after.0,after.1,after.2,PAGE,include_quarantined], |r| Ok(ReplicaEnvelopeId {
             writer:r.get(0)?,sequence:r.get(1)?,hash:r.get(2)?,
         }))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if identities.is_empty() {
@@ -642,6 +686,125 @@ mod tests {
         store
             .write_backup(&mut fs::File::create(path).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn pairing_operation_archive_round_trip_preserves_recoverable_history() {
+        for keyed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = Store::open_memory("archive-issuer").unwrap();
+            let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+            source.set_node_key(key.clone()).unwrap();
+            if keyed {
+                source.bind_fleet("archive-fleet").unwrap();
+                source.pin_fleet_anchor(key.public()).unwrap();
+                source.set_member_key(Some(key.clone())).unwrap();
+                source.admit_fleet_anchor("archive-fleet", key.public(), "listening").unwrap();
+            }
+            let mut operations = Vec::new();
+            for kind in ["custom.client.pairing-begun", "custom.client.pairing-completed",
+                "custom.client.terminal-attached", "custom.client.terminal-consumed",
+                "custom.client.terminal-detached"] {
+                operations.push(source.append_client_operation_claim(&ClaimInput {
+                    subject:format!("custom/client/archive-{}", kind.rsplit('.').next().unwrap()),kind:kind.into(),
+                    actor:Some("person/example".into()),fields:serde_json::from_value(json!({
+                        "person_id":"person/example","expires_at_unix_ms":u64::MAX,
+                    })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
+                }).unwrap());
+            }
+            // Later ordinary history must survive even when its predecessor is quarantined.
+            diagnostic(&source, "archive-round-trip");
+            let path = root.path().join("history.backup");
+            archive(&source, &path);
+            let destination = root.path().join("restored.db");
+            let report = backup::restore(&path, &destination, root.path()).unwrap();
+            assert_eq!(report.operation_envelopes_quarantined, if keyed { 0 } else { 5 });
+            assert_eq!(report.projections_match, keyed);
+            let restored = Store::open(&destination, &report.writer).unwrap();
+            for operation in &operations {
+                assert_eq!(restored.client_operation_is_trusted(operation).unwrap(), keyed);
+                assert_eq!(restored.claim_by_id(&operation.id).unwrap().is_some(), keyed);
+            }
+            assert!(!restored.claims_for_kind_at("daemon.diagnostic", None, true, 10).unwrap().claims.is_empty());
+            let retained_archive = root.path().join("retained.backup");
+            let retained_header = archive(&restored, &retained_archive);
+            assert_eq!(retained_header.version == super::super::backup_format::VERSION_WITH_QUARANTINE, !keyed);
+            // The supported version range of readers predating quarantine excludes this archive.
+            assert_eq!((super::super::backup_format::VERSION..=super::super::backup_format::VERSION_WITH_SHARDS)
+                .contains(&retained_header.version), keyed);
+            let retained = backup::restore(&retained_archive, &root.path().join("retained.db"), root.path()).unwrap();
+            assert_eq!(retained.operation_envelopes_quarantined, report.operation_envelopes_quarantined);
+            assert_eq!(retained.log_digest, report.log_digest);
+            if !keyed {
+                assert!(restored.replication_signature_requests().unwrap().is_empty());
+                source.bind_fleet("archive-fleet").unwrap();
+                source.pin_fleet_anchor(key.public()).unwrap();
+                source.set_member_key(Some(key.clone())).unwrap();
+                source.admit_fleet_anchor("archive-fleet", key.public(), "listening").unwrap();
+                source.complete_replication_activation().unwrap();
+                restored.bind_fleet("archive-fleet").unwrap();
+                restored.pin_fleet_anchor(key.public()).unwrap();
+                let signed = source.export_replication_exchange("archive-fleet", &Default::default()).unwrap();
+                assert!(signed.envelopes.iter().any(|envelope| envelope.member_key.is_some()));
+                restored.receive_replication_exchange(source.origin(), "archive-fleet", &signed).unwrap();
+                assert!(restored.validate_replication_backlog().unwrap().held >= 5);
+                restored.project_replication_backlog().unwrap();
+                assert!(restored.replication_signature_requests().unwrap().is_empty());
+                for operation in &operations {
+                    assert!(!restored.client_operation_is_trusted(operation).unwrap());
+                    assert!(restored.claim_by_id(&operation.id).unwrap().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restore_preserves_historical_usage_credits_with_no_current_writers() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        source.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+        let input = ClaimInput {
+            subject: "agent/sample/usage-producer".into(),
+            kind: fractal_schema::usage_limits::KIND.into(),
+            actor: Some("agent/sample/usage-producer".into()),
+            fields: serde_json::from_value(json!({
+                "readings": [],
+                "credit_readings": [{
+                    "account": "digest",
+                    "account_ref": "account/sample",
+                    "provider": "anthropic",
+                    "credit_id": "durable-credit",
+                    "expires_at": "2026-11-08T10:00:00Z",
+                    "measured_at": "2026-11-07T10:00:00Z",
+                    "state": "redeemed",
+                    "disposition": {
+                        "kind": "redeemed",
+                        "at": "2026-11-07T09:00:00Z",
+                        "evidence_ref": "doc/sample/credit-receipt"
+                    },
+                    "coverage": "reported",
+                    "source": "omp-usage",
+                    "host": "sample-host"
+                }]
+            })).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let historical = source.append_claim(&input).unwrap();
+        source.set_usage_limits_writers(Vec::new()).unwrap();
+        let backup_path = root.path().join("usage.jsonl");
+        let header = archive(&source, &backup_path);
+        let target_path = root.path().join("restored.db");
+        let report = backup::restore(&backup_path, &target_path, root.path()).unwrap();
+        assert!(report.projections_match);
+        assert_eq!(report.graph_digest, header.graph_digest);
+        assert_eq!(report.tables["claim_sources"], header.tables["claim_sources"]);
+        let restored = Store::open(&target_path, &report.writer).unwrap();
+        let retained = restored.claim_by_id(&historical.id).unwrap().unwrap();
+        assert_eq!(retained.body, historical.body);
+        assert!(restored.append_claim(&input).is_err(), "historical import must not authorize new trusted writes");
+        assert!(restored.append_client_claim(&input).is_err(), "historical import must not authorize new public writes");
     }
 
     #[test]
@@ -1654,9 +1817,9 @@ mod tests {
                     header.shards.insert("notes".into(), digest);
                 }
             })),
-            ("unsupported claim backup format/version: \"st3.claim-backup\" version 6", Box::new(|records| {
+            ("unsupported claim backup format/version: \"st3.claim-backup\" version 7", Box::new(|records| {
                 if let Record::Header(header) = &mut records[0] {
-                    header.version = 6;
+                    header.version = 7;
                 }
             })),
         ];
@@ -1938,11 +2101,11 @@ mod tests {
                 |row| row.get(0),
             ).unwrap();
             assert_eq!(unsettled, 0, "settled admission is deliberately not chain completeness");
-            assert!(source.check_backup_chains().unwrap_err().to_string().contains("predecessor"));
+            assert!(source.check_backup_chains(&BTreeMap::new()).unwrap_err().to_string().contains("predecessor"));
             assert!(source.write_backup(&mut Vec::new()).is_err());
             exchange.envelopes = vec![first];
             accept(&source, "alder", &exchange);
-            source.check_backup_chains().unwrap();
+            source.check_backup_chains(&BTreeMap::new()).unwrap();
             let root = tempfile::tempdir().unwrap();
             let archive_path = root.path().join("arrived.jsonl");
             let header = archive(&source, &archive_path);
@@ -2001,7 +2164,7 @@ mod tests {
                     "SELECT COUNT(*) FROM batches WHERE origin='alder'", [],
                     |row| row.get::<_, u64>(0),
                 ).unwrap(), 2, "both well-formed canonical batches reached the checker");
-                let error = source.check_backup_chains().unwrap_err().to_string();
+                let error = source.check_backup_chains(&BTreeMap::new()).unwrap_err().to_string();
                 assert!(error.contains(if wrong_sequence {
                     "retained predecessor absent"
                 } else {
@@ -2043,7 +2206,7 @@ mod tests {
                 |row| row.get(0),
             ).unwrap();
             assert_ne!(own_predecessor, other_hash, "both admitted writers retain different real predecessor hashes");
-            let error = source.check_backup_chains().unwrap_err().to_string();
+            let error = source.check_backup_chains(&BTreeMap::new()).unwrap_err().to_string();
             assert!(error.contains("predecessor"));
             for witness in ["writer=\"alder\"", "sequence=2", "predecessor_sequence=1",
                 "retained predecessor wrong hash", "not covered by a checkpoint"] {
@@ -2098,7 +2261,7 @@ mod tests {
             ).unwrap(), 0);
             // Deliberately NOT a signed re-admission/complete old-history control. A bare
             // local floor cannot stand in for either of those proofs or certify the report.
-            assert!(source.check_backup_chains().unwrap_err().to_string().contains("predecessor"));
+            assert!(source.check_backup_chains(&BTreeMap::new()).unwrap_err().to_string().contains("predecessor"));
         }
 
         #[test]
