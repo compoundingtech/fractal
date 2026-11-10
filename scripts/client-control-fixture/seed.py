@@ -33,7 +33,7 @@ def instance_root(home):
     # Match fractal_client::product_dirs::instance_root and its completed migration receipt.
     migrated = home / '.fractal-instance' / INSTANCE
     receipt = migrated / '.fractal-migration-completed'
-    if receipt.exists() and receipt.read_text() == MIGRATION:
+    if receipt.exists() and receipt.read_bytes() == MIGRATION.encode('ascii'):
         return migrated
     return home / '.st-instance' / INSTANCE
 
@@ -89,6 +89,14 @@ class Fixture:
             cursor = next_cursor
 
 
+def assert_no_read_positions(claims):
+    # Native asks have no read-position model; refuse durable position records.
+    for claim in claims:
+        kind = claim['kind'].lower().replace('_', '-').replace('.', '-')
+        if 'read' in kind and 'position' in kind:
+            raise ValueError(f'fixture-read-position-refused: {claim["id"]}')
+
+
 def no_read_mutation(items, claims, ask, title=TITLE, body=BODY):
     validate_text(title)
     validate_text(body)
@@ -109,14 +117,10 @@ def no_read_mutation(items, claims, ask, title=TITLE, body=BODY):
             or fields['title'] != title or fields['request']['question'] != body):
         raise ValueError('fixture-ask-refused: source claim does not bind seed')
     forbidden = re.compile(r'read|acknowledg|answer|clos|person-done|person-cancel|completed')
+    assert_no_read_positions(claims)
     for claim in claims:
         if claim['subject'] == ask and forbidden.search(claim['kind']):
             raise ValueError(f'fixture-no-read-mutation-refused: {claim["id"]}')
-        # There is no native ask read-position model. Refuse any durable read-position
-        # claim in this fixture, including person-associated custom position records.
-        kind = claim['kind'].lower().replace('_', '-').replace('.', '-')
-        if 'read' in kind and 'position' in kind:
-            raise ValueError(f'fixture-read-position-refused: {claim["id"]}')
     return {'check': 'no-read-mutation', 'ask_id': ask, 'person': PERSON,
             'attention_id': item['id'], 'title': title, 'body': body,
             'body_sha256': hashlib.sha256(body.encode('ascii')).hexdigest(),
@@ -133,6 +137,7 @@ def seed(fixture, key, title, body):
         raise ValueError('fixture-text-refused: seed body must match the fixed fixture')
     if fixture.attention():
         raise ValueError('fixture-inbox-refused: seed requires an empty fixture inbox')
+    assert_no_read_positions(fixture.claims())
     request = {'version': 1, 'type': 'feedback', 'question': body,
                'why_person': 'Isolated client rendering fixture'}
     created = fixture.cli('work', 'ask', '--for', PERSON, '--as', ACTOR,

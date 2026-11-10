@@ -61,6 +61,27 @@ class FixtureSeedTests(unittest.TestCase):
             run.assert_not_called()
             self.assertFalse(own.parent.exists())
 
+    def test_root_receipt_matches_rust_bytes_without_newline_normalization(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            migrated = home / '.fractal-instance' / seed.INSTANCE
+            migrated.mkdir(parents=True)
+            receipt = migrated / '.fractal-migration-completed'
+            receipt.write_bytes(seed.MIGRATION.replace('\n', '\r\n').encode('ascii'))
+            self.assertEqual(seed.instance_root(home), home / '.st-instance' / seed.INSTANCE)
+            receipt.write_bytes(seed.MIGRATION.encode('ascii'))
+            self.assertEqual(seed.instance_root(home), migrated)
+
+    def test_seed_refuses_existing_read_position_before_ask_creation(self):
+        with patch.object(seed, 'Fixture') as fixture_type:
+            fixture = fixture_type.return_value
+            fixture.attention.return_value = []
+            fixture.claims.return_value = [{'id': 'claim/position',
+                                           'kind': 'custom.mailbox.read-position'}]
+            with self.assertRaisesRegex(ValueError, 'fixture-read-position-refused'):
+                seed.seed(fixture, 'fixture-key', seed.TITLE, seed.BODY)
+            fixture.cli.assert_not_called()
+
     def evidence(self):
         ask = 'step-run/fixture/ask'
         items = [{'id': 'attention/fixture', 'source_id': ask, 'person_id': seed.PERSON,
