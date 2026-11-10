@@ -412,8 +412,30 @@ class Delivery:
         self.persist()
         return version
 
+    def verify_install_artifact(self, artifact):
+        app = Path(artifact["app"])
+        try:
+            with (app / "Info.plist").open("rb") as file:
+                info = plistlib.load(file)
+            verify_fabric_linkage(app, info, self.env)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            # Invalidate retention and delivery intent, even if it already reached the phone.
+            (app.parent / "success.json").unlink(missing_ok=True)
+            for field in ("pending", "install_attempt"):
+                if self.data.get(field, {}).get("app") == artifact["app"]:
+                    del self.data[field]
+            if self.data.get("installed_key") == artifact["key"]:
+                self.data.pop("installed_key", None)
+            self.persist()
+            self.record("install_refused", commit=artifact["commit"], reason="fabric_missing",
+                        build_version=artifact["build_version"])
+            return False
+        return True
+
     def recover_install(self, pending):
         """Confirm an interrupted attempt using the same installed-build readback."""
+        if not self.verify_install_artifact(pending):
+            return False
         version = self.read_installed(pending)
         if version is None:
             return False
@@ -443,6 +465,7 @@ class Delivery:
         if self.data.get("config", config) != config:
             raise ValueError("Device/team or trust configuration changed: use a separate state directory")
         if self.args.reconcile_installed:
+            # Readback-only reconciliation cannot install or launch an artifact.
             if not self.data.get("trusted_head"):
                 raise ValueError("--reconcile-installed requires initialized delivery state")
             version = self.read_installed()
@@ -534,20 +557,9 @@ class Delivery:
         if self.env.get("AGENT_ACTION_APPROVAL") != "deploy":
             self.record("install_held", commit=pending["commit"], reason="deploy_approval_required")
             return
+        if not self.verify_install_artifact(pending):
+            return
         if not pending["installed"]:
-            app = Path(pending["app"])
-            try:
-                with (app / "Info.plist").open("rb") as file:
-                    info = plistlib.load(file)
-                verify_fabric_linkage(app, info, self.env)
-            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
-                # Invalidate retention too, so the next tick cannot reuse this snapshot.
-                (app.parent / "success.json").unlink(missing_ok=True)
-                del self.data["pending"]
-                self.persist()
-                self.record("install_refused", commit=pending["commit"], reason="fabric_missing",
-                            build_version=pending["build_version"])
-                return
             version = self.read_installed(pending)
             if version is None:
                 return

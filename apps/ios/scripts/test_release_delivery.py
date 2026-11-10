@@ -1339,6 +1339,39 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(self.commands("xcrun"), [])
                 self.assertEqual(len(self.commands("xcodebuild")), 2)
 
+    def test_disabled_stub_is_refused_before_install_recovery_readback(self):
+        self.reconcile("--build-only")
+        data = self.saved_state()
+        data["install_attempt"] = dict(data["pending"])
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(fabric_stub=True)
+        self.reconcile()
+        event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["outcome"], "install_refused")
+        self.assertEqual(event["reason"], "fabric_missing")
+        self.assertNotIn("pending", self.saved_state())
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.assertEqual(self.commands("xcrun"), [])
+        receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+        self.assertFalse(receipt.exists())
+
+    def test_disabled_stub_is_refused_before_installed_launch_retry(self):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.command_log.unlink()
+        self.configure(fabric_stub=True, launch_exit=0)
+        self.reconcile()
+        event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["outcome"], "install_refused")
+        self.assertEqual(event["reason"], "fabric_missing")
+        self.assertNotIn("pending", self.saved_state())
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.assertNotIn("installed_key", self.saved_state())
+        self.assertEqual(self.commands("xcrun"), [])
+        receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+        self.assertFalse(receipt.exists())
+
     def test_pending_artifact_with_real_bridge_installs(self):
         self.reconcile("--build-only")
         self.reconcile()
