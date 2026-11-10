@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Observe Storybook completion without a channel-subscription timer race",
+  "replay": {"status": "none", "detail": "Browser proof tooling only; no runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "No client or wire contract change; strict Storybook completion requirements are preserved."},
+  "downtime": {"status": "none", "detail": "No additional service interruption."},
+  "manual": {"status": "none", "detail": "No installation or operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery behavior changes."}
+}

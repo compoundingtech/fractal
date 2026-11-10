@@ -140,6 +140,7 @@ export function ThreadHeader({
   sidebarCollapsed = false,
   onToggleSidebar,
   sidebarToggleRef,
+  panelToggleRef,
   sidebarSheet,
   narrow = false,
 }: {
@@ -166,6 +167,8 @@ export function ThreadHeader({
   panelOpen: boolean
   drawerOpen: boolean
   onTogglePanel: () => void
+  /** The wide header's Toggle right panel button: the opener a host returns focus to when an explicit close unmounts the focused panel control. */
+  panelToggleRef?: React.Ref<HTMLButtonElement>
   onToggleDrawer: () => void
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
@@ -201,7 +204,7 @@ export function ThreadHeader({
         {!narrow && !terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="drawer" label="Toggle terminal drawer" disabledReason={terminalDisabledReason} />}
         {narrow
           ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={panelOpen} active={panelOpen} onPress={onTogglePanel} />
-          : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
+          : <ChromeControl ref={panelToggleRef} icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
       </div>
     </header>
     </NarrowLayoutContext.Provider>
