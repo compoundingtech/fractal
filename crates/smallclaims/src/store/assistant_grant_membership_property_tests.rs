@@ -951,7 +951,20 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
         "member_key": original.public(), "high_water": 0, "reason": "alternate proof regression"
     }));
     receive_without_authority_maintenance(&target, &export(&anchor, &target));
-    assert!(!target.advance_assistant_grant_authority_backfill().unwrap());
+    // A production slice may revisit this claim and finish its key search.
+    // Stop real Store maintenance at the first durable mid-page boundary instead.
+    let mut mid_page = false;
+    for _ in 0..authority::CLAIMS_PER_SLICE {
+        target.advance_assistant_grant_authority_backfill_for_test(Duration::ZERO, 1).unwrap();
+        mid_page = target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)
+             AND EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)
+             AND EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+            [&grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap();
+        if mid_page { break; }
+    }
+    assert!(mid_page, "fixture did not reach its bounded durable mid-page recheck");
     {
         let connection = target.readers.get();
         let (authenticated, key): (bool, String) = connection.query_row(
@@ -1077,11 +1090,7 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
         let mut finished = false;
         for _ in 0..key_pages + 3 {
             let done = if matches!(coverage, AlternateProofCoverage::AlreadyAdmittedOneUnit) {
-                let mut connection = target.connection.write();
-                let transaction = connection.transaction().unwrap();
-                let done = authority::backfill_slice(&transaction,Duration::ZERO).unwrap();
-                transaction.commit().unwrap();
-                done
+                target.advance_assistant_grant_authority_backfill_for_test(Duration::ZERO, 1).unwrap()
             } else {
                 target.advance_assistant_grant_authority_backfill().unwrap()
             };
@@ -1210,9 +1219,9 @@ fn many_past_covering_additions_visit_needy_grants_not_unrelated_receipts() {
         ).unwrap();
         authority::take_authentication_attempts();
         authority::take_authentication_claims();
-        // Apply the real membership delta, then use one-unit transactions so
-        // the completion bound cannot hide receipt scans inside a large slice.
-        target.advance_assistant_grant_authority_backfill().unwrap();
+        // Apply only the real membership delta, then use one-unit transactions
+        // so no unmeasured production slice can drain the work under test.
+        target.persist_assistant_grant_membership_for_test().unwrap();
         let bound = additions * (needy.len() * 4 + 2) + 8;
         let mut completed = false;
         for _ in 0..bound {
@@ -1252,9 +1261,9 @@ fn many_past_covering_additions_visit_needy_grants_not_unrelated_receipts() {
 #[test]
 fn ordinary_dirty_subject_is_not_starved_by_past_covering_addition_backlog() {
     let (target, established, _, _) = past_covering_addition_backlog(256);
-    // Preparing membership also consumes a normal slice; enough real addition
-    // work must remain to distinguish fairness from merely draining the queue.
-    target.advance_assistant_grant_authority_backfill().unwrap();
+    // Establish real membership without allowing a production slice to drain
+    // the addition backlog before ordinary dirty work joins the scheduler.
+    target.persist_assistant_grant_membership_for_test().unwrap();
     let grant = &established[0];
     let mut connection = target.connection.write();
     let queued: usize = connection.query_row(

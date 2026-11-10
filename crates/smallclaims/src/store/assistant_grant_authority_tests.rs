@@ -596,7 +596,7 @@ fn deterministic_event_permutations_match_raw_history_and_subject_rebuilds() {
 
 fn reset_projection(connection: &Connection) {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-ha93665c85209 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */
+        /* sqlite-large-value: allow-for-now lv-h90b20a930910 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */
         "DELETE FROM assistant_grant_effective;
          DELETE FROM assistant_grant_authority;
          DELETE FROM assistant_grant_pending;
@@ -619,6 +619,9 @@ fn reset_projection(connection: &Connection) {
 
 fn drain_authority(store: &Store) {
     while !store.advance_assistant_grant_authority_backfill().unwrap() {}
+    // Raw SQL slice drivers need the durable generation, even when Store's
+    // empty-membership fast path can answer from its in-memory snapshot.
+    store.persist_assistant_grant_membership_for_test().unwrap();
 }
 
 // Build the raw, unsigned keyed-writer history an older importer could leave.
@@ -678,9 +681,10 @@ fn unsigned_victim_origin_legacy_fork_is_rejected_on_receive_and_upgrade_backfil
 fn victim_origin_legacy_fork_injected_after_partial_cursor_cannot_authenticate() {
     let victim = node("victim", None);
     let local = append(&victim, SUBJECT, GRANTED, fields());
+    reset_projection(&victim.connection.write());
+    victim.persist_assistant_grant_membership_for_test().unwrap();
     {
         let mut connection = victim.connection.write();
-        reset_projection(&connection);
         let transaction = connection.transaction().unwrap();
         assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
         transaction.commit().unwrap();
@@ -832,6 +836,9 @@ fn committed_backfill_slice_resumes_after_reopen_and_is_idempotent() {
         expected = snapshot(&connection);
         assert_eq!(expected.len(), 70);
         reset_projection(&connection);
+        drop(connection);
+        store.persist_assistant_grant_membership_for_test().unwrap();
+        let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
         assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
         let cursor: String = transaction.query_row(
@@ -997,7 +1004,7 @@ fn every_nonempty_maintenance_queue_receives_a_unit_within_one_zero_slice_round(
     ];
     for start in 0..Q {
         connection.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn',?1)",
+            /* sqlite-large-value: allow-for-now lv-h6092688f3bb2 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn',?1)",
             [start.to_string()],
         ).unwrap();
         let mut visited = [false; 7];
@@ -1006,7 +1013,7 @@ fn every_nonempty_maintenance_queue_receives_a_unit_within_one_zero_slice_round(
             // cases. None of these tasks supplies authentication or inserts a
             // forged authenticated pending row.
             connection.execute_batch(
-                "INSERT OR IGNORE INTO assistant_grant_dirty VALUES('fairness/dirty');
+                /* sqlite-large-value: allow-for-now lv-h7f1ad651ea53 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES('fairness/dirty');
                  INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES('fairness/recheck');
                  INSERT OR IGNORE INTO assistant_grant_proof_invalidations
                      (id,writer,sequence,envelope_hash,member_key)
@@ -1022,7 +1029,7 @@ fn every_nonempty_maintenance_queue_receives_a_unit_within_one_zero_slice_round(
                             'fairness/unfinished','missing','missing','','');",
             ).unwrap();
             connection.execute(
-                "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
+                /* sqlite-large-value: allow-for-now lv-h304ebce462ea owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
                  SELECT claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record
                  FROM assistant_grant_effective WHERE claim_id=?1", [&grant.id],
             ).unwrap();
@@ -1031,7 +1038,7 @@ fn every_nonempty_maintenance_queue_receives_a_unit_within_one_zero_slice_round(
             let mut units = 0;
             for (index, queue) in queues.iter().enumerate() {
                 let left: usize = transaction.query_row(
-                    &format!("SELECT COUNT(*) FROM {queue}"), [], |row| row.get(0),
+                    /* sqlite-large-value: allow-for-now lv-hdfcb841d79cd owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {queue}"), [], |row| row.get(0),
                 ).unwrap();
                 assert!(left<=1, "unexpected work in {queue}");
                 if left==0 {
@@ -1131,7 +1138,7 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
     for page in 0..4 {
         // This test measures one authentication page, not a full fair round.
         connection.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+            /* sqlite-large-value: allow-for-now lv-h438a93c1e680 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
         ).unwrap();
         let transaction = connection.transaction().unwrap();
         let done = authority::backfill_slice(&transaction,Duration::ZERO).unwrap();
@@ -1229,7 +1236,7 @@ fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_
     let mut previous = (-1,String::new());
     for page in 0..4 {
         connection.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+            /* sqlite-large-value: allow-for-now lv-h26af0e87fa91 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
         ).unwrap();
         let transaction = connection.transaction().unwrap();
         let done = authority::backfill_slice(&transaction,Duration::ZERO).unwrap();
@@ -1325,9 +1332,9 @@ fn late_signature_restarts_an_in_progress_key_cursor_before_its_old_position() {
             /* sqlite-large-value: allow-for-now lv-h3135f9c18750 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
             params![signature.writer,format!("~{index:08}"),member_start]).unwrap();
     }
-    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h403d59b4d3b8 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     connection.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+        /* sqlite-large-value: allow-for-now lv-h1572d9b159f1 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
     ).unwrap();
     let transaction = connection.transaction().unwrap();
     assert!(!authority::backfill_slice(&transaction,Duration::ZERO).unwrap());
@@ -1377,9 +1384,9 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
             /* sqlite-large-value: allow-for-now lv-hec4dd1196f81 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
             params![signature.writer,format!("~{index:08}")]).unwrap();
     }
-    connection.execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hcd2447942ecb owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     connection.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+        /* sqlite-large-value: allow-for-now lv-h07764852571e owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
     ).unwrap();
     let transaction = connection.transaction().unwrap();
     assert!(!authority::backfill_slice(&transaction,Duration::ZERO).unwrap());
@@ -1609,14 +1616,14 @@ fn dirty_work_before_saved_round_robin_cursor_is_serviced_in_the_same_slice() {
     let grant = append(&store,SUBJECT,GRANTED,fields());
     drain_authority(&store);
     let mut connection = store.connection.write();
-    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hb7abee1d3c34 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     let sequence: i64 = connection.query_row(
         "SELECT sequence FROM assistant_grant_queue_owners WHERE queue='dirty' AND owner=?1",
         [&grant.id], |row| row.get(0),
     ).unwrap();
     for key in ["assistant_grant_owner_cursor/dirty", "assistant_grant_owner_upper/dirty"] {
         connection.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-hdc1a81f82dc2 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
             params![key,sequence+1],
         ).unwrap();
     }
@@ -1643,10 +1650,10 @@ fn authenticated_proof_recheck_owner_finishes_despite_lower_and_between_id_arriv
     // The victim keeps its real signed claim and evidence. Controlled IDs exist
     // only as stale queue owners whose missing claims should be retired.
     connection.execute(
-        "INSERT INTO assistant_grant_proof_rechecks VALUES('!m/initial')", [],
+        /* sqlite-large-value: allow-for-now lv-hc29bf21ad872 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES('!m/initial')", [],
     ).unwrap();
     connection.execute(
-        "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id],
+        /* sqlite-large-value: allow-for-now lv-hd8dbafedad29 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id],
     ).unwrap();
     assert!(authority::subject_ready(&connection, SUBJECT).is_err());
     let mut lifted = false;
@@ -1655,7 +1662,7 @@ fn authenticated_proof_recheck_owner_finishes_despite_lower_and_between_id_arriv
             let id = format!("{prefix}/{slice:08}");
             assert!(id.as_str()<grant.id.as_str());
             connection.execute(
-                "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&id],
+                /* sqlite-large-value: allow-for-now lv-ha3bff3300652 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&id],
             ).unwrap();
         }
         // Each visit commits independently: neither the owner turn nor the
@@ -1691,8 +1698,8 @@ fn authenticated_proof_recheck_owner_finishes_despite_lower_and_between_id_arriv
     ).unwrap(), "stale missing-claim rechecks must retire normally");
 }
 
-include!("assistant_grant_receipt_cost_tests.rs");
-include!("assistant_grant_attachment_tests.rs");
+/* sqlite-large-value: allow-for-now lv-h70e364d23629 owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ include!("assistant_grant_receipt_cost_tests.rs");
+/* sqlite-large-value: allow-for-now lv-h5d5b16b3dd2b owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ include!("assistant_grant_attachment_tests.rs");
 
 #[path = "assistant_grant_membership_property_tests.rs"]
 mod membership_property_tests;

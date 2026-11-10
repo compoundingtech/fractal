@@ -377,7 +377,7 @@ fn measure_backfill(config: Config) {
     {
         let connection = store.connection.write();
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h54566dabc8dc owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */
+            /* sqlite-large-value: allow-for-now lv-h8a66f653be39 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */
             "DROP TRIGGER IF EXISTS assistant_grant_dirty_insert;
              DELETE FROM assistant_grant_authority;
              DELETE FROM assistant_grant_effective;
@@ -391,9 +391,9 @@ fn measure_backfill(config: Config) {
                 OR key LIKE 'assistant_grant_authority_cursor/%';",
         ).unwrap();
     }
-    // Invalidating readiness above makes the production worker persist its
-    // sealed snapshot, rather than taking the already-idle in-memory fast path.
-    assert!(store.advance_assistant_grant_authority_backfill().unwrap());
+    // Prepare real durable membership without charging claim-maintenance work
+    // to fixture setup or depending on Store's idle in-memory fast path.
+    store.persist_assistant_grant_membership_for_test().unwrap();
     {
         let mut connection = store.connection.write();
         connection.execute(/* sqlite-large-value: allow-for-now lv-hb93a7253f42d owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='assistant_grant_authority_version'", []).unwrap();

@@ -541,7 +541,7 @@ overlays. The authenticated authority projection in PR #5993 preserves those
 requirements without treating raw claim rows as authority.
 
 `smallclaims::store::assistant_grant_authority` owns schema site
-`lv-hbfff283c1bdb`. Its authority transition index includes the exact base claim
+`lv-hecb38ff7561b`. Its authority transition index includes the exact base claim
 and canonical store order; its effective-grant active index keys principal,
 owner, revocation, expiry and profile. Authenticated records, grant subjects,
 principal/actor keys and proof identities remain inline variable-size values.
@@ -602,6 +602,36 @@ They exercise batch/scalar parity and shared-signature verification deduplicatio
 in an in-memory store; they add no production writer. The maintainer retains the
 listed body/predecessor and exact-wire representation TODOs for these fixture
 copies; this exception is not a byte-size or execution-cost proof.
+
+## Attachment work and queue-owner inventory (PR #6306)
+
+`smallclaims::store::assistant_grant_authority` owns attachment schema
+`lv-hecb38ff7561b`, replacing `lv-hbfff283c1bdb`, and queue-owner schema
+`lv-h8523b0e4eedf`. Attachment work stores candidate/base claim IDs, subject,
+origin, actor and lower/upper claim-ID cursors; conservative witnesses copy the
+effective grant's principal, owner, profile, expiry, revocation and record JSON.
+Pending-row and witness indexes retain these variable TEXT keys inline.
+Reference/chunk conversion must preserve exact authenticated pairs and
+conservative conflict visibility until resumable attachment work finishes.
+
+The seven maintenance queues register owner/subowner TEXT identities with local
+integer admission sequences. Insert/delete triggers maintain that registry;
+upgrade populates it from existing queued work, not raw claim history.
+Per-queue metadata retains the current sequence cursor and fixed round frontier,
+and maintenance-turn metadata rotates the queues. These replace the old
+dirty/witness content-key cursors rather than creating a second scheduler.
+The registry's variable keys and old-cell/index reclamation remain the module's
+`chunk-or-reference-variable-columns` and
+`bound-or-reference-values-and-reclamation` work. Local sequence order and
+per-slice row counts do not establish byte-size or total-upgrade-cost bounds.
+
+The `assistant_grant_attachment_tests`, `assistant_grant_authority_tests` and
+`assistant_grant_authority_bench` producer modules retain their own exceptions
+for isolated witness/queue mutations, reset statements, count tables and
+measurement triggers. Their follow-up must preserve candidate accounting,
+conservative visibility, owner-round fairness and keyed cleanup when values
+move to references. Fixture constants and integer counters do not exempt their
+variable keys, copied grant records or declared indexes from representation review.
 
 ## Incremental observed credit heads
 

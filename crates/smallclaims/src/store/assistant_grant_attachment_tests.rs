@@ -12,7 +12,7 @@ struct AttachmentSliceWork {
 
 fn attachment_install_counter(connection: &Connection) {
     connection.execute_batch(
-        "CREATE TEMP TABLE attachment_slice_work (
+        /* sqlite-large-value: allow-for-now lv-h883a0563031f owner=smallclaims::store::assistant_grant_attachment_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE attachment_slice_work (
              candidates INTEGER NOT NULL, completions INTEGER NOT NULL,
              pair_inserts INTEGER NOT NULL, pair_updates INTEGER NOT NULL,
              pair_deletes INTEGER NOT NULL, witness_cleanups INTEGER NOT NULL);
@@ -59,7 +59,7 @@ fn attachment_connection_slice(connection: &mut Connection, budget: Duration) ->
     // and effective-row writes materialize the same candidate, so do not count
     // them twice. Retiring a saved conflict witness is a separate shared unit.
     connection.execute(
-        "UPDATE attachment_slice_work SET candidates=0,completions=0,
+        /* sqlite-large-value: allow-for-now lv-h5aae6d0fcbc6 owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE attachment_slice_work SET candidates=0,completions=0,
          pair_inserts=0,pair_updates=0,pair_deletes=0,witness_cleanups=0", [],
     ).unwrap();
     let transaction = connection.transaction().unwrap();
@@ -364,7 +364,7 @@ fn trimming_an_attachment_owner_and_opposite_mid_task_does_not_restore_stale_pai
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
         for claim in [&transitions[0],&grants[0]] {
-            transaction.execute("DELETE FROM claims WHERE id=?1", [&claim.id]).unwrap();
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-hc498f691123a owner=smallclaims::store::assistant_grant_attachment_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id]).unwrap();
             authority::refresh_claim(&transaction, &claim.id).unwrap();
             let own_tasks: usize = transaction.query_row(
                 "SELECT COUNT(*) FROM assistant_grant_attachments WHERE claim_id=?1", [&claim.id], |row| row.get(0),
@@ -486,14 +486,14 @@ fn ineligible_witness_prefix_consumes_bounded_visits_in_zero_and_full_slices() {
         // the unfinished subject's tasks intentionally have missing owners.
         for index in 0..PREFIX {
             connection.execute(
-                "INSERT INTO assistant_grant_attachment_witnesses
+                /* sqlite-large-value: allow-for-now lv-h108afeaef9c1 owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachment_witnesses
                  SELECT ?1,'prefix/unfinished',principal,owner,profile,expires_at,revoked,grant_record
                  FROM assistant_grant_effective WHERE claim_id=?2",
                 params![format!("prefix/{index:08}"),grant.id],
             ).unwrap();
         }
         connection.execute(
-            "INSERT INTO assistant_grant_attachment_witnesses
+            /* sqlite-large-value: allow-for-now lv-h9254089d7b16 owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachment_witnesses
              SELECT 'tail/eligible','tail/finished',principal,owner,profile,expires_at,revoked,grant_record
              FROM assistant_grant_effective WHERE claim_id=?1", [&grant.id],
         ).unwrap();
@@ -501,13 +501,13 @@ fn ineligible_witness_prefix_consumes_bounded_visits_in_zero_and_full_slices() {
         // accidentally make the prefix eligible before the tail is reached.
         for index in 0..(PREFIX * 4) {
             connection.execute(
-                "INSERT INTO assistant_grant_attachments
+                /* sqlite-large-value: allow-for-now lv-h122fd32ce7be owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachments
                  VALUES(?1,?2,'prefix/unfinished','missing','missing','','')",
                 params![format!("prefix-task/{index:08}"),GRANTED],
             ).unwrap();
         }
         connection.execute_batch(
-            "DELETE FROM meta WHERE key IN ('assistant_grant_owner_cursor/witness','assistant_grant_owner_upper/witness');
+            /* sqlite-large-value: allow-for-now lv-h507602eef215 owner=smallclaims::store::assistant_grant_attachment_tests TODO=chunk-or-reference-variable-columns */ "DELETE FROM meta WHERE key IN ('assistant_grant_owner_cursor/witness','assistant_grant_owner_upper/witness');
              CREATE TEMP TABLE witness_visits (id INTEGER PRIMARY KEY, base_claim_id TEXT NOT NULL);
              CREATE TEMP TRIGGER witness_visit_counter AFTER INSERT ON main.meta
              WHEN NEW.key='assistant_grant_owner_cursor/witness' BEGIN
@@ -520,7 +520,7 @@ fn ineligible_witness_prefix_consumes_bounded_visits_in_zero_and_full_slices() {
         let mut visited = 0;
         let mut finished = false;
         for _ in 0..(8 * (PREFIX + 1)) {
-            connection.execute("DELETE FROM witness_visits", []).unwrap();
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hc1ff7fff40e5 owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM witness_visits", []).unwrap();
             let transaction = connection.transaction().unwrap();
             assert!(!authority::backfill_slice(&transaction, budget).unwrap());
             let visits: Vec<String> = transaction.prepare(
@@ -578,7 +578,7 @@ fn attachment_owner_turn_survives_reopen_and_lower_and_between_id_arrivals() {
         // Only queue fixtures have controlled IDs. The victim and its base are
         // real local appends, with their ordinary content-derived claim IDs.
         store.connection.write().execute(
-            "INSERT INTO assistant_grant_attachments
+            /* sqlite-large-value: allow-for-now lv-h6e10366c69da owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachments
              VALUES('!m/initial',?1,'attacker/subject','missing','missing','','')",
             [GRANTED],
         ).unwrap();
@@ -599,7 +599,7 @@ fn attachment_owner_turn_survives_reopen_and_lower_and_between_id_arrivals() {
             let id = format!("{prefix}/{slice:08}");
             assert!(id.as_str()<policy.id.as_str());
             connection.execute(
-                "INSERT INTO assistant_grant_attachments
+                /* sqlite-large-value: allow-for-now lv-h0cdb58e7f665 owner=smallclaims::store::assistant_grant_attachment_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_attachments
                  VALUES(?1,?2,'attacker/subject','missing','missing','','')",
                 params![id,GRANTED],
             ).unwrap();

@@ -100,7 +100,7 @@ pub fn expiry_key(value: u64) -> String { format!("{value:020}") }
 
 pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hbfff283c1bdb owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-hecb38ff7561b owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
             claim_id TEXT NOT NULL, base_claim_id TEXT NOT NULL,
             grant_subject TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
@@ -254,7 +254,7 @@ fn install_auth_cursor(connection: &Connection) -> Result<()> {
 // content hash. Queue rows keep their existing schemas and inner page cursors.
 fn install_queue_owners(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS assistant_grant_queue_sequences (
+        /* sqlite-large-value: allow-for-now lv-h8523b0e4eedf owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS assistant_grant_queue_sequences (
            queue TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
          CREATE TABLE IF NOT EXISTS assistant_grant_queue_owners (
            queue TEXT NOT NULL, owner TEXT NOT NULL, subowner TEXT NOT NULL,
@@ -272,12 +272,12 @@ fn install_queue_owners(connection: &Connection) -> Result<()> {
         ("witness","assistant_grant_attachment_witnesses","base_claim_id","''"),
     ] {
         connection.execute(
-            "INSERT OR IGNORE INTO assistant_grant_queue_sequences VALUES(?1,0)", [queue],
+            /* sqlite-large-value: allow-for-now lv-h1b952236b766 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_queue_sequences VALUES(?1,0)", [queue],
         )?;
         let new_subowner = if subowner=="''" { "''".to_owned() } else { format!("NEW.{subowner}") };
         let old_subowner = if subowner=="''" { "''".to_owned() } else { format!("OLD.{subowner}") };
         connection.execute_batch(&format!(
-            "CREATE TRIGGER IF NOT EXISTS {table}_owner_insert AFTER INSERT ON {table}
+            /* sqlite-large-value: allow-for-now lv-h76abc2bf6838 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_owner_insert AFTER INSERT ON {table}
              WHEN NOT EXISTS(SELECT 1 FROM assistant_grant_queue_owners
                WHERE queue='{queue}' AND owner=CAST(NEW.{owner} AS TEXT) AND subowner={new_subowner})
              BEGIN
@@ -296,7 +296,7 @@ fn install_queue_owners(connection: &Connection) -> Result<()> {
             // Only the existing work set is indexed once on upgrade; raw claim
             // history and already-completed authority are never replayed.
             connection.execute_batch(&format!(
-                "INSERT INTO assistant_grant_queue_owners
+                /* sqlite-large-value: allow-for-now lv-hffdfae208d46 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_queue_owners
                    SELECT '{queue}',CAST({owner} AS TEXT),{subowner},
                      ROW_NUMBER() OVER(ORDER BY {owner},{subowner})
                    FROM {table};
@@ -307,11 +307,11 @@ fn install_queue_owners(connection: &Connection) -> Result<()> {
         }
     }
     connection.execute(
-        "DELETE FROM meta WHERE key IN ('assistant_grant_dirty_cursor','assistant_grant_attachment_witness_cursor')",
+        /* sqlite-large-value: allow-for-now lv-h4f48d30d177b owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key IN ('assistant_grant_dirty_cursor','assistant_grant_attachment_witness_cursor')",
         [],
     )?;
     connection.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('assistant_grant_queue_owners_installed','1')", [],
+        /* sqlite-large-value: allow-for-now lv-hdb46a61cfda0 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES('assistant_grant_queue_owners_installed','1')", [],
     )?;
     Ok(())
 }
@@ -336,7 +336,7 @@ fn queue_owner(connection: &Connection, queue: &str) -> Result<Option<(String,St
                 [queue], |row| row.get(0),
             )?;
             connection.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
+                /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
             )?;
             seek(0,upper)?
         }
@@ -345,7 +345,7 @@ fn queue_owner(connection: &Connection, queue: &str) -> Result<Option<(String,St
     // The fixed round frontier excludes all later arrivals, including arrivals
     // above the current cursor. An unfinished owner resumes next round.
     connection.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![cursor_key,sequence],
+        /* sqlite-large-value: allow-for-now lv-h8760a7d75590 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![cursor_key,sequence],
     )?;
     Ok(Some((owner,subowner)))
 }
@@ -687,7 +687,7 @@ fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
     let kinds: &[&str] = if claim.kind==GRANTED { &[POLICY,REVOKED] } else { &[GRANTED] };
     for kind in kinds {
         connection.execute(
-            "INSERT OR IGNORE INTO assistant_grant_attachments
+            /* sqlite-large-value: allow-for-now lv-h8f01e3faea8f owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_attachments
              (claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id)
              SELECT ?1,?2,?3,?4,?5,'',claim_id FROM assistant_grant_pending
              INDEXED BY assistant_grant_pending_attachment_index
@@ -723,7 +723,7 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
     } else { None };
     let Some((candidate_id,candidate)) = candidate else {
         connection.execute(
-            "DELETE FROM assistant_grant_attachments WHERE claim_id=?1 AND candidate_kind=?2", params![id,kind],
+            /* sqlite-large-value: allow-for-now lv-h0545b8ffe4b6 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachments WHERE claim_id=?1 AND candidate_kind=?2", params![id,kind],
         )?;
         return Ok(true);
     };
@@ -734,7 +734,7 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
     // Demotion precedes attachment and cancels the owner's tasks.
     if transition_valid(base,transition) {
         connection.execute(
-            "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
+            /* sqlite-large-value: allow-for-now lv-h7e9db0ae826a owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
              SELECT claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record
              FROM assistant_grant_effective WHERE claim_id=?1", [&base.id],
         )?;
@@ -745,7 +745,7 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
     }
     // Invalid candidates advance and consume exactly the same unit.
     connection.execute(
-        "UPDATE assistant_grant_attachments SET after_claim_id=?3 WHERE claim_id=?1 AND candidate_kind=?2",
+        /* sqlite-large-value: allow-for-now lv-h8fb933e31076 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_attachments SET after_claim_id=?3 WHERE claim_id=?1 AND candidate_kind=?2",
         params![id,kind,candidate_id],
     )?;
     Ok(true)
@@ -762,7 +762,7 @@ fn attachment_witness_one(connection: &Connection) -> Result<bool> {
         [&subject], |row| row.get(0),
     )?;
     if !pending {
-        connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [&base])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h65210e524ade owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [&base])?;
     }
     Ok(true)
 }
@@ -793,7 +793,7 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
             /* sqlite-large-value: allow-for-now lv-h28df63bc590a owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "UPDATE assistant_grant_pending SET authenticated=0,auth_member_key=NULL,
              auth_sequence=NULL,auth_envelope_hash=NULL,auth_record_position=NULL WHERE claim_id=?1", [id],
         )?;
-        connection.execute("DELETE FROM assistant_grant_attachments WHERE claim_id=?1", [id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h018f62ad3faf owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachments WHERE claim_id=?1", [id])?;
         connection.execute(
             /* sqlite-large-value: allow-for-now lv-h7ab907abb853 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_recompute
              SELECT claim_id FROM assistant_grant_pending WHERE claim_id=?1", [id],
@@ -869,7 +869,7 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
 fn rebuild_authenticated_subject(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
     // Fanout is durable work, not a subject-history replay in this claim's unit.
     // At most two kind partitions belong to an owner; cancellation is constant.
-    connection.execute("DELETE FROM assistant_grant_attachments WHERE claim_id=?1", [&claim.id])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h5ff6179b5135 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachments WHERE claim_id=?1", [&claim.id])?;
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h53b6a1e0835c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_recompute(claim_id) VALUES(?1)",
         [&claim.id])?;
@@ -1344,14 +1344,14 @@ fn retraction_one(connection: &Connection) -> Result<bool> {
         params![writer,key,lower,upper,sequence,id], |row| Ok((row.get(0)?,row.get(1)?)),
     ).optional()?;
     if let Some((sequence,id)) = pending {
-        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
-        connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h2daf7a592c21 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hbc290dd6ae0d owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
         connection.execute(
-            "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-h7be65771e125 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
             params![task,sequence,id],
         )?;
     } else {
-        connection.execute("DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hc1e17d6d240e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
     }
     Ok(true)
 }
@@ -1375,7 +1375,7 @@ fn history_one(connection: &Connection, membership_current: bool) -> Result<bool
         if let Some((id,index)) = claim {
             refresh_claim_inner(connection,&id,membership_current)?;
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
+                /* sqlite-large-value: allow-for-now lv-hba2ee169759a owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
                 "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
                 params![key,index.to_string()],
             )?;
@@ -1418,7 +1418,7 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             }
             if visited {
                 connection.execute(
-                    "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn',?1)",
+                    /* sqlite-large-value: allow-for-now lv-hedcbf9131f97 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn',?1)",
                     [turn as i64],
                 )?;
             }
@@ -1465,9 +1465,9 @@ impl Store {
     // not mirror membership invalidation in another trigger/revision.
     // Only actual changed windows acquire the writer; equal snapshots update an
     // in-memory observation, without SQL writes or authentication cursor resets.
-    fn prepare_assistant_grant_membership(&self) -> Result<Option<MembershipUpdate>> {
+    fn prepare_assistant_grant_membership(&self, force: bool, limit: usize) -> Result<Option<MembershipUpdate>> {
         let generation = self.assistant_grant_membership_generation()?;
-        if generation==self.assistant_grant_membership_observed_generation.load(Ordering::Acquire) {
+        if !force && generation==self.assistant_grant_membership_observed_generation.load(Ordering::Acquire) {
             return Ok(None);
         }
         let connection = self.readers.get();
@@ -1486,17 +1486,17 @@ impl Store {
         )?.query_map([], |row| Ok(((row.get::<_,String>(0)?,row.get::<_,String>(1)?),
                                   (row.get::<_,u64>(2)?,row.get::<_,Option<u64>>(3)?))))?
             .collect::<rusqlite::Result<_>>()?;
-        let mut windows = Vec::with_capacity(CLAIMS_PER_SLICE);
+        let mut windows = Vec::with_capacity(limit);
         let mut complete = true;
         for (identity,window) in &desired {
             if current.get(identity)==Some(window) { continue; }
-            if windows.len()==CLAIMS_PER_SLICE { complete=false; break; }
+            if windows.len()==limit { complete=false; break; }
             windows.push((identity.0.clone(),identity.1.clone(),Some(*window)));
         }
         if complete {
             for identity in current.keys() {
                 if desired.contains_key(identity) { continue; }
-                if windows.len()==CLAIMS_PER_SLICE { complete=false; break; }
+                if windows.len()==limit { complete=false; break; }
                 windows.push((identity.0.clone(),identity.1.clone(),None));
             }
         }
@@ -1505,7 +1505,42 @@ impl Store {
 
     /// Background work only; receipt transactions never fold fleet history.
     pub fn advance_assistant_grant_authority_backfill(&self) -> Result<bool> {
-        let prepared = self.prepare_assistant_grant_membership()?;
+        self.advance_assistant_grant_authority_with_budget(Duration::from_millis(100),CLAIMS_PER_SLICE)
+    }
+
+    // The raw-connection driver cannot see Store's deliberately write-free
+    // in-memory membership observation. Persist a real sealed snapshot before
+    // fixtures hand control to that driver; never synthesize authentication.
+    #[cfg(test)]
+    pub(super) fn persist_assistant_grant_membership_for_test(&self) -> Result<()> {
+        loop {
+            let update = self.prepare_assistant_grant_membership(true,CLAIMS_PER_SLICE)?
+                .expect("forced membership preparation always returns its snapshot");
+            let mut connection = self.connection.write_background();
+            let transaction = connection.transaction()?;
+            let generation = if let Some(authority) = self.fleet_authority.get() {
+                authority.fleet_generation()?
+            } else {
+                fleet_generation(&transaction)?
+            };
+            if generation!=update.generation { continue; }
+            update.apply(&transaction)?;
+            transaction.commit()?;
+            if update.complete {
+                self.assistant_grant_membership_observed_generation.store(generation,Ordering::Release);
+                return Ok(());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn advance_assistant_grant_authority_backfill_for_test(&self, budget: Duration, units: usize) -> Result<bool> {
+        assert!(units>0 && units<=CLAIMS_PER_SLICE);
+        self.advance_assistant_grant_authority_with_budget(budget,units)
+    }
+
+    fn advance_assistant_grant_authority_with_budget(&self, budget: Duration, units: usize) -> Result<bool> {
+        let prepared = self.prepare_assistant_grant_membership(false,units)?;
         let generation = prepared.as_ref().map_or_else(
             || self.assistant_grant_membership_observed_generation.load(Ordering::Acquire),
             |update| update.generation,
@@ -1529,7 +1564,7 @@ impl Store {
         } else { 0 };
         let membership_current = prepared.as_ref().is_none_or(|update| update.complete);
         let done = backfill_slice_with_limit(
-            &transaction, Duration::from_millis(100), CLAIMS_PER_SLICE-used, membership_current,
+            &transaction, budget, units-used, membership_current,
         )?;
         transaction.commit()?;
         if membership_current {
