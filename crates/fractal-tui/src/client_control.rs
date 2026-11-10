@@ -25,6 +25,48 @@ pub(crate) fn validate_device(device: &Device, client_socket: &std::path::Path) 
     Ok(())
 }
 
+pub(crate) fn load_fixture_device(path: &std::path::Path, normal: &std::path::Path) -> Result<Device> {
+    use anyhow::Context;
+    ensure!(path != normal && path.canonicalize()? != normal.canonicalize().unwrap_or_else(|_| normal.to_owned()),
+        "Client control must not use the normal paired profile");
+    let profile = fractal_client::device::Profile::load(path)?
+        .context("Pair the isolated TUI profile first")?;
+    ensure!(profile.devices.len() == 1, "Fixture profile must contain exactly one pairing");
+    let device = profile.devices.into_iter().next().unwrap();
+    let socket = device.endpoint.strip_prefix("unix:").context("Fixture pairing requires a Unix endpoint")?;
+    validate_device(&device, std::path::Path::new(socket))?;
+    Ok(device)
+}
+
+/// Read-only observer output. Never serialize the unredacted device or profile.
+pub(crate) fn identity(path: &std::path::Path, normal: &std::path::Path) -> Result<Value> {
+    use anyhow::Context;
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let device = load_fixture_device(path, normal)?;
+    let public_key = device.signing_key.as_ref().context("Fixture key missing")?.public_key()?;
+    let point = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(
+        public_key.strip_prefix("p256:").context("Fixture key must be P-256")?)?;
+    ensure!(point.len() == 65 && point[0] == 4, "Fixture key must be uncompressed P-256");
+    let mut snapshot: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let devices = snapshot["devices"].as_array_mut().context("Invalid fixture profile")?;
+    ensure!(devices.len() == 1, "Fixture profile must contain exactly one pairing");
+    for device in devices {
+        for (section, field) in [("signing_key", "pkcs8"), ("session", "credential")] {
+            let secret = device[section][field].as_str().context("Missing fixture secret")?;
+            let digest = format!("{:x}", Sha256::digest(secret.as_bytes()));
+            device[section][field] = serde_json::json!({"redacted":"[REDACTED]","sha256":digest});
+        }
+    }
+    Ok(serde_json::json!({
+        "public_key":public_key,
+        "fingerprint":format!("{:x}", Sha256::digest(&point)),
+        "device_id":device.session.device_id,
+        "session_actor":device.session.session_actor,
+        "profile":snapshot,
+    }))
+}
+
 fn fresh(value: &Value) -> bool {
     value.as_str().is_some_and(fresh_timestamp)
 }
@@ -158,6 +200,61 @@ mod tests {
     use serde_json::json;
     use super::*;
     use fractal_client::device::{KeyAlgorithm, SigningKey};
+
+    #[test]
+    fn identity_is_read_only_redacted_and_detects_secret_changes() {
+        use fractal_client::device::Profile;
+        use sha2::{Digest, Sha256};
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.json");
+        let normal = dir.path().join("normal.json");
+        let mut device = fixture().0.device;
+        device.signing_key = Some(SigningKey::generate(KeyAlgorithm::P256).unwrap());
+        let mut profile = Profile { devices: vec![device] };
+        profile.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let raw: Value = serde_json::from_slice(&before).unwrap();
+        let output = identity(&path, &normal).unwrap();
+        assert_eq!(output.as_object().unwrap().len(), 5);
+        let point = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(output["public_key"].as_str().unwrap().strip_prefix("p256:").unwrap()).unwrap();
+        assert_eq!(point.len(), 65);
+        assert_eq!(output["fingerprint"], format!("{:x}", Sha256::digest(&point)));
+        assert_eq!(output["device_id"], raw["devices"][0]["session"]["device_id"]);
+        assert_eq!(output["session_actor"], raw["devices"][0]["session"]["session_actor"]);
+        let printed = serde_json::to_string(&output).unwrap();
+        for (section, field) in [("signing_key", "pkcs8"), ("session", "credential")] {
+            let secret = raw["devices"][0][section][field].as_str().unwrap();
+            assert!(!printed.contains(secret));
+            assert_eq!(output["profile"]["devices"][0][section][field]["redacted"], "[REDACTED]");
+            assert_eq!(output["profile"]["devices"][0][section][field]["sha256"],
+                format!("{:x}", Sha256::digest(secret.as_bytes())));
+        }
+        let mut restored = output["profile"].clone();
+        restored["devices"][0]["signing_key"]["pkcs8"] = raw["devices"][0]["signing_key"]["pkcs8"].clone();
+        restored["devices"][0]["session"]["credential"] = raw["devices"][0]["session"]["credential"].clone();
+        assert_eq!(restored, raw);
+        assert_eq!(Sha256::digest(std::fs::read(&path).unwrap()), Sha256::digest(&before));
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert!(identity(&path, &path).is_err());
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(&path, &normal).unwrap();
+            assert!(identity(&normal, &path).is_err());
+        }
+        profile.devices[0].session.credential.push('x');
+        profile.devices[0].signing_key = Some(SigningKey::generate(KeyAlgorithm::P256).unwrap());
+        profile.save(&path).unwrap();
+        let changed = identity(&path, &dir.path().join("other.json")).unwrap();
+        for (section, field) in [("signing_key", "pkcs8"), ("session", "credential")] {
+            assert_ne!(changed["profile"]["devices"][0][section][field]["sha256"],
+                output["profile"]["devices"][0][section][field]["sha256"]);
+        }
+        profile.devices.push(profile.devices[0].clone());
+        profile.save(&path).unwrap();
+        assert!(identity(&path, &dir.path().join("other.json")).is_err());
+    }
 
     fn fixture() -> (Control, Value) {
         let device: Device = serde_json::from_value(json!({

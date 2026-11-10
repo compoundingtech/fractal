@@ -810,6 +810,22 @@ pub enum Action {
     /// unless they are typing a message or `--keep-focus` says to leave it. The request waits
     /// for fractal to know the subject, so an agent made a moment ago can be opened.
     Open(OpenArgs),
+    /// Read-only fixture client observation; never pairs or opens the interface.
+    ClientControl {
+        #[command(subcommand)]
+        action: ClientControlAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ClientControlAction {
+    /// Print public identity and a secret-redacted profile snapshot without writing.
+    Identity {
+        #[arg(long)]
+        profile: std::path::PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -979,8 +995,14 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
 /// Run the TUI before starting a CLI runtime. This owns its runtime and terminal guards,
 /// and sets the client name before any connection can initialize the shared name lock.
 pub fn run(mut options: Args) -> Result<()> {
-    if let Some(Action::Open(open)) = options.action.take() {
-        return open_in_terminal_ui(&open);
+    match options.action.take() {
+        Some(Action::Open(open)) => return open_in_terminal_ui(&open),
+        Some(Action::ClientControl { action: ClientControlAction::Identity { profile, json: _ } }) => {
+            let identity = client_control::identity(&profile, &connection::profile_path()?)?;
+            println!("{}", serde_json::to_string(&identity)?);
+            return Ok(());
+        }
+        None => {}
     }
     anyhow::ensure!(!options.classic, CLASSIC_GONE);
     let process_started = std::time::Instant::now();
@@ -1019,11 +1041,7 @@ pub fn run(mut options: Args) -> Result<()> {
         anyhow::ensure!(options.endpoint.as_ref() == Some(socket),
             "Client control requires --endpoint pointing to the fixture client socket");
         let normal = connection::profile_path()?;
-        anyhow::ensure!(path != normal && path.canonicalize()? != normal.canonicalize().unwrap_or(normal),
-            "Client control must not use the normal paired profile");
-        let profile = connection::Profile::load(path)?.context("Pair the isolated TUI profile first")?;
-        anyhow::ensure!(profile.devices.len() == 1, "Fixture profile must contain exactly one pairing");
-        let device = profile.devices.into_iter().next().unwrap();
+        let device = client_control::load_fixture_device(path, &normal)?;
         client_control::validate_device(&device, socket)?;
         Some(device)
     } else { None };

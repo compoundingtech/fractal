@@ -337,6 +337,17 @@ consent packet. The packet names kind `tui`, instance `client-control-fixture`,
 the selected host, and the native consent ask. No runtime device, session, grant,
 run or message IDs are precomputed.
 
+Read-only observer identity is available without opening the interface:
+`fractal tui client-control identity --profile DEDICATED_PROFILE --json`.
+It refuses the normal profile and requires exactly one fixture command pairing.
+The JSON contains `public_key` (canonical `p256:`), `fingerprint` (lowercase
+SHA-256 of the 65-byte uncompressed SEC1 point), `device_id`, `session_actor`,
+and `profile`. The latter preserves the full on-disk JSON except that
+`signing_key.pkcs8` and `session.credential` become
+`{"redacted":"[REDACTED]","sha256":"..."}`; each digest covers the exact UTF-8
+bytes of the original string value. The helper never saves or changes the
+profile, pairs a device, enrolls it, or contacts the daemon.
+
 After the separate fixture setup and TUI enrollment approvals, use the existing
 `pairing.begin` operation with scopes exactly `read.projections` and
 `control.commands`. Complete its manually supplied code and independently pinned
