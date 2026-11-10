@@ -160,6 +160,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case pairingOriginRequired
     case pairingRestartRequired
     case pairingKeyMismatch
+    case pairingKeyBindingRequired
+    case pairingAlreadyClaimed
+    case pairingClaimInvalid
     case suspendAuthoredSessionSelection
     case legacyActionReceiptUntrusted
     case arrangementExists
@@ -251,6 +254,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "pairing-origin-required": .pairingOriginRequired
         case "pairing-restart-required": .pairingRestartRequired
         case "pairing-key-mismatch": .pairingKeyMismatch
+        case "pairing-key-binding-required": .pairingKeyBindingRequired
+        case "pairing-already-claimed": .pairingAlreadyClaimed
+        case "pairing-claim-invalid": .pairingClaimInvalid
         case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
@@ -344,6 +350,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .pairingOriginRequired: "pairing-origin-required"
         case .pairingRestartRequired: "pairing-restart-required"
         case .pairingKeyMismatch: "pairing-key-mismatch"
+        case .pairingKeyBindingRequired: "pairing-key-binding-required"
+        case .pairingAlreadyClaimed: "pairing-already-claimed"
+        case .pairingClaimInvalid: "pairing-claim-invalid"
         case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
@@ -1470,7 +1479,22 @@ public enum PairingBegin: Codable, Sendable {
     }
     private enum PrincipalKeys: String, CodingKey { case assistantID = "assistant_id" }
 }
-public struct PersonPairingBegin: Codable, Sendable { public let apiVersion: String; public let deviceName: String; public let deviceKeyFingerprint: String?; public let personID: String; public let fullControl: Bool?; public let fabricGateway: Bool?; public let scopes: [String]?; public init(apiVersion: String, deviceName: String, personID: String, fullControl: Bool? = nil, fabricGateway: Bool? = nil, scopes: [String]? = nil, deviceKeyFingerprint: String? = nil) { self.apiVersion = apiVersion; self.deviceName = deviceName; self.deviceKeyFingerprint = deviceKeyFingerprint; self.personID = personID; self.fullControl = fullControl; self.fabricGateway = fabricGateway; self.scopes = scopes }; enum CodingKeys: String, CodingKey { case apiVersion = "api_version", deviceName = "device_name", deviceKeyFingerprint = "device_key_fingerprint", personID = "person_id", fullControl = "full_control", fabricGateway = "fabric_gateway", scopes } }
+public struct PersonPairingBegin: Codable, Sendable { public let apiVersion: String; public let deviceName: String; public let deviceKeyFingerprint: String?; public let binding: String?; public let personID: String; public let fullControl: Bool?; public let fabricGateway: Bool?; public let scopes: [String]?; public init(apiVersion: String, deviceName: String, personID: String, fullControl: Bool? = nil, fabricGateway: Bool? = nil, scopes: [String]? = nil, deviceKeyFingerprint: String? = nil, binding: String? = nil) { self.apiVersion = apiVersion; self.deviceName = deviceName; self.deviceKeyFingerprint = deviceKeyFingerprint; self.binding = binding; self.personID = personID; self.fullControl = fullControl; self.fabricGateway = fabricGateway; self.scopes = scopes }; enum CodingKeys: String, CodingKey { case apiVersion = "api_version", deviceName = "device_name", deviceKeyFingerprint = "device_key_fingerprint", binding, personID = "person_id", fullControl = "full_control", fabricGateway = "fabric_gateway", scopes } }
+public struct PairingKeyClaim: Codable, Sendable {
+    public let apiVersion, code, devicePublicKey, proof: String
+    public init(apiVersion: String, code: String, devicePublicKey: String, proof: String) { self.apiVersion = apiVersion; self.code = code; self.devicePublicKey = devicePublicKey; self.proof = proof }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", code, devicePublicKey = "device_public_key", proof }
+}
+public struct PairingKeyApproval: Codable, Sendable {
+    public let apiVersion, deviceKeyFingerprint: String
+    public init(apiVersion: String, deviceKeyFingerprint: String) { self.apiVersion = apiVersion; self.deviceKeyFingerprint = deviceKeyFingerprint }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", deviceKeyFingerprint = "device_key_fingerprint" }
+}
+public struct PairingKeyStatus: Codable, Sendable {
+    public let kind, status, expiresAt: String
+    public let deviceKeyFingerprint: String?
+    enum CodingKeys: String, CodingKey { case kind, status, expiresAt = "expires_at", deviceKeyFingerprint = "device_key_fingerprint" }
+}
 public struct PairingChallenge: Codable, Sendable {
     public let kind, pairingID, code, expiresAt: String; public let personRootFingerprint: String?
     public let principal: AssistantPrincipal?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
