@@ -4375,7 +4375,7 @@
       "required": ["_tag", "version", "gateway", "id", "code", "expires_at_unix_ms"],
       "properties": {
         "_tag": { "const": "fractal.pairing" }, "version": { "enum": [1, 2] },
-        "gateway": { "type": "string", "format": "uri" }, "id": { "$ref": "#/$defs/Id" },
+        "gateway": { "type": "string", "format": "uri-reference", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:" }, "id": { "$ref": "#/$defs/Id" },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "expires_at_unix_ms": { "type": "integer" }, "fabric": { "$ref": "#/$defs/PairingFabricPermit" }
       },
