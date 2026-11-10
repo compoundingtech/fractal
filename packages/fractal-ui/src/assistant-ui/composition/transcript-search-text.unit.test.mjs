@@ -73,6 +73,18 @@ test('whitespace normalization and expanding case folds map back to exact DOM of
   assert.deepEqual(rangesIn(new JSDOM('<div>needle</div>').window.document.body, 'needle').map(range => range.toString()), ['needle'])
 })
 
+test('Greek sigma forms match in both directions with exact highlighted characters', () => {
+  for (const [source, query] of [['ΟΣ', 'ος'], ['ος', 'ΟΣ']]) {
+    const entries = searchEntries([turnFor(prose(source))])
+    const root = new JSDOM(`<p>prefix <strong>${source[0]}</strong><em>${source[1]}</em> suffix</p>`).window.document.body
+    assert.equal(findMatches(entries, query).length, 1)
+    const ranges = rangesIn(root, query)
+    assert.deepEqual(ranges.map(range => range.toString()), [source])
+    assert.equal(ranges[0].startOffset, 0)
+    assert.equal(ranges[0].endOffset, 1)
+  }
+})
+
 test('user prompts remain literal while assistant source rows use rendered Markdown', () => {
   const item = { ...prose('the **sidebar** reads'), role: 'user' }
   assert.equal(findMatches(searchEntries([turnFor(item)]), '**sidebar**').length, 1)

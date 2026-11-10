@@ -37,7 +37,8 @@ const normalized = (parts: readonly TextPart[]) => {
       const start = part.node === undefined ? undefined : { node: part.node, offset }
       offset += character.length
       const end = part.node === undefined ? undefined : { node: part.node, offset }
-      const folded = /\s/u.test(character) ? ' ' : character.toLowerCase()
+      // Fold final sigma too: matching must not depend on word position or inline-node boundaries.
+      const folded = /\s/u.test(character) ? ' ' : character === 'ς' ? 'σ' : character.toLowerCase()
       if (folded === ' ' && (text === '' || text.endsWith(' '))) {
         if (text.endsWith(' ') && end !== undefined) ends[text.length - 1] = end
         continue
