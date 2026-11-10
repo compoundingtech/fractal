@@ -7,6 +7,7 @@ Typed authoring for Fractal declarations: agents, missions and schedules kept as
 | `fractal` | isomorphic | The `Fractal` authoring namespace; declaration schemas and the KDL lowering (`agent`, `mission`, `schedule` nodes, `emit`, `fractalKdl`) as named exports |
 | `fractal/tree` | Node | `loadSubjectTree` plus the define forms and reference types |
 | `fractal/testing` | Node | `scratchDaemonLayer`, an isolated daemon for conformance tests |
+| `fractal/effect` | Bun program host, isomorphic | The `Fractal` namespace with the program forms of `mission` and `step`, plus `ask`, `run`, `command`, `env`, `cwd` and `Worker`; the host contract (`ProgramEntry`, `HostContextV1`) as named exports |
 
 ## Authoring
 
@@ -59,9 +60,48 @@ Validate the output with `fractal validate` before publishing it with `fractal a
 
 [`@fractal/declarations`](../../clients/typescript/fractal-declarations/README.md) is the generated, dependency-free encoder for a subset of the grammar. This package covers more of the grammar (gates, loops, inputs and products, documents, observers, calendar schedules) and path-derived trees. For the shared subset both produce the same declarations; `src/parity.unit.test.ts` and `crates/fractal/tests/validate.rs` check that. [COVERAGE.md](./COVERAGE.md) records grammar coverage and conformance evidence; [docs/requirements.md](./docs/requirements.md) and [docs/spec.md](./docs/spec.md) hold the contract.
 
-## Roadmap
+## Programs
 
-Program-form missions, `Fractal.mission(intent, program)` with `Fractal.step(...)` effects and `Fractal.ask`, are a design target shown in the documentation's Effect tab. They have no runtime yet: missions are declared as data.
+`fractal/effect` holds the program form of a mission (design: [`docs/st3/program-engine.md`](../../docs/st3/program-engine.md)), built on Effect's `effect/workflow`. A program's body branches on step values. Its bundle runs in the daemon's program host, which journals every step and replays the journal after a restart; this package implements the bundle's side of that host contract.
+
+```ts
+import { Effect, Schema } from 'effect'
+import { Fractal } from 'fractal/effect'
+
+import factory from '../agent.ts'
+
+export default Fractal.mission(
+  {
+    meta: import.meta,
+    id: 'factory/land',
+    goal: 'Land one change on main.',
+    reportTo: factory,
+    input: Schema.Struct({ change: Schema.String }),
+    output: Schema.Struct({ commit: Schema.String }),
+  },
+  ({ change }) =>
+    Effect.gen(function* () {
+      const out = yield* Fractal.step(
+        { id: 'merge', success: Schema.String },
+        Effect.map(Fractal.command(['./merge', change]), (result) => result.stdout.trim()),
+      )
+      return { commit: out }
+    }),
+)
+```
+
+| Call | `effect/workflow` | Journal |
+|---|---|---|
+| `Fractal.mission(intent, program)` | a `Workflow` with `intent.input` as payload and `intent.output` as success | the success, encoded with `output`, or the typed failure fails the program step |
+| `Fractal.step({ id, success?, error? }, effect)` | an `Activity` named by its key: `id`, then `id#2`… for repeats, so `Effect.retry` runs it again under a new key | its encoded value, or its typed failure with `_tag` and fields; defects and interrupts are not journaled |
+| `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | a `DurableDeferred` | a worker turn: a linked child run of `mission`; the product `resource/<child run>/<product>`, decoded with `success`, is the value |
+| `Fractal.ask({ id, for, title, request, deadline?, default? })` | a `DurableDeferred` | a native person ask on the program step, answered `AskAnswer` or failed `AskCancelled` |
+| `Fractal.run(mission, input, { id? })` | a `DurableDeferred` | a linked child run, `ChildRun` or `ChildFailed` |
+| `Fractal.command(argv, { env?, cwd?, priority? })` | — | not journaled: run it inside a step; the host runs it as a process group it ends on cancel |
+
+Every `input` field must be required and encode to a string, since each one is a native `input "name" kind="text"`; a payload that does not decode refuses the run with `InvalidInput`. Without `error`, a step or program journals any tagged error as `_tag` plus its fields and the step fails with that plain object (typed `Journaled<E>`), live and on replay, so `catchTag` matches; an untagged error is a defect. With `error`, the schema rebuilds the error as its class, which a program's `error` class needs. Only one fiber may use a step id: concurrent branches would take `id#n` keys in completion order, which replay does not reproduce, so a second branch using the id is a defect. A journal entry the daemon refuses ends the attempt with a defect that the body cannot catch.
+
+A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`; `fixtures/programs/factory/land-program` is the factory's landing program, and `src/program-bundle.unit.test.ts` runs its `bun build --target=bun` bundle. Bundling a program and rendering its `program` step declaration are not part of `loadSubjectTree` yet.
 
 ## Checks
 
