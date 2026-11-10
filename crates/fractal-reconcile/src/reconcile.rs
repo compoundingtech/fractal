@@ -17892,6 +17892,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     Value::String(retry_at.to_string()),
                                 ),
                             ]);
+                            if let Some(details) = error.downcast_ref::<crate::github_http::GithubResponseDetails>() {
+                                fields.insert("github_response".into(), serde_json::to_value(details)
+                                    .expect("GitHub response details contain only JSON primitives"));
+                            }
                             if let Some(attempt) = &refresh_attempt {
                                 fields.insert("attempt".into(), Value::String(attempt.clone()));
                             }
@@ -43747,8 +43751,15 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
             "closed",
         );
         // Polling again delivers nothing more.
+        let prior_claim = store.newest_claim_where("resource/repo/issue/1", "resource.observed", |_| true)
+            .unwrap().unwrap().id;
+        github.requests.lock().clear();
         poll(member_b).await;
         assert_eq!(delivered(), after);
+        assert_eq!(store.newest_claim_where("resource/repo/issue/1", "resource.observed", |_| true)
+            .unwrap().unwrap().id, prior_claim, "304-backed unchanged polls append no observation claim");
+        assert!(github.requests.lock().iter().any(|request|
+            request.to_ascii_lowercase().contains("if-none-match:")), "the idle REST poll revalidates");
     }
 
     /// A plugin database that fails is the observer's failure, never hidden. A read that fails

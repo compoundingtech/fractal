@@ -2332,6 +2332,7 @@ name = "fractal-resource-providers"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fractal-github-base",
  "fractal-resource-protocol",
  "fractal-resource-wasip2",
  "hickory-resolver",
