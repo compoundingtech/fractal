@@ -140,7 +140,7 @@ window.startShell = () => {
   const Fixture = () => {
     const [count, setCount] = useState(0)
     return createElement('div', { onClick: event => {
-      if (event.target.closest('[data-changelog-popover]')) {
+      if (event.target.closest('[data-devbar-build-changes]')) {
         event.stopPropagation()
         setTimeout(() => { flushSync(() => setCount(n => n + 1)); window.shellTimerDone = true }, 0)
       }
@@ -210,18 +210,18 @@ try {
     const samples = await page.evaluate(() => { window.stopCapture(); return window.samples })
     if (samples.length !== 8 || samples[7].attributes.outcome !== 'unacknowledged') throw new Error(JSON.stringify(samples))
     await page.evaluate(() => window.startShell())
-    await page.getByRole('button', { name: /^Changes/ }).click()
-    await page.getByRole('dialog', { name: 'Recent changes' }).waitFor()
-    const shellHost = await page.evaluate(() => document.querySelector('[data-app-overlay-host]').contains(document.querySelector('[data-changelog-popover]')))
-    if (!shellHost) throw new Error('Status-bar changelog escaped registered app host')
+    await page.getByRole('button', { name: /^Build identity/ }).click()
+    await page.getByRole('dialog', { name: 'Build and changes' }).waitFor()
+    // The kit's native popover renders in place in the top layer, inside the shell root the capture observes.
+    const shellHost = await page.evaluate(() => document.body.firstElementChild.contains(document.querySelector('[data-devbar-build-changes]')))
+    if (!shellHost) throw new Error('Developer-bar build popover escaped the registered shell root')
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     const shellGeometry = await page.evaluate(() => {
-      const host = document.querySelector('[data-app-overlay-host]')
-      const popover = document.querySelector('[data-changelog-popover]')
+      const popover = document.querySelector('[data-devbar-build-changes]').closest('[popover]')
       const bounds = popover.getBoundingClientRect()
-      return { hostPosition: getComputedStyle(host).position, hostZ: getComputedStyle(host).zIndex, popoverZ: getComputedStyle(popover).zIndex, width: bounds.width, height: bounds.height }
+      return { open: popover.matches(':popover-open'), width: bounds.width, height: bounds.height }
     })
-    if (shellGeometry.hostPosition !== 'static' || shellGeometry.hostZ !== 'auto' || Number(shellGeometry.popoverZ) <= 1000 || shellGeometry.width <= 0 || shellGeometry.height <= 0) throw new Error(JSON.stringify(shellGeometry))
+    if (!shellGeometry.open || shellGeometry.width <= 0 || shellGeometry.height <= 0) throw new Error(JSON.stringify(shellGeometry))
     const beforeNoop = await page.evaluate(() => window.shellSamples.length)
     if (beforeNoop < 1) throw new Error('Status-bar real opening produced no sample')
     await page.getByRole('heading', { name: \"What's new\" }).click()
@@ -229,8 +229,8 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     if (await page.evaluate(() => window.shellSamples.length) !== beforeNoop) throw new Error('Status-bar no-op attributed a timer commit')
     await page.evaluate(() => window.stopCapture())
-    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, shellGeometry, samples }))
-    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellChangelogHostAndTimerExclusion: true, shellGeometry, samples }
+    console.log(JSON.stringify({ status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellBuildPopoverRootAndTimerExclusion: true, shellGeometry, samples }))
+    return { status: 'pass', idleFrames: 8, rafIngestBeforeAndAfterCaptureExcluded: true, timerCommitsExcluded: true, stoppedReactCommitPainted: true, externalPortalBubbleAndCapture: true, realShellBuildPopoverRootAndTimerExclusion: true, shellGeometry, samples }
   }`])
 } finally {
   try { await run(['close']) } finally { await vite.close() }
