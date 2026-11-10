@@ -73,7 +73,6 @@ jobs:
       - proof-linux-fleet-compat
       - proof-linux-gate
       - proof-evidence-note-linux-gate
-      - proof-evidence-shadow-compare
       - proof-evidence-note-rust-tests
       - proof-fractal-web-changes
       - proof-fractal-web-execution
