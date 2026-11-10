@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./effect": "./src/effect.ts",
     "./testing": "./src/testing.ts",
     "./tree": "./src/tree.ts"
   },

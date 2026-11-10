@@ -71,6 +71,7 @@ pub use fractal_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub use fractal_reconcile::native_seed;
 pub use fractal_store::node_identity;
+pub use fractal_api_mailbox::declared_objectives;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
 pub use fractal_api_mailbox::readiness_slo;

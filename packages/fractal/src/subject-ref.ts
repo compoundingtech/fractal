@@ -1,5 +1,5 @@
 /** The declaration kind; a schedule is a mission carrying native timing. */
-export type SubjectKind = 'agent' | 'mission' | 'schedule'
+export type SubjectKind = 'agent' | 'mission' | 'schedule' | 'objective'
 
 /** An imported source module identity, resolved against the subject tree at publication. */
 export interface SubjectRef<K extends SubjectKind> {
