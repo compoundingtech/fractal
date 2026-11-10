@@ -7647,6 +7647,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
@@ -10840,7 +10841,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
-                    row["id"].as_str().unwrap_or_default().replace('/', "%2F"),
+                    urlencoding::encode(row["id"].as_str().unwrap_or_default()),
                 ))
                 .await?;
             if json_output {
