@@ -64,6 +64,43 @@ test('cancellation after async credentials prevents sending an action', async ()
     assert.equal(fetches, 0);
 });
 
+test('AbortSignal polyfills without throwIfAborted reach fetch unless aborted', async () => {
+    let fetches = 0;
+    const signal = { aborted: false };
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async (_url, init) => {
+            fetches++;
+            assert.equal(init.signal, signal);
+            return response(capabilityFixture);
+        },
+    });
+    await client.capabilities({ signal });
+    assert.equal(fetches, 1);
+    signal.aborted = true;
+    for (const reason of [new Error('cancelled by caller'), 'cancelled', 0, false]) {
+        signal.reason = reason;
+        await assert.rejects(client.capabilities({ signal }), error => error === reason);
+        await assert.rejects(client.discover({ signal }), error => error === reason);
+    }
+    assert.equal(fetches, 1);
+});
+
+test('aborted legacy signals use AbortError with and without global DOMException', async t => {
+    let fetches = 0;
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async () => { fetches++; return response(capabilityFixture); },
+    });
+    const signal = { aborted: true };
+    await assert.rejects(client.capabilities({ signal }), error => error instanceof DOMException && error.name === 'AbortError');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'DOMException');
+    t.after(() => Object.defineProperty(globalThis, 'DOMException', descriptor));
+    globalThis.DOMException = undefined;
+    await assert.rejects(client.capabilities({ signal }), error => error instanceof Error && error.name === 'AbortError' && error.message === 'This operation was aborted');
+    assert.equal(fetches, 0);
+});
+
 test('actual delayed WebSocket upgrade distinguishes readiness and contains malformed frames', async t => {
     const http = require('node:http');
     const { once } = require('node:events');
