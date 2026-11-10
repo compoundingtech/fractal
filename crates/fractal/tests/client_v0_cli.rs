@@ -2937,7 +2937,7 @@ agent "queue-chief" {
 mission "queued-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step in each run."
-  step "work" { assigned-to "agent/queue-seat" }
+  step "work" { assigned-to "agent/client-v0-cli.queue-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();
@@ -3227,10 +3227,10 @@ async fn agents_and_missions_show_print_what_the_worker_last_reported() {
 agent "reporter" { workspace "/tmp"; command "true" }
 mission "reported-work" state="ready" {
   goal "Show what the worker said."
-  step "docs" { assigned-to "agent/reporter" }
+  step "docs" { assigned-to "agent/client-v0-cli.reporter" }
   step "build" {
     title "Build the parser"
-    assigned-to "agent/reporter"
+    assigned-to "agent/client-v0-cli.reporter"
   }
 }
 "#;
@@ -3419,7 +3419,7 @@ agent "queued-alias-seat" { workspace "/tmp"; command "true" }
 mission "queued-alias-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step."
-  step "work" { assigned-to "agent/queued-alias-seat" }
+  step "work" { assigned-to "agent/client-v0-cli.queued-alias-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();

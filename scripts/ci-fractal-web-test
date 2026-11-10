@@ -74,6 +74,8 @@ web_inputs = (
     "megarepo.kdl",
     "megarepo.lock",
     "flake.lock",
+    "nix/fractal-web-publisher.nix",
+    "apps/fractal-web/server/main.mts",
     "scripts/ci-web-shell",
     "scripts/ci-web-shell-test",
     "scripts/prepare-pnpm-source-inputs.py",

@@ -4,7 +4,7 @@
 
 use super::*;
 
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9ba868b7fa5 owner=fractal_store::store::unread_mail TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h4989830fa0ba owner=fractal_store::store::unread_mail TODO=chunk-or-reference-variable-columns */ r#"
 BEGIN IMMEDIATE;
 DROP INDEX IF EXISTS claims_message_sent_time_index;
 CREATE TABLE IF NOT EXISTS unread_mail (
@@ -105,7 +105,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     )?;
     if !filled {
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-he0ee7a5b7b4e owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
+            /* sqlite-large-value: allow-for-now lv-h20b53be73fcd owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
              DELETE FROM unread_mail;
              DELETE FROM unread_mail_prefixes;
              INSERT INTO unread_mail(subject,sent_time)
@@ -132,7 +132,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     )?;
     if !expiry_migrated {
         connection.execute_batch(
-            "BEGIN IMMEDIATE;
+            /* sqlite-large-value: allow-for-now lv-h5a7c3523223f owner=fractal_store::store::unread_mail TODO=prepare-body-and-predecessor-values */ "BEGIN IMMEDIATE;
              INSERT OR IGNORE INTO unread_mail_pending
              SELECT subject FROM claims WHERE kind='message.expired'
                AND NOT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1');

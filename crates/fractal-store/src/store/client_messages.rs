@@ -216,7 +216,7 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     if trigger_generation.as_deref() != Some("2") {
         // Upgrade old source capture once, never churn SQLite's schema on reopen.
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc0ebfddf4a2b owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_message_cut_repair;DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
-        connection.execute_batch("DROP TRIGGER IF EXISTS local_stream_lifecycle_client_selector;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h27dc7fe74bfd owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS local_stream_lifecycle_client_selector;")?;
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb6aa628a36c9 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_cut_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
@@ -237,7 +237,7 @@ END;
 "#)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3d82e91a912 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?;
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hb92e5d1ad214 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'2') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h990276e7632d owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'2') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [TRIGGER_MARKER],
     )?;
     // Older completed v1 caches acquire a conservative first-publication cohort.
@@ -247,7 +247,7 @@ END;
     )?;
     if trigger_generation.as_deref() != Some("2") {
         connection.execute(
-            "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+            /* sqlite-large-value: allow-for-now lv-hc678d4a7585b owner=fractal_store::store::client_messages TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
              SELECT DISTINCT subject,-1,1,1 FROM claims WHERE kind='message.expired'
              ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|1,created_index=created_index+1", [],
         )?;

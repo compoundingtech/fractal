@@ -1800,6 +1800,17 @@ fn a_harness_cannot_act_as_another_agent() {
 }
 
 #[test]
+fn a_program_effect_acts_as_its_run() {
+    assert_eq!(run_actor(Some("secret"), Some("abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(Some("secret"), Some("mission-run/abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(None, Some("abc")), None);
+    assert_eq!(run_actor(Some(""), Some("abc")), None);
+    assert_eq!(run_actor(Some("secret"), Some("")), None);
+    assert_eq!(parse_actor_subject("mission-run/abc").as_deref(), Ok("mission-run/abc"));
+    assert!(parse_actor_subject("mission-run/").is_err());
+}
+
+#[test]
 fn execution_actor_options_parse_and_fail_closed() {
     for (path, tail) in [
         (["changes", "sync"], vec!["--repository", "fixture/garden"]),
@@ -2589,6 +2600,14 @@ fn declared_admission_human_output_is_explicitly_not_enforced() {
     for field in ["priority: normal", "lane: check", "cpu_seconds: 300", "memory_max: 8G", "disk_max: 20G", "token_budget: 100000"] {
         assert!(rendered.contains(field), "{rendered}");
     }
+}
+
+#[test]
+fn agent_charter_prints_every_line_without_terminal_controls() {
+    assert_eq!(
+        render_agent_charter("Keep main green.\n\nOwn \u{1b}[31mreleases\u{1b}[0m and notes."),
+        "Charter\n  Keep main green.\n\n  Own releases and notes.\n"
+    );
 }
 
 #[test]
@@ -3509,12 +3528,15 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
     #[cfg(test)]
     const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
+    #[cfg(test)]
+    const CLAIMS_SOURCE: &str = include_str!("claims_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
         ("agents", /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("claims", CLAIMS_SOURCE),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),

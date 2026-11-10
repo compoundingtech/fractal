@@ -1641,10 +1641,13 @@ mod tests {
             assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
             ask: "step-run/demo/ask".into(),
             status: "completed".into(),
-            summary: "Proceed".into(),
+            summary: "Proceed\nNote on hold (not selected): Revisit after launch.".into(),
             respondent: "assistant/chatgpt".into(),
             answered_at_unix_ms: 2_000,
-            answer: None,
+            answer: Some(serde_json::json!({
+                "type": "decision", "outcome": "accept", "id": "proceed", "label": "Proceed",
+                "option_notes": [{"id": "hold", "text": "Revisit after launch."}]
+            })),
             resolved_by: None,
             evidence: vec![],
         });
@@ -1654,6 +1657,7 @@ mod tests {
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
         assert!(rendered.contains("Assistant owner: person/avery"));
         assert!(rendered.contains("Assistant session actor: assistant/chatgpt/session/test"));
+        assert!(rendered.contains("Note on hold (not selected): Revisit after launch."));
     }
 
     fn run(subject: &str, parent: Option<&str>, steps: Vec<StepRunView>) -> MissionRunView {
