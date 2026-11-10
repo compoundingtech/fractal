@@ -612,13 +612,16 @@ fn unsigned_remote_without_membership_drains_once_and_maintenance_goes_idle() {
         ).unwrap();
         assert!(authority::maintenance_pending(&transaction).unwrap());
         assert_eq!(transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get::<_,u64>(0)).unwrap(), 1);
-        assert!(authority::backfill_slice(&transaction, Duration::from_millis(100)).unwrap());
-        assert_eq!(transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get::<_,u64>(0)).unwrap(), 0);
-        assert!(!transaction.query_row(
+        transaction.commit().unwrap();
+    }
+    assert!(target.advance_assistant_grant_authority_backfill().unwrap());
+    {
+        let connection = target.readers.get();
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get::<_,u64>(0)).unwrap(), 0);
+        assert!(!connection.query_row(
             "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
             [&grant.id], |row| row.get::<_,bool>(0)).unwrap());
-        assert!(!authority::maintenance_pending(&transaction).unwrap());
-        transaction.commit().unwrap();
+        assert!(!authority::maintenance_pending(&connection).unwrap());
     }
     assert!(!target.assistant_grant_authority_maintenance_pending().unwrap());
     let writes = target.connection.write().total_changes();

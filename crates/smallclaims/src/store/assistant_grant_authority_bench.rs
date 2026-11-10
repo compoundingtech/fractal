@@ -163,7 +163,7 @@ fn assistant_grant_authority_bench_unsigned_rows_reach_readiness() {
         malformed_bps: 1_000,
         unauthenticated_bps: 4_000,
         revoked_bps: 2_500,
-        unrelated_body_bytes: 256,
+        unrelated_body_bytes: 1_024,
         authority_body_bytes: 1_024,
         transaction_rows: 1_000,
         slice_ms: 100,
@@ -177,9 +177,6 @@ fn measure_backfill(config: Config) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
     let store = Store::open(&path, LOCAL, Arc::new(runtime::Plain)).unwrap();
-    // The low-level slices below require the same sealed membership snapshot
-    // the production Store worker prepares before refreshing unsigned claims.
-    assert!(store.advance_assistant_grant_authority_backfill().unwrap());
     let mut expected_effective = 0_u64;
     let mut expected_revoked = 0_u64;
     let mut raw_revocations = 0_u64;
@@ -188,7 +185,7 @@ fn measure_backfill(config: Config) {
     let mut authority_body_bytes = 0_u64;
     let mut unrelated_body_bytes = 0_u64;
     {
-        let mut connection = store.connection.write();
+        let connection = store.connection.write();
         connection.execute_batch(
             /* sqlite-large-value: allow-for-now lv-h6064c7271014 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */
             "DROP TRIGGER IF EXISTS assistant_grant_dirty_insert;
@@ -201,6 +198,13 @@ fn measure_backfill(config: Config) {
              DELETE FROM meta WHERE key='assistant_grant_authority_version'
                 OR key LIKE 'assistant_grant_authority_cursor/%';",
         ).unwrap();
+    }
+    // Invalidating readiness above makes the production worker persist its
+    // sealed snapshot, rather than taking the already-idle in-memory fast path.
+    assert!(store.advance_assistant_grant_authority_backfill().unwrap());
+    {
+        let mut connection = store.connection.write();
+        connection.execute("DELETE FROM meta WHERE key='assistant_grant_authority_version'", []).unwrap();
         // Fixed small pool of representative unrelated JSON sizes, not a history.
         let unrelated_bodies = [
             padded_body(json!({"fields": {"text": "synthetic conversation summary"}}), config.unrelated_body_bytes / 4),
