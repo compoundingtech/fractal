@@ -153,6 +153,8 @@ export interface Agent {
   readonly terminal: string
   /** An authoritative empty runtime list proves this agent has no terminal. */
   readonly terminalDisabledReason?: string
+  /** The roster's runtime ids, joined: a remembered failed attach holds only while this stays the same. */
+  readonly runtimeKey?: string
   readonly name: string
   readonly lifecycle: SeatLifecycle
   readonly host: string
@@ -200,6 +202,8 @@ export interface Fleet {
 export interface RosterDecode {
   readonly undecodable: readonly Undecodable[]
   readonly decodeStale: boolean
+  /** The latest window said more rows exist than it carried. */
+  readonly hasMore?: boolean
 }
 
 /** A roster whose latest frame decoded completely. */

@@ -12,6 +12,9 @@ import { LiveAgentWorkspace } from '../web/LiveAgentWorkspace.tsx'
 import { DomTerminal } from '../terminal/DomTerminal.tsx'
 import { defaultTerminalPalette } from '../terminal/palette.ts'
 import { createEmbedNavigation } from './navigation.ts'
+import { schemePreference } from '../web/themePreference.ts'
+import { usageSectionHeight, usageSectionOpen } from '../monitor/usageSectionState.ts'
+import { geometryNumbers } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 export const fragments = ['web', 'web-narrow', 'claude-code', 'codex'] as const
 export type EmbedFragment = typeof fragments[number]
@@ -28,8 +31,8 @@ export const terminalCapture = (fragment: 'claude-code' | 'codex'): TerminalScre
 export const Embed = ({ fragment, scheme = 'dark' }: { readonly fragment: EmbedFragment; readonly scheme?: 'light' | 'dark' }) => {
   const headingId = React.useId()
   const [registry] = React.useState(() => {
-    const value = AtomRegistry.make()
-    value.set(persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' }), scheme)
+    const value = AtomRegistry.make({ initialValues: [[usageSectionOpen, false], [usageSectionHeight, geometryNumbers.drawerDefault]] })
+    value.set(schemePreference, scheme)
     value.set(persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' }), embedAgent)
     value.set(persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false }), false)
     value.set(persistedAtom({ key: `round2.panes.${embedAgent}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }), [])

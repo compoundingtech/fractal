@@ -2381,6 +2381,11 @@ impl Client {
         };
         self.get(&format!("/v1/client/usage{query}")).await
     }
+    pub async fn usage_hub_quota(
+        &self,
+    ) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {
+        self.get("/v1/client/usage/quota").await
+    }
     pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {
         self.get("/v1/client/clients").await
     }

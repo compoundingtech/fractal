@@ -1838,7 +1838,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -4326,6 +4326,22 @@ export type UsageCredits = {
   unpriced_tokens: number;
   used_microusd: number;
 };
+
+export type UsageHubQuota = ({
+  state: "disabled";
+} | {
+  reason: "transport" | "invalid_snapshot";
+  refresh_seconds: number;
+  state: "unavailable";
+} | {
+  refresh_seconds: number;
+  snapshot: {
+  accounts: Array<unknown>;
+  generatedAt: string;
+  schemaVersion: 3;
+};
+  state: "available";
+});
 
 export type UsageLimit = {
   account: string;
