@@ -457,6 +457,7 @@ pub struct WriterGuard<'a> {
     mutation_observer: Option<&'a Arc<writer_observer::MutationState>>,
     /// When profiling, when this thread took the writer.
     pub acquired: Option<std::time::Instant>,
+    writer_operation: Option<telemetry::WriterOperation>,
     /// The connection's changed-row count when it was lent, so the rows this thread changed are
     /// noted for it when it gives the connection back; see `touched::writes`.
     pub changes_at_lend: u64,
@@ -654,7 +655,11 @@ impl WriterConnection {
         self.finalizers.install_runtime(callback)
     }
 
+    #[track_caller]
     pub fn send(&self, mut job: WriterJob) {
+        if let WriterJob::Batched { wait, .. } = &mut job {
+            *wait = crate::profile::WriterWait::with_writer_operation(wait.take());
+        }
         if let (Some(writer), WriterJob::Batched { wait, .. }) = (&self.telemetry, &mut job) {
             *wait = Some(crate::profile::writer_waiting_for(wait.take(), writer.holder(),
                 telemetry::current_origin().unwrap_or_else(telemetry::Origin::other)));
@@ -711,6 +716,10 @@ impl WriterConnection {
         let (give_back, returned) = std::sync::mpsc::sync_channel(1);
         let enqueued = std::time::Instant::now();
         let origin = telemetry::current_origin();
+        let mut writer_operation = telemetry::WriterOperation::start(
+            if matches!(class, writer_queue::LoanClass::Background) { "background" } else { "foreground" },
+            "write.lend",
+        );
         match class {
             writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
             writer_queue::LoanClass::Background => {
@@ -748,6 +757,9 @@ impl WriterConnection {
             .expect("the writer thread lends its connection");
         drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
+        if let Some(operation) = &mut writer_operation {
+            operation.acquired(enqueued.elapsed());
+        }
         WriterGuard {
             changes_at_lend: connection.total_changes(),
             connection: Some(connection),
@@ -758,6 +770,7 @@ impl WriterConnection {
             handler_policy: &self.handler_policy,
             mutation_observer: self.mutation_observer.as_ref(),
             acquired: crate::profile::writer_acquired(wait),
+            writer_operation,
         }
     }
 
@@ -944,7 +957,7 @@ fn write_queue(
 /// writer), fails, or meets a lending write, which it returns to run next.
 fn run_write_batch(
     connection: &mut Connection,
-    first: WriterJob,
+    mut first: WriterJob,
     // Where the batch takes more writes from, and for how long.
     intake: (&std::sync::mpsc::Receiver<WriterJob>, std::time::Duration),
     committed_index: &AtomicU64,
@@ -959,6 +972,10 @@ fn run_write_batch(
 ) -> Option<WriterJob> {
     let (queue, window) = intake;
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
+    // The first caller owns transaction setup too; later jobs acquire at their savepoint.
+    if let WriterJob::Batched { wait: Some(wait), enqueued, .. } = &mut first {
+        wait.writer_operation_acquired(enqueued.elapsed());
+    }
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
         _ => None,
@@ -1022,6 +1039,10 @@ fn run_write_batch(
             }
         }
         let origin = wait.as_mut().map(crate::profile::WriterWait::take_trace_origin);
+        let mut writer_operation = wait.as_mut().and_then(crate::profile::WriterWait::take_writer_operation);
+        if let Some(operation) = &mut writer_operation {
+            operation.acquired(enqueued.elapsed());
+        }
         if let Some(writer) = writer_telemetry {
             writer.set_holder(origin.clone());
         }
@@ -1031,6 +1052,7 @@ fn run_write_batch(
         }
         match (&transaction, &failure) {
             (Some(transaction), None) => {
+                let _request = writer_operation.as_ref().map(telemetry::WriterOperation::enter);
                 let operation_started = attribution.as_ref().map(|_| std::time::Instant::now());
                 // The caller's operation waited until now, holds the writer while its write
                 // runs, and shares the commit below with the rest of the batch.
@@ -1066,7 +1088,7 @@ fn run_write_batch(
             // A batch that failed to begin answers its first write with the error.
             _ => drop(run),
         }
-        answers.push(done);
+        answers.push((done, writer_operation));
         if failure.is_none()
             && answers.len() < WRITE_BATCH_LIMIT
             && started.elapsed() < window
@@ -1135,7 +1157,9 @@ fn run_write_batch(
     // delivery too: channel backpressure is no longer counted as writer-held time.
     drop(hold);
     drop(_holder);
-    for done in answers {
+    for (done, writer_operation) in answers {
+        // Include shared finalizers, COMMIT and observers, but not ACK backpressure.
+        drop(writer_operation);
         let _ = done.send(committed.clone());
     }
     lend
@@ -1208,6 +1232,8 @@ impl Drop for WriterGuard<'_> {
         );
         crate::profile::writer_released(self.acquired.take());
         let _ = self.give_back.send(connection);
+        // The loan remains held through finalization, observer notification and return.
+        drop(self.writer_operation.take());
     }
 }
 
