@@ -537,22 +537,26 @@ pub fn read_slice(
 ) -> Result<PreparedSlice, ApiError> {
     let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
-    let mut held = timeline.hold();
+    let mut held = crate::otel::conversation_phase("st.conversation.fold_mutex_wait_ms", || timeline.hold());
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(&slots)?;
+    let _slot = crate::otel::conversation_phase("st.conversation.native_admission_ms", || read_slot(&slots))?;
     drop(queue);
     let basis = basis(source)?;
     let fold = crate::profile::span("conversation/native-fold");
-    let mut slice = held
-        .slice(source, order, before, limit)
-        .map_err(ApiError::internal)?;
+    crate::otel::conversation_count("st.conversation.native_read_limit", limit);
+    let mut slice = crate::otel::conversation_phase("st.conversation.native_fold_ms", ||
+        held.slice(source, order, before, limit)).map_err(ApiError::internal)?;
     drop(fold);
     if prepare_display {
         let _preparation = crate::profile::span("conversation/native-display-preparation");
+        crate::otel::conversation_phase("st.conversation.display_preparation_ms", || -> Result<(), ApiError> {
         for item in &mut slice.items {
             prepare_one(source, session, session_id, &basis, item)?;
         }
+        crate::otel::conversation_count("st.conversation.native_prepared_items", slice.items.len());
+            Ok(())
+        })?;
     }
     if basis != self::basis(source)? {
         return Err(invalidated());
