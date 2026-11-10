@@ -793,6 +793,148 @@ mod tests {
         }
     }
 
+    #[test]
+    fn header_projection_preserves_normal_todos_jobs_subagents_and_pending_questions() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"views", "type":"tool_result", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[
+                {"kind":"tool_output", "payload":{}, "view":{"type":"todo","phases":[{"items":["ship"]}]}},
+                {"kind":"tool_output", "payload":{}, "view":{"type":"job","jobs":[{"id":"job","status":"running"}]}},
+                {"kind":"tool_output", "payload":{}, "view":{"type":"task","agents":[{"id":"child","name":"Worker","status":"running"}]}},
+                {"kind":"tool_call", "payload":{"call_id":"ask"}, "view":{"type":"ask","questions":[{"question":"Continue?"}]}}
+            ]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let expected = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut actual = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut actual);
+        for key in ["todos", "jobs", "subagents", "ask"] {
+            assert!(actual.get(key).is_some(), "{key}");
+        }
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    // The pre-change path: prepare the entire newest head, then derive its header and
+    // truncate its entries for the page. Keep it independent of header_items.
+    fn legacy_head(
+        state: &AppState, native: &ExternalSession, session: &ClientSession,
+        snapshot: &ClientSnapshot, limit: usize,
+    ) -> (Value, Vec<Value>) {
+        let (slice, _) = super::super::canonical_native_slice(
+            state, snapshot, native, session, &native.id, &[],
+            crate::external_sessions::TimelineOrder::TimestampSequence, None,
+            (limit + 1).max(CLIENT_MAX_PAGE_ITEMS), None, true,
+        ).unwrap();
+        let count = slice.items.len().min(CLIENT_MAX_PAGE_ITEMS);
+        let header = fractal_api_core::conversation_header::derive(
+            &slice.items[..count], slice.has_more || slice.items.len() > count,
+        );
+        let items = slice.items.into_iter().take(limit).rev().collect();
+        (header, items)
+    }
+
+    fn assert_header_page_matches_legacy(limit: usize) {
+        let _counter = prepared_counter_guard();
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut transcript = String::new();
+        for index in 0..240 {
+            let record = json!({
+                "type":"message", "id":format!("message-{index:03}"),
+                "timestamp":format!("2026-10-06T12:{:02}:{:02}Z", index / 60, index % 60),
+                "message":{"role":"assistant", "model":"example/model",
+                    "usage":{"cost":{"total":0.01}}, "contextSnapshot":{"promptTokens":1000 + index},
+                    "content":[{"type":"text","text":format!("reply {index}")}]},
+            });
+            transcript.push_str(&format!("{record}\n"));
+        }
+        std::fs::write(&native.transcript, transcript).unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "header-equality");
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let snapshot = super::super::new_client_snapshot(&state);
+        let (expected_header, expected_items) = legacy_head(&state, &native, &session, &snapshot, limit);
+        reset_prepared_bodies(&native.id);
+        let page = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id,
+            &super::super::ClientListQuery { limit: Some(limit), ..Default::default() }, &native,
+        ).unwrap().0;
+        assert_eq!(serde_json::to_vec(&page["header"]).unwrap(), serde_json::to_vec(&expected_header).unwrap());
+        assert_eq!(serde_json::to_vec(&page["items"]).unwrap(), serde_json::to_vec(&expected_items).unwrap());
+        assert_eq!(prepared_bodies(), limit + 1);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_1() {
+        assert_header_page_matches_legacy(1);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_20() {
+        assert_header_page_matches_legacy(20);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_200() {
+        assert_header_page_matches_legacy(200);
+    }
+
+    #[test]
+    fn header_keeps_bounded_facts_from_a_pathological_entry_replaced_for_display() {
+        let root = tempfile::tempdir().unwrap();
+        let mut details = serde_json::Map::from_iter((0..6_000)
+            .map(|index| (format!("key-{index:0>196}"), json!(0))));
+        details.insert("model".into(), json!(format!("{}\u{001b}", "m".repeat(20_000))));
+        let native = fixture(root.path(), json!([
+            {"type":"toolResult", "call_id":"pathological", "content":"ok", "details":details},
+        ]));
+        let state = super::super::tests::test_state_named(root.path(), "header-pathological");
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let snapshot = super::super::new_client_snapshot(&state);
+        let (old_header, _) = legacy_head(&state, &native, &session, &snapshot, 1);
+        let page = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id,
+            &super::super::ClientListQuery { limit: Some(1), ..Default::default() }, &native,
+        ).unwrap().0;
+        assert!(old_header.get("model").is_none());
+        let model = page["header"]["model"]["value"].as_str().unwrap();
+        assert!(model.len() < VALUE_BYTES + 256);
+        assert!(!model.chars().any(char::is_control));
+        assert!(serde_json::to_vec(&page["header"]).unwrap().len() < VALUE_BYTES + 1024);
+        assert_eq!(page["items"][0]["body"]["code"], "native-entry-too-large");
+    }
+
+    #[test]
+    fn header_uses_raw_pending_question_call_id_when_display_payload_exceeds_8kib() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"ask", "type":"tool_call", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[{"kind":"tool_call", "payload":{"call_id":"raw-call", "padding":"p".repeat(9000)},
+                "view":{"type":"ask", "questions":[{"question":"Continue?"}]}}]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let old = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut new = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut new);
+        assert_eq!(old["ask"]["value"]["call_id"], "");
+        assert_eq!(new["ask"]["value"]["call_id"], "raw-call");
+        assert_eq!(old["ask"]["value"]["questions"], new["ask"]["value"]["questions"]);
+    }
+
     fn assert_native_keyset_pages_match_full_read(
         state: &AppState,
         native: &ExternalSession,
