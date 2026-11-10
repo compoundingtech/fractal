@@ -330,11 +330,11 @@ fn only_the_exec_declared_for_the_working_attempt_moves_the_clock_and_nothing_el
             "exec-work-action"
         );
     }
-    declare_exec(&store, &run, &subject, "2");
-    assert_eq!(code(wait(&exec, "next-attempt")), "stale-work-attempt");
-    declare_exec(&store, &run, &subject, "1");
     store.set_step_state(&subject, "ready", None).unwrap();
     assert_eq!(code(wait(&exec, "not-working")), "work-not-running");
+    store.set_step_state(&subject, "working", None).unwrap();
+    declare_exec(&store, &run, &subject, "2");
+    assert_eq!(code(wait(&exec, "next-attempt")), "stale-work-attempt");
     assert!(store.claims_for(&subject, Some("work.progress")).unwrap().is_empty());
 
     // A step with a worker keeps its clock with that worker's lease.
