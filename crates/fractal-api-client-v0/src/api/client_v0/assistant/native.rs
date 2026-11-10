@@ -52,6 +52,6 @@ pub async fn propose(State(state): State<AppState>, Extension(snapshot): Extensi
     owner_session.assistant_write = Some(authorization);
     drop(_guard);
     let result = super::super::action(State(state.clone()),Extension(snapshot),Extension(owner_session),Json(request)).await;
-    audit(&state,"grant-authorized-write",&session.actor,session.transport,fields(&granted)?["grant_id"].as_str(),&result)?;
+    audit(&state,"grant-authorized-write",&session.actor,session.transport,fields(&granted)?["grant_id"].as_str(),None,&result)?;
     result
 }

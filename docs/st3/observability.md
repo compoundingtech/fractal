@@ -693,6 +693,13 @@ review. The same rule applies to unknown driver and kind values. Agent, parent,
 session, mission, message, PR, PID and commit identifiers are never labels on
 either gauge, including resource attributes promoted to labels.
 
+Configure R with the daemon's root `agent_population_repositories` TOML key,
+an array of at most eight unique canonical lowercase `owner/repo` names (for
+example, `["example/repo"]`), validated at configuration load. URLs, filesystem
+paths and `.git` suffixes are rejected. The source default is an empty registry:
+every repository is `unattributed` until explicitly configured.
+Restart the daemon after changing this registry.
+
 Kind describes provenance, not activity. Use an explicit semantic discriminator
 for roots, mission seats, gates and verifiers; harness children always take
 `subagent`. `owner_run_id` alone cannot distinguish mission, gate and verifier,
@@ -705,15 +712,17 @@ Gate/verifier kinds are reserved, not inferred from a seat's current verifying
 work or from human-gate attention. Existing gate work is not proof of a distinct
 gate/verifier agent.
 
-Repository is normalized against R at the agent resource boundary. The resource
-already has declared `checkout.repository`, but does not project the optional
-repository from `workspace.observed`; these are different facts. Project the
-current observed repository onto the agent resource so the exporter needs no
-workspace-claim join. Prefer that positively observed repository; a declared
-checkout is usable only when not contradicted by a current observation. Missing
-or conflicting evidence maps to `unattributed`. A child inherits its observed
-parent's repository unless it has its own positively observed checkout; do not
-infer one from a native session path.
+Repository is normalized against R at the population-only agent resource boundary.
+Ordinary roster/card presentation does not read workspace observations for metrics.
+The population fold overlays the current `workspace.observed` repository when its
+workspace and host match the card. A canonical `owner/repo`, or an absolute
+megarepo path containing `github.com/owner/repo[/refs/...]`, normalizes to lowercase
+`owner/repo`; unknown paths map to `unattributed`. This normalization performs no
+git or filesystem I/O. Prefer positively observed repository evidence; a declared
+`checkout.repository` is usable only when not contradicted by a current observation.
+An empty registry skips the population workspace read entirely. A child inherits
+its observed parent's repository unless it has its own positively observed checkout;
+do not infer one from a native session path.
 
 ### Membership and exclusive classification
 
@@ -782,6 +791,27 @@ to its completion time in seconds since the Unix epoch. Failed refreshes and
 SDK collection callbacks never advance that value; before the first success
 the instrument is absent. The dotted name follows the instrument convention
 above, without a Prometheus `_seconds` suffix.
+The card's nonauthoritative `host-lost` end-reason is not terminal evidence:
+retain its last-live incarnation as `unreachable/stale`, even when the
+presentation also carries a launch/fault annotation. An authoritative runtime
+or harness end, retirement, or removal still excludes the incarnation.
+
+
+Refresh subscribes to the store commit notification before the initial fold,
+then coalesces commits with a minimum 30-second rest (or the preceding fold's
+duration, whichever is longer). It also wakes for the earliest relevant shared
+classification boundary: idle freshness at heard-at + `HARNESS_OBSERVATION_FRESHNESS` + 1 ms,
+launch + 120,001 ms or heard-at + 661,001 ms, an owned live child's lease expiry,
+and the canonical attention snapshot's next visibility boundary. These strict-age
+offsets match the existing card overlay; working turns have no age-only expiry.
+With no commits or deadlines, the refresher performs zero folds per minute.
+Retention expiry removes cached zero buckets at their ten-minute deadline,
+independently of refresh admission or success, without a store read or a new
+last-success timestamp. Failed folds wait for a store commit or an unconsumed
+future classification deadline from the last complete fold, subject to the same
+minimum rest; failure itself never schedules a retry timer. Expired classification
+deadlines are consumed even on failure, so a defective fold cannot busy-loop.
+
 
 Consumers alert on `st_agents_refresh_last_success`: compute snapshot age with
 `time() - st_agents_refresh_last_success` and compare it with the deployment's
@@ -850,12 +880,19 @@ with the attribute `otel.metric.overflow=true`, rendered in Mimir as
 `st_agents{otel_metric_overflow="true"}`). Alert on the presence of that label
 for any of the three metrics: overflow is a contract violation, never a valid
 fallback bucket or silently accepted population total.
+The 256-bucket operational allocation must not reject a complete snapshot or
+freeze last-success, counts, or retained-zero aging. Publish the complete cut;
+the SDK's explicit 512-series safety limit surfaces excess combinations through
+its overflow series. Such overflow remains an alertable contract violation,
+not an approved loss of labels or a valid substitute for capacity review.
+
 
 This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
-another 2,000. SQL already reserves up to 1,500 series; mailbox/delivery and
-other instruments consume the remainder. Capacity and label-churn review is an
-implementation gate, not a claim of current compliance. If inventory exceeds
-the allocation, the decision owner must approve a revised budget or a lossless
+another 2,000. The HTTP request-duration instrument already reserves up to 1,500
+series; mailbox/delivery and other instruments consume the remainder. Capacity
+and label-churn review is an implementation gate, not a claim of current
+compliance. If inventory exceeds the allocation, the decision owner must approve
+a revised budget or a lossless
 dimension policy before rollout: never truncate agents, use SDK overflow to
 silently lose the contract's labels, or discard counts to meet a budget.
 
@@ -889,6 +926,26 @@ events must not let a child replace the seat's channel. Implementation follows
 only after independent GO on this revision, in separate exporter/store and driver
 PRs; this documentation changes no runtime behavior.
 Consumer dashboards and alerts require telemetry-registry entries before rollout.
+
+### Rollout prerequisites and deployment switch
+
+Population export is explicitly opt-in per daemon: the root TOML key
+`agent_population_enabled = false` is the default, including when omitted.
+While off, the daemon starts no population refresher, subscribes no population
+commit observer, registers none of the three population/attention instruments,
+and performs no population queries on the ordinary roster/card path.
+Enabling the ordinary OTLP metrics pipeline alone does not enable population.
+
+Set `agent_population_enabled = true` only after the independent review GO,
+enabled-driver child lifecycle coverage, authoritative attention ownership,
+host inventory, repository registry R, cardinality allocation, and applicable
+telemetry-registry requirements above have been satisfied. Configure
+`agent_population_repositories` alongside the switch; an empty registry remains
+valid and maps all repositories to `unattributed`, not permission to discover
+new label values. Restart the daemon after changing either key. Population
+instruments register only after the first successful complete snapshot and
+also require the existing metrics pipeline to be enabled. To disable population
+without disabling other telemetry, set the switch to false and restart.
 
 ## Per-agent delivery health
 
@@ -1020,10 +1077,10 @@ bands at the next successful refresh, normally at most about 30 seconds late
 reclassify cached messages, so a recent-band age can briefly exceed one day.
 Failed refreshes retain the last complete summary and log a warning.
 
-For a live-latency alert unmasked by stale backlog, use:
+For an unread-latency alert across all ages, including stale pending mail, use:
 
 ```promql
-max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_age_band="recent",st_mailbox_state=~"pending|delivered"}) > 1800
+max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_state=~"pending|delivered"}) > 1800
 ```
 
 For a weekly stale-backlog list, use

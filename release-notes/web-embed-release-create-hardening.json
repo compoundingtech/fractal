@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Release publication treats GitHub HTTP/2 errors of the form stream error: stream ID N; CANCEL; received from peer as transient. They use the existing bounded retry and reconciliation path, so a create that already made a draft is resumed rather than repeated. Partial drafts are still continued and published assets are never replaced.",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Release scripts only; no product binary, claim or wire change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the previous transient-error classification."}
+}

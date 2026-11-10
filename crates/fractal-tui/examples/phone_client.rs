@@ -5,7 +5,7 @@
 //! capabilities read every 10 s (5 s wait). Screens load launches, machines, devices and
 //! sessions only when opened, so an idle phone on Home reads nothing else: no usage, no clients,
 //! no glasses or conversation unless a screen follows one. This client does exactly that and
-//! names itself `smalltalk-ios 0.1.0 [LABEL]` in `x-st3-client`. Its transport is the local
+//! names itself `fractal-phone-client VERSION [LABEL]` in `x-st3-client`. Its transport is the local
 //! Unix socket, not the paired gateway; that difference is the limit of this measurement.
 //!
 //! cargo run --release -p fractal-tui --example phone_client -- --seconds 180 --label measure-phone
@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 
 #[path = "../src/environment.rs"]
 mod environment;
+
+#[allow(dead_code)]
+#[path = "../../fractal-drivers/src/version.rs"]
+mod version;
 
 use fractal_client::{Client, set_client_name};
 
@@ -49,7 +53,11 @@ async fn main() {
             _ => {}
         }
     }
-    set_client_name(format!("smalltalk-ios 0.1.0 [{label}]"));
+    version::set_build_stamps(
+        option_env!("CLI_BUILD_STAMP"),
+        option_env!("ST_BUILD_STAMP_LOCAL"),
+    );
+    set_client_name(format!("fractal-phone-client {} [{label}]", version::machine_version()));
     if let Some(path) = timing {
         use std::io::Write as _;
         let started = Instant::now();

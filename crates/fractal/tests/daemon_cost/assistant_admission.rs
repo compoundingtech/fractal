@@ -131,6 +131,7 @@ async fn authenticated_get_during_pairing() {
     store.bind_fleet(super::super::daemon_bench::FLEET).unwrap();
     store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
     let state = AppState {
+        browser_pairing_login:None,
         seat_admission:Default::default(), owning_person:Some(OWNER.into()), store:store.clone(),
         notify:Arc::new(tokio::sync::Notify::new()), event_notify:tokio::sync::watch::channel(0).0,
         node:NODE.into(), state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:PathBuf::from("pty"),

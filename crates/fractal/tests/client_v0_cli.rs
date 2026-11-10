@@ -18,6 +18,7 @@ use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
@@ -494,6 +495,22 @@ async fn serve_for_test(socket: &Path, router: axum::Router) -> tokio::task::Joi
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     server
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clients_cli_reports_its_fractal_machine_version() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let server = serve_for_test(&socket, fractal_daemon::api::router(test_state(root.path()))).await;
+    let listed = value(&run_cli(&socket, &["clients"]).await);
+    let version = value(&run_cli(&socket, &["--version"]).await);
+    let expected = format!("fractal {}", version["machine_version"].as_str().unwrap());
+    let items = listed["value"]["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| item["client"].as_str() == Some(expected.as_str())),
+        "{listed}"
+    );
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2565,7 +2582,7 @@ mission "cli/child" state="ready" {
         .unwrap();
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cli-device".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),

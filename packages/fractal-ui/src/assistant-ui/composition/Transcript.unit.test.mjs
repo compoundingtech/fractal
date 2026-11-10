@@ -180,7 +180,10 @@ test('the optional host footer renders once per finished turn as its last child,
   assert.match(markup, /model-one · 100 tokens · \$0\.01<\/footer><\/section>/)
   assert.match(markup, /data-testid="live-work"/)
   assert.doesNotMatch(markup, /model-two/)
-  assert.match(markup, /data-item-id="without-facts"[^>]*><\/section>/)
+  // A turn without facts gets no footer: its section ends with no host footer inside it.
+  const withoutFacts = markup.split('data-item-id="without-facts"')[1]?.split('data-testid="transcript-turn"')[0] ?? ''
+  assert.notEqual(withoutFacts, '')
+  assert.doesNotMatch(withoutFacts, /host-turn-footer/)
   // Once the same turn finishes, its footer appears.
   turns[1] = { ...turns[1], work: { ...turns[1].work, running: false } }
   assert.match(render(renderTurnFooter), /model-two · 200 tokens · \$0\.02<\/footer><\/section>/)
