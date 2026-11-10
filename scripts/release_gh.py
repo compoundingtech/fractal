@@ -1,7 +1,8 @@
 """gh calls for the release publish steps (#4606).
 
-A 5xx or a timeout from the GitHub API is retried after each delay in RELEASE_GH_RETRY_DELAYS
-(seconds, comma-separated; 10,30,90 by default). Any other failure ends the step at once. GitHub can
+A 5xx, timeout or transient transport error (including HTTP/2 stream CANCEL) from the GitHub API is
+retried after each delay in RELEASE_GH_RETRY_DELAYS (seconds, comma-separated; 10,30,90 by default).
+Any other failure ends the step at once. GitHub can
 answer 504 after it did the work, so a call whose repeat would fail or duplicate passes `done`: after
 a transient failure it is asked first, and when the effect is already in place the call counts as
 done without being repeated.
@@ -16,7 +17,8 @@ import sys
 import time
 
 TRANSIENT = re.compile(
-    r'HTTP 5\d\d|\b50[234]\b|timed out|timeout|connection reset|unexpected EOF|TLS handshake', re.IGNORECASE)
+    r'HTTP 5\d\d|\b50[234]\b|timed out|timeout|connection reset|unexpected EOF|TLS handshake|'
+    r'stream error: stream ID \d+; CANCEL; received from peer', re.IGNORECASE)
 
 
 def delays():

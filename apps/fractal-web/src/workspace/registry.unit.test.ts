@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { emptyWorkspace, tabsOf, transition } from './model.ts'
-import { corePolicies, makeKindRegistry, type KindContribution } from './registry.ts'
+import { corePolicies, makeKindRegistry, TabKindClaimConflict, type KindContribution } from './registry.ts'
 import { defaultBudget, desiredHolds, planTiers } from './resources.ts'
 import { parsePane, subjectOfRef, type SubjectKind } from './subject.ts'
 
@@ -43,6 +43,15 @@ describe('the tab-kind registry', () => {
     const rival: KindContribution<string> = { ...github, id: 'rival' }
     expect(() => makeKindRegistry({ views, contributions: [github, rival] })).toThrow(/claimed by \[github\.pull-request, rival\]/)
     expect(() => makeKindRegistry({ views, contributions: [rival, github] })).toThrow(/claimed by \[rival, github\.pull-request\]/)
+  })
+
+  it('refuses with a tagged error naming the kind, the ref and the claimants', () => {
+    const rival: KindContribution<string> = { ...github, id: 'rival' }
+    const refused = (() => {
+      try { return makeKindRegistry({ views, contributions: [github, rival] }) } catch (error) { return error }
+    })()
+    expect(refused).toBeInstanceOf(TabKindClaimConflict)
+    expect(refused).toMatchObject({ _tag: 'TabKindClaimConflict', kind: 'github.pull-request', ref: 'resource/github/acme/garden/pull/9', claimants: ['github.pull-request', 'rival'] })
   })
 
   it('refuses a contribution that does not claim its own example', () => {

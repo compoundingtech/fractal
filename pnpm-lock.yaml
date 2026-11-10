@@ -34,6 +34,9 @@ importers:
       '@effect/opentelemetry':
         specifier: 4.1.0
         version: 4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)
+      '@effect/platform-browser':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)
       '@effect/platform-node':
         specifier: 4.1.0
         version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
@@ -862,6 +865,11 @@ packages:
         optional: true
       '@opentelemetry/sdk-trace-web':
         optional: true
+
+  '@effect/platform-browser@4.1.0':
+    resolution: {integrity: sha512-IEyaPzejKozHDupOUSjQIgQYGv2C0I828up8z7/nvQTHzmQHUS2/tGMEwXX/FwAvnrWZ0H9MhlhTl18ZgCHQiQ==}
+    peerDependencies:
+      effect: ^4.1.0
 
   '@effect/platform-node-shared@4.1.0':
     resolution: {integrity: sha512-uYQfFRoxWLo8fIhiSeBcmz/R1ooOfE3HF3cWHFgxz82tZMk2Wn02BGABcdLmaAch9VpDLbtWnuhSxNyBsGMUFg==}
@@ -6342,6 +6350,10 @@ snapshots:
       effect: 4.1.0
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
+
+  '@effect/platform-browser@4.1.0(effect@4.1.0)':
+    dependencies:
+      effect: 4.1.0
 
   '@effect/platform-node-shared@4.1.0(effect@4.1.0)':
     dependencies:

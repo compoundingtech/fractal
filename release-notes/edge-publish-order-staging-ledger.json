@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Edge publication is crash-safe and forward-only: source-qualified staged builds are verified as one coherent unit through STAGING-LEDGER.sha256 before moving the tag and repairing fixed asset aliases. Interrupted publication converges on the next eligible run.",
+  "summary": "Edge publication is recoverable and forward-only: a leased Git tag push precedes all release mutation, then source-qualified staged builds are verified as one coherent unit through STAGING-LEDGER.sha256 before repairing fixed asset aliases. Interrupted publication converges on the next eligible run.",
   "replay": {
     "status": "none",
     "detail": "Release publication scripts only; no graph, claim or storage replay changes."

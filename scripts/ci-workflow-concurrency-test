@@ -124,6 +124,9 @@ def jobs(workflow):
 
 daily_jobs = jobs('release-daily.yml')
 native_jobs = jobs('release-fractal.yml')
+assert re.search(r"^    timeout-minutes: \$\{\{ matrix.runner == 'macos-15' && 10 \|\| 5 \}\}$",
+                 native_jobs['installer'], re.M), native_jobs['installer']
+print('passed: macOS installer receives ten minutes while Linux retains five')
 for block in (daily_jobs['release'], daily_jobs['publish'],
               native_jobs['publishEmbed'], native_jobs['publishEdge']):
     assert re.search(r'^      group: fractal-release-mutation$', block, re.M), block
@@ -197,9 +200,11 @@ for job, block in daily_jobs.items():
             expression = condition.removeprefix('${{').removesuffix('}}').strip()
             for name, value in (
                     ('github.event_name', 'workflow_dispatch'), ('github.ref', 'refs/heads/other'),
-                    ('inputs.mode', mode), ('inputs.sha', 'a' * 40), ('needs.build.result', build_result)):
+                    ('inputs.mode', mode), ('inputs.sha', 'a' * 40), ('inputs.run', ''),
+                    ('needs.build.result', build_result)):
                 expression = expression.replace(name, repr(value))
-            expression = expression.replace('!cancelled()', 'True').replace('&&', ' and ').replace('||', ' or ')
+            expression = expression.replace('!cancelled()', 'True').replace('always()', 'True')
+            expression = expression.replace('&&', ' and ').replace('||', ' or ')
             assert not eval(expression, {'__builtins__': {}}, {}), (job, mode, build_result)
 assert policy('release-fractal.yml', 'workflow_dispatch', 100, sha='a' * 40) == (
     'fractal-release-candidate-' + 'a' * 40, False)

@@ -27,6 +27,29 @@ Each archive has the physical `bin/fractal`, temporary `bin/st3` and `bin/st` re
 libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
+Before each native Cargo build, `scripts/release-zig-preseed.py` checks out the Ghostty
+revision pinned by `vendor/libghostty-vt-sys/build.rs` and reads its
+`flatpak/zig-packages.json` package-cache pins, including every host and transitive
+dependency. All archives retry after 1 and 3 seconds; GitHub archives additionally
+fall back to the equivalent `codeload.github.com` transport. Each archive enters the default Zig global cache
+through `zig fetch`; its printed content hash must equal the upstream pin or the
+job fails. Cargo reuses that exact source checkout through `GHOSTTY_SOURCE_DIR`,
+without modifying dependency URLs or hashes. The loopback-only regression test is
+`python3 scripts/release-zig-preseed-test.py`.
+Truncated bodies are transport failures and follow the same retry/fallback path.
+The vaxis dependency also pins an older uucode Git source: it is fetched using
+`git+https` at the manifest's exact commit, with 1- and 3-second retries and the
+same content-hash comparison. Git sources never substitute a codeload archive.
+Each archive attempt has a 60-second elapsed deadline, and each `zig fetch`
+subprocess has a 60-second timeout. The cache phase has a shared 660-second
+budget; source clone and checkout each have a 120-second timeout (15 minutes
+total workload budget, plus process cleanup). Subprocesses own their process groups;
+timeouts send the whole group SIGTERM, allow up to 0.2 seconds, then send SIGKILL
+and reap the direct child so Git helpers cannot outlive the deadline.
+Unavailable transports warn with the package name and leave fetching to
+the normal Zig build; reaching the shared deadline warns and stops seeding.
+Printed content-hash mismatches remain fatal integrity errors.
+
 The embedded web UI ships in `share/fractal-web` in both release archives and
 the complete Nix `fractal` package (also selected by transitional `st3` package attributes). The archive installer preserves that tree at
 `../share/fractal-web` relative to the chosen bin directory, including upgrade
@@ -56,6 +79,14 @@ workflow: creation refuses existing releases, and uploads never use `--clobber`.
 Repository maintainers must preserve these releases and their tags. Consumers pin
 both that full version and the archive SHA-256, not `edge`, `latest`, or a temporary
 Actions artifact.
+The publisher first pushes the immutable tag through Git with an absent-ref lease,
+then creates the release with `--verify-tag`. An existing tag at the same source
+SHA (including an annotated tag's peeled commit) is accepted; a different SHA
+stops before any release write. Failed pushes reobserve the remote: a same-SHA
+winner is accepted, a different SHA is refused, and transient failures with no tag
+retry using the release API retry delays while retaining the absent-ref lease.
+An interrupted run can leave a tag without a release; rerunning resumes against
+that tag, never replaces it. The source commit must exist in the publisher's checkout.
 
 To produce the archive locally, apply the pinned workspace member with `mr apply`,
 then run `nix develop .#web --command node scripts/release-fractal-embed.mjs dist`.
@@ -204,8 +235,8 @@ The native runtime suite and documentation tests remain covered.
 After a `main` run of **Fractal tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `fractal-release-attempt-N` artifact by its
-immutable artifact ID, re-checks checksums and the source recorded in each archive, uploads source-qualified
-staging copies and their ledger, and moves the tag before replacing the fixed-name archives and `.sha256`
+immutable artifact ID, re-checks checksums and the source recorded in each archive, moves the tag with
+a leased Git push, then uploads source-qualified staging copies and their ledger before replacing the fixed-name archives and `.sha256`
 files one file at a time, then `SHA256SUMS`, then `RELEASE.json` alone as the source commit marker.
 A multi-file `gh release upload` can upload concurrently; separate commands enforce alias and sidecar ordering.
 It then removes stale assets and rewrites the notes, which give the exact source commit, a link to the run,
@@ -214,8 +245,8 @@ The ID-based download uses `merge-multiple: true` and `path: dist`, keeping arch
 `SHA256SUMS` and `RELEASE.json` directly in `dist/`, as assembly and the edge publisher require.
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 If the release is absent but its tag remains, the same forward-only guard still applies. Creation
-adds only the release container; it then shares the normal staging, tag PATCH, alias replacement,
-verification and cleanup sequence. `gh release create --target` alone does not move a retained tag.
+first moves the tag with a leased Git push, then creates only the release container using `--verify-tag`.
+It shares the normal staging, alias replacement, verification and cleanup sequence.
 
 
 - Versioned releases and tags are unchanged. `edge` is marked as a pre-release and never as latest, so the
@@ -232,12 +263,17 @@ verification and cleanup sequence. `gh release create --target` alone does not m
   `SHA256SUMS` and uploads alone, last among staged files, as their commit marker. A complete set
   matching its ledger is retained even if a same-source rerun has different build bytes. A missing
   or invalid ledger, missing staged file, or digest mismatch restages the whole unit from validated
-  dist before moving the tag or repairing aliases; partial builds are never mixed.
+  dist before repairing aliases; partial builds are never mixed. Staging always follows the leased tag move.
   A failed tag move preserves the previous fixed-name assets and manifest.
 - Between the tag move and alias replacement, installers briefly receive the previous binaries.
   The installer verifies each archive's `.sha256` sidecar, not `SHA256SUMS`: a consistent new pair
   can install before `SHA256SUMS` is replaced. A mismatched pair fails closed; retry after a minute.
   An interrupted replacement or finalization converges on the next run.
+- Tag movement uses a Git push with a force-with-lease against the observed tag object SHA, rather
+  than the REST ref update. First creation uses an absent-ref lease and pushes before
+  creating the release with `--verify-tag`. The publisher passes `GH_TOKEN` through Git's HTTP
+  authentication environment when checkout has not persisted credentials. A rejected lease
+  stops before any release mutation; retrying reobserves the tag before replacing assets.
 - The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
 - `scripts/release-fractal-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
   and prints the notes without publishing.
@@ -268,10 +304,25 @@ build use SHA-keyed concurrency groups with cancellation disabled; newer main pu
 cannot cancel them. The build rechecks source eligibility before executing source scripts.
 The later mutation job revalidates the successful build identity. `--dry-run --sha`
 never dispatches a build and requires an already successful `--run`.
+To retry without rebuilding, repeat the candidate dispatch with `-f run=SUCCESSFUL_BUILD_RUN_ID -f sha=FULL_40_CHARACTER_SOURCE_SHA` (and the original tag and summary); the run must be a successful main push or an exact matching candidate build.
 The optional `summary` input (`scripts/release-fractal-daily --summary "$SUMMARY"`) adds
 the operator's summary to the draft notes; it defaults to empty. Publication preserves
 that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
 prints the candidate notes without creating a tag or draft.
+
+For an explicitly selected verified build, `recover_draft=true` (script option
+`--recover-draft`) opts into one minimal metadata-only draft POST. It requires
+explicit `tag`, full `sha`, and successful `run`; it never builds a replacement.
+The response status, date and request ID are logged without request credentials.
+An ambiguous create is reconciled by paginated authenticated release listing and
+release-ID reads, not another POST or deletion. Recovery requires an absent tag,
+the exact `Fractal <tag>` name, target SHA and candidate marker, and matching draft flags. Original
+assets are uploaded only after reconciliation, checked against their SHA-256
+digests, and the notes are updated while retaining draft state. Existing exact
+drafts are adopted; conflicting or incomplete evidence stops without deleting
+anything. Ordinary candidate creation also preserves and reconciles drafts after
+an ambiguous failure rather than deleting or retrying them. Publication still
+requires the unchanged exact-SHA product GO and artifact verification.
 
 Candidate version selection, draft creation, cleanup, publication, and edge/embed release
 jobs share one job-level `fractal-release-mutation` concurrency group, with cancellation
@@ -339,7 +390,7 @@ for ensuring that this dispatcher attestation references the Product Lead's actu
 for the exact full source SHA. Automation does not verify the referenced message's
 contents. No human-only environment review is required.
 The publisher refuses a non-draft or prerelease, a SHA that differs from the draft target,
-an existing immutable tag, or `RELEASE.json`, incomplete notes, or invalid
+an existing immutable tag at a different source SHA, or a differing `RELEASE.json`, incomplete notes, or invalid
 checksums/archive sources. `CANDIDATE.json` records the exact full source SHA, build run ID,
 build attempt number, and immutable numeric Actions artifact ID (`build_artifact`).
 The publisher also validates the canonical workflow numeric ID and path
@@ -355,8 +406,15 @@ with `gh release edit`, it rechecks `/actions/runs/RUN_ID` and rejects a changed
 for the recorded proof. Missing or expired artifacts, old-format proof, and unsuccessful
 or mismatched workflow/run/attempt/artifact proof fail closed. Publish within the artifact's
 seven-day retention, or build a fresh candidate.
-It creates the selected tag at the exact approved source SHA if absent, publishes the
-existing bytes and notes, and proposes compatibility baselines.
+After verification it creates the selected tag at the exact approved source SHA if absent
+using a Git push with `--force-with-lease=refs/tags/TAG:` (an absent-ref lease), then publishes
+the existing bytes and notes and proposes compatibility baselines. A pre-existing tag at
+the approved SHA is accepted, including an annotated tag's peeled commit. A failed push
+reobserves the tag, accepting a same-SHA winner but refusing a different SHA; transient
+failures with no tag retry with the same absent-ref lease and release API retry delays.
+A retry can resume after a successful push followed by an interrupted release edit.
+The existing `GH_TOKEN` is passed only through Git's HTTP authentication environment.
+Daily draft creation and draft recovery remain untagged; no stable tag is pushed before product GO.
 Candidate runs never advance baselines. Consumers must pin only published release tags,
 not draft candidate version names. Drafts are private and are not available through
 published-release download URLs; stable latest discovery excludes drafts and prereleases.

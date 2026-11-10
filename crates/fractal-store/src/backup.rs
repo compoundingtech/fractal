@@ -17,6 +17,7 @@ use crate::message_body::BodyAttachment as _;
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, ShardDigest, TableDigest, VERSION,
     VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS, VERSION_WITH_SHARDS,
+    VERSION_WITH_QUARANTINE,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -160,12 +161,15 @@ fn check_header(header: &Header) -> Result<()> {
     // Builds before version 5 say only "unsupported claim backup format/version"; this one also
     // names what it found and what it restores.
     ensure!(
-        header.format == FORMAT && (VERSION..=VERSION_WITH_SHARDS).contains(&header.version),
+        header.format == FORMAT && (VERSION..=VERSION_WITH_QUARANTINE).contains(&header.version),
         "unsupported claim backup format/version: {:?} version {}; this build restores {FORMAT:?} \
-         versions {VERSION} to {VERSION_WITH_SHARDS}",
+         versions {VERSION} to {VERSION_WITH_QUARANTINE}",
         header.format,
         header.version
     );
+    ensure!(header.version >= VERSION_WITH_QUARANTINE
+        || !header.ledgers.contains_key("replica_restore_quarantine"),
+        "operation quarantine requires the current archive version");
     ensure!(
         header.version >= VERSION_WITH_SHARDS || header.shards.is_empty(),
         "shard digests in an archive that does not declare shards"

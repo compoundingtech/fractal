@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Rebuild run projections faster by reusing prepared SQL statements",
+  "replay": {"status": "none", "detail": "Run-part rebuild replay reuses cached prepared statements and clears replayed claims' projection health in one statement. Projection output is unchanged."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Projection rows are unchanged; no wire or format changes."},
+  "downtime": {"status": "none", "detail": "No additional service interruption is introduced."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

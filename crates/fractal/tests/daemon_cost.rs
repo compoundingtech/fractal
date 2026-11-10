@@ -20,6 +20,9 @@
 //! [`GROWTH`] times its work at the smaller, after dividing by how much larger its answer grew: a
 //! list that answers ten times more rows may read ten times more, and a request that answers the
 //! same must read about the same. Small differences under [`SLACK`] steps pass.
+//! Cold search index construction visits every local conversation, including those without
+//! searchable text. Its separate row normalizes by that conversation count and strictly caps
+//! per-conversation VM/full-scan work growth at 1.5x; warm search requests retain their flat bound.
 //!
 //! Additive work/mission `progress_at` serialization uses timestamps already hydrated by these
 //! routes; lightweight mission cards return null and do not add summary reads.
@@ -139,6 +142,22 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/custom/decision-inputs",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests",
+        "interactive configured-owner pairing requires an authenticated publisher device and native person decision ask, absent from generated cost stores; browser_pairing_tests covers admission and pending limits; the pending count scans browser request history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/{id}/redeem",
+        "one-use interactive redemption requires a receipt-authenticated request and its exact answered native person ask, absent from generated cost stores; browser_pairing_tests covers pending, deny, expiry, exact scopes and single use; request, answer and completion lookups are subject-keyed, but receipt and completion write costs are not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/revoke-current",
+        "browser self-revocation requires its real paired bearer and operation receipts, absent from generated cost stores; browser_pairing_tests covers authenticated revocation; subject-keyed completion and request reads plus the revocation write are not measured here",
+    ),
+    (
         "POST /v1/fleet/admission-override",
         "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
     ),
@@ -179,12 +198,19 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
     ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    ("POST /v1/client/pairings/renewals/stage", "explicit operator replacement staging; bounded source lookup and one append, no history-growing scan; covered by device renewal route tests"),
+    ("POST /v1/client/pairings/renewals/pending", "explicit key-bound pending lookup; capped current-stage scan and bounded challenge append, covered by device renewal route tests"),
+    ("POST /v1/client/pairings/renewals/complete", "explicit one-use replacement completion; transactionally rechecks source, stage and consumption before one grant, covered by device renewal route tests"),
     ("POST /v1/client/diagnostics", "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here"),
     // A Claude permission hook's or Codex driver's approval poll: one indexed newest-claim read
     // and one operation lookup.
     (
         "GET /v1/harness-prompts/state",
         "one newest harness.observed read by its subject index and one answer read by its operation index",
+    ),
+    (
+        "GET /v1/client/attention-budget",
+        "ordinary read probes use a raw Unix person header, which this recipient-authenticated route rejects; the paired push fixture does not seed scaling mission/person native asks and lineage; attention_budget API tests cover scoped admission, recipient revalidation and text-free reports, but populated report cost is not measured here",
     ),
     // Aliases: the same handler as a measured route under the name a person reads.
     (
@@ -1397,6 +1423,11 @@ const SEAT_RUNTIME: &str = "cost-seat-0-runtime";
 
 /// The same agent list, after one seat changes at each scale.
 const COLD_AGENTS: &str = "GET /v1/client/agents (after harness observation)";
+/// First native search through worker completion, normalized by local conversations.
+const COLD_SEARCH: &str = "conversation search cold build";
+/// Indexing must visit even empty conversations, so indexed bytes are not its work unit.
+/// The 1.5x per-conversation cap permits linear construction, but rejects content × agents.
+const COLD_SEARCH_GROWTH: f64 = 1.5;
 const ARRANGEMENT_OWNER: &str = "person/ada";
 const ARRANGEMENT_SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
 const ARRANGEMENT_PATH: &str = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
@@ -1529,7 +1560,7 @@ struct Cost {
     sorts: u64,
     autoindex_rows: u64,
     statements: u64,
-    /// The answer's size in bytes, or the rows a trim deleted.
+    /// The answer's size in bytes, rows a trim deleted, or local conversations for cold search.
     answer: u64,
     /// How many things the answer returned ([`item_count`]), at least one.
     items: u64,
@@ -1727,6 +1758,175 @@ impl Fixture {
     }
 }
 
+const READY_WORK_COST_ROUTE: &str = "GET /v1/client/ready-work";
+
+#[tokio::test]
+async fn populated_ready_work_cost_by_cohort_size() {
+    use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
+    use tower::ServiceExt;
+
+    async fn measure(
+        app: &axum::Router,
+        store: &Store,
+        cohort: &[String],
+    ) -> Cost {
+        let cut = store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10),
+            fractal_daemon::api::wait_published_lists_at_least(store, cut))
+            .await.expect("ready cost publication reaches graph cut").unwrap();
+        let path = format!("/v1/client/ready-work?cohort={}", urlencoding::encode(&cohort.join(",")));
+        let sample = counted(|| async {
+            let reply = app.clone().oneshot(Request::builder().uri(path)
+                .body(Body::empty()).unwrap()).await.unwrap();
+            let status = reply.status();
+            let body = to_bytes(reply.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(value["snapshot"]["store_index"], cut);
+            assert_eq!(value["value"]["ready_count"], cohort.len() * 2);
+            assert_eq!(value["value"]["coverage"], "local-graph-cut");
+            Ok(value)
+        }).await;
+        assert!(sample.vm_steps > 0 && sample.statements > 0);
+        assert_eq!(sample.fullscan_steps, 0, "ready-work must use indexed lookups: {sample:?}");
+        println!("ready-work cohort={} ready={} vm_steps={} statements={} fullscan_steps={} max_repeat={} shape={}",
+            cohort.len(), cohort.len() * 2, sample.vm_steps, sample.statements,
+            sample.fullscan_steps, sample.max_repeat, sample.top_shape);
+        sample
+    }
+
+    fn append_history(store: &Store, subject: &str, actor: &str, events: std::ops::Range<usize>) {
+        for event in events {
+            let message = format!("message/ready-cost-history-{subject}-{event}");
+            for (kind, fields) in [
+                ("work.released", json!({
+                    "attempt": 1, "status": "ready",
+                    "handoff_to": actor, "handoff_message": message,
+                })),
+                ("work.progress", json!({
+                    "attempt": 1, "status": "ready",
+                    "handoff_acknowledged": message,
+                })),
+            ] {
+                store.append_claim(&fractal_daemon::model::ClaimInput {
+                    subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+        }
+    }
+
+    fn assert_within(actual: u64, baseline: u64, growth: usize, label: &str) {
+        assert!(
+            u128::from(actual) * 2 <= u128::from(baseline) * 3 * growth as u128,
+            "{label}: actual={actual}, baseline={baseline}, allowed growth=1.5x{growth}"
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), NODE).unwrap());
+    let seats: Vec<_> = (0..64).map(|i| format!("bench/ready-cost/{i}")).collect();
+    let mut source = String::from("version 2\n");
+    for seat in &seats {
+        source.push_str(&format!("agent {seat:?} {{ workspace \"/tmp\"; command \"true\" }}\n"));
+    }
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
+    store.apply_internal(&intent, "ready-cost-seats").unwrap();
+    let cohort: Vec<_> = seats.iter().map(|seat| format!("agent/{seat}")).collect();
+    let mut subjects = Vec::new();
+    for (index, actor) in cohort.iter().enumerate() {
+        for step in 0..2 {
+            let work = store.start_work(&fractal_daemon::model::WorkStartRequest {
+                actor: actor.clone(),
+                title: format!("Ready cost fixture {index}/{step}"),
+                idempotency_key: format!("ready-cost-{index}-{step}"),
+            }).unwrap();
+            subjects.push((work.subject, actor.clone()));
+        }
+    }
+
+    let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.path().join("state"),
+        pty_root: root.path().join("pty"),
+        pty_binary: stub_pty(root.path()),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.path().join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
+    fractal_daemon::api::start_published_lists(&state);
+    let app = fractal_daemon::api::router(state);
+    let mut sizes = Vec::new();
+    for size in [1, 8, 32, 64] {
+        let sample = measure(&app, &store, &cohort[..size]).await;
+        // There are two eligible steps/ready rows per seat, so these are both
+        // per-ready-row and per-cohort-step costs, not raw whole-request totals.
+        let rows = (size * 2) as u64;
+        println!("ready-work cohort={size} vm_steps_per_ready_row={} statements_per_cohort_step={}",
+            sample.vm_steps as f64 / rows as f64, sample.statements as f64 / rows as f64);
+        sizes.push((rows, sample));
+    }
+    // SQLite work counters are deterministic, not wall time. A 1.5x allowance
+    // tolerates fixed request overhead and modest plan changes, but not an extra
+    // cohort factor (64x here) or an unrelated-history factor (10x below).
+    // dev5 fixture observation: cohorts 1/8/32/64 yielded ready 2/16/64/128,
+    // VM 247/1458/5610/11146 and statements 13/62/230/454, all with zero scans.
+    let (small_rows, small) = &sizes[0];
+    // Check every cohort: an intermediate non-monotone spike must not hide
+    // behind a cheap largest-cohort sample.
+    for (rows, sample) in &sizes {
+        assert_within(sample.vm_steps * small_rows, small.vm_steps * rows, 1, "VM per ready row");
+        assert_within(sample.statements * small_rows, small.statements * rows, 1, "statements per cohort step");
+    }
+
+    // Keep the measured cohort and answer fixed while growing both event kinds
+    // tenfold on real work subjects assigned only to seats outside that cohort.
+    let unrelated = &subjects[64..];
+    for (subject, actor) in unrelated {
+        append_history(&store, subject, actor, 0..4);
+    }
+    let short_unrelated = measure(&app, &store, &cohort[..8]).await;
+    for (subject, actor) in unrelated {
+        append_history(&store, subject, actor, 4..40);
+    }
+    let long_unrelated = measure(&app, &store, &cohort[..8]).await;
+    assert_within(long_unrelated.vm_steps, short_unrelated.vm_steps, 1, "unrelated history VM");
+    assert_within(long_unrelated.statements, short_unrelated.statements, 1, "unrelated history statements");
+    // dev5 observation: 4 -> 40 release/progress pairs per unrelated subject
+    // left the fixed 8-seat request unchanged at 1458 VM steps / 62 statements.
+
+    // In contrast, histories on an eligible subject are NOT capped. latest_handoff
+    // SEARCHes subject+kind via claims_subject_kind_index; returned/progress use
+    // claims_subject_kind_accepted_index with the same prefix. The canonical
+    // latest query still uses a temporary ordering B-tree. Thus we allow linear
+    // candidate work, not history-independent VM cost: 10x releases/progress on
+    // ONE eligible subject may cost at most 10x * 1.5 VM steps for this fixed
+    // answer. Statement count must remain within 1.5x, rejecting per-event queries.
+    // Every release has an acknowledgment, so this exercises the progress lookup
+    // without turning the probe into an empty/refused-answer measurement.
+    let (subject, actor) = &subjects[0];
+    append_history(&store, subject, actor, 0..64);
+    let short_subject = measure(&app, &store, &cohort[..1]).await;
+    append_history(&store, subject, actor, 64..640);
+    let long_subject = measure(&app, &store, &cohort[..1]).await;
+    assert_within(long_subject.vm_steps, short_subject.vm_steps, 10, "one-subject history VM");
+    assert_within(long_subject.statements, short_subject.statements, 1, "one-subject history statements");
+    // dev5 observation: 64 -> 640 pairs on one eligible subject grew VM
+    // 5223 -> 49575 (9.49x), with 15 statements and zero scans at both sizes.
+}
+
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.
 #[tokio::test]
 async fn mission_detail_many_finished_runs_do_not_repeat_step_history() {
@@ -1760,6 +1960,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = fractal_daemon::api::router(AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -1871,10 +2072,12 @@ async fn no_request_does_work_that_grows_with_the_store() {
         } else {
             (after.answer.max(1) as f64 / before.answer.max(1) as f64).max(1.0)
         };
+        let growth_limit = if name == COLD_SEARCH { COLD_SEARCH_GROWTH } else { GROWTH };
         let grew = |field: fn(&Cost) -> u64| {
             let (before, after) = (field(before), field(after));
             let ratio = after as f64 / before.max(1) as f64 / answered;
-            (ratio, ratio > GROWTH && after > before + SLACK)
+            // Cold indexing has a strict per-conversation bound, not the warm-row slack.
+            (ratio, ratio > growth_limit && (name == COLD_SEARCH || after > before + SLACK))
         };
         let (steps, steps_grew) = grew(|cost| cost.vm_steps);
         let (scans, scans_grew) = grew(|cost| cost.fullscan_steps);
@@ -1888,13 +2091,14 @@ async fn no_request_does_work_that_grows_with_the_store() {
             ));
         }
         let summary = format!(
-            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} bytes",
+            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} {}",
             before.vm_steps,
             after.vm_steps,
             before.fullscan_steps,
             after.fullscan_steps,
             before.answer,
-            after.answer
+            after.answer,
+            if name == COLD_SEARCH { "local conversations" } else { "bytes" },
         );
         match KNOWN_GROWTH.iter().find(|(route, _)| route == name) {
             Some((_, limit)) if steps.max(scans) > *limit => failures.push(format!(
@@ -1904,6 +2108,10 @@ async fn no_request_does_work_that_grows_with_the_store() {
                 "{name}: no longer grows with the store; remove it from KNOWN_GROWTH: {summary}"
             )),
             Some(_) => {}
+            None if name == COLD_SEARCH && (steps_grew || scans_grew) => failures.push(format!(
+                "{name}: per-conversation work exceeds {COLD_SEARCH_GROWTH}x \
+                 (VM {steps:.2}x, full-scan {scans:.2}x): {summary}"
+            )),
             None if steps_grew || scans_grew => {
                 failures.push(format!("{name}: work grows with the store: {summary}"))
             }
@@ -1934,6 +2142,7 @@ async fn no_request_does_work_that_grows_with_the_store() {
             "usage_window": {"since_ms": usage_window.0, "until_ms": usage_window.1},
             "claims": [small.claims, large.claims],
             "growth_limit": GROWTH,
+            "cold_search": {"growth_limit": COLD_SEARCH_GROWTH, "normalization": "local conversations"},
             "slack": SLACK,
             "small": small.costs,
             "large": large.costs,
@@ -2055,6 +2264,7 @@ fn the_cost_check_covers_every_route() {
     let measured = PROBES
         .iter()
         .map(|probe| probe.route)
+        .chain([READY_WORK_COST_ROUTE])
         .collect::<BTreeSet<_>>();
     let skipped = NOT_MEASURED
         .iter()
@@ -2141,6 +2351,86 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     );
     assert!(samples[1].vm_steps <= samples[0].vm_steps * 2 + SLACK);
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
+}
+
+/// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
+/// Repeated observations grow the durable log, not the projected credit inventory.
+#[test]
+fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
+    const WRITER: &str = "agent/sample/usage-producer";
+    const DAY_MS: u64 = 86_400_000;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
+    store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    // Complete initialization outside measured request scopes; joining the worker is deterministic.
+    store.wait_for_usage_credit_backfill().unwrap();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+    let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
+        store.append_claim(&ClaimInput {
+            subject: WRITER.into(), kind: "usage.limits.observed".into(), actor: Some(WRITER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])),
+                ("credit_readings".into(), json!([{
+                    "account": "digest", "account_ref": "account/one", "provider": "anthropic",
+                    "credit_id": credit_id, "expires_at": time(expires),
+                    "measured_at": time(now - 1_000 + n),
+                    "state": state, "coverage": "reported", "source": "omp-usage", "host": "cost-node",
+                    "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                }])),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // An identity not refreshed by any later batch must never vanish from the inventory.
+    let forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+    for n in 1..=1_000 {
+        let refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
+        if !matches!(n, 100 | 1_000) {
+            continue;
+        }
+        for configured in [true, false] {
+            store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
+            if configured {
+                store.wait_for_usage_credit_backfill().unwrap();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..4 {
+                let scope = work::SqliteWorkScope::start();
+                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let spent = scope.finish();
+                if configured {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
+                    assert_eq!(row["status"], "missed");
+                    assert_eq!(row["current"], "1 forfeited window-equivalents");
+                    let evidence = row["evidence"].as_array().unwrap();
+                    assert_eq!(evidence.len(), 2);
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == forfeited.id));
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == refreshed.id));
+                } else {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/unknown").unwrap();
+                    assert_eq!(row["status"], "no-data");
+                    assert!(row["evidence"].as_array().unwrap().is_empty());
+                }
+                samples.push(spent);
+            }
+            let spent = samples.into_iter().skip(1).min_by_key(|sample| sample.vm_steps).unwrap();
+            if configured { enabled.push(spent); } else { disabled.push(spent); }
+        }
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    }
+    for (configured, samples) in [(true, enabled), (false, disabled)] {
+        let (small, large) = (samples[0], samples[1]);
+        assert!(small.statements > 0, "shared SLO SQL work must be traced");
+        assert!(large.statements <= small.statements + 2,
+            "SLO SQL calls grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.vm_steps <= small.vm_steps + SLACK,
+            "SLO row work grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+            "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
+    }
 }
 
 #[test]
@@ -2780,6 +3070,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -3062,6 +3353,59 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         }
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
+        }
+        if probe.route == "GET /v1/client/conversations/search" {
+            // The cold build owns all SQL work through the worker's explicit completion,
+            // not merely until its first 503 or a quiet interval between reader admissions.
+            let path = fixture.fill(probe.path, 0);
+            smallclaims::sqlite::histogram::take();
+            let before_work = work::total();
+            let before_builds = fractal_daemon::api::managed_owner_map_build_count_for_test();
+            let started = Instant::now();
+            let (indexed_bytes, local_conversations) =
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    if let Err(error) = person.request::<(), Value>("GET", &path, None).await {
+                        assert!(
+                            fractal_daemon::client::api_error_parts(&error).is_some_and(
+                                |(status, code, message, _)| {
+                                    status == 503
+                                        && code == "remote-unavailable"
+                                        && message
+                                            == "conversation search index is being built; retry shortly"
+                                },
+                            ),
+                            "the cold search request failed: {error:#}",
+                        );
+                    }
+                    fractal_daemon::api::client_v0::search::wait_native_index_for_test(
+                        &store, "person/bench-operator",
+                    ).await.expect("the cold search index worker must succeed")
+                })
+                .await
+                .expect("the cold search index worker must finish within 120 seconds");
+            let spent = work::total() - before_work;
+            let owner_map_builds =
+                fractal_daemon::api::managed_owner_map_build_count_for_test() - before_builds;
+            println!(
+                "scale {scale}: {COLD_SEARCH}: {:.3}s, {owner_map_builds} owner-map builds, \
+                 {local_conversations} local conversations, {indexed_bytes} indexed bytes, \
+                 {} VM steps, {} full-scan steps, {} statements",
+                started.elapsed().as_secs_f64(), spent.vm_steps, spent.fullscan_steps,
+                spent.statements,
+            );
+            assert!(
+                owner_map_builds <= local_conversations + 1,
+                "cold search rebuilt the fleet owner map {owner_map_builds} times for \
+                 {local_conversations} local conversations",
+            );
+            assert!(indexed_bytes > 0, "cold search must index the generated content");
+            assert!(local_conversations > 0, "cold search must visit local conversations");
+            let (max_repeat, top_shape) = most_repeated_shape();
+            costs.insert(COLD_SEARCH.to_owned(), Cost {
+                max_repeat,
+                top_shape,
+                ..Cost::from_work(spent, local_conversations as u64, None)
+            });
         }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.

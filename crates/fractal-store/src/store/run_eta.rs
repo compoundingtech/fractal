@@ -282,7 +282,13 @@ pub fn step_timestamps(
     (started, completed)
 }
 
-pub fn read(connection: &Connection, run: &str, at: u128) -> Result<Option<Value>> {
+/// The run's definition and each remaining declared step's nearest-rank p25/p75 sample duration
+/// and sample count, `None` for a step without samples. `None` when the run is over.
+#[allow(clippy::type_complexity)]
+fn remaining_steps(
+    connection: &Connection,
+    run: &str,
+) -> Result<Option<(MissionSpec, Vec<(String, Option<(u64, u64, usize)>)>)>> {
     let run = run.trim_start_matches("mission-run/");
     let body = connection
         .query_row(
@@ -297,13 +303,11 @@ pub fn read(connection: &Connection, run: &str, at: u128) -> Result<Option<Value
     let Some(body) = body else { return Ok(None) };
     let mission: MissionSpec = serde_json::from_str(&body)?;
     let specs = flatten_mission_step_specs(&mission);
-    let critical = specs.iter().any(|step| !step.dependencies.is_empty());
     let steps = connection.prepare_cached("SELECT step_path,definition_hash,status FROM step_runs
         WHERE run_id=?1 AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)")?
         .query_map([run], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut weights = BTreeMap::new();
-    let mut samples = SAMPLE_LIMIT;
+    let mut remaining = Vec::new();
     for (path, hash, status) in steps {
         if matches!(
             status.as_str(),
@@ -322,19 +326,48 @@ pub fn read(connection: &Connection, run: &str, at: u128) -> Result<Option<Value
             )?
             .query_map(params![hash, path], |row| row.get::<_, u64>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        if durations.is_empty() {
-            return Ok(None);
-        }
-        samples = samples.min(durations.len());
         // Nearest-rank empirical quartiles remain integer durations, including n=1.
         let n = durations.len();
-        weights.insert(
-            path,
+        let quartiles = (n > 0).then(|| {
             (
                 durations[n.div_ceil(4) - 1],
                 durations[(3 * n).div_ceil(4) - 1],
-            ),
-        );
+                n,
+            )
+        });
+        remaining.push((path, quartiles));
+    }
+    Ok(Some((mission, remaining)))
+}
+
+/// Each remaining step's p25/p75 duration and sample count, for the steps that have samples. A
+/// step without samples is absent; unlike [`read`], it does not hide the others.
+pub fn read_steps(connection: &Connection, run: &str) -> Result<BTreeMap<String, (u64, u64, usize)>> {
+    Ok(remaining_steps(connection, run)?
+        .map(|(_, steps)| {
+            steps
+                .into_iter()
+                .filter_map(|(path, quartiles)| Some((path, quartiles?)))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+pub fn read(connection: &Connection, run: &str, at: u128) -> Result<Option<Value>> {
+    let Some((mission, remaining)) = remaining_steps(connection, run)? else {
+        return Ok(None);
+    };
+    let critical = flatten_mission_step_specs(&mission)
+        .iter()
+        .any(|step| !step.dependencies.is_empty());
+    let mut weights = BTreeMap::new();
+    let mut samples = SAMPLE_LIMIT;
+    for (path, quartiles) in remaining {
+        let Some((low, high, n)) = quartiles else {
+            return Ok(None);
+        };
+        samples = samples.min(n);
+        weights.insert(path, (low, high));
     }
     let edges = flattened_dependencies(&mission);
     let mut totals = BTreeMap::<String, (u64, u64)>::new();

@@ -119,6 +119,14 @@ async function rootProof(root: Grant, fingerprint: string | undefined, crypto: P
   require(!fingerprint || fingerprint === actual, 'Person-root fingerprint mismatch. Do not trust this response; obtain the fingerprint separately from the trusted machine.');
 }
 
+/** Authenticate a renewal issuer using only the profile's previously saved root pin. */
+export async function verifyPersonRoot(proof: unknown, person: string, fingerprint: string, crypto: ProofCrypto): Promise<string> {
+  validatePairingTrust(fingerprint, false);
+  const root = await grantProof(proof, undefined, person, crypto);
+  await rootProof(root, fingerprint, crypto);
+  return root.body.fields.key as string;
+}
+
 /** Check enrollment before saving any credential. A fingerprint must be validated before POST. */
 export async function verifyPairing(session: PersonPairedSession, key: string, fingerprint: string | undefined, crypto: ProofCrypto): Promise<void> {
   require(typeof session.person_id === 'string' && /^person\/[^/]+$/.test(session.person_id)
