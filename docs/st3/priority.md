@@ -211,7 +211,9 @@ The grace interval is the p90 of observed waits for normal-priority entries in t
 queue, over a pinned time window. Measure each wait from ready or queue join to first
 claim or admission, as applicable to the queue. Each replica computes the interval
 from its own history. Every selector decision records the window, the method and
-the value.
+the value. If the window has no observed normal-priority wait, the grace interval is
+unknown. Then the selector does not reorder by priority: it keeps FIFO order by queue
+join time and records the grace interval as unknown.
 
 **Current state.** The seat queue is FIFO with manual moves. The budgets-v1 step
 `seat-shadow` will only record shadow decisions for one dedicated seat; FIFO still
