@@ -101,8 +101,10 @@ describe('terminal navigation toggle', () => {
   })
   it('opens the live terminal and returns to the thread on the second click', async () => {
     await mount(observed({ value: [agent] }))
+    const historyLength = window.history.length
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('terminal/example:detail')
+    expect(window.history.length).toBe(historyLength + 1)
     // The name says what a press does next, so it carries no toggle state that would read "Show conversation, pressed".
     expect(toggle()?.getAttribute('aria-label')).toBe('Show conversation')
     expect(toggle()?.hasAttribute('aria-pressed')).toBe(false)
@@ -111,6 +113,7 @@ describe('terminal navigation toggle', () => {
     expect(host.textContent).not.toContain('Terminal unavailable')
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
+    expect(window.history.length).toBe(historyLength + 2)
     expect(toggle()?.getAttribute('aria-label')).toBe('Show terminal')
     expect(terminalShown()).toBe(false)
   })
@@ -172,19 +175,35 @@ describe('terminal failure stays local to the terminal pane', () => {
     expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
     expectThreadRetained(before)
   })
-  it('turns a terminal-less deep link back to the conversation and keeps the toggle disabled with the reason', async () => {
-    window.history.replaceState(null, '', '/w/agent/example?open=terminal/example:detail')
+  it('replaces a terminal-less deep link so Back leaves instead of reopening the missing terminal', async () => {
+    const previous = '/w/agent/previous?open=thread'
+    window.history.replaceState(null, '', previous)
+    window.history.pushState(null, '', '/w/agent/example?open=terminal/example:detail')
+    const historyLength = window.history.length
     await mount(observed({ value: [{ ...agent, runtime_ids: [] }] }), noTerminal)
     await waitForThread()
     await vi.waitFor(() => expect(terminalShown()).toBe(false))
     expect(toggle()?.getAttribute('aria-label')).toBe('Show terminal')
     expect(toggleDisabled()).toBe(true)
     expect(toggleDescription()).toBe('This agent has no terminal.')
+    expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
+    expect(window.history.length).toBe(historyLength)
+    await act(async () => {
+      window.history.back()
+      await vi.waitFor(() => expect(`${window.location.pathname}${window.location.search}`).toBe(previous))
+    })
+    expect(terminalShown()).toBe(false)
+    await act(async () => {
+      window.history.forward()
+      await vi.waitFor(() => expect(`${window.location.pathname}${window.location.search}`).toBe('/w/agent/example?open=thread'))
+    })
+    expect(terminalShown()).toBe(false)
   })
   it('disables the toggle after an attach finds no terminal, returns to the conversation, and re-enables when the runtimes change', async () => {
     await mount(observed({ value: [agent] }), noTerminal)
     await waitForThread()
     expect(toggle()?.hasAttribute('aria-disabled')).toBe(false)
+    const historyLength = window.history.length
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
     await waitForThread()
@@ -192,6 +211,8 @@ describe('terminal failure stays local to the terminal pane', () => {
     expect(toggle()?.getAttribute('aria-label')).toBe('Show terminal')
     expect(toggleDisabled()).toBe(true)
     expect(toggleDescription()).toBe('This agent has no terminal.')
+    // Opening is an ordinary push; the automatic return replaces that entry.
+    expect(window.history.length).toBe(historyLength + 1)
     // The same roster frame again keeps the remembered failure.
     await mount(observed({ value: [{ ...agent }] }), noTerminal)
     expect(toggleDisabled()).toBe(true)

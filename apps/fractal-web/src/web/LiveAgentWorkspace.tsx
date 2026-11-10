@@ -344,13 +344,14 @@ const initialAgentFromUrl = (location: string) => {
 export interface WorkspaceNavigation {
   readonly getLocation: () => string
   readonly subscribe: (callback: () => void) => () => void
-  readonly navigate: (href: string) => void
+  readonly navigate: (href: string, options?: { readonly replace?: boolean }) => void
 }
 const browserNavigation: WorkspaceNavigation = {
   getLocation: locationState,
   subscribe: subscribeLocation,
-  navigate: (href) => {
-    window.history.pushState(null, '', href)
+  navigate: (href, options) => {
+    if (options?.replace === true) window.history.replaceState(null, '', href)
+    else window.history.pushState(null, '', href)
     window.dispatchEvent(new PopStateEvent('popstate'))
   },
 }
@@ -508,9 +509,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
-  const navigate = (ref: string, pane = 'thread') => {
+  const navigate = (ref: string, pane = 'thread', options?: { readonly replace?: boolean }) => {
     setStoredAgent(ref)
-    navigation.navigate(workspaceHref(ref, pane, location.split('?')[1] ?? ''))
+    navigation.navigate(workspaceHref(ref, pane, location.split('?')[1] ?? ''), options)
   }
   // Which agents were last left on their terminal. Memory only: a reload restores the selected agent through `?open=`.
   const terminalAgents = React.useRef(new Set<string>())
@@ -686,7 +687,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
   const shownTerminalDisabledReason = terminalOpen ? undefined : terminalDisabledReason
   const focusShownView = React.useRef(false)
-  // An attach that finds no terminal records its reason and returns to the conversation.
+  // An attach that finds no terminal records its reason and replaces the failed view so Back can leave it.
   const shownTerminalRef = terminalOpen ? terminalSubjectForAgent(current) : undefined
   const shownTerminal = useAtomValue(shownTerminalRef === undefined ? idleTerminal : terminalSource.terminal(shownTerminalRef))
   const missingTerminal = shownTerminalRef !== undefined && shownTerminal._tag === 'Unavailable' && shownTerminal.code === 'no-terminal'
@@ -695,7 +696,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     if (missingTerminal === undefined) return
     setTerminalFailures(failures => new Map(failures).set(current, { runtimeKey: agent?.runtimeKey, reason: missingTerminal }))
     focusShownView.current = true
-    navigate(current)
+    navigate(current, 'thread', { replace: true })
   }, [missingTerminal, current, agent?.runtimeKey, navigate])
   const toggleTerminal = () => {
     if (terminalOpen) { focusShownView.current = true; navigate(current) }
