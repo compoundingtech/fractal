@@ -10,6 +10,8 @@ export interface ClientControlPermission {
   /** Authoritative adapter returns nothing unless identity/session/run/grant binding is valid. */
   readonly verbs: ReadonlySet<string>
   readonly screens: ReadonlySet<string>
+  /** Internal authority projection of the grant's bound item, not a wire field name. */
+  readonly boundAskId: string
 }
 
 const destinationFor = (intent: ClientControlIntent): ClientControlRouteTarget | undefined => {
@@ -25,7 +27,7 @@ const destinationFor = (intent: ClientControlIntent): ClientControlRouteTarget |
  * The later generated-wire adapter owns identity/session/run/window validation and permission revocation.
  */
 export const handleGrantedClientControlIntent = async (input: {
-  readonly currentScreen: () => string
+  readonly currentTarget: () => ClientControlRouteTarget | undefined
   readonly intent: ClientControlIntent
   readonly permission: () => ClientControlPermission | undefined
   readonly foreground: () => boolean
@@ -37,16 +39,20 @@ export const handleGrantedClientControlIntent = async (input: {
   const destination = intent.verb === 'phone.navigate' ? destinationFor(intent) : undefined
   if (intent.verb === 'phone.navigate' && destination === undefined) return 'Refused'
   if (intent.verb === 'phone.inspect' && (intent.screenName !== undefined || intent.targetAskId !== undefined)) return 'Refused'
+  const targetAllowed = (permission: ClientControlPermission, target: ClientControlRouteTarget | undefined) =>
+    target !== undefined && permission.screens.has(target._tag)
+      && (target._tag !== 'Attention' || target.askId === permission.boundAskId)
   const allowed = () => {
     const permission = input.permission()
     return permission !== undefined && permission.verbs.has(intent.verb)
-      && permission.screens.has(destination?._tag ?? input.currentScreen())
+      && targetAllowed(permission, destination ?? input.currentTarget())
   }
   if (!allowed()) return 'Refused'
   if (!input.foreground()) return 'NotForeground'
   if (destination !== undefined) await input.navigate(destination)
   // Navigation may yield; revoked authority or lost foreground must never sign afterward.
-  if (!input.permission()?.screens.has(input.currentScreen())) return 'Refused'
+  const permission = input.permission()
+  if (permission === undefined || !targetAllowed(permission, input.currentTarget())) return 'Refused'
   if (!allowed()) return 'Refused'
   if (!input.foreground()) return 'NotForeground'
   await input.signVisibleState()

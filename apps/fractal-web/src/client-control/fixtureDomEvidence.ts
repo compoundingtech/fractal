@@ -6,7 +6,7 @@ import { isFixturePlainText } from './fixtureText.ts'
 export interface FixtureSeedExpectation {
   readonly askId: string
   readonly title: string
-  /** SHA-256 of the rendered request.question text, never answer text or conversation content. */
+  /** SHA-256 of the rendered request.question text, never answer text. */
   readonly questionTextSha256: string
   readonly subjectIds: readonly string[]
 }
@@ -50,8 +50,9 @@ export const compareFixtureDom = (seed: FixtureSeedExpectation, observed: {
 }
 
 /**
- * Call AFTER granted navigation on the real app in a fresh, dedicated Playwright context.
- * The runner owns context creation, verified fixture attestation, network capture and granted
+ * Call AFTER granted navigation on the real app in its dedicated, isolated Playwright context.
+ * Keep the profile across journeys; do not reset storage to manufacture initially unseen state.
+ * The runner owns context lifecycle, verified fixture attestation, network capture and granted
  * commands. This function never navigates, pairs, reads credentials, mutates state, or signs.
  * Selectors identify the ask title and rendered request.question INSIDE the expanded native ask.
  * Digest is SHA-256 of exact UTF-8 DOM innerText, without trimming/normalizing. Never press answer

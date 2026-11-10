@@ -4,15 +4,21 @@ import type { ClientControlRouteTarget } from './navigation.ts'
 
 const permission: ClientControlPermission = {
   verbs: new Set(['phone.inspect', 'phone.navigate']), screens: new Set(['NowRoot', 'Attention']),
+  boundAskId: 'attention/unit-ask',
 }
 
-const exercise = async (intent: ClientControlIntent, grant: ClientControlPermission | undefined = permission) => {
+const exercise = async (
+  intent: ClientControlIntent,
+  grant: ClientControlPermission | undefined = permission,
+  initialTarget: ClientControlRouteTarget = { _tag: 'NowRoot' },
+) => {
   const navigations: ClientControlRouteTarget[] = []
   let signatures = 0
+  let currentTarget = initialTarget
   const result = await handleGrantedClientControlIntent({
     intent, permission: () => grant, foreground: () => true,
-    currentScreen: () => intent.screenName === 'Attention' ? 'Attention' : 'NowRoot',
-    navigate: async target => { navigations.push(target) },
+    currentTarget: () => currentTarget,
+    navigate: async target => { navigations.push(target); currentTarget = target },
     signVisibleState: async () => { signatures += 1 },
   })
   return { result, navigations, signatures }
@@ -45,6 +51,18 @@ describe('client-control grant-check handler boundary', () => {
       { ...permission, screens: new Set(['NowRoot']) })).toEqual({ result: 'Refused', navigations: [], signatures: 0 })
   })
 
+  it('refuses navigation to an ask other than the grant-bound item', async () => {
+    expect(await exercise({ verb: 'phone.navigate', screenName: 'Attention', targetAskId: 'attention/other-ask' })).toEqual({
+      result: 'Refused', navigations: [], signatures: 0,
+    })
+  })
+
+  it('refuses inspecting an ask other than the grant-bound item', async () => {
+    expect(await exercise({ verb: 'phone.inspect' }, permission, { _tag: 'Attention', askId: 'attention/other-ask' })).toEqual({
+      result: 'Refused', navigations: [], signatures: 0,
+    })
+  })
+
   it.each([
     [undefined, true, 'Refused'],
     [permission, false, 'NotForeground'],
@@ -53,7 +71,7 @@ describe('client-control grant-check handler boundary', () => {
     const calls: string[] = []
     const result = await handleGrantedClientControlIntent({
       intent: { verb: 'phone.navigate', screenName: 'NowRoot' }, permission: () => grant,
-      foreground: () => foreground, currentScreen: () => 'NowRoot',
+      foreground: () => foreground, currentTarget: () => ({ _tag: 'NowRoot' }),
       navigate: async () => { calls.push('navigate') }, signVisibleState: async () => { calls.push('sign') },
     })
     expect(result).toBe(expected)
@@ -65,7 +83,7 @@ describe('client-control grant-check handler boundary', () => {
     let signatures = 0
     const result = await handleGrantedClientControlIntent({
       intent: { verb: 'phone.navigate', screenName: 'NowRoot' }, permission: () => active, foreground: () => true,
-      currentScreen: () => 'NowRoot',
+      currentTarget: () => ({ _tag: 'NowRoot' }),
       navigate: async () => { active = undefined }, signVisibleState: async () => { signatures += 1 },
     })
     expect(result).toBe('Refused')
