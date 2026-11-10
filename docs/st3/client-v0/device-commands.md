@@ -1,8 +1,8 @@
-# Foreground phone commands
+# Foreground device commands
 
-A device command is one typed, expiring request to a paired phone's foreground instance.
-It is not a durable action, background job, push notification, or replay queue. This contract
-adds the daemon/client boundary; a phone must implement the handlers before it can execute commands.
+A device command is one typed, expiring request to a paired client's foreground instance.
+It is not a background job, push notification, or replay queue. The same protocol addresses
+enrolled iOS, web and TUI test clients; ordinary person-operated phone commands retain their wire shape.
 
 ## Commands and responses
 
@@ -97,9 +97,10 @@ After the capability probe, a phone subscribes on its existing foreground collec
 ```
 
 The server uses only the existing `snapshot` and `changes` resource-window frames, containing
-`device-command` rows. There are no new frame kinds and no second socket. The addressed session
-is the delivery boundary; subscriptions cannot override it. Phone windows contain only active
-`pending` / `delivered` commands; terminal transitions remove them, never replay them.
+`device-command` rows and test-client grant lifecycle resources. There are no new frame kinds
+and no second socket. The addressed session is the delivery boundary; subscriptions cannot
+override it. Client command windows contain only active `pending` / `delivered` commands;
+terminal transitions remove them, never replay them.
 Nonpaired issuer windows include their terminal outcomes in a newest-first window of at most
 32 rows (a requested collection limit can reduce this). GET retains each outcome independently
 of that window for the correlation period. Phones must never execute terminal or expired rows.
@@ -120,13 +121,13 @@ collections stream for the addressed `session_actor`, or `expired` otherwise. Ph
 client timestamps do not extend that deadline. A late report cannot replace the terminal decision;
 repeated reports cannot overwrite an already accepted outcome.
 
-Commands live only in memory on the phone pairing's issuing member. They are never claims,
-replicated records, persistent receipts, event replay, or restart recovery. Terminal outcomes remain
-available for five minutes of ephemeral correlation before eviction. The process retains at most
-2048 rows in total and refuses further admission when retention capacity is exhausted; it does not
-discard a retained outcome early to make room. A daemon restart or eviction makes outcomes
-unavailable. Expired commands are never executed on reconnection. The normal envelope's snapshot
-describes the response context, not durable storage of the command.
+Command correlation rows live only in memory on the pairing's issuing member; they are not
+replicated or replayed after restart. Granted commands and fixture admission refusals have
+separate durable receipt claims described below. Terminal correlation outcomes remain
+available for five minutes before eviction. The process retains at most 2048 rows and refuses
+further admission when capacity is exhausted rather than discarding retained outcomes early.
+A restart or eviction removes command correlation, not persisted receipts. Expired commands
+are never executed on reconnection. The normal envelope's snapshot describes response context.
 
 ## Isolated client-control v1 signed results
 
@@ -223,6 +224,56 @@ This persisted withdrawal ends every grant bound to that enrollment, regardless
 of timestamps; new enrollment cannot resurrect old grants. Grant issue, command
 admission and result acceptance reload enrollment and pairing authority.
 Operators can revoke even after the pairing expires.
+
+## Grant admission and durable receipts
+
+`POST /v1/client/control-grants` binds a grant to the issuing agent's currently
+claimed step of a running mission run. The exact claim generation, attempt and
+incarnation remain authoritative: claim replacement, claim/run end, enrollment
+revocation and deadlines end the grant. The default budget is 50 commands, spent
+durably before admission; grants last at most two hours. Only `phone.inspect`
+and `phone.navigate` to `NowRoot` or `Attention` can be granted. The journey opens
+the seeded native ask using `Attention {params: {id}}`, then inspects it. Required
+grant `item_id` binds Attention to that existing native ask; missing, unknown or
+different asks are `screen-not-granted`. NowRoot-only grants need no item.
+`Conversation` is always `screen-not-granted`. Answer, close, read-state and
+`message.send` verbs are `verb-not-granted`; no grant authorizes a mutation.
+
+The existing session-scoped `commands` collection includes generated
+`kind: "client-control-grant-lifecycle"` resources before the first command.
+Their states are `started`, `ended` and `revoked`; the stable resource ID and
+strictly increasing sequence identify the latest durable transition per grant.
+Idle subscribers receive revocation and run/claim/deadline termination without
+issuing a command or resubscribing. Lifecycle drives only the control indicator
+and termination: policy remains in each command's `control_grant` record.
+Commands without an active matching lifecycle grant fail closed. Clients ignore
+duplicate/out-of-order starts, preserve the grant's `item_id` binding, and never
+reactivate a terminal grant ID. A command binds `grant_id` and `run_id`; no second
+command transport exists.
+
+Granted result acceptance verifies the generated canonical bytes directly with
+the enrolled P-256 key, not principal message authority. The outer outcome,
+error and optional result must agree with the signed binding. The daemon checks
+the command and grant windows, pairing session, run, command, verb and visible
+screen again, and rejects terminal-command replay. Signature-envelope nonce and
+timestamp metadata do not establish freshness; the daemon's clock does.
+
+Every terminal granted command has one durable
+`custom.client.command-receipt` claim. The resource's `receipt_claim_id` identifies
+it. Completed signed results record `verifiedResultSignature` and `signedResult`;
+unsigned terminal states such as expiry and grant-end refusal record nulls.
+Command correlation rows themselves remain ephemeral.
+
+An authenticated agent's well-formed command refused for a D-3/D-4 reason also
+receives one durable rejected-attempt receipt, but only in the local-only fixture
+owned by `person/client-control-fixture`. It records an assigned `commandId`,
+issuer, device, optional grant/run, verb/screen, typed reason, terminal state
+`refused` and no signature. The typed error details include `command_id` and
+`receipt_claim_id`. The existing 2,048-row, five-minute command/refusal retention
+bound limits receipt admission; saturation returns `receipt-capacity` without a
+receipt. Persisted receipt claims are not removed when this window expires.
+Unauthenticated or malformed requests, and requests outside the fixture, return
+typed errors without receipt writes.
 
 ## Grant lifecycle on the commands collection
 

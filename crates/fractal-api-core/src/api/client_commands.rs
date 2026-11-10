@@ -1,5 +1,5 @@
-//! Foreground phone commands are member-local, bounded, ephemeral correlation records.
-//! No claims, durable receipts, replication, or replay participate in this protocol.
+//! Foreground device commands are member-local, bounded, ephemeral correlation records.
+//! Granted test-client commands additionally produce durable, purpose-bound receipts.
 use super::client_v0::{acting_party, forbidden, paired_client_session, require_scope, revalidate_session, validation, ClientSession};
 use super::*;
 use std::collections::BTreeMap;
@@ -20,14 +20,17 @@ pub struct DeviceCommandRequest {
     pub kind: String,
     pub args: Value,
     pub ttl_ms: Option<u64>,
+    pub grant_id: Option<String>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceResultRequest {
     pub command_id: String,
     pub outcome: String,
     pub result: Option<Value>,
     pub error_code: Option<String>,
+    pub binding: Option<fractal_schema::client_control::ClientResultBinding>,
+    pub signature: Option<fractal_client::DeviceSignature>,
 }
 #[derive(Clone)]
 struct Command {
@@ -64,12 +67,80 @@ impl Command {
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> { CHANGES.subscribe() }
 fn changed(member: &str) { let _ = CHANGES.send(member.to_owned()); }
 fn storage_error() -> ApiError { ApiError::internal("local device command memory is unavailable") }
+fn persist_receipt(state: &AppState, row: &mut Command) -> Result<(), ApiError> {
+    if !row.terminal() || row.resource.get("grant_id").is_none() || row.resource.get("receipt_claim_id").is_some() {
+        return Ok(());
+    }
+    let command_id = row.resource["id"].as_str().ok_or_else(storage_error)?;
+    let receipt = state.store.append_client_operation_claim(&ClaimInput {
+        subject: format!("custom/client/command-receipt/{}", command_id.trim_start_matches("device-command/")),
+        kind: "custom.client.command-receipt".into(),
+        actor: Some(row.person.clone()),
+        fields: serde_json::from_value(json!({
+            "commandId": command_id, "terminalState": row.resource["state"],
+            "issuer": row.resource["issued_by"], "device": row.resource["device_id"],
+            "session": row.resource["session_actor"], "grantId": row.resource["grant_id"],
+            "runId": row.resource["run_id"], "commandKind": row.resource["command_kind"],
+            "verifiedResultSignature": row.resource.get("verified_result_signature"),
+            "signedResult": row.resource.get("signed_result"),
+        })).map_err(ApiError::internal)?,
+        evidence: Vec::new(), expected_subject: Some(None),
+        idempotency_key: Some(format!("client-command-receipt:{command_id}")),
+    }).map_err(ApiError::internal)?;
+    row.resource["receipt_claim_id"] = json!(receipt.id);
+    super::signal_changed(state);
+    Ok(())
+}
+fn control_refusal(code: &'static str) -> ApiError {
+    ApiError { status: StatusCode::FORBIDDEN, code: code.into(), message: format!("client control refused: {code}"), details: Box::default() }
+}
+fn verify_result(state: &AppState, session: &ClientSession, row: &Command, request: &DeviceResultRequest) -> Result<(), ApiError> {
+    use fractal_schema::client_control::{CLIENT_RESULT_SIGNED_FIELDS, client_result_canonical_bytes};
+    let Some(grant_id) = row.resource.get("grant_id").and_then(Value::as_str) else {
+        if request.binding.is_some() || request.signature.is_some() { return Err(forbidden("signed results require a command grant")); }
+        return Ok(());
+    };
+    if row.terminal() || client_now_ms() >= row.expires { return Err(forbidden("device result is outside its command window")); }
+    let binding = request.binding.as_ref().ok_or_else(|| forbidden("device result requires a signed binding"))?;
+    let signature = request.signature.as_ref().ok_or_else(|| forbidden("device result requires a signature"))?;
+    let enrollment = super::client_control_enrollment::enrolled(state, &binding.device)?;
+    let grant = super::client_control_grants::check_result_window(
+        state, grant_id, row.resource["run_id"].as_str().unwrap_or_default(),
+        row.resource["device_id"].as_str().unwrap_or_default(),
+        row.resource["issued_by"].as_str().unwrap_or_default(),
+        row.resource["command_kind"].as_str().unwrap_or_default(),
+        &row.resource["args"], &request.command_id,
+    )?;
+    if binding.purpose != "client.device-result.v1"
+        || binding.command_kind != row.resource["command_kind"]
+        || binding.device != row.resource["device_id"]
+        || binding.session != session.actor
+        || binding.grant_id != grant_id || binding.run_id != grant.run_id
+        || binding.command_id != request.command_id || binding.outcome != request.outcome
+        || binding.error_code != request.error_code
+        || enrollment.pairing_subject != row.grant
+        || signature.signer != session.authority_actor || signature.key != enrollment.public_key
+        || signature.format != "fields-v1"
+        || !signature.signed_fields.iter().map(String::as_str).eq(CLIENT_RESULT_SIGNED_FIELDS.iter().copied())
+        || request.result.as_ref().is_some_and(|result| serde_json::to_value(&binding.visible_state).as_ref().ok() != Some(result))
+    { return Err(forbidden("device result binding does not match its command")); }
+    super::client_control_grants::check_screen(&grant, &binding.visible_state.screen)?;
+    if binding.visible_state.screen == "Attention" {
+        let item = binding.visible_state.opened_item.as_ref().ok_or_else(|| control_refusal("screen-not-granted"))?;
+        super::client_control_grants::check_item(&grant, &item.id)?;
+    }
+    let bytes = client_result_canonical_bytes(binding).map_err(ApiError::internal)?;
+    if !smallclaims::principal::verify_key_signature(&enrollment.public_key, &bytes, &signature.signature) {
+        return Err(forbidden("invalid device result signature"));
+    }
+    Ok(())
+}
 fn missing() -> ApiError { ApiError { status: StatusCode::NOT_FOUND, code: "not-found".into(), message: "device command not found".into(), details: Box::default() } }
 fn capacity() -> ApiError { ApiError { status: StatusCode::TOO_MANY_REQUESTS, code: "resource-exhausted".into(), message: "device command capacity exceeded".into(), details: Box::default() } }
 pub fn scope(kind: &str) -> Result<&'static str, ApiError> {
     match kind { "phone.inspect" | "phone.navigate" => Ok("read.projections"), "phone.message.read" => Ok("control.messages"), _ => Err(validation("unknown phone command kind")) }
 }
-pub fn paired(session: &ClientSession) -> bool { session.pairing_grant.is_some() && session.pairing_issued_here && session.transport != "unix" }
+pub fn paired(session: &ClientSession) -> bool { session.pairing_grant.is_some() && session.pairing_issued_here }
 pub fn capable(session: &ClientSession) -> bool { paired(session) || acting_party(session) && (session.allows("read.projections") || session.allows("control.messages")) }
 fn bounded_string(value: &Value) -> bool { value.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control)) }
 fn fields(value: &Value, required: &[&str], optional: &[&str]) -> bool {
@@ -102,12 +173,41 @@ fn sweep(rows: &mut BTreeMap<(String, String), Command>, member: &str, now: u128
     for ((node, _), row) in rows.iter_mut().filter(|((node, _), _)| node == member) {
         row.expire(now, super::client_presence::has_collection_stream(node, row.resource["session_actor"].as_str().unwrap_or_default()));
     }
-    rows.retain(|_, row| row.terminal_at.is_none_or(|at| now.saturating_sub(at) < RETENTION_MS));
+    rows.retain(|_, row| row.terminal_at.is_none_or(|at| now.saturating_sub(at) < RETENTION_MS)
+        || row.resource.get("grant_id").is_some() && row.resource.get("receipt_claim_id").is_none());
+}
+fn sweep_durable(rows: &mut BTreeMap<(String, String), Command>, state: &AppState, now: u128) -> Result<(), ApiError> {
+    sweep(rows, &state.node, now);
+    for (_, row) in rows.iter_mut().filter(|((node, _), _)| node == &state.node) {
+        if !row.terminal() && let Some(grant_id) = row.resource.get("grant_id").and_then(Value::as_str) {
+            match super::client_control_grants::check_result_window(
+                state, grant_id, row.resource["run_id"].as_str().unwrap_or_default(),
+                row.resource["device_id"].as_str().unwrap_or_default(),
+                row.resource["issued_by"].as_str().unwrap_or_default(),
+                row.resource["command_kind"].as_str().unwrap_or_default(), &row.resource["args"],
+                row.resource["id"].as_str().unwrap_or_default(),
+            ) {
+                Ok(_) => {}
+                Err(error) if error.status == StatusCode::FORBIDDEN => {
+                    row.resource["state"] = json!("refused");
+                    row.resource["error_code"] = json!(error.code);
+                    row.terminal_at = Some(now);
+                    row.stamp(now);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        persist_receipt(state, row)?;
+    }
+    Ok(())
 }
 fn admit(rows: &BTreeMap<(String, String), Command>, member: &str, device: &str) -> Result<(), ApiError> {
     if rows.len() >= MAX_COMMANDS || rows.iter().filter(|((node, _), row)|
         node == member && row.resource["device_id"] == device && !row.terminal()
     ).count() >= MAX_PENDING_PER_DEVICE { Err(capacity()) } else { Ok(()) }
+}
+fn admit_receipt(rows: &BTreeMap<(String, String), Command>) -> Result<(), ApiError> {
+    if rows.len() >= MAX_COMMANDS { Err(control_refusal("receipt-capacity")) } else { Ok(()) }
 }
 fn visible(row: &Command, session: &ClientSession) -> bool {
     if session.pairing_grant.is_some() { paired(session) && row.resource["session_actor"] == session.actor && session.pairing_grant.as_deref() == Some(row.grant.as_str()) }
@@ -122,13 +222,70 @@ fn authorize_read(row: &Command, session: &ClientSession) -> Result<(), ApiError
 /// Requires a running Tokio runtime to own deadline and retention wakeups.
 pub fn issue(state: &AppState, session: &ClientSession, request: DeviceCommandRequest) -> Result<Value, ApiError> {
     let session = revalidate_session(state, session)?;
+    match issue_inner(state, &session, &request) {
+        Err(mut error) if session.authority_actor.starts_with("agent/") && acting_party(&session)
+            && state.local_only() && state.owning_person.as_deref() == Some("person/client-control-fixture")
+            && matches!(error.code.as_str(), "device-not-test-client" | "grant-missing" | "grant-expired"
+                | "screen-not-granted" | "verb-not-granted" | "budget-exhausted" | "actor-not-granted") =>
+        {
+            let now = client_now_ms();
+            let mut rows = ROWS.lock().map_err(|_| storage_error())?;
+            sweep_durable(&mut rows, state, now)?;
+            admit_receipt(&rows)?;
+            let mut suffix = crate::model::new_request_id();
+            suffix.replace_range(14..15, "8");
+            let id = format!("device-command/{suffix}");
+            let run_id = request.grant_id.as_deref().and_then(|id| super::client_control_grants::lookup(state, id).ok()).map(|grant| grant.run_id);
+            let receipt = state.store.append_client_operation_claim(&ClaimInput {
+                subject: format!("custom/client/command-receipt/{suffix}"),
+                kind: "custom.client.command-receipt".into(), actor: Some(session.authority_actor.clone()),
+                fields: serde_json::from_value(json!({
+                    "commandId": id, "terminalState": "refused", "issuer": session.actor,
+                    "device": request.device, "grantId": request.grant_id, "runId": run_id,
+                    "commandKind": request.kind, "screen": request.args.get("screen"), "reason": error.code,
+                    "verifiedResultSignature": null, "signedResult": null,
+                })).map_err(ApiError::internal)?,
+                evidence: Vec::new(), expected_subject: Some(None),
+                idempotency_key: Some(format!("client-command-receipt:{id}")),
+            }).map_err(ApiError::internal)?;
+            let resource = json!({"id":id,"kind":"device-command","revision":format!("{id}:refused"),
+                "updated_at":client_timestamp(now),"issued_at":client_timestamp(now),"expires_at":client_timestamp(now),
+                "state":"refused","issued_by":session.actor,"device_id":request.device,
+                "command_kind":request.kind,"args":request.args,"error_code":error.code,"receipt_claim_id":receipt.id});
+            rows.insert((state.node.clone(), id.clone()), Command { resource, expires: now, terminal_at: Some(now),
+                person: session.authority_actor.clone(), grant: String::new(), issuer_grant: session.pairing_grant.clone() });
+            error.details.insert("command_id".into(), json!(id));
+            error.details.insert("receipt_claim_id".into(), json!(receipt.id));
+            super::signal_changed(state);
+            Err(error)
+        }
+        result => result,
+    }
+}
+fn issue_inner(state: &AppState, session: &ClientSession, request: &DeviceCommandRequest) -> Result<Value, ApiError> {
     if !super::wire_names::api_version(&request.api_version) { return Err(validation("unsupported api_version")); }
-    if !request.device.starts_with("device/") || request.device.len() <= "device/".len() || request.device.len() > 4096 { return Err(validation("invalid device selector")); }
-    validate_args(&request.kind, &request.args)?;
-    require_scope(&session, scope(&request.kind)?)?;
+    if !request.device.starts_with("device/") || request.device.len() <= "device/".len()
+        || request.device.len() > 4096 || request.device.chars().any(char::is_control)
+    { return Err(validation("invalid device selector")); }
+    if request.grant_id.as_ref().is_some_and(|id| !id.starts_with("client-control-grant/")
+        || id.len() <= "client-control-grant/".len() || id.len() > 4096 || id.chars().any(char::is_control))
+    { return Err(validation("invalid client control grant selector")); }
+    if request.kind.is_empty() || request.kind.len() > 128 || request.kind.chars().any(char::is_control)
+        || !request.args.is_object() || serde_json::to_vec(&request.args).map_or(true, |bytes| bytes.len() > 8192)
+    { return Err(validation("invalid command verb or args")); }
     if !acting_party(&session) { return Err(forbidden("device commands require a concrete person or local agent")); }
     let ttl = request.ttl_ms.unwrap_or(30_000);
     if !(1..=60_000).contains(&ttl) { return Err(validation("ttl_ms must be 1 through 60000")); }
+    let controlled = session.authority_actor.starts_with("agent/") || request.grant_id.is_some();
+    let enrollment = if controlled { Some(super::client_control_enrollment::enrolled(state, &request.device)?) } else { None };
+    if controlled && request.grant_id.is_none() {
+        return Err(control_refusal("grant-missing"));
+    }
+    if controlled && !matches!(request.kind.as_str(), "phone.inspect" | "phone.navigate") {
+        return Err(control_refusal("verb-not-granted"));
+    }
+    validate_args(&request.kind, &request.args)?;
+    require_scope(session, scope(&request.kind)?)?;
     let mut before = None;
     let mut target: Option<ClaimRecord> = None;
     loop {
@@ -148,21 +305,40 @@ pub fn issue(state: &AppState, session: &ClientSession, request: DeviceCommandRe
     // The existing generator supplies random UUID bits; commands use the v8 namespace.
     suffix.replace_range(14..15, "8");
     let id = format!("device-command/{suffix}");
-    let resource = json!({"id":id,"kind":"device-command","revision":format!("{id}:pending"),"updated_at":client_timestamp(now),"command_kind":request.kind,"args":request.args,"device_id":request.device,"session_actor":phone.actor,"issued_by":session.actor,"issued_at":client_timestamp(now),"expires_at":client_timestamp(now + u128::from(ttl)),"state":"pending"});
+    let mut resource = json!({"id":id,"kind":"device-command","revision":format!("{id}:pending"),"updated_at":client_timestamp(now),"command_kind":request.kind,"args":request.args,"device_id":request.device,"session_actor":phone.actor,"issued_by":session.actor,"issued_at":client_timestamp(now),"expires_at":client_timestamp(now + u128::from(ttl)),"state":"pending"});
     {
         let mut rows = ROWS.lock().map_err(|_| storage_error())?;
-        sweep(&mut rows, &state.node, now);
+        sweep_durable(&mut rows, state, now)?;
         admit(&rows, &state.node, &request.device)?;
+        if let Some(grant_id) = &request.grant_id {
+            let grant = super::client_control_grants::lookup(state, grant_id)?;
+            let enrollment = enrollment.as_ref().ok_or_else(|| control_refusal("device-not-test-client"))?;
+            if enrollment.pairing_subject != target.subject || grant.session != phone.actor {
+                return Err(control_refusal("device-not-test-client"));
+            }
+            let grant = super::client_control_grants::check_and_consume(
+                state, grant_id, &grant.run_id, &request.device, &session.authority_actor,
+                &request.kind, &request.args, &id,
+            )?;
+            resource["grant_id"] = json!(grant.grant_id);
+            resource["run_id"] = json!(grant.run_id);
+            resource["control_grant"] = grant.resource("active");
+        }
         rows.insert((state.node.clone(), id.clone()), Command { resource: resource.clone(), expires: now + u128::from(ttl), terminal_at: None, person: phone.authority_actor, grant: target.subject, issuer_grant: session.pairing_grant.clone() });
     }
     changed(&state.node);
     let member = state.node.clone();
+    let timer_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(ttl)).await;
-        if let Ok(mut rows) = ROWS.lock() { sweep(&mut rows, &member, client_now_ms()); }
+        if let Ok(mut rows) = ROWS.lock() && let Err(error) = sweep_durable(&mut rows, &timer_state, client_now_ms()) {
+            tracing::error!(message = %error.message, "device command expiry receipt failed");
+        }
         changed(&member);
         tokio::time::sleep(Duration::from_millis(RETENTION_MS as u64)).await;
-        if let Ok(mut rows) = ROWS.lock() { rows.remove(&(member.clone(), id)); }
+        if let Ok(mut rows) = ROWS.lock() && let Err(error) = sweep_durable(&mut rows, &timer_state, client_now_ms()) {
+            tracing::error!(message = %error.message, "device command retention receipt failed");
+        }
         changed(&member);
     });
     Ok(resource)
@@ -170,7 +346,7 @@ pub fn issue(state: &AppState, session: &ClientSession, request: DeviceCommandRe
 pub fn read(state: &AppState, session: &ClientSession, id: &str) -> Result<Value, ApiError> {
     let session = revalidate_session(state, session)?;
     let mut rows = ROWS.lock().map_err(|_| storage_error())?;
-    sweep(&mut rows, &state.node, client_now_ms());
+    sweep_durable(&mut rows, state, client_now_ms())?;
     let row = rows.get(&(state.node.clone(), id.to_owned())).ok_or_else(missing)?;
     // Paired callers may also be issuers. GET provides their correlation surface,
     // while their collection window remains strictly addressed to their own phone.
@@ -190,14 +366,23 @@ pub fn report(state: &AppState, session: &ClientSession, request: DeviceResultRe
     if !paired(&session) { return Err(forbidden("device results require a paired session issued by this member")); }
     if !matches!(request.outcome.as_str(), "completed" | "not-foreground" | "expired" | "refused" | "failed")
         || request.error_code.as_ref().is_some_and(|s| s.is_empty() || s.len() > 128 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
-        || request.result.as_ref().is_some_and(|v| serde_json::to_vec(v).map_or(true, |b| b.len() > 8192)) { return Err(validation("invalid device result")); }
+        || request.result.as_ref().is_some_and(|v| serde_json::to_vec(v).map_or(true, |b| b.len() > 8192))
+        || request.binding.as_ref().is_some_and(|v| serde_json::to_vec(v).map_or(true, |b| b.len() > 8192))
+        || request.signature.as_ref().is_some_and(|v| serde_json::to_vec(v).map_or(true, |b| b.len() > 4096))
+    { return Err(validation("invalid device result")); }
     let resource = {
         let mut rows = ROWS.lock().map_err(|_| storage_error())?;
         let now = client_now_ms();
-        sweep(&mut rows, &state.node, now);
+        sweep_durable(&mut rows, state, now)?;
         let row = rows.get_mut(&(state.node.clone(), request.command_id.clone())).ok_or_else(missing)?;
         authorize_read(row, &session)?;
+        verify_result(state, &session, row, &request)?;
+        if request.binding.is_some() {
+            row.resource["verified_result_signature"] = serde_json::to_value(&request.signature).map_err(ApiError::internal)?;
+            row.resource["signed_result"] = serde_json::to_value(&request.binding).map_err(ApiError::internal)?;
+        }
         row.finish(&request, now, super::client_presence::has_collection_stream(&state.node, &session.actor));
+        persist_receipt(state, row)?;
         row.resource.clone()
     };
     changed(&state.node);
@@ -209,8 +394,8 @@ pub fn collection_items(state: &AppState, session: &ClientSession) -> Result<Vec
     let session = revalidate_session(state, session)?;
     if !capable(&session) { return Err(forbidden("phone commands are unavailable for this session")); }
     let mut rows = ROWS.lock().map_err(|_| storage_error())?;
-    sweep(&mut rows, &state.node, client_now_ms());
-    let mut items = Vec::new();
+    sweep_durable(&mut rows, state, client_now_ms())?;
+    let mut items = super::client_control_grants::collection_items(state, &session)?;
     let mut delivered = false;
     let mut selected = rows.iter_mut()
         .filter(|((member, _), row)| member == &state.node && visible(row, &session)
@@ -250,10 +435,14 @@ pub async fn read_route(State(state): State<AppState>, Extension(session): Exten
 }
 
 #[cfg(test)]
+#[path = "client_commands_result_tests.rs"]
+mod control_result_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn command() -> Command { Command { resource: json!({"state":"pending"}), expires: 100, terminal_at: None, person: "person/ada".into(), grant: "grant/test".into(), issuer_grant: None } }
-    fn result() -> DeviceResultRequest { DeviceResultRequest { command_id: "test".into(), outcome: "completed".into(), result: Some(json!({"ok":true})), error_code: None } }
+    fn result() -> DeviceResultRequest { DeviceResultRequest { command_id: "test".into(), outcome: "completed".into(), result: Some(json!({"ok":true})), error_code: None, binding: None, signature: None } }
     #[test]
     fn daemon_deadline_and_terminal_precedence() {
         let mut early = command(); early.finish(&result(), 99, false); early.expire(200, false); assert_eq!(early.resource["state"], "completed");
