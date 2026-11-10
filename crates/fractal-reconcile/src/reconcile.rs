@@ -14447,17 +14447,27 @@ impl<R: RuntimeControl> Reconciler<R> {
         let idempotency_key = request.idempotency_key();
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
         let Some(status) = self.store.mission_run_status(&child)? else {
+            // The runs holding the mission's capacity are read before the start and again after a
+            // refusal, so the end of any holder, even one that ends in between, evaluates this run.
+            let note_holders = || -> Result<()> {
+                for holder in self.store.active_mission_runs_for_mission(mission)? {
+                    smallclaims::touched::note_read(|| holder.subject.clone());
+                }
+                Ok(())
+            };
+            note_holders()?;
             return match self.start_program_child(run, &request.step, mission, input, idempotency_key) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
                 }
                 Err(error) if error.code == "mission-run-capacity" => {
-                    for holder in self.store.active_mission_runs_for_mission(mission)? {
-                        smallclaims::touched::note_read(|| holder.subject.clone());
-                    }
+                    note_holders()?;
                     Ok(false)
                 }
+                // A store failure is retried by the next evaluation; only a refused request is
+                // the program's defect.
+                Err(error) if error.code == "internal" => Err(error.into()),
                 Err(error) => {
                     let reason = format!(
                         "the program could not start its child run `{}` of mission `{mission}`: {}",
@@ -14566,6 +14576,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     engine.waiting(request, &view.subject)?;
                     (view.subject, true)
                 }
+                // A store failure is retried by the next evaluation.
+                Err(error) if error.code == "internal" => return Err(error.into()),
                 Err(error) => {
                     let reason = format!("the program's ask `{}` was refused: {}", request.key, error.message);
                     engine.fail(&request.step, request.attempt, &reason)?;

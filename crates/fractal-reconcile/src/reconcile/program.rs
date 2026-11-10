@@ -123,6 +123,8 @@ pub struct Request {
     pub wait: Wait,
     /// The child run or ask subject once it exists.
     pub child: Option<String>,
+    /// The bundle hash of the program that asked, which journals the key's entries.
+    program: String,
     seq: Value,
     since: Instant,
 }
@@ -287,16 +289,24 @@ impl ProgramEngine {
             .collect()
     }
 
-    /// The child run or ask `request` waits on now exists: journal it as the key's `child`.
+    /// The child run or ask `request` waits on now exists: journal it as the key's `child`, even
+    /// when the program stopped waiting meanwhile, so nothing it started goes unrecorded. When its
+    /// step has left the attempt by then, the step's cancellation (which may have read the journal
+    /// before this entry) did not see it: cancel it here.
     pub fn waiting(&self, request: &Request, child: &str) -> Result<()> {
-        let Some(program) = self.program_of(request, |running| {
-            if let Some(pending) = running.requests.get_mut(&request.key) {
-                pending.child = Some(child.to_owned());
-            }
-        }) else {
-            return Ok(());
-        };
-        self.write_journal(&request.step, request.attempt, &program, &request.key, "started", &Value::Null, Some(child))?;
+        self.write_journal(&request.step, request.attempt, &request.program, &request.key, "started", &Value::Null, Some(child))?;
+        let running = self
+            .program_of(request, |running| {
+                if let Some(pending) = running.requests.get_mut(&request.key) {
+                    pending.child = Some(child.to_owned());
+                }
+            })
+            .is_some();
+        // A program removed by its host's exit is resumed and adopts the child; one that ended or
+        // left its attempt (each sets the step's state before it cancels) does not.
+        if !running && let Some(reason) = self.left(&request.step, request.attempt)? {
+            self.cancel_waits(&request.step, request.attempt, &reason)?;
+        }
         Ok(())
     }
 
@@ -354,10 +364,11 @@ impl ProgramEngine {
             }
         }
         eprintln!("fractal: program {step} attempt {attempt} failed: {reason}");
-        self.cancel_waits(step, attempt, reason)?;
+        // The step's state first: a child started concurrently then sees it left (`waiting`).
         if self.left(step, attempt)?.is_none() {
             self.store.set_step_state_unless_terminal(step, "failed", Some(reason))?;
         }
+        self.cancel_waits(step, attempt, reason)?;
         (self.wake)(step);
         Ok(())
     }
@@ -672,6 +683,7 @@ impl ProgramEngine {
                 key: key.to_owned(),
                 wait,
                 child: None,
+                program: program.to_owned(),
                 seq: message["seq"].clone(),
                 since: Instant::now(),
             };
@@ -780,11 +792,8 @@ impl ProgramEngine {
         if !forget(&mut self.lock(), step, attempt, generation) {
             return Ok(());
         }
-        // A program can end while a child run or ask it started is still open (a lost race):
-        // nothing waits on it any more.
-        let left = self.left(step, attempt)?;
-        self.cancel_waits(step, attempt, left.as_deref().unwrap_or("the program ended"))?;
-        if left.is_some() {
+        if let Some(reason) = self.left(step, attempt)? {
+            self.cancel_waits(step, attempt, &reason)?;
             return Ok(());
         }
         let exit = &message["exit"];
@@ -796,6 +805,10 @@ impl ProgramEngine {
             _ => ("failed", Some(failure_reason(&exit["error"]))),
         };
         self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
+        // A program can end while a child run or ask it started is still open (a lost race):
+        // nothing waits on it any more. The step's state comes first, so a child started
+        // concurrently sees it left (`waiting`).
+        self.cancel_waits(step, attempt, "the program ended")?;
         eprintln!("fractal: program {step} {status}");
         (self.wake)(step);
         Ok(())
@@ -814,10 +827,10 @@ impl ProgramEngine {
             inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
         }
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
-        self.cancel_waits(step, attempt, &reason)?;
         if self.left(step, attempt)?.is_none() {
             self.store.set_step_state_unless_terminal(step, "failed", Some(&reason))?;
         }
+        self.cancel_waits(step, attempt, &reason)?;
         (self.wake)(step);
         Ok(())
     }

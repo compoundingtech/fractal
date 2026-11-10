@@ -354,6 +354,25 @@ pub struct PersonAskPass {
     pub next_deadline: Option<u128>,
 }
 
+/// Whether `step`'s definition in its generation's revision runs a program.
+fn runs_program(tx: &Transaction<'_>, step: &StepRunView) -> Result<bool> {
+    let body: Option<String> = tx
+        .query_row(
+            "SELECT r.body FROM run_generations g
+             JOIN mission_runs m ON m.id=?2
+             JOIN mission_revisions r ON r.mission_id=m.mission_id AND r.revision=g.revision
+             WHERE g.id=?1",
+            params![generation_id_from_subject(&step.generation), step.run.strip_prefix("mission-run/").unwrap_or(&step.run)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(body) = body else { return Ok(false) };
+    let mission: crate::model::MissionSpec = serde_json::from_str(&body)?;
+    Ok(fractal_store::store::flatten_mission_step_specs(&mission)
+        .into_iter()
+        .any(|spec| spec.path == step.step && spec.program.is_some()))
+}
+
 pub trait PersonWorkStore {
     /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError>;
@@ -491,11 +510,13 @@ impl PersonWorkStore for Store {
                     && matches!(origin.status.as_str(), "ready" | "blocked" | "claimed" | "working"))
             }).transpose().map_err(internal)?.unwrap_or(false);
             // A program step has no claimant: the daemon asks for the step's current attempt,
-            // which the request names as its incarnation (docs/st3/program-engine.md §6).
+            // which the request names as its incarnation (docs/st3/program-engine.md §6). Only a
+            // step whose definition runs a program may be asked from this way.
             let stale = if program {
                 !origin.agentless
                     || !matches!(origin.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
                     || input.incarnation.as_deref() != Some(origin.attempt.to_string().as_str())
+                    || !runs_program(tx, &origin).map_err(internal)?
             } else {
                 !declaration_live(tx, &input.actor).map_err(internal)?
                     || (!legacy_origin && (!matches!(origin.status.as_str(), "claimed" | "working")

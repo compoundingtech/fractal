@@ -4,7 +4,7 @@
 //! `fractal/effect` program API decodes. These tests fail, never skip, when no `bun` is on `PATH`.
 use super::*;
 use crate::model::{AnswerInput, PROGRAM_ASKER, PersonStepResponse};
-use crate::reconcile::program::{JOURNAL_KIND, Liveness, ProgramEngine, RESULT_KEY};
+use crate::reconcile::program::{JOURNAL_KIND, Liveness, ProgramEngine, RESULT_KEY, Wait};
 use serde_json::json;
 use std::time::Instant;
 
@@ -306,6 +306,27 @@ fn a_child_of_a_full_mission_waits_and_starts_when_the_holder_ends() {
     fixture.complete_child(&child);
     std::fs::write(&parent.gate, "").unwrap();
     fixture.until("the program completes", || fixture.status(&parent.step) == "completed");
+}
+
+#[test]
+fn a_child_started_after_its_step_left_is_journaled_and_cancelled() {
+    let fixture = fixture();
+    let holder = fixture.holder();
+    let parent = fixture.start("late", "child");
+    fixture.until("the program asks for its child", || !fixture.engine.requests(&parent.run).is_empty());
+    // An evaluation's view of the request, taken before the step leaves its attempt.
+    let request = fixture.engine.requests(&parent.run).remove(0);
+    fixture.store.set_step_state(&parent.step, "failed", Some("the active execution timeout expired")).unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    assert!(fixture.engine.requests(&parent.run).is_empty());
+    // That evaluation now starts the child, after the step's own cancellation found nothing.
+    fixture.store.request_mission_run_cancellation(&holder, "make room").unwrap();
+    let run = fixture.store.mission_run(&parent.run).unwrap().unwrap();
+    let Wait::Run { mission, input } = &request.wait else { panic!("a child run request") };
+    assert!(fixture.reconciler.settle_program_child(&fixture.engine, &run, &request, mission, input).unwrap());
+    let late = fixture.child(&parent.step, "publish", 1).expect("the late child is journaled");
+    let late = fixture.store.mission_run(&late).unwrap().unwrap();
+    assert_ne!((late.status.as_str(), late.phase.as_str()), ("running", "normal"), "the late child is cancelled");
 }
 
 #[test]

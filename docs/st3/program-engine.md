@@ -272,7 +272,9 @@ does the rest: it starts or adopts what the key waits on, journals a second `sta
 child run or answers an ask evaluates the parent run again; nothing polls. A replayed key never
 asks again; a resumed attempt that asks for an open key adopts what that key already waits on. A
 request the daemon refuses (an unknown mission, inputs the mission does not accept, an ask without
-a person) fails the program step with the reason, as a defect would.
+a person) fails the program step with the reason, as a defect would; a store failure leaves the
+step as it is, and the next evaluation tries again. A child run or ask is journaled as `child` even
+when it starts just after its program stopped waiting, and is then cancelled with the attempt.
 
 **Child runs.** The evaluation calls `create_child_mission_run`, the path `uses-mission` takes:
 `parent_step_run` is the program step, the inputs are the request's, and the idempotency key is
@@ -297,7 +299,8 @@ independence holds as in LandingMission).
 the program step, with `work ask --step` semantics: the same structured requests, deadlines and
 default answers (the fleet's ask-deadline policy applies), and the same inbox. Its requester is
 `daemon/program`: a program step has no claimant, so the step's attempt fences the ask instead of a
-claim. The step waits on a person (`waiting-person`) while any ask is open; its program stays loaded
+claim. Only a step whose definition runs a program accepts that requester, and the work API refuses
+requests that name it. The step waits on a person (`waiting-person`) while any ask is open; its program stays loaded
 and its execution clock pauses (DQ6), and a program may hold several asks at once. The program
 receives:
 
