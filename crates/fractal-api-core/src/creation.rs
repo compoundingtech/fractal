@@ -273,17 +273,24 @@ mod tests {
             ..Default::default()
         };
         let plain = terminal_document("person/example", "one", &args, "host", ".", "key");
-        assert!(plain.contains("st3.cwd=\"home\""), "{plain}");
         assert!(!plain.contains("cd "), "{plain}");
         assert!(plain.contains("${SHELL:-/bin/sh}"), "{plain}");
         let intent = crate::graph::parse_intent(&plain, "host").unwrap();
-        let member = intent.subjects["pty/person/example/one"].member.as_ref().unwrap();
+        let member = intent.subjects["pty/person/example/one"]
+            .member
+            .as_ref()
+            .unwrap();
         assert_eq!(member.cwd, ".");
         assert_eq!(member.tags["st3.cwd"], "home");
         let placed = terminal_document("person/example", "two", &args, "host", "/srv/work", "key");
         assert!(!placed.contains("HOME"), "{placed}");
-        assert!(!placed.contains("st3.cwd"), "{placed}");
-        assert!(placed.contains("workspace \"/srv/work\""), "{placed}");
+        let intent = crate::graph::parse_intent(&placed, "host").unwrap();
+        let member = intent.subjects["pty/person/example/two"]
+            .member
+            .as_ref()
+            .unwrap();
+        assert_eq!(member.cwd, "/srv/work");
+        assert!(!member.tags.contains_key("st3.cwd"));
     }
     #[test]
     fn created_agents_use_checkout_for_new_and_existing_branches_and_keep_plain_workspaces() {

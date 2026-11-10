@@ -512,7 +512,9 @@ impl PtyRuntime {
     ) -> Result<()> {
         // Only API-created default terminals opt into home resolution. A seat or mission
         // workspace of "." retains its ordinary working-directory semantics.
-        let home = if cwd == Path::new(".") && tags.get("st3.cwd").is_some_and(|value| value == "home") {
+        let home = if cwd == Path::new(".")
+            && tags.get("st3.cwd").is_some_and(|value| value == "home")
+        {
             let home = std::env::home_dir().context("resolve default terminal home directory")?;
             anyhow::ensure!(
                 home.is_absolute(),
