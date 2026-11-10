@@ -1525,6 +1525,10 @@ binding response, even if a retry supplies different bytes and a current binding
 associated writes return HTTP 409 `idempotency-key-expired`, with the key and original claim id,
 when the saved response cannot be rebuilt. This is terminal (`retryable: false`), not a silent
 success; inspect the committed outcome before deliberately starting a new action with a fresh key.
+Revision approval retries can resume from the matching committed approval claim when the
+response is missing: they preserve the approval, finish any outstanding immediate cutover,
+and save the rebuilt result. A projection-drain refusal between approval, cutover and response
+storage does not turn the same approval key into a terminal expired-key refusal.
 
 Seven days covers the phone's retries with backoff and ordinary retries across a daemon
 restart. Exact saved-response replay lasts seven days; durable recognition of the original

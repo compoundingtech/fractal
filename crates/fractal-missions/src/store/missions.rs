@@ -214,6 +214,8 @@ pub type MissionStepTimestamps = BTreeMap<String, (Option<u128>, Option<u128>)>;
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub static MISSION_TIMING_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static REVISION_APPROVAL_AFTER_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static REVISION_APPROVAL_AFTER_CUTOVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 use fractal_delivery::store::run_eta::step_timestamps;
@@ -3415,11 +3417,28 @@ impl MissionsStore for Store {
             Continue(Box<RevisionProposalView>, bool, bool),
         }
         let decision = self.with_all_runs_fenced(|transaction| -> Result<ApprovalDecision, FractalError> {
-        if let Some(response) =
-            smallclaims::store::idempotency::cached_response(transaction, idempotency_key)?
-        {
-            return serde_json::from_str(&response).map(Box::new).map(ApprovalDecision::Complete).map_err(internal);
-        }
+        let recovering = match smallclaims::store::idempotency::cached_response(transaction, idempotency_key) {
+            Ok(Some(response)) => return serde_json::from_str(&response).map(Box::new).map(ApprovalDecision::Complete).map_err(internal),
+            Ok(None) => false,
+            Err(error) if error.code == "idempotency-key-expired" => {
+                // Approval and cutover can commit before the response fence admits us.
+                // Resume only this exact committed approval, never another operation.
+                let claim = smallclaims::store::idempotency::original_claim(transaction, idempotency_key).map_err(internal)?;
+                let approved: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1
+                     AND kind='revision-proposal.approved' AND subject=?2
+                     AND json_extract(body, '$.fields.reviewer')=?3
+                     AND json_extract(body, '$.fields.preview_hash')=?4)",
+                    params![claim, format!("revision-proposal/{proposal_id}"), actor, preview_hash],
+                    |row| row.get(0),
+                ).map_err(internal)?;
+                if !approved {
+                    return Err(error);
+                }
+                true
+            }
+            Err(error) => return Err(error),
+        };
         let mut proposal = revision_proposal_view_tx(transaction, proposal_id).map_err(internal)?;
         if proposal.status != "applied" {
             let generation: String = transaction.query_row(
@@ -3469,7 +3488,7 @@ impl MissionsStore for Store {
             mark_replay_safe_receipt_tx(transaction, idempotency_key).map_err(internal)?;
             return Ok(ApprovalDecision::Complete(Box::new(response)));
         }
-        if proposal.status != "pending-approval" {
+        if proposal.status != "pending-approval" && !(recovering && proposal.status == "draining") {
             return Err(FractalError::new(
                 "revision-proposal-not-reviewable",
                 format!("revision proposal `{proposal_id}` is {}", proposal.status),
@@ -3507,6 +3526,9 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         let reopening = is_failed_terminal(&run_status, &run_phase);
+        if recovering {
+            return Ok(ApprovalDecision::Continue(Box::new(proposal), all_approved, reopening));
+        }
         let status = if all_approved
             && !reopening
             && matches!(proposal.cutover, RevisionCutover::WhenIdle)
@@ -3565,6 +3587,10 @@ impl MissionsStore for Store {
         mark_replay_safe_receipt_tx(transaction, idempotency_key).map_err(internal)?;
         Ok(ApprovalDecision::Continue(Box::new(proposal), all_approved, reopening))
         })?;
+        #[cfg(any(test, feature = "test-support"))]
+        REVISION_APPROVAL_AFTER_COMMIT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() { hook(); }
+        });
         let (proposal, all_approved, reopening) = match decision {
             ApprovalDecision::Complete(response) => return Ok(*response),
             ApprovalDecision::Continue(proposal, all_approved, reopening) => {
@@ -3575,6 +3601,10 @@ impl MissionsStore for Store {
         if all_approved && (reopening || matches!(proposal.cutover, RevisionCutover::RestartActive))
         {
             let run = self.finish_proposal_cutover(proposal_id, &actor, idempotency_key)?;
+            #[cfg(any(test, feature = "test-support"))]
+            REVISION_APPROVAL_AFTER_CUTOVER.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() { hook(); }
+            });
             let applied = self
                 .revision_proposal(proposal_id)
                 .map_err(internal)?

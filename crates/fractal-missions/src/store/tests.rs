@@ -10762,6 +10762,110 @@ version 2
 }
 
 #[test]
+fn revision_approval_retries_after_projection_gate_blocks_its_response() {
+    use std::sync::{Arc, mpsc};
+    use super::missions::{REVISION_APPROVAL_AFTER_COMMIT, REVISION_APPROVAL_AFTER_CUTOVER};
+
+    // Exercise draining, a blocked cutover, and an applied cutover whose receipt is blocked.
+    for (cutover, after_cutover) in [("when-idle", false), ("restart-active", false), ("restart-active", true)] {
+        let fixture = || {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let publish = |goal: &str, key: &str| {
+                let source = format!(
+                    "version 2\nmission \"approval-race\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" revision-cutover={cutover:?} {{ goal \"Exercise approval receipts.\"; step \"work\" {{ goal {goal:?}; }} }}"
+                );
+                let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+                let planned = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+                store.apply(&intent, &planned.subject_tokens, key).unwrap();
+                intent.missions["approval-race"].clone()
+            };
+            let first = publish("First goal.", "approval-race-first");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: first.id, revision: None, workspace: "/tmp".into(),
+                requester: Some("person/requester".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "approval-race-run".into(),
+            }).unwrap();
+            let candidate = publish("Second goal.", "approval-race-second");
+            let proposal = store.create_revision_proposal(
+                &run.id, &candidate, "person/requester", "review new goal", "approval-race-proposal",
+            ).unwrap();
+            (store, run, proposal)
+        };
+        let (normal_store, _, normal_proposal) = fixture();
+        let normal = normal_store.approve_revision_proposal(
+            &normal_proposal.id, "person/reviewer", normal_proposal.preview_hash.as_deref().unwrap(), "approval-race-approve",
+        ).unwrap();
+        let (store, run, proposal) = fixture();
+        let preview = proposal.preview_hash.as_deref().unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder_store = store.clone();
+        let run_id = run.id.clone();
+        let holder = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let _gate = holder_store.graph.projection.lock();
+            // Equivalent to a receive committing a pending part while retaining the gate.
+            let pending = serde_json::to_string(&Aggregate::RunTree(run_id)).unwrap();
+            holder_store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-he6b15544062e owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![format!("projection-run-rebuild:{pending}"), pending],
+            ).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        let hook: Box<dyn FnOnce()> = Box::new(move || {
+            start_tx.send(()).unwrap();
+            ready_rx.recv().unwrap();
+        });
+        if after_cutover {
+            REVISION_APPROVAL_AFTER_CUTOVER.with(|slot| *slot.borrow_mut() = Some(hook));
+        } else {
+            REVISION_APPROVAL_AFTER_COMMIT.with(|slot| *slot.borrow_mut() = Some(hook));
+        }
+        let result = store.approve_revision_proposal(
+            &proposal.id, "person/reviewer", preview, "approval-race-approve",
+        );
+        let committed = store.revision_proposal(&proposal.id).unwrap().unwrap();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "database-busy");
+        assert_eq!(error.details.get("reason").and_then(serde_json::Value::as_str), Some("run-projection-drain"));
+        assert_eq!(committed.approvals, vec!["person/reviewer"]);
+        let retried = store.approve_revision_proposal(
+            &proposal.id, "person/reviewer", preview, "approval-race-approve",
+        ).unwrap();
+        let expected_status = if cutover == "when-idle" { "draining" } else { "applied" };
+        assert_eq!(retried.status, expected_status);
+        assert_eq!(retried.proposal.as_ref().unwrap().status, expected_status);
+        assert_eq!(retried.status, normal.status);
+        let actual_proposal = retried.proposal.as_ref().unwrap();
+        let mut normal_proposal = normal.proposal.unwrap();
+        // Separate executions have separate clocks, but identical operation-derived identities.
+        normal_proposal.created_at_unix_ms = actual_proposal.created_at_unix_ms;
+        normal_proposal.updated_at_unix_ms = actual_proposal.updated_at_unix_ms;
+        assert_eq!(serde_json::to_value(actual_proposal).unwrap(), serde_json::to_value(normal_proposal).unwrap());
+        if cutover == "when-idle" || after_cutover {
+            assert_eq!(serde_json::to_value(&retried.proposal).unwrap(), serde_json::to_value(Some(&committed)).unwrap());
+        }
+        assert_eq!(
+            serde_json::to_value(&retried.proposal).unwrap(),
+            serde_json::to_value(store.revision_proposal(&proposal.id).unwrap()).unwrap(),
+        );
+        let cached = store.approve_revision_proposal(
+            &proposal.id, "person/reviewer", preview, "approval-race-approve",
+        ).unwrap();
+        assert_eq!(serde_json::to_value(&cached).unwrap(), serde_json::to_value(&retried).unwrap());
+        let approvals: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE subject=?1 AND kind='revision-proposal.approved'",
+            [&proposal.subject], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(approvals, 1, "recovery must not approve twice");
+    }
+}
+
+#[test]
 fn cancelling_a_revision_proposal_reopens_the_run_for_one_replacement() {
     let store = Store::open_memory("node").unwrap();
     let publish = |goal: &str, key: &str| {
