@@ -383,6 +383,8 @@ one paragraph, with no Markdown syntax, JSON, leading/trailing whitespace or
 repeated whitespace. The body digest is lowercase hex SHA-256 of the exact
 question bytes. A grant's optional `item_id` binds Attention navigation and
 signed inspection to that ask; another ask produces no result.
+Lifecycle and command item bindings must agree, including absent or null values.
+NowRoot may be unbound; Attention always requires a nonempty bound item.
 
 ### Independent terminal observation
 

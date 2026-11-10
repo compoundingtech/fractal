@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Terminal test clients refuse missing, null or mismatched command item bindings under an item-bound lifecycle; Attention always requires an item.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "Daemon admission remains unchanged and independently enforced."},
+  "compatibility": {"status": "changed", "detail": "Unbound NowRoot commands remain supported; unbound Attention commands are refused before navigation and signing."},
+  "downtime": {"status": "none", "detail": "No restart or activation."},
+  "manual": {"status": "none", "detail": "No runtime action required."},
+  "recovery": {"status": "none", "detail": "No persisted changes to undo."}
+}

@@ -87,7 +87,7 @@ impl Control {
         let Ok(frame) = serde_json::from_value::<fractal_client::ClientControlGrantLifecycle>(frame) else { return; };
         if self.stopped || frame.device != self.device.session.device_id
             || frame.session != self.device.session.session_actor
-            || frame.grant_id.is_empty() || frame.run_id.is_empty() { return; }
+            || frame.sequence == 0 || frame.grant_id.is_empty() || frame.run_id.is_empty() { return; }
         if self.grant.as_ref().is_some_and(|active| active.grant_id == frame.grant_id
             && (active.run_id != frame.run_id || active.item_id != frame.item_id)) { return; }
         match frame.state {
@@ -143,11 +143,12 @@ impl Control {
     pub fn allows(&self, command: &Value, current_screen: &str) -> bool {
         let Some(lifecycle) = self.active() else { return false; };
         let grant = &command["control_grant"];
+        let item_id = grant["item_id"].as_str();
         if grant["grant_id"] != lifecycle.grant_id || grant["run_id"] != lifecycle.run_id
             || grant["device"] != self.device.session.device_id
             || grant["session"] != self.device.session.session_actor
             || !fresh(&grant["expires_at"])
-            || grant.get("item_id").is_some_and(|id| !id.is_null() && id.as_str() != lifecycle.item_id.as_deref())
+            || item_id != lifecycle.item_id.as_deref()
         { return false; }
         let Some(id) = command["id"].as_str() else { return false; };
         let Some(verb) = command["command_kind"].as_str() else { return false; };
@@ -164,8 +165,8 @@ impl Control {
             && fresh(&command["expires_at"])
             && grant["verbs"].as_array().is_some_and(|verbs| verbs.iter().any(|v| v == verb))
             && grant["screens"].as_array().is_some_and(|screens| screens.iter().any(|s| s == screen))
-            && (screen != "Attention" || verb == "phone.inspect"
-                || grant.get("item_id").is_none_or(|id| id.is_null() || command["args"]["params"]["id"] == *id))
+            && (screen != "Attention" || item_id.is_some_and(|item| !item.is_empty()
+                && (verb == "phone.inspect" || command["args"]["params"]["id"].as_str() == Some(item))))
             && grant["max_commands"].as_u64().is_some_and(|max| self.used.len() < max as usize)
             && !self.used.contains(id)
     }
@@ -180,8 +181,8 @@ impl Control {
             return Ok(None);
         }
         let grant = &command["control_grant"];
-        if visible_state.screen == "Attention" && grant.get("item_id").is_some_and(|id|
-            !id.is_null() && visible_state.opened_item.as_ref().is_none_or(|item| id.as_str() != Some(item.id.as_str()))) {
+        if visible_state.screen == "Attention" && visible_state.opened_item.as_ref()
+            .is_none_or(|item| grant["item_id"].as_str() != Some(item.id.as_str())) {
             return Ok(None);
         }
         let binding = ClientResultBinding {
@@ -409,6 +410,67 @@ mod tests {
         revoked["sequence"] = json!(99);
         control.update_lifecycle(revoked);
         assert!(control.active().is_none());
+        assert!(control.result(&command, visible()).unwrap().is_none());
+    }
+
+    #[test]
+    fn bound_item_cannot_be_removed_or_changed_before_shipped_navigation_or_signing() {
+        use fractal_schema::client_control::ClientVisibleItem;
+        fn native_asks() -> crate::ui::Ui {
+            use crate::ui::view::{AttentionKind, Load};
+            let mut world = crate::ui::demo::test_world();
+            let Load::Ready(items) = &mut world.attention else { panic!("attention must be loaded"); };
+            let item = items.first_mut().unwrap();
+            item.id = "attention/A".into();
+            item.title = "Ask A".into();
+            item.kind = AttentionKind::Request { from:"Fixture producer".into(),from_id:"agent/fixture".into(),
+                question:"Question A".into(),structured:None,images:Vec::new() };
+            let mut other = item.clone();
+            other.id = "attention/B".into();
+            other.title = "Ask B".into();
+            items.push(other);
+            crate::ui::Ui::new(world)
+        }
+        fn bind_a(control: &mut Control) {
+            let mut frame = serde_json::to_value(control.grant.as_ref().unwrap()).unwrap();
+            frame["item_id"] = json!("attention/A");
+            control.grant = None;
+            control.sequences.clear();
+            control.ingest(&json!({"kind":"snapshot","id":"commands","items":[frame]}));
+        }
+        for supplied in [None, Some(Value::Null), Some(json!("attention/B"))] {
+            let (mut control, mut command) = fixture();
+            bind_a(&mut control);
+            if let Some(item) = supplied { command["control_grant"]["item_id"] = item; }
+            command["args"] = json!({"screen":"Attention","params":{"id":"attention/B"}});
+            let mut ui = native_asks();
+            let before = ui.control_visible();
+            assert!(!ui.control_apply(&control, &command));
+            assert_eq!(ui.control_visible(), before);
+            let rendered = ClientVisibleState { route:"home:attention/B".into(),screen:"Attention".into(),
+                visible_item_ids:vec!["attention/B".into()],opened_item:Some(ClientVisibleItem {
+                    id:"attention/B".into(),title:"Ask B".into(),body:"Question B".into() }) };
+            // Deliberately no key: a signer call would error, not return None.
+            assert!(control.result(&command, rendered).unwrap().is_none());
+        }
+        let (mut control, mut command) = fixture();
+        bind_a(&mut control);
+        command["control_grant"]["item_id"] = json!("attention/A");
+        command["args"] = json!({"screen":"Attention","params":{"id":"attention/A"}});
+        let mut ui = native_asks();
+        assert!(ui.control_apply(&control, &command));
+        let rendered = ClientVisibleState { route:"home:attention/A".into(),screen:"Attention".into(),
+            visible_item_ids:vec!["attention/A".into()],opened_item:Some(ClientVisibleItem {
+                id:"attention/A".into(),title:"Ask A".into(),body:"Question A".into() }) };
+        control.device.signing_key = Some(SigningKey::generate(KeyAlgorithm::P256).unwrap());
+        assert!(control.result(&command, rendered).unwrap().unwrap().signature.is_some());
+        let (mut control, mut command) = fixture();
+        assert!(control.allows(&command, "NowRoot")); // both unbound
+        command["args"] = json!({"screen":"Attention","params":{"id":"attention/B"}});
+        let mut ui = native_asks();
+        let before = ui.control_visible();
+        assert!(!ui.control_apply(&control, &command)); // Attention always bound
+        assert_eq!(ui.control_visible(), before);
         assert!(control.result(&command, visible()).unwrap().is_none());
     }
 
