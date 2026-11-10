@@ -50,7 +50,7 @@ export interface DetailsPaneProps {
   variants:DetailsVariants;state:DetailsState;intent:DetailsLayoutIntent;onIntentChange:(intent:DetailsLayoutIntent)=>void;
   overview:DetailsOverview;sections:readonly DetailsSection[];trace:TraceSeries;now:number;
   onOpen:(uri:string,split:boolean)=>void;onRetry:()=>void;pendingShape?:DetailsPendingShape;
-  /** Standalone panel close; host owns visibility. The pane restores the opening control's focus. */
+  /** Standalone panel close; host owns visibility. The pane returns focus before requesting unmount. */
   onClose?:()=>void;
   /** Stable host-owned focus target when the opener has disappeared. Never return document.body. */
   closeFocusTarget?:()=>HTMLElement|null;
@@ -107,17 +107,16 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
     if(onClose&&opening?._tag!=='Restored')closeButtonRef.current?.focus({preventScroll:true})
   },[])
   const close=()=>{
-    const region=regionRef.current
+    const region=regionRef.current,hostTarget=closeFocusTarget?.()
+    const hostTargetUsable=hostTarget?.isConnected&&hostTarget!==hostTarget.ownerDocument.body&&hostTarget!==hostTarget.ownerDocument.documentElement
+    const candidate=openerRef.current?.isConnected?openerRef.current:hostTargetUsable?hostTarget:region?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')??region
+    // The opener/host target is stable and outside this pane. Transfer focus before the host removes it,
+    // not in a later animation frame that may be delayed independently of the close commit.
+    if(candidate?.isConnected&&candidate!==candidate.ownerDocument.body&&candidate!==candidate.ownerDocument.documentElement){
+      if(!candidate.hasAttribute('tabindex')&&!candidate.matches('button,a[href],input,select,textarea'))candidate.tabIndex=-1
+      candidate.focus({preventScroll:true})
+    }
     onClose?.()
-    requestAnimationFrame(()=>{
-      const hostTarget=closeFocusTarget?.()
-      const hostTargetUsable=hostTarget?.isConnected&&hostTarget!==hostTarget.ownerDocument.body&&hostTarget!==hostTarget.ownerDocument.documentElement
-      const candidate=openerRef.current?.isConnected?openerRef.current:hostTargetUsable?hostTarget:region?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')??region
-      if(candidate?.isConnected&&candidate!==candidate.ownerDocument.body&&candidate!==candidate.ownerDocument.documentElement){
-        if(!candidate.hasAttribute('tabindex')&&!candidate.matches('button,a[href],input,select,textarea'))candidate.tabIndex=-1
-        candidate.focus({preventScroll:true})
-      }
-    })
   }
   const retry=()=>{
     setDetailsOpen(false)

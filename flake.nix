@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/277dc6d9f7b226da58e526398ee450d877b6a4a1";
+      "github:overengineeringstudio/effect-utils/15ff7fa8968469c2c99a647888a999f9d62ffde5";
   };
 
   outputs =
@@ -399,6 +399,11 @@
         fractalWeb = import ./nix/fractal-web.nix {
           inherit effect-utils system version buildStamp;
           source = self;
+        };
+        fractalWebPublisher = import ./nix/fractal-web-publisher.nix {
+          inherit effect-utils system version;
+          source = self;
+          installation = fractalWeb.installation;
         };
 
         st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
@@ -891,6 +896,12 @@
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.fractal-web = fractalWeb;
+        packages.fractal-web-publisher = fractalWebPublisher;
+        apps.fractal-web-publisher = {
+          type = "app";
+          program = "${fractalWebPublisher}/bin/fractal-web-publisher";
+        };
+        checks.fractal-web-publisher = fractalWebPublisher;
         packages.fractal = fractal;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;

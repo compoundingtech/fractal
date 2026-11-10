@@ -6,8 +6,8 @@ afterEach(() => { document.body.replaceChildren() })
 
 const devbarHost = (height: number): HTMLElement => {
   const host = document.createElement('div')
-  host.innerHTML = '<aside><section aria-label="Counters"></section><div role="group" aria-label="Developer bar"></div></aside>'
-  host.querySelector('[role="group"]')!.getBoundingClientRect = () => ({ height }) as DOMRect
+  host.innerHTML = '<aside><section aria-label="Counters"></section><div role="toolbar" aria-label="Developer bar"></div></aside>'
+  host.querySelector('[role="toolbar"]')!.getBoundingClientRect = () => ({ height }) as DOMRect
   host.querySelector('section')!.getBoundingClientRect = () => ({ height: 500 }) as DOMRect
   document.body.append(host)
   return host
