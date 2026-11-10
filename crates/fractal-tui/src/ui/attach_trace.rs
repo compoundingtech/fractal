@@ -23,6 +23,8 @@ struct State {
     sink: Option<File>,
     #[cfg(test)]
     captured: Option<Arc<Mutex<Vec<serde_json::Value>>>>,
+    #[cfg(test)]
+    info_outcomes: usize,
 }
 
 impl Trace {
@@ -116,6 +118,25 @@ impl Inner {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.finished { return; }
         state.finished = true;
+        if outcome != "success" {
+            tracing::info!(
+                target: "fractal_tui::attach",
+                attempt_id = %self.attempt,
+                agent = %self.agent,
+                phase_reached = state.last_phase.unwrap_or("attempt"),
+                outcome,
+                elapsed_ms = %self.started.elapsed().as_millis(),
+                "terminal attach attempt ended"
+            );
+            // Unit tests capture this outcome in memory rather than touch the user's cache.
+            #[cfg(not(test))]
+            super::lastrun::note_attach_outcome(
+                self.attempt, &self.agent, state.last_phase.unwrap_or("attempt"),
+                outcome, self.started.elapsed().as_millis(),
+            );
+            #[cfg(test)]
+            { state.info_outcomes += 1; }
+        }
         for (_, (phase, started)) in std::mem::take(&mut state.active) {
             self.emit(&mut state, phase, outcome, Some(started.elapsed().as_millis()));
         }
@@ -168,6 +189,8 @@ mod tests {
             assert_eq!(terminal.len(), 1);
             assert_eq!(terminal[0]["outcome"], outcome);
             assert_eq!(terminal[0]["phase_reached"], if agent == "agent/a" { "upgrade" } else { "first-screen-rendered" });
+            let trace = if agent == "agent/a" { &a } else { &b };
+            assert_eq!(trace.0.state.lock().unwrap().info_outcomes, usize::from(outcome != "success"));
             assert!(terminal[0]["at_unix_ms"].as_u64().is_some_and(|time| time > 0));
         }
     }
@@ -177,5 +200,17 @@ mod tests {
         let (trace, events) = Trace::captured("agent/a");
         drop(trace);
         assert_eq!(events.lock().unwrap().last().unwrap()["outcome"], "dropped");
+    }
+    #[test]
+    fn unsuccessful_terminal_outcomes_log_once_without_an_opt_in_sink() {
+        for outcome in ["outer-deadline", "selection-changed", "dropped", "setup-failed"] {
+            let trace = Trace::with_state("agent/a", State::default());
+            trace.finish(outcome);
+            trace.finish(outcome);
+            assert_eq!(trace.0.state.lock().unwrap().info_outcomes, 1);
+        }
+        let trace = Trace::with_state("agent/a", State::default());
+        trace.complete();
+        assert_eq!(trace.0.state.lock().unwrap().info_outcomes, 0);
     }
 }
