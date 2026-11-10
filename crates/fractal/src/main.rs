@@ -10154,6 +10154,8 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
     };
     let client = if actor.starts_with("agent/") {
         Client::unix_agent(socket.as_ref(), actor)?
+    } else if actor.starts_with("mission-run/") {
+        Client::unix_run(socket.as_ref(), actor)?
     } else {
         Client::unix_as(socket.as_ref(), actor)?
     };
