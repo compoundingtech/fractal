@@ -11,6 +11,21 @@ pub const CLIENT_RESULT_SIGNED_FIELDS: &[&str] = &[
 ];
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+pub enum ClientControlGrantLifecycleState { Started, Ended, Revoked }
+/// Session-scoped payload carried only by the existing commands collection.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ClientControlGrantLifecycleEvent {
+    pub grant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub item_id: Option<String>,
+    pub run_id: String,
+    pub device: String,
+    pub session: String,
+    pub state: ClientControlGrantLifecycleState,
+    pub reason: String,
+    pub sequence: u64,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum ClientControlRefusal {
     DeviceNotTestClient, GrantMissing, GrantExpired, ScreenNotGranted,
     VerbNotGranted, BudgetExhausted, ActorNotGranted,

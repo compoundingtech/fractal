@@ -32,15 +32,17 @@ export function visibleStateCanonicalJson(state: ClientVisibleState): string {
     + ',"route":' + quote(state.route) + ',"screen":' + quote(state.screen)
     + ',"visible_item_ids":[' + state.visible_item_ids.map(quote).join(',') + ']}';
 }
-export async function visibleStateDigest(state: ClientVisibleState): Promise<string> {
-  const bytes = new TextEncoder().encode(visibleStateCanonicalJson(state));
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+export type ClientControlSha256 = (bytes: Uint8Array) => Promise<Uint8Array>;
+export const defaultWebCryptoSha256: ClientControlSha256 = async bytes =>
+  new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+export async function visibleStateDigest(state: ClientVisibleState, sha256: ClientControlSha256 = defaultWebCryptoSha256): Promise<string> {
+  const digest = await sha256(new TextEncoder().encode(visibleStateCanonicalJson(state)));
+  return Array.from(digest, b => b.toString(16).padStart(2, '0')).join('');
 }
 /** Sign using ECDSA P-256/SHA-256, IEEE P1363 r||s (64 bytes), base64url without padding.
  * Never use this helper as message.send authorization. Enforce active grant first. */
-export async function clientResultCanonicalBytes(binding: ClientResultBinding): Promise<Uint8Array> {
-  const digest = await visibleStateDigest(binding.visible_state);
+export async function clientResultCanonicalBytes(binding: ClientResultBinding, sha256: ClientControlSha256 = defaultWebCryptoSha256): Promise<Uint8Array> {
+  const digest = await visibleStateDigest(binding.visible_state, sha256);
   const fields: [string, string | null][] = [
     ['purpose', binding.purpose], ['command_kind', binding.command_kind], ['device', binding.device],
     ['session', binding.session], ['grant_id', binding.grant_id], ['run_id', binding.run_id],
