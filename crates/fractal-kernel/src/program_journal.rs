@@ -287,7 +287,7 @@ mod tests {
             "workspace": "w", "requester": "person/owner", "mode": "run", "status": "running", "phase": "work",
             "created_at_unix_ms": 1, "updated_at_unix_ms": 2, "programs": [timed_view()],
         });
-        let page = json!({"runs": [run], "has_more": false, "idempotency_key": "k"});
+        let page = json!({"runs": [run], "has_more": false, "frontier": 1});
         let decoded = serde_json::from_value::<crate::model::MissionRunTreePage>(page).unwrap();
         assert_eq!(decoded.runs[0].programs, [timed_view()]);
     }
