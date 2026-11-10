@@ -858,6 +858,8 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
     // Measure the disabled gateway read; external fetch work is byte-bounded, not store-sized.
     get("GET /v1/client/quota", "/v1/client/quota"),
+    // The unconfigured usage hub returns disabled locally without an external request.
+    get("GET /v1/client/usage/quota", "/v1/client/usage/quota"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",

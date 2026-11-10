@@ -919,6 +919,7 @@
             { "$ref": "#/$defs/AgentQueue" },
             { "$ref": "#/$defs/AgentRelatedRuns" },
             { "$ref": "#/$defs/UsagePeriod" },
+            { "$ref": "#/$defs/UsageHubQuota" },
             { "$ref": "#/$defs/MailBacklog" },
             { "$ref": "#/$defs/SloList" },
             { "$ref": "#/$defs/SloHistory" }
@@ -1562,6 +1563,14 @@
         "samples": { "type": "integer", "minimum": 0 },
         "steps": { "type": "array", "items": { "type": ["number", "null"], "minimum": 0, "maximum": 100 } }
       }
+    },
+    "UsageHubQuota": {
+      "description": "The operator's usage hub quota. snapshot is the hub's own schema version 3 document, relayed unchanged.",
+      "oneOf": [
+        {"type": "object", "required": ["state"], "properties": {"state": {"const": "disabled"}}},
+        {"type": "object", "required": ["state", "refresh_seconds", "reason"], "properties": {"state": {"const": "unavailable"}, "refresh_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "reason": {"enum": ["transport", "invalid_snapshot"]}}},
+        {"type": "object", "required": ["state", "refresh_seconds", "snapshot"], "properties": {"state": {"const": "available"}, "refresh_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "snapshot": {"type": "object", "required": ["schemaVersion", "generatedAt", "accounts"], "properties": {"schemaVersion": {"const": 3}, "generatedAt": {"type": "string", "format": "date-time"}, "accounts": {"type": "array"}}}}}
+      ]
     },
     "UsagePeriod": {
       "type": "object", "additionalProperties": false,

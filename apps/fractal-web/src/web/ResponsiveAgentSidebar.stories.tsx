@@ -41,7 +41,7 @@ const ResponsiveSidebarSurface = ({ viewport, scheme = 'dark', shortcut = true, 
       </nav>
     </ResponsiveAgentSidebar>
     <section aria-label="Agent workspace" data-sidebar-thread="" {...stylex.props(styles.thread)}>
-      <ThreadHeader title={rows.find(row => row.ref === selected)!.title} folder="local" now={storyNow} sidebarCollapsed={narrow || collapsed} sidebarToggleRef={opener} onToggleSidebar={toggle} panelOpen={false} drawerOpen={false} onTogglePanel={() => undefined} onToggleDrawer={() => undefined} />
+      <ThreadHeader title={rows.find(row => row.ref === selected)!.title} folder="local" now={storyNow} sidebarCollapsed={narrow || collapsed} sidebarToggleRef={opener} onToggleSidebar={toggle} panelOpen={false} terminalOpen={false} onTogglePanel={() => undefined} onToggleTerminal={() => undefined} />
       <article {...stylex.props(styles.article)}><h1 {...stylex.props(styles.heading)}>Review the sidebar</h1><p>Opening navigation does not move this thread. The roster remains readable in a minimum 240px drawer.</p><Aria.Button {...stylex.props(styles.button)}>Reply to this session</Aria.Button></article>
       <Aria.DialogTrigger><Aria.Button>Open unrelated dialog</Aria.Button><Aria.Modal isDismissable><Aria.Dialog aria-label="Resize cleanup check"><Aria.Button autoFocus slot="close">Close unrelated dialog</Aria.Button></Aria.Dialog></Aria.Modal></Aria.DialogTrigger>
     </section>

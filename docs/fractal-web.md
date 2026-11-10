@@ -731,14 +731,35 @@ pnpm exec tsc --noEmit -p apps/fractal-web
 
 ## Fractal web terminal attachment
 
-The header's **Toggle terminal drawer** stays disabled with an accessible description and
+The header's control swaps the main pane between the agent's conversation and its terminal,
+each replacing the other: **Show terminal** with a terminal glyph, then **Show conversation**
+with a message glyph and the active fill. The name carries the state, so the control has no
+`aria-pressed`. Terminal mode hides the workspace tabs; a terminal is never a tab. The URL
+(`?open=terminal/<ref>:detail`) restores the view on reload, and this page also remembers per
+agent, in memory, which agents were left on their terminal. Opening an agent from an alert or
+a mission always shows its conversation.
+
+The conversation is retained behind the terminal like any hidden pane. The selected agent's
+terminal stays mounted and connected once shown: while hidden it has `content-visibility:
+hidden` and `inert`, accepts no input, releases its projected follow and paints no new frames,
+while its raw session keeps feeding the emulator so the reveal needs no reattach. Leaving the
+agent closes it. A wide window moves focus to the shown view on an explicit switch: the
+composer, or the terminal pane rather than its grid, because focusing a live grid arms typing.
+A phone keeps focus on the toggle, so a switch raises no keyboard.
+
+An attach that reports `no-terminal` turns the tab back to its conversation (a view change, so
+it adds no history entry) and disables **Show terminal** with that reason. The failure is remembered
+per agent in memory until the roster reports a different runtime list for that agent.
+
+**Show terminal** stays disabled with an accessible description and
 hover title until the live roster establishes a runtime for the selected agent. While
 loading, its reason is “Waiting for the live agent roster to find this agent’s terminal.”
 An absent roster row or an empty runtime list keeps it disabled with the specific cause.
-An explicit terminal deep link still shows its local reason beside the usable thread.
+An explicit terminal deep link shows its local reason in the pane, with **Show conversation**
+enabled as the way back.
 On phones the control leaves the header, which keeps its room for the breadcrumb: a
-labelled **Terminal** button sits fixed at the right end of the workspace tab row, has a
-44px target and reports its pressed state. The tabs scroll and truncate before it rather
+labelled **Terminal** (then **Conversation**) button sits fixed at the right end of the workspace tab row, has a
+44px target and the active fill while the terminal is shown, when it is alone in the row. The tabs scroll and truncate before it rather
 than running under it. When unavailable it stays focusable; pressing it opens a reason
 popover rather than relying on a hover title.
 
