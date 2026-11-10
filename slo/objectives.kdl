@@ -1,54 +1,34 @@
-// The objectives every Fractal daemon is built with (docs/st3/objectives.md). Each daemon shows
-// each latency objective's live 1-minute, 5-minute and 1-hour windows on
-// `GET /v1/client/request-latency` and in `fractal doctor`, and CI's daemon_load reads them too.
-// An objective describes; it gates nothing by itself. daemon_load's budgets stay its gates.
-//
-// A latency path is `METHOD /route` as the daemon routes it, or `stream COLLECTION` for the time
-// from a subscription on the client collections socket to its first snapshot or screen. A request
-// that asks to wait (`wait_ms` above zero, or `wait=true`) is a long poll and counts toward no
-// objective. An agents list asked to be fresh (`fresh=true`) waits for one roster refresh by
-// design: it is the path `GET /v1/client/agents (fresh)` and counts toward its own objective, not
-// the first page's. `publish COLLECTION` is a refresher's publication: the time from the first
-// claim this node committed after the previous publication to the publication that carries it.
+// Generated file - DO NOT EDIT
+// Source: objectives.kdl.genie.ts
 version 2
-
 objective "person-read" {
   about "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents"
   indicator "latency" {
-    // Agents list
     path "GET /v1/client/agents"
     path "GET /v1/client/agents/{*id}"
     path "stream agents"
-    // Missions list
     path "GET /v1/client/missions"
     path "GET /v1/client/missions/{*id}"
     path "stream missions"
-    // Open a conversation, and its changes
     path "GET /v1/client/sessions/{*id}"
     path "stream conversation"
     path "GET /v1/client/conversations/{id}/changes"
-    // Work list
     path "GET /v1/client/work"
     path "GET /v1/client/work/{*id}"
     path "GET /v1/work"
     path "stream work"
-    // Now
     path "GET /v1/client/now"
     path "GET /v1/client/attention"
     path "stream attention"
-    // Why a run is stuck, and every blocked run
     path "GET /v1/mission-runs/{run}/waiting-on"
     path "GET /v1/blocked-runs"
-    // Documents
     path "GET /v1/client/documents/content"
     path "GET /v1/documents"
     path "GET /v1/documents/content"
   }
   target "p99" within="300ms"
-  // The same reads through this daemon from another machine that owns them.
-  target "p99" within="300ms" scope="remote"
+  target "p99" scope="remote" within="300ms"
 }
-
 objective "person-read-fresh" {
   about "An agents list with legacy fresh=true or an explicit min_cut asks to wait for publication; ordinary st agents ls and tree do not. Explicit waits have their own target and count toward no other"
   indicator "latency" {
@@ -56,7 +36,6 @@ objective "person-read-fresh" {
   }
   target "p99" within="300ms"
 }
-
 objective "projection-fresh" {
   about "From a commit to the published missions, agents or attention view that carries it, timed by each refresher; refreshers fold at most once a second"
   indicator "latency" {
@@ -66,7 +45,6 @@ objective "projection-fresh" {
   }
   target "p99" within="1500ms"
 }
-
 objective "write-ack" {
   about "Writes and acks: send, work actions, harness events"
   indicator "latency" {
@@ -86,7 +64,6 @@ objective "write-ack" {
   }
   target "p99" within="300ms"
 }
-
 objective "terminal-attach" {
   about "Terminal attach to first screen"
   indicator "latency" {
@@ -95,44 +72,31 @@ objective "terminal-attach" {
   }
   target "p99" within="200ms"
 }
-
 objective "sql-statement" {
   about "One SQL statement"
   indicator "statement"
   target "p99" within="10ms"
   target "max" within="100ms"
 }
-
 objective "transaction" {
   about "Any transaction, read or write, and any hold of the store's writer"
   indicator "transaction"
   target "max" within="300ms"
 }
-
 objective "writer-hold" {
   about "Each hold of the store's single writer, and each read transaction past the same target, by who held it: a request route or background task, its client, and the code that asked"
   indicator "writer-hold"
   target "max" within="300ms"
 }
-
-// The member's CPU is its daemon process and every replication worker process beside it, all
-// their work included (maintenance, heartbeat, anti-entropy, replication), over closed UTC
-// minutes. An idle minute is one known to be idle: no seat on this member working, no daemon
-// start, deploy or replication catch-up in it, and every figure known. An hour with fewer than
-// `idle-min-minutes` idle minutes, or that the daemon was not up for all of, is unknown.
 objective "cpu" {
   about "Member CPU, the daemon and its replication workers: at most 1 core over the hour, and 0.5 core over the hour's idle minutes"
   indicator "cpu" {
     idle-min-minutes 10
-    // daemon_load's bound in CI under its synthetic load, which is not the production target.
     load-max-cores 2
   }
   target "cores" max=1
   target "idle-cores" max=0.5
 }
-
-// Closed UTC minutes reported by paired clients; distinct from daemon response timing.
-
 objective "ios-open-to-live" {
   about "Foreground to first live Home snapshot; reported phone population only"
   indicator "latency" {
@@ -140,7 +104,6 @@ objective "ios-open-to-live" {
   }
   target "p99" within="3000ms"
 }
-
 objective "ios-connect" {
   about "Client connection; reported phone population only"
   indicator "latency" {
@@ -148,7 +111,6 @@ objective "ios-connect" {
   }
   target "p99" within="1500ms"
 }
-
 objective "ios-message-ack" {
   about "Client message acknowledgement; reported phone population only"
   indicator "latency" {
@@ -156,7 +118,6 @@ objective "ios-message-ack" {
   }
   target "p99" within="500ms"
 }
-
 objective "ios-conversation-open" {
   about "Client conversation opening; reported phone population only"
   indicator "latency" {
@@ -164,7 +125,6 @@ objective "ios-conversation-open" {
   }
   target "p99" within="1000ms"
 }
-
 objective "ios-terminal-open" {
   about "Client terminal opening; reported phone population only"
   indicator "latency" {
@@ -172,7 +132,6 @@ objective "ios-terminal-open" {
   }
   target "p99" within="1500ms"
 }
-
 objective "ios-recover" {
   about "Client feed recovery; reported phone population only"
   indicator "latency" {
@@ -180,7 +139,6 @@ objective "ios-recover" {
   }
   target "p99" within="10000ms"
 }
-
 objective "ios-live-share" {
   about "Live foreground time / reported foreground time; disconnected foreground is over-target"
   indicator "share" {
@@ -188,27 +146,17 @@ objective "ios-live-share" {
   }
   target "live-share" min-percent=99
 }
-
 objective "projection-divergence" {
   about "Open P1 projection bugs: two members that hold the same envelopes and project a table differently. Each is a fault for the fleet's fault agent with what a reproduction needs; nothing repairs it from a peer"
   indicator "divergence"
   target "open" max=0
 }
-
 objective "database" {
   about "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run"
   indicator "database"
   target "live-gb" max=8
   target "growth-mb-per-day" max=300
 }
-
-// CI, observed outside the daemon: the merge queue and the workspace's checks. A `ci-duration`
-// target is one percentile of a duration, the row `NAME/pPERCENTILE`. A `ci-count` is the most
-// events an hour, the row `NAME`. `series` names what feeds it, `ci/NAME`. They are objectives in
-// `fractal slo` only, not in the request-latency read or `fractal doctor`. Workspace CI's runs,
-// read by the repository observer that reads main_performance_failures and held in memory, feed
-// them; other members show no-data.
-
 objective "merge-latency" {
   about "A pull request's time in the merge queue, from entering it to merging"
   indicator "ci-duration" {
@@ -217,7 +165,6 @@ objective "merge-latency" {
   target "p50" within="10m"
   target "p95" within="10m"
 }
-
 objective "ci-critical-path" {
   about "The workspace CI's critical path, from a change to all checks green"
   indicator "ci-duration" {
@@ -225,7 +172,6 @@ objective "ci-critical-path" {
   }
   target "p95" within="13m"
 }
-
 objective "flakes" {
   about "Flaky results: tests nextest passed only on a retry, and merge groups ejected from the queue"
   indicator "ci-count" {
