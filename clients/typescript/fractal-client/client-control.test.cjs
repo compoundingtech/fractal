@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('typescript');
-const { webcrypto, createPublicKey, verify } = require('node:crypto');
+const { webcrypto, createPublicKey, createHash, verify } = require('node:crypto');
 const Module = require('node:module');
 const filename = path.join(__dirname, 'ClientControl.generated.ts');
 const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
@@ -40,4 +40,14 @@ test('all clients share canonical bytes, digest and purpose-specific fixed-key s
 test('JCS refuses lone surrogate strings', () => {
   const state = { ...fixture.vectors[0].input.visible_state, route: '\ud800' };
   assert.throws(() => visibleStateCanonicalJson(state), /Invalid Unicode/);
+});
+
+test('injected SHA256 reproduces golden bytes without a WebCrypto dependency', async () => {
+  let calls = 0;
+  const sha256 = async bytes => { calls++; return new Uint8Array(createHash('sha256').update(bytes).digest()); };
+  for (const vector of fixture.vectors) {
+    assert.equal(await visibleStateDigest(vector.input.visible_state, sha256), vector.visible_state_sha256);
+    assert.equal(Buffer.from(await clientResultCanonicalBytes(vector.input, sha256)).toString('utf8'), vector.canonical_bytes);
+  }
+  assert.equal(calls, fixture.vectors.length * 2);
 });

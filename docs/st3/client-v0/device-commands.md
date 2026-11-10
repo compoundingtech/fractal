@@ -223,3 +223,34 @@ This persisted withdrawal ends every grant bound to that enrollment, regardless
 of timestamps; new enrollment cannot resurrect old grants. Grant issue, command
 admission and result acceptance reload enrollment and pairing authority.
 Operators can revoke even after the pairing expires.
+
+## Grant lifecycle on the commands collection
+
+The existing session-scoped `commands` subscription carries generated
+`client-control-grant-lifecycle` resources alongside device commands, using the
+same snapshot/changes frames and typed `Resource` decoder. Each lifecycle row
+has the ordinary resource header plus `grant_id`, optional `item_id`, `run_id`,
+`device`, `session`, `state` (`started`, `ended`, `revoked`), `reason` and a
+monotonic, positive JSON-safe integer `sequence`.
+
+These rows drive the visible indicator and termination only. They do not carry
+verbs, screens or budget policy; policy remains in each
+`DeviceCommand.control_grant`. A command without an active, nonterminal
+lifecycle grant for its `grant_id` must produce no navigation or signature.
+When a grant binds `item_id`, every lifecycle row must carry that exact item.
+Clients ignore started rows whose sequence is not greater than the last
+observed sequence for the grant, and treat ended/revoked as permanently final
+for that grant ID: a later started row cannot reactivate it.
+
+`fixtures/clients/client-control-lifecycle-v1.json` is shared decoder and
+acceptance-trace data for all clients, covering each state, stale/reordered
+started rows, missing/wrong item binding, command-before-start and
+command-after-terminal. Context-dependent lifecycle checks belong to the
+client handler; decoding a resource never grants authority.
+
+TypeScript canonical hashing supports Hermes without WebCrypto through an
+injected `ClientControlSha256 = (bytes: Uint8Array) => Promise<Uint8Array>`.
+Pass it as the second argument to `visibleStateDigest` or
+`clientResultCanonicalBytes`; omitting it uses generated
+`defaultWebCryptoSha256`. Canonical encoding remains generated and unchanged;
+the injected implementation returns the raw 32 SHA-256 bytes, not hex or text.

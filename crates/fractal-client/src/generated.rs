@@ -2857,6 +2857,7 @@ pub enum Resource {
     Machine(Machine),
     Device(Device),
     DeviceCommand(DeviceCommand),
+    ClientControlGrantLifecycle(ClientControlGrantLifecycle),
     Operation(Operation),
     History(History),
     Session(Session),
@@ -2892,6 +2893,7 @@ pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
     "machine",
     "device",
     "device-command",
+    "client-control-grant-lifecycle",
     "operation",
     "history",
     "session",
@@ -2961,6 +2963,7 @@ impl Resource {
             Self::Machine(v) => &v.header,
             Self::Device(v) => &v.header,
             Self::DeviceCommand(v) => &v.header,
+            Self::ClientControlGrantLifecycle(v) => &v.header,
             Self::Operation(v) => &v.header,
             Self::History(v) => &v.header,
             Self::Session(v) => &v.header,
@@ -6271,4 +6274,18 @@ pub struct DeviceCommand {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ClientControlGrantLifecycle {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    #[serde(flatten)]
+    pub lifecycle: fractal_schema::client_control::ClientControlGrantLifecycleEvent,
+}
+impl std::ops::Deref for ClientControlGrantLifecycle {
+    type Target = fractal_schema::client_control::ClientControlGrantLifecycleEvent;
+    fn deref(&self) -> &Self::Target {
+        &self.lifecycle
+    }
 }
