@@ -64,6 +64,43 @@ test('cancellation after async credentials prevents sending an action', async ()
     assert.equal(fetches, 0);
 });
 
+test('AbortSignal polyfills without throwIfAborted reach fetch unless aborted', async () => {
+    let fetches = 0;
+    const signal = { aborted: false };
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async (_url, init) => {
+            fetches++;
+            assert.equal(init.signal, signal);
+            return response(capabilityFixture);
+        },
+    });
+    await client.capabilities({ signal });
+    assert.equal(fetches, 1);
+    signal.aborted = true;
+    for (const reason of [new Error('cancelled by caller'), 'cancelled', 0, false]) {
+        signal.reason = reason;
+        await assert.rejects(client.capabilities({ signal }), error => error === reason);
+        await assert.rejects(client.discover({ signal }), error => error === reason);
+    }
+    assert.equal(fetches, 1);
+});
+
+test('aborted legacy signals use AbortError with and without global DOMException', async t => {
+    let fetches = 0;
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async () => { fetches++; return response(capabilityFixture); },
+    });
+    const signal = { aborted: true };
+    await assert.rejects(client.capabilities({ signal }), error => error instanceof DOMException && error.name === 'AbortError');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'DOMException');
+    t.after(() => Object.defineProperty(globalThis, 'DOMException', descriptor));
+    globalThis.DOMException = undefined;
+    await assert.rejects(client.capabilities({ signal }), error => error instanceof Error && error.name === 'AbortError' && error.message === 'This operation was aborted');
+    assert.equal(fetches, 0);
+});
+
 test('actual delayed WebSocket upgrade distinguishes readiness and contains malformed frames', async t => {
     const http = require('node:http');
     const { once } = require('node:events');
@@ -737,6 +774,40 @@ test('collection stream holds commands until the socket opens and passes frames 
     socket.onmessage({ data: 'not json' });
     assert.equal(ends.length, 1);
     assert.deepEqual(socket.closed, [1000]);
+});
+
+test('collection native errors retain only NSError identity through plainError', async () => {
+    for (const [domain, code] of [['NSURLErrorDomain', -1009], ['SRWebSocketErrorDomain', 2132], ['NSPOSIXErrorDomain', 0]]) {
+        const socket = collectionSocket(), ends = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
+        await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: () => socket });
+        const onerror = socket.onerror;
+        const event = { domain, code, message: 'private credential', localizedDescription: 'private gateway', userInfo: { url: 'https://private.invalid' } };
+        onerror(event);
+        onerror(event);
+        assert.equal(ends.length, 1);
+        assert.ok(ends[0] instanceof Error);
+        assert.equal(ends[0].message, `The collections socket failed (${domain} ${code})`);
+        assert.equal(plainError(ends[0]), ends[0].message);
+        assert.doesNotMatch(JSON.stringify({ issue: plainError(ends[0]) }), /private|localizedDescription|userInfo/);
+        assert.equal(socket.onopen, null);
+        assert.equal(socket.onerror, null);
+    }
+});
+
+test('browser and incomplete native collection errors retain generic text without event messages', async () => {
+    for (const event of [undefined, null, {}, new Error('private browser failure'),
+        { message: 'private' }, { domain: 'NSURLErrorDomain' }, { code: -1009 },
+        { domain: 1, code: -1009 }, { domain: 'NSURLErrorDomain', code: '-1009' },
+        { domain: 'NSURLErrorDomain', code: NaN }, { domain: 'NSURLErrorDomain', code: Infinity },
+        { domain: 'NSURLErrorDomain', code: 1.5 }]) {
+        const socket = collectionSocket(), ends = [];
+        const client = new FractalClient({ baseUrl: 'https://example.test' });
+        await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: () => socket });
+        socket.onerror(event);
+        assert.equal(ends.length, 1);
+        assert.equal(plainError(ends[0]), 'The collections socket failed');
+    }
 });
 
 test('command observers see queued and direct commands only after socket.send', async () => {

@@ -3620,10 +3620,15 @@
       "description": "The answer of a person-step ask that applies at its deadline. Absent, the ask times out without an answer.",
       "properties": {"id": {"type": "string"}, "label": {"type": "string"}}
     },
+    "PersonOptionNote": {
+      "type": "object", "additionalProperties": false, "required": ["id", "text"],
+      "description": "A note about another named option, not the chosen answer. IDs must exist in the request and be unique; text must be nonblank.",
+      "properties": {"id": {"type": "string"}, "text": {"type": "string", "minLength": 1, "maxLength": 8000, "pattern": "\\S"}}
+    },
     "PersonAnswerInput": {
       "type": "object", "additionalProperties": false,
       "description": "A named answer id for a decision or choice; text for feedback, a custom choice, or the changes requested.",
-      "properties": {"id": {"type": "string"}, "text": {"type": "string"}}
+      "properties": {"id": {"type": "string"}, "text": {"type": "string"}, "option_notes": {"type": "array", "items": {"$ref": "#/$defs/PersonOptionNote"}, "description": "Notes about other named options. Omit when empty; requires person-answer-option-notes capability."}}
     },
     "PersonAnswer": {
       "type": "object", "required": ["type", "outcome"],
@@ -3641,7 +3646,8 @@
         ]},
         "id": {"type": "string"},
         "label": {"type": "string"},
-        "text": {"type": "string"}
+        "text": {"type": "string"},
+        "option_notes": {"type": "array", "items": {"$ref": "#/$defs/PersonOptionNote"}, "description": "Notes about other named options, omitted when empty."}
       }
     },
     "PersonAnswerRecord": {

@@ -6244,7 +6244,7 @@ mod tests {
         assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(2));
         ui.note_acted(&Effect::Attention {
             id: "attention/a".into(), action: "work.done".into(),
-            reason: Some("Yes".into()), answer: None,
+            reason: Some("Yes".into()), answer: None, option_notes: Vec::new(),
         });
         assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(1));
         ui.set_world(world);

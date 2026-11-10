@@ -1,5 +1,5 @@
 // A fake client whose collections sockets the test drives frame by frame.
-export function fakeClient() {
+export function fakeClient({ autoOpen = true } = {}) {
   const sockets = [];
   const client = {
     collectionStream: async options => {
@@ -15,7 +15,9 @@ export function fakeClient() {
       socket.close = () => { socket.closed = true; transport?.close(); };
       socket.frame = frame => options.onFrame(frame);
       socket.drop = error => options.onEnd(error);
+      socket.open = () => options.onOpen?.();
       sockets.push(socket);
+      if (autoOpen) queueMicrotask(socket.open);
       return socket;
     },
   };

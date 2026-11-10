@@ -225,6 +225,9 @@ pub enum Effect {
         reason: Option<String>,
         /// A structured request's named answer, by id.
         answer: Option<String>,
+        /// Notes on named answers other than `answer`, as `(answer id, text)`; sent only to a
+        /// Fractal that takes them (`person-answer-option-notes`).
+        option_notes: Vec<(String, String)>,
     },
     LaunchRevise {
         id: String,
@@ -4063,6 +4066,31 @@ impl Ui {
         }
     }
 
+    /// Every saved, nonblank note on a named answer of request `id` other than `chosen`, in the
+    /// request's order, as `(answer id, text)`. These go with the answer; none is dropped.
+    fn option_notes(&self, id: &str, chosen: Option<&str>) -> Vec<(String, String)> {
+        let Some(AttentionKind::Request { structured: Some(request), .. }) = self
+            .world
+            .attention
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| &item.kind)
+        else {
+            return Vec::new();
+        };
+        request
+            .answers
+            .iter()
+            .filter(|answer| Some(answer.id.as_str()) != chosen)
+            .filter_map(|answer| {
+                let text = self.conversation_state.drafts.get(&format!("answer:{id}:{}", answer.id))?;
+                let text = text.trim();
+                (!text.is_empty()).then(|| (answer.id.clone(), text.to_owned()))
+            })
+            .collect()
+    }
+
     /// Required changes use the same option-bound editor as optional notes.
     fn ask_for_words(&mut self, answer: &fractal_client::RequestAnswerOption) -> bool {
         if answer.outcome.as_deref() != Some("request_changes") {
@@ -4128,6 +4156,7 @@ impl Ui {
                         reason: self.conversation_state.drafts
                             .get(&format!("answer:{id}:{}", answer.id)).cloned(),
                         answer: Some(answer.id.clone()),
+                        option_notes: self.option_notes(&id, Some(&answer.id)),
                     });
                     self.flash(format!("Answering “{}”…", answer.label));
                 } else {
@@ -4961,6 +4990,7 @@ impl Ui {
                 action: "work.done".into(),
                 reason: Some("Read".into()),
                 answer: Some("read".into()),
+                option_notes: Vec::new(),
             });
         } else {
             self.flash("Read · demo: nothing was sent");
@@ -5724,6 +5754,7 @@ impl Ui {
                         .into(),
                         reason: Some(draft),
                         answer: None,
+                        option_notes: Vec::new(),
                     }),
                     Some(AttentionKind::Launch { .. }) => Some(Effect::LaunchRevise {
                         id: id.clone(),
@@ -5742,6 +5773,7 @@ impl Ui {
                         .into(),
                         reason: Some(draft),
                         answer: self.note_answers.get(&id).cloned(),
+                        option_notes: self.option_notes(&id, self.note_answers.get(&id).map(String::as_str)),
                     }),
                     Some(AttentionKind::Message { from, .. }) => Some(Effect::Reply {
                         id: id.clone(),
@@ -5757,6 +5789,7 @@ impl Ui {
                             action: answer.into(),
                             reason: Some(draft),
                             answer: None,
+                            option_notes: Vec::new(),
                         }),
                     Some(AttentionKind::Revision { .. }) => self
                         .current_item()
@@ -5968,10 +6001,11 @@ impl Ui {
         if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
             // r closes a request that needs nothing from the person; the step continues. A
             // decision or choice is set aside by name: st tells its asker it was dismissed.
-            let named = action == 'r'
-                && self
-                    .structured_request()
-                    .is_some_and(|(_, request)| !request.answers.is_empty());
+            let request = if action == 'r' { self.structured_request() } else { None };
+            let named = request.as_ref().is_some_and(|(_, request)| !request.answers.is_empty());
+            let chosen = request.as_ref()
+                .and_then(|(_, request)| request.answers.iter().find(|answer| answer.id == "dismiss"))
+                .map(|answer| answer.id.as_str());
             let answer = match action {
                 'y' => "Yes",
                 'n' => "No",
@@ -5979,11 +6013,17 @@ impl Ui {
                 _ => "Nothing for me to do here.",
             };
             if self.live {
+                let reason = chosen
+                    .and_then(|chosen| self.conversation_state.drafts.get(&format!("answer:{id}:{chosen}")))
+                    .cloned()
+                    .unwrap_or_else(|| answer.into());
+                let option_notes = self.option_notes(&id, chosen);
                 self.effects.push(Effect::Attention {
                     id,
                     action: "work.done".into(),
-                    reason: Some(answer.into()),
+                    reason: Some(reason),
                     answer: named.then(|| "dismiss".to_owned()),
+                    option_notes,
                 });
                 self.flash(format!("Answering “{answer}”…"));
             } else {
@@ -6021,6 +6061,7 @@ impl Ui {
                     action: name.into(),
                     reason,
                     answer: None,
+                    option_notes: Vec::new(),
                 });
                 self.flash("Sending…");
             } else {
@@ -8817,6 +8858,7 @@ mod tests {
             action: "work.done".into(),
             reason: None,
             answer: None,
+            option_notes: Vec::new(),
         });
         let mut next = world;
         if let Load::Ready(items) = &mut next.attention {

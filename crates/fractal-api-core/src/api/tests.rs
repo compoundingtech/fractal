@@ -12715,6 +12715,52 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
     );
 }
 
+#[tokio::test]
+async fn claims_endpoint_filters_by_kind_and_subject_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (subject, kind) in [
+        ("custom/acme/change/1", "custom.acme.change"),
+        ("custom/acme/changes/x", "custom.acme.change"),
+        ("custom/acme/change/2", "custom.acme.note"),
+    ] {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let app = router(state);
+    let subjects = |page: &Value| {
+        page["claims"].as_array().unwrap().iter()
+            .map(|claim| claim["subject"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (query, expected) in [
+        ("kind=custom.acme.change", vec!["custom/acme/change/1", "custom/acme/changes/x"]),
+        ("subject_prefix=custom%2Facme%2Fchange%2F", vec!["custom/acme/change/1", "custom/acme/change/2"]),
+        ("kind=custom.acme.change&subject_prefix=custom%2Facme%2Fchange%2F", vec!["custom/acme/change/1"]),
+    ] {
+        let (status, page) = get_request(app.clone(), &format!("/v1/claims?{query}")).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {page}");
+        assert_eq!(subjects(&page), expected, "{query}");
+    }
+    let (status, refused) = get_request(
+        app,
+        "/v1/claims?subject=custom%2Facme%2Fchange%2F1&subject_prefix=custom%2Facme%2F",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "invalid-claims-query");
+}
+
 async fn writer_binding_request(
     app: Router,
     path: &str,

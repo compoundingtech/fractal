@@ -22,7 +22,7 @@ import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts, readPositions } from './qualityNative';
 import { readPositionRemote, syncsReadPositions } from './readPosition';
 import { nativeCollectionSocket } from './modules/fractal-collections';
-import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
+import { FabricCarrier, routeLabel, selectRoute, shouldRetryFabric, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
 import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
@@ -1284,7 +1284,10 @@ function useAppStore(proof?: FabricProfile) {
       setOrder(updated);
       if (!proof) void AsyncStorage.setItem(ORDER_KEY, JSON.stringify(updated));
     },
-    reconnect() { feed?.reconnect(); },
+    reconnect() {
+      if (shouldRetryFabric(carrierChoice, carrier.snapshot.phase)) carrier.retry();
+      feed?.reconnect();
+    },
     setSimpleOn(on: boolean) {
       setSimpleOn(on);
       if (!proof) void AsyncStorage.setItem(SIMPLE_KEY, on ? '1' : '0').catch(() => {});
