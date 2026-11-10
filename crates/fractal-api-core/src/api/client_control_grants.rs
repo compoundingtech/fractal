@@ -24,6 +24,7 @@ pub struct IssueGrantRequest {
     pub actor_agent: String,
     pub verbs: Vec<String>,
     pub screens: Vec<String>,
+    pub item_id: Option<String>,
     pub max_commands: Option<u64>,
     /// Daemon-clock Unix milliseconds; defaults to the bounded claim/run deadline.
     pub expires_at: Option<u128>,
@@ -39,6 +40,8 @@ pub struct ControlGrant {
     pub actor_agent: String,
     pub verbs: Vec<String>,
     pub screens: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
     pub max_commands: u64,
     pub expires_at: u128,
     pub issued_at: u128,
@@ -64,6 +67,7 @@ impl ControlGrant {
             device: self.device.clone(), session: self.session.clone(),
             actor_agent: self.actor_agent.clone(), verbs: self.verbs.clone(),
             screens: self.screens.clone(), max_commands: self.max_commands,
+            item_id: self.item_id.clone(),
             expires_at: client_timestamp(self.expires_at), state: state.into(),
         }
     }
@@ -73,6 +77,7 @@ impl ControlGrant {
             "session":self.session,"actor_agent":self.actor_agent,"verbs":self.verbs,
             "screens":self.screens,"max_commands":self.max_commands,
             "expires_at":client_timestamp(self.expires_at),"state":state});
+        if let Some(item_id) = &self.item_id { resource["item_id"] = json!(item_id); }
         resource["id"] = json!(self.grant_id);
         resource["kind"] = json!("client-control-grant");
         resource["revision"] = json!(format!("{}:{state}", self.grant_id));
@@ -87,7 +92,7 @@ fn refusal(code: &'static str) -> ApiError {
 }
 fn unavailable() -> ApiError { ApiError::internal("client control admission lock unavailable") }
 fn verb_allowed(verb: &str) -> bool { matches!(verb, "phone.inspect" | "phone.navigate") }
-fn screen_allowed(screen: &str) -> bool { matches!(screen, "NowRoot" | "Conversation") }
+fn screen_allowed(screen: &str) -> bool { matches!(screen, "NowRoot" | "Attention") }
 
 fn append(state: &AppState, subject: &str, kind: &str, actor: &str, fields: Value) -> Result<ClaimRecord, ApiError> {
     state.store.append_client_operation_claim(&crate::model::ClaimInput {
@@ -183,6 +188,7 @@ pub fn issue_grant(state: &AppState, session: &ClientSession, request: IssueGran
         grant_id: format!("client-control-grant/{}", crate::model::new_request_id()),
         run_id: request.run_id, device: request.device, session: enrollment.session.actor,
         actor_agent: request.actor_agent, verbs: request.verbs, screens: request.screens,
+        item_id: request.item_id,
         max_commands, expires_at, issued_at: now, enrollment_id: enrollment.enrollment_id, binding,
     };
     append(state, &grant.grant_id, GRANTED, &grant.actor_agent,
@@ -218,11 +224,25 @@ pub fn check_screen(grant: &ControlGrant, screen: &str) -> Result<(), ApiError> 
     }
     Ok(())
 }
+/// An item-bound grant can inspect or navigate only the seeded native ask. Parent
+/// result verification applies this same rule to the signed visible item's id.
+pub fn check_item(grant: &ControlGrant, item_id: &str) -> Result<(), ApiError> {
+    if grant.item_id.as_deref().is_some_and(|allowed| allowed != item_id) {
+        return Err(refusal("screen-not-granted"));
+    }
+    Ok(())
+}
 fn check_command(grant: &ControlGrant, kind: &str, args: &Value) -> Result<(), ApiError> {
     if !verb_allowed(kind) || !grant.verbs.iter().any(|allowed| allowed == kind) {
         return Err(refusal("verb-not-granted"));
     }
-    if kind == "phone.navigate" { check_screen(grant, args["screen"].as_str().unwrap_or_default())?; }
+    if kind == "phone.navigate" {
+        let screen = args["screen"].as_str().unwrap_or_default();
+        check_screen(grant, screen)?;
+        if screen == "Attention" {
+            check_item(grant, args.pointer("/params/id").and_then(Value::as_str).unwrap_or_default())?;
+        }
+    }
     super::client_commands::validate_args(kind, args)
 }
 fn consumption_fields(grant: &ControlGrant, command_id: &str, kind: &str, args: &Value) -> Value {
@@ -355,7 +375,7 @@ mod tests {
         ControlGrant { grant_id: "client-control-grant/test".into(), run_id: "mission-run/test".into(),
             device: "device/test".into(), session: "client-session/test".into(), actor_agent: "agent/test".into(),
             verbs: vec!["phone.inspect".into(), "phone.navigate".into()],
-            screens: vec!["NowRoot".into(), "Conversation".into()], max_commands: DEFAULT_MAX_COMMANDS,
+            screens: vec!["NowRoot".into(), "Attention".into()], item_id: None, max_commands: DEFAULT_MAX_COMMANDS,
             expires_at: 200, issued_at: 100, enrollment_id: "enrollment/test".into(),
             binding: ClaimBinding { step_run: "step-run/test".into(), generation: "generation/test".into(),
                 attempt: 1, incarnation: Some("incarnation/test".into()), claim_id: "claim/test".into() } }
@@ -373,7 +393,8 @@ mod tests {
     }
     #[test]
     fn message_authority_is_never_grantable() {
-        for verb in ["message.send", "phone.message.read", "client.message.read", "control.messages"] {
+        for verb in ["message.send", "phone.message.read", "client.message.read", "control.messages",
+            "answer", "close", "read-state", "phone.attention.answer", "phone.attention.close"] {
             assert_eq!(validate_scope(&[verb.into()], &["NowRoot".into()], 50).unwrap_err().code, "verb-not-granted");
             assert_eq!(check_command(&grant(), verb, &json!({})).unwrap_err().code, "verb-not-granted");
         }
@@ -382,9 +403,10 @@ mod tests {
     fn closed_screens_and_verb_subsets_are_enforced() {
         let mut grant = grant();
         assert!(check_command(&grant, "phone.inspect", &json!({})).is_ok());
-        assert!(check_command(&grant, "phone.navigate", &json!({"screen":"Conversation","params":{"target":"person/seed"}})).is_ok());
-        grant.screens = vec!["NowRoot".into()];
+        assert!(check_command(&grant, "phone.navigate", &json!({"screen":"Attention","params":{"id":"step-run/ask-seed/ask"}})).is_ok());
         assert_eq!(check_command(&grant, "phone.navigate", &json!({"screen":"Conversation","params":{"target":"person/seed"}})).unwrap_err().code, "screen-not-granted");
+        grant.screens = vec!["NowRoot".into()];
+        assert_eq!(check_command(&grant, "phone.navigate", &json!({"screen":"Attention","params":{"id":"step-run/ask-seed/ask"}})).unwrap_err().code, "screen-not-granted");
         grant.verbs = vec!["phone.inspect".into()];
         assert_eq!(check_command(&grant, "phone.navigate", &json!({"screen":"NowRoot"})).unwrap_err().code, "verb-not-granted");
         assert_eq!(validate_scope(&["phone.inspect".into()], &["Agents".into()], 50).unwrap_err().code, "screen-not-granted");
@@ -484,7 +506,7 @@ pub mod test_support {
     pub fn request(grant: &ControlGrant, max_commands: u64) -> IssueGrantRequest {
         IssueGrantRequest { run_id: grant.run_id.clone(), step_run: grant.binding.step_run.clone(),
             device: grant.device.clone(), actor_agent: grant.actor_agent.clone(),
-            verbs: grant.verbs.clone(), screens: grant.screens.clone(),
+            verbs: grant.verbs.clone(), screens: grant.screens.clone(), item_id: grant.item_id.clone(),
             max_commands: Some(max_commands), expires_at: None }
     }
     pub fn reenroll(state: &AppState, key: &EcdsaKeyPair, issuer: &ClientSession, consent: &str) {
@@ -545,7 +567,7 @@ mission "client-control-test" state="ready" {
         let grant = issue_grant(&state, &issuer, IssueGrantRequest {
             run_id: run.subject, step_run, device: "device/test".into(), actor_agent: issuer.actor.clone(),
             verbs: vec!["phone.inspect".into(), "phone.navigate".into()],
-            screens: vec!["NowRoot".into(), "Conversation".into()], max_commands: None, expires_at: None,
+            screens: vec!["NowRoot".into(), "Attention".into()], item_id: None, max_commands: None, expires_at: None,
         }).unwrap();
         (state, key, grant, issuer)
     }
@@ -703,5 +725,34 @@ mod durable_tests {
         let revoked = resources.iter().find(|resource| resource["id"] == grant.grant_id).unwrap();
         assert_eq!(revoked["state"], "revoked");
         assert_eq!(revoked["revision"], format!("{}:revoked", grant.grant_id));
+    }
+    #[test]
+    fn native_ask_item_binding_is_durable_and_conversation_is_never_granted() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, _, grant, issuer) = fixture(root.path());
+        let mut bound_request = request(&grant, 50);
+        bound_request.item_id = Some("step-run/ask-seed/ask".into());
+        let bound = issue_grant(&state, &issuer, bound_request).unwrap();
+        let loaded = lookup(&state, &bound.grant_id).unwrap();
+        assert_eq!(loaded.item_id.as_deref(), Some("step-run/ask-seed/ask"));
+        assert_eq!(loaded.resource("active")["item_id"], "step-run/ask-seed/ask");
+        assert_eq!(loaded.wire("active").item_id, loaded.item_id);
+        assert!(check_item(&loaded, "step-run/ask-seed/ask").is_ok());
+        assert_eq!(check_item(&loaded, "step-run/ask-other/ask").unwrap_err().code, "screen-not-granted");
+        assert!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
+            &bound.actor_agent, "phone.navigate", &json!({"screen":"NowRoot"}), "command/root").is_ok());
+        assert!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
+            &bound.actor_agent, "phone.navigate", &json!({"screen":"Attention","params":{"id":"step-run/ask-seed/ask"}}), "command/seed").is_ok());
+        assert_eq!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
+            &bound.actor_agent, "phone.navigate", &json!({"screen":"Attention","params":{"id":"step-run/ask-other/ask"}}), "command/other").unwrap_err().code, "screen-not-granted");
+        assert_eq!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
+            &bound.actor_agent, "phone.navigate", &json!({"screen":"Conversation","params":{"target":"person/seed"}}), "command/conversation").unwrap_err().code, "screen-not-granted");
+        let mut conversation_request = request(&grant, 50);
+        conversation_request.screens = vec!["NowRoot".into(), "Conversation".into()];
+        assert_eq!(issue_grant(&state, &issuer, conversation_request).unwrap_err().code, "screen-not-granted");
+        for verb in ["answer", "close", "read-state", "message.send", "phone.message.read"] {
+            assert_eq!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
+                &bound.actor_agent, verb, &json!({}), "command/mutate").unwrap_err().code, "verb-not-granted");
+        }
     }
 }
