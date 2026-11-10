@@ -300,16 +300,16 @@ mission "garden/program" state="ready" {{
             })
             .unwrap();
     };
-    set_thread_clock(Some(t0 + MINUTE));
+    // The store stamps entries with its own clock, a moment after `t0`: read half a minute past
+    // the whole minute.
     entry("render", "started", None);
     entry("render", "completed", None);
     entry("review", "started", Some("mission-run/garden/child"));
 
     // The journal moved a minute ago: the program runs, and its innermost key waits on a child.
-    // Claims are stamped a moment after the clock: read half a minute past the whole minute.
-    let waiting = waits(&store, &run.subject, t0 + 2 * MINUTE + MINUTE / 2, QUIET);
+    let waiting = waits(&store, &run.subject, t0 + MINUTE + MINUTE / 2, QUIET);
     let (work, _) = published(&store);
-    assert_eq!(work.rows[&land].value["gate_kind"], "program");
+    assert_eq!(work.rows.rows[&land].value["gate_kind"], "program");
     let landing = open(&waiting, "land");
     assert_eq!(landing.kind, WaitKind::Program, "a program step is never `watching`: {waiting:#?}");
     assert_eq!(landing.detail.as_deref(), Some("review waits on mission-run/garden/child"));
@@ -320,16 +320,15 @@ mission "garden/program" state="ready" {{
     );
 
     // A running effect is named with how long it has run.
-    set_thread_clock(Some(t0 + 3 * MINUTE));
     entry("review", "completed", Some("mission-run/garden/child"));
     entry("merge", "started", None);
     let waiting = waits(&store, &run.subject, t0 + 5 * MINUTE + MINUTE / 2, QUIET);
-    assert_eq!(open(&waiting, "land").detail.as_deref(), Some("merge running for 2m"));
+    assert_eq!(open(&waiting, "land").detail.as_deref(), Some("merge running for 5m"));
 
     // Past its stalled-after with no new entry, well inside the quiet limit: no progress.
     let waiting = waits(&store, &run.subject, t0 + 14 * MINUTE + MINUTE / 2, QUIET);
     assert_eq!((waiting.verdict, waiting.cause), (RunVerdict::Stalled, Some(WaitKind::NoProgress)));
-    assert!(waiting.reason.starts_with("land: st holds it, no progress for 11m: merge running for 11m"), "{}", waiting.reason);
+    assert!(waiting.reason.starts_with("land: st holds it, no progress for 14m: merge running for 14m"), "{}", waiting.reason);
 
     // `missions show` projects the same journal under the step.
     let view = store.mission_run(&run.id).unwrap().unwrap();
