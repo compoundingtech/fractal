@@ -63,7 +63,8 @@ import { defaultFilters, fixtureSidebarState, sidebarState } from '../shell/side
 import { useMachineMemory, withRememberedMachines } from '../shell/sidebar/show.ts'
 import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 import { SidebarToolbar, type SidebarToolbarProps } from '../shell/sidebar/Toolbar.tsx'
-import { credentialNotice, type Agent } from '../data/source.ts'
+import { credentialNotice, waiting, type Agent, type Feed } from '../data/source.ts'
+import type { TerminalScreen } from '@fractal/client/schema'
 import { sidebarAttention } from './sidebarAttention.ts'
 import { FolderAttentionSignal } from './AttentionControls.tsx'
 import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
@@ -79,6 +80,7 @@ import { DecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 import { schemePreference, useResolvedScheme } from './themePreference.ts'
 
 const emptyAgents: readonly Agent[] = []
+const idleTerminal = Atom.make<Feed<TerminalScreen>>(waiting)
 
 
 /** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
@@ -445,13 +447,19 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [ux, rosterObserved])
   const current = initialAgentFromUrl(location) ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
+  // Attaches that found no terminal, per agent. Each holds until the roster reports different runtimes for that agent.
+  const [terminalFailures, setTerminalFailures] = React.useState<ReadonlyMap<string, { readonly runtimeKey: string | undefined; readonly reason: string }>>(new Map())
+  const failedAttach = (row: Agent) => {
+    const failure = terminalFailures.get(row.ref)
+    return failure !== undefined && failure.runtimeKey === row.runtimeKey ? failure.reason : undefined
+  }
   // A canonical subject address is not proof of a terminal. Keep the control disabled
   // from its first render until the roster can establish the selected agent's runtime.
   const terminalDisabledReason = terminalSubjectForAgent(current) === undefined ? undefined
     : credentialNotice(fleet) ?? (fleet._tag === 'Waiting' ? 'Waiting for the live agent roster to find this agent’s terminal.'
       : fleet._tag === 'Unavailable' ? 'The agent roster is unavailable, so this agent’s terminal cannot be found.'
         : agent === undefined ? 'This agent is not in the live agent roster, so it has no terminal.'
-          : agent.terminalDisabledReason)
+          : agent.terminalDisabledReason ?? failedAttach(agent))
   const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
   const terminalSource = useDataSource()
   // After first paint, idle time warms the terminal chunk and fonts; data waits for explicit intent.
@@ -678,6 +686,17 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
   const shownTerminalDisabledReason = terminalOpen ? undefined : terminalDisabledReason
   const focusShownView = React.useRef(false)
+  // An attach that finds no terminal records its reason and returns to the conversation.
+  const shownTerminalRef = terminalOpen ? terminalSubjectForAgent(current) : undefined
+  const shownTerminal = useAtomValue(shownTerminalRef === undefined ? idleTerminal : terminalSource.terminal(shownTerminalRef))
+  const missingTerminal = shownTerminalRef !== undefined && shownTerminal._tag === 'Unavailable' && shownTerminal.code === 'no-terminal'
+    ? shownTerminal.detail.trim() || 'This agent has no terminal.' : undefined
+  React.useEffect(() => {
+    if (missingTerminal === undefined) return
+    setTerminalFailures(failures => new Map(failures).set(current, { runtimeKey: agent?.runtimeKey, reason: missingTerminal }))
+    focusShownView.current = true
+    navigate(current)
+  }, [missingTerminal, current, agent?.runtimeKey, navigate])
   const toggleTerminal = () => {
     if (terminalOpen) { focusShownView.current = true; navigate(current) }
     else if (terminalRef !== undefined) { focusShownView.current = true; navigate(current, `${terminalRef}:detail`) }

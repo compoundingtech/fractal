@@ -45,6 +45,7 @@ const toggleDescription = () => (toggle()?.getAttribute('aria-describedby') ?? '
 // A control with a reason stays focusable: aria-disabled, never the native attribute, and the kit tooltip instead of a title.
 const toggleDisabled = () => toggle()?.getAttribute('aria-disabled') === 'true' && toggle()?.disabled === false
 const waitingReason = 'Waiting for the live agent roster to find this agent’s terminal.'
+const noTerminal = { ...unavailable({ reason: 'failed', detail: 'This agent has no terminal.', code: 'no-terminal' }), retryable: false }
 const grid = () => host.querySelector(`[data-testid="terminal-pane"] [aria-label="Terminal: ${screen.title}"]`)
 
 describe('agent roster notice', () => {
@@ -171,20 +172,33 @@ describe('terminal failure stays local to the terminal pane', () => {
     expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
     expectThreadRetained(before)
   })
-  it('shows a terminal-less deep link in place of the thread and keeps the way back enabled', async () => {
+  it('turns a terminal-less deep link back to the conversation and keeps the toggle disabled with the reason', async () => {
     window.history.replaceState(null, '', '/w/agent/example?open=terminal/example:detail')
-    const feed = { ...unavailable({ reason: 'failed', detail: 'This agent has no terminal.', code: 'no-terminal' }), retryable: false }
-    await mount(observed({ value: [{ ...agent, runtime_ids: [] }] }), feed)
-    await vi.waitFor(() => expect(terminalPane()?.textContent).toContain('This agent has no terminal.'))
-    expect(terminalPane()?.getAttribute('aria-label')).toBe('Terminal')
-    expect(terminalPane()?.textContent).not.toContain('Retry')
-    expect(toggle()?.getAttribute('aria-label')).toBe('Show conversation')
+    await mount(observed({ value: [{ ...agent, runtime_ids: [] }] }), noTerminal)
+    await waitForThread()
+    await vi.waitFor(() => expect(terminalShown()).toBe(false))
+    expect(toggle()?.getAttribute('aria-label')).toBe('Show terminal')
+    expect(toggleDisabled()).toBe(true)
+    expect(toggleDescription()).toBe('This agent has no terminal.')
+  })
+  it('disables the toggle after an attach finds no terminal, returns to the conversation, and re-enables when the runtimes change', async () => {
+    await mount(observed({ value: [agent] }), noTerminal)
+    await waitForThread()
     expect(toggle()?.hasAttribute('aria-disabled')).toBe(false)
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
     await waitForThread()
     expect(terminalShown()).toBe(false)
+    expect(toggle()?.getAttribute('aria-label')).toBe('Show terminal')
     expect(toggleDisabled()).toBe(true)
+    expect(toggleDescription()).toBe('This agent has no terminal.')
+    // The same roster frame again keeps the remembered failure.
+    await mount(observed({ value: [{ ...agent }] }), noTerminal)
+    expect(toggleDisabled()).toBe(true)
+    // A changed runtime list is new evidence: the toggle is offered again.
+    await mount(observed({ value: [{ ...agent, runtime_ids: ['runtime/example-next'] } as unknown as Agent] }), observed({ value: screen }))
+    expect(toggle()?.hasAttribute('aria-disabled')).toBe(false)
+    expect(toggleDescription()).toBe('')
   })
   it.each([
     ['ungranted', 'Terminal viewing is refused by the gateway.', false],
