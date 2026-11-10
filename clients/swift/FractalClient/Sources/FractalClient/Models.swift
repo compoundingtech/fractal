@@ -791,20 +791,23 @@ public struct DeviceCommandRequest: Codable, Sendable {
     public let apiVersion, device: String
     public let command: PhoneCommand
     public let ttlMS: UInt64?
-    public init(device: String, command: PhoneCommand, ttlMS: UInt64? = nil, apiVersion: String = "st3.client.v0") {
-        self.apiVersion = apiVersion; self.device = device; self.command = command; self.ttlMS = ttlMS
+    public let grantID: String?
+    public init(device: String, command: PhoneCommand, ttlMS: UInt64? = nil, grantID: String? = nil, apiVersion: String = "st3.client.v0") {
+        self.apiVersion = apiVersion; self.device = device; self.command = command; self.ttlMS = ttlMS; self.grantID = grantID
     }
-    private enum Keys: String, CodingKey { case apiVersion = "api_version", device, ttlMS = "ttl_ms" }
+    private enum Keys: String, CodingKey { case apiVersion = "api_version", device, ttlMS = "ttl_ms", grantID = "grant_id" }
     public init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: Keys.self)
         apiVersion = try box.decode(String.self, forKey: .apiVersion)
         device = try box.decode(String.self, forKey: .device)
         ttlMS = try box.decodeIfPresent(UInt64.self, forKey: .ttlMS)
+        grantID = try box.decodeIfPresent(String.self, forKey: .grantID)
         command = try PhoneCommand(from: decoder)
     }
     public func encode(to encoder: Encoder) throws {
         var box = encoder.container(keyedBy: Keys.self)
         try box.encode(apiVersion, forKey: .apiVersion); try box.encode(device, forKey: .device)
+        try box.encodeIfPresent(grantID, forKey: .grantID)
         try box.encodeIfPresent(ttlMS, forKey: .ttlMS); try command.encode(to: encoder)
     }
 }
@@ -813,10 +816,12 @@ public struct DeviceResult: Codable, Sendable {
     public let outcome: DeviceCommandOutcome
     public let result: JSONValue?
     public let errorCode: String?
-    public init(commandID: String, outcome: DeviceCommandOutcome, result: JSONValue? = nil, errorCode: String? = nil) {
-        self.commandID = commandID; self.outcome = outcome; self.result = result; self.errorCode = errorCode
+    public let binding: ClientResultBinding?
+    public let signature: DeviceSignature?
+    public init(commandID: String, outcome: DeviceCommandOutcome, result: JSONValue? = nil, errorCode: String? = nil, binding: ClientResultBinding? = nil, signature: DeviceSignature? = nil) {
+        self.commandID = commandID; self.outcome = outcome; self.result = result; self.errorCode = errorCode; self.binding = binding; self.signature = signature
     }
-    enum CodingKeys: String, CodingKey { case commandID = "command_id", outcome, result, errorCode = "error_code" }
+    enum CodingKeys: String, CodingKey { case commandID = "command_id", outcome, result, errorCode = "error_code", binding, signature }
 }
 public struct DeviceCommand: Codable, Sendable, Identifiable {
     public let id, kind, revision, updatedAt, deviceID, sessionActor, issuedBy, issuedAt, expiresAt: String
@@ -824,9 +829,14 @@ public struct DeviceCommand: Codable, Sendable, Identifiable {
     public let state: DeviceCommandState
     public let result: JSONValue?
     public let errorCode: String?
+    public let grantID, runID: String?
+    public let controlGrant: ClientControlGrant?
+    public let receiptClaimID: String?
     private enum Keys: String, CodingKey {
         case id, kind, revision, updatedAt = "updated_at", deviceID = "device_id", sessionActor = "session_actor"
         case issuedBy = "issued_by", issuedAt = "issued_at", expiresAt = "expires_at", state, result, errorCode = "error_code"
+        case grantID = "grant_id", runID = "run_id", controlGrant = "control_grant"
+        case receiptClaimID = "receipt_claim_id"
     }
     public init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: Keys.self)
@@ -836,6 +846,9 @@ public struct DeviceCommand: Codable, Sendable, Identifiable {
         issuedBy = try box.decode(String.self, forKey: .issuedBy); issuedAt = try box.decode(String.self, forKey: .issuedAt)
         expiresAt = try box.decode(String.self, forKey: .expiresAt); state = try box.decode(DeviceCommandState.self, forKey: .state)
         result = try box.decodeIfPresent(JSONValue.self, forKey: .result); errorCode = try box.decodeIfPresent(String.self, forKey: .errorCode)
+        grantID = try box.decodeIfPresent(String.self, forKey: .grantID); runID = try box.decodeIfPresent(String.self, forKey: .runID)
+        controlGrant = try box.decodeIfPresent(ClientControlGrant.self, forKey: .controlGrant)
+        receiptClaimID = try box.decodeIfPresent(String.self, forKey: .receiptClaimID)
         command = try PhoneCommand(from: decoder, resource: true)
     }
     public func encode(to encoder: Encoder) throws {
@@ -846,6 +859,9 @@ public struct DeviceCommand: Codable, Sendable, Identifiable {
         try box.encode(issuedBy, forKey: .issuedBy); try box.encode(issuedAt, forKey: .issuedAt)
         try box.encode(expiresAt, forKey: .expiresAt); try box.encode(state, forKey: .state)
         try box.encodeIfPresent(result, forKey: .result); try box.encodeIfPresent(errorCode, forKey: .errorCode)
+        try box.encodeIfPresent(grantID, forKey: .grantID); try box.encodeIfPresent(runID, forKey: .runID)
+        try box.encodeIfPresent(controlGrant, forKey: .controlGrant)
+        try box.encodeIfPresent(receiptClaimID, forKey: .receiptClaimID)
         try command.encode(to: encoder, resource: true)
     }
 }

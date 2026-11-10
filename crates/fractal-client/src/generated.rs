@@ -6175,6 +6175,8 @@ pub enum PhoneCommand {
 pub struct DeviceCommandRequest {
     pub api_version: String,
     pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
     #[serde(flatten)]
     pub command: PhoneCommand,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6219,6 +6221,31 @@ pub struct DeviceResult {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<fractal_schema::client_control::ClientResultBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ClientCommandReceipt {
+    pub command_id: String,
+    pub terminal_state: DeviceCommandOutcome,
+    pub issuer: String,
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub command_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<fractal_schema::client_control::ClientControlRefusal>,
+    pub verified_result_signature: Option<DeviceSignature>,
+    pub signed_result: Option<fractal_schema::client_control::ClientResultBinding>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct DeviceCommand {
@@ -6231,6 +6258,14 @@ pub struct DeviceCommand {
     pub issued_by: String,
     pub issued_at: String,
     pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_grant: Option<fractal_schema::client_control::ClientControlGrant>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_claim_id: Option<String>,
     pub state: DeviceCommandState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,

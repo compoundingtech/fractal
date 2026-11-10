@@ -487,6 +487,7 @@
       "properties": {
         "grant_id": {"type": "string"}, "run_id": {"type": "string"}, "device": {"type": "string"}, "session": {"type": "string"}, "actor_agent": {"type": "string"},
         "verbs": {"type": "array", "items": {"type": "string"}}, "screens": {"type": "array", "items": {"type": "string"}},
+        "item_id": {"type": "string"},
         "max_commands": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "expires_at": {"$ref": "#/$defs/Timestamp"}, "state": {"type": "string"}
       }
     },
