@@ -90,8 +90,9 @@ Taken by the owner on 2026-11-10:
 
 - **T01 At-least-once effects:** an effect interrupted between running and journaling runs again.
   Every step effect must be idempotent (merge by `Factory-Change`, revert by `Factory-Revert-Of`).
-- **T02 Shared crash domain per member:** one host process runs every program on a member; a host
-  crash interrupts all of them, and each resumes from its journal.
+- **T02 Shared crash domain per member:** one host process runs every program on a member, each
+  attempt in its own worker; a host process crash interrupts all of them, and each resumes from its
+  journal.
 - **T03 Fresh start on a new generation:** a revised run restarts its program from the top under
   the new code; only native steps carry forward.
 
@@ -118,7 +119,7 @@ member. Options considered:
 |---|---|---|---|
 | Start of a run | none | none (host stays warm) | 2.2–3.6 s launch + ~2 s first claim |
 | Handoff between steps | in-process | one pipe round trip, 0.01–0.02 s | 0.02–0.05 s, CLI calls |
-| A program bug (loop, OOM, crash) | stalls or kills the daemon and every seat | a crash kills the host and the daemon restarts it, programs resume; a busy loop stalls that host's programs, never the daemon (its writes to the host are queued) | kills one run's agent |
+| A program bug (loop, OOM, crash) | stalls or kills the daemon and every seat | a crash kills the host and the daemon restarts it, programs resume; a busy loop is confined to its program's worker, which the host terminates after the liveness deadline (DQ8); the daemon's writes to the host are queued, so it never blocks | kills one run's agent |
 | Effect 4 + Node/Bun APIs the step libraries use | V8 needs Node shims; QuickJS lacks them | native Bun | native Bun |
 | Daemon build and binary | +V8 (tens of MB, longer builds) | +1 embedded 5 KB script | none |
 | Authority | daemon-held | daemon-held; host has no credential | agent identity = union of steps |
@@ -139,7 +140,12 @@ can run an effect to its end but can never journal it.
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
+| host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
+| host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
+| daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
 | host → daemon | `done` | `step`, `attempt`, `exit` (`{_tag: Success, value}` or `{_tag: Failure, error}`) | the program ended |
+| host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and was terminated (DQ8) |
+| daemon → host / host → daemon | `ping` / `pong` | `seq` | host liveness (DQ8) |
 
 Both sides drop a message for another attempt than the one running, and the daemon drops messages
 from a host generation it no longer runs. A host that exits takes exactly its own programs with it;
@@ -148,9 +154,9 @@ the next host resumes each from its journal.
 A bundle is one self-contained ES module whose default export carries the entry
 `Symbol.for('fractal.program.v1')`. The program API (`Fractal.mission/step/command`) and Effect
 are inside the bundle, so the host is version-free and the bundle hash pins the runtime library
-too. The host verifies the hash before loading, runs each step effect in its own process group,
-and kills those groups on `cancel` and when its stdin closes. The second does not yet hold in every
-case (DQ2).
+too. The host verifies the hash before loading and runs each program attempt in its own worker. It
+starts each step effect in its own process group and kills those groups on `cancel` and when its
+stdin closes; groups that outlive a crashed host or daemon are ended by the next daemon (DQ2).
 
 ### 3. Declaration and authority
 
@@ -210,9 +216,10 @@ Each inner step writes registered `program.step` claims on the program's step ru
 | `value` / `error` | any | the encoded success value, or the typed error with `_tag` and fields |
 | `ms` | integer | effect duration |
 
-Idempotency keys: `program:STEP:ATTEMPT:KEY:completed` and `program:STEP:ATTEMPT:KEY:failed`. A
-double execution that produces a different result is refused by the store (R03); the daemon then
-sends `nack` and the program fails instead of continuing past a result that is not durable.
+Idempotency key: `program:STEP:ATTEMPT:KEY:result` for both `completed` and `failed`, so a key has
+one result per attempt whatever its status, and a double execution that produces a different
+result is refused by the store (R03); the daemon then sends `nack` and the program fails instead of
+continuing past a result that is not durable. `started` entries are not fenced.
 
 Replay reads the subject's claims in pages of 500 inside the daemon (no CLI trace limit) and returns
 the `completed` and `failed` entries of the current attempt. A resumed attempt continues where it
@@ -235,11 +242,12 @@ and an iterative program that needs more than a few thousand steps runs rounds a
 
 `Fractal.run(mission, inputs)` asks the daemon to create a child run with
 `create_child_mission_run`, the path `uses-mission` already takes: `parent_step_run` is the program
-step, the idempotency key is `program:STEP:KEY`, so a resumed program adopts its child instead of
-starting another. The child is natively linked: cancelling the parent run cancels the child through
-`cancel_descendant_mission_runs_tx` (R08); a capacity-full child start waits (mission graph runtime
-§Run ownership). The engine learns the child's terminal state from its own store transition, not by
-polling, and journals it under the child step's key.
+step, the idempotency key is `program:STEP:ATTEMPT:KEY`, so a resumed attempt adopts its child
+instead of starting another, while a retried attempt starts a new one (§5). The child is natively
+linked: cancelling the parent run cancels the child through `cancel_descendant_mission_runs_tx`
+(R08); a capacity-full child start waits (mission graph runtime §Run ownership). The engine learns
+the child's terminal state from its own store transition, not by polling, and journals it under the
+child step's key.
 
 A worker turn (`Fractal.step(...).pipe(Effect.provide(Fractal.Worker.layer(agent)))`) is a child run
 of a one-step mission whose step is assigned to that agent, with the step's `goal` and `success`
@@ -329,12 +337,15 @@ program to the same wait.
 ## Design questions
 
 - **DQ1 Bundle distribution:** decided: replicated blobs stored at `apply` (§4).
-- **DQ2 Effect processes across a daemon crash:** decided: the host records itself and every effect
-  process group it starts in the engine's state directory and removes an entry when that group ends;
-  a daemon kills every recorded process and group before it starts a host. Proved by a kill test that
+- **DQ2 Effect processes across a daemon crash:** decided: each effect's process group ends with its
+  leader (the host kills the group when the leader exits). The host records each group in the
+  engine's state directory with the boot id and the leader's start time, and removes the record when
+  it kills the group. Before it starts a host, a daemon kills each recorded group whose leader still
+  has the recorded start time, or whose leader is gone while the group lives on, and drops records
+  from an earlier boot without a kill, so a reused pid is never signalled. Proved by a kill test that
   asserts no survivor.
-- **DQ3 Host isolation per bundle:** one process for all bundles, or a Bun worker per bundle hash, so
-  one program's busy loop cannot starve others.
+- **DQ3 Host isolation:** decided: one host process per member, one worker per program attempt, so
+  one program's busy loop cannot starve the others (DQ8).
 - **DQ4 Large values:** step values above the claim field limit go to documents and the journal keeps
   the reference.
 - **DQ5 Deterministic helpers:** which non-step sources (clock, randomness, environment) the API
@@ -344,9 +355,10 @@ program to the same wait.
   timeout clock, as `work wait` does for seats.
 - **DQ7 Native graph retirement:** whether native step-graph execution is retired once every
   data-DSL mission lowers to a program.
-- **DQ8 Host liveness:** decided: the engine pings the host and kills a host that does not answer
-  within a deadline; its programs resume on the next host. Whether a busy loop should take only its
-  own bundle down stays DQ3.
+- **DQ8 Program liveness:** decided: the host pings each program's worker; a worker that does not
+  answer within the deadline is terminated and its step fails with the `program/host` fault naming
+  the deadline, so a deterministic busy loop fails once instead of looping across restarts. The
+  engine pings the host the same way and replaces a host that does not answer; its programs resume.
 
 ## Build plan
 
@@ -355,8 +367,8 @@ on a scratch instance at each.
 
 | Milestone | Ships |
 |---|---|
-| M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with replay, eager cancellation, the per-member process group (DQ2) and the liveness ping (DQ8); bundles pinned by hash in the member's blob store, read from the declared path on first dispatch; linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
-| M2 Publication | `fractal apply` stores a program mission's bundle as a replicated blob (§4); the `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration, and validates both. Factory's landing mission becomes the first production program. |
+| M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with a worker per program, replay, eager cancellation, recorded effect process groups (DQ2) and liveness pings (DQ8); the step definition names its bundle by `bundle_hash` and publishing the declaration stores the blob, so neither the field nor definition hashes change in later milestones (§4); linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
+| M2 Publication | `fractal apply` carries a program mission's bundle to the daemon it publishes on and validates it (§4); the `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration. Factory's landing mission becomes the first production program. |
 | M3 One model | The data DSL compiles into programs (§9), with byte and behaviour parity for existing data-DSL missions; published KDL missions keep running on the native graph until they are republished. |
 
 ## Spike results (scratch, macOS, load 80–280)
