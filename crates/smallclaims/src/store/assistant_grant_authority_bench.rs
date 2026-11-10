@@ -152,10 +152,34 @@ fn slice(connection: &mut Connection, budget: Duration) -> (bool, Duration) {
 #[test]
 #[ignore = "opt-in disk/RSS authority backfill measurement; run alone with --ignored --nocapture"]
 fn assistant_grant_authority_measure_realistic_backfill() {
-    let config = Config::from_env();
+    measure_backfill(Config::from_env());
+}
+
+#[test]
+fn assistant_grant_authority_bench_unsigned_rows_reach_readiness() {
+    measure_backfill(Config {
+        rows: 10_000,
+        authority_bps: 5_000,
+        malformed_bps: 1_000,
+        unauthenticated_bps: 4_000,
+        revoked_bps: 2_500,
+        unrelated_body_bytes: 256,
+        authority_body_bytes: 1_024,
+        transaction_rows: 1_000,
+        slice_ms: 100,
+        startup_ms: 2_000,
+        target_bytes: 50_000_000_000,
+    });
+}
+
+fn measure_backfill(config: Config) {
+    let fixture_started = Instant::now();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
     let store = Store::open(&path, LOCAL, Arc::new(runtime::Plain)).unwrap();
+    // The low-level slices below require the same sealed membership snapshot
+    // the production Store worker prepares before refreshing unsigned claims.
+    assert!(store.advance_assistant_grant_authority_backfill().unwrap());
     let mut expected_effective = 0_u64;
     let mut expected_revoked = 0_u64;
     let mut raw_revocations = 0_u64;
@@ -174,10 +198,8 @@ fn assistant_grant_authority_measure_realistic_backfill() {
              DELETE FROM assistant_grant_dirty;
              DELETE FROM assistant_grant_auth_cursor;
              DELETE FROM assistant_grant_membership_dirty;
-             DELETE FROM assistant_grant_membership_windows;
              DELETE FROM meta WHERE key='assistant_grant_authority_version'
-                OR key LIKE 'assistant_grant_authority_cursor/%';
-             UPDATE assistant_grant_membership_state SET applied_generation=-1 WHERE id=1;",
+                OR key LIKE 'assistant_grant_authority_cursor/%';",
         ).unwrap();
         // Fixed small pool of representative unrelated JSON sizes, not a history.
         let unrelated_bodies = [
@@ -258,6 +280,7 @@ fn assistant_grant_authority_measure_realistic_backfill() {
         assert_eq!(checkpoint, (0, 0, 0));
     }
     drop(store);
+    println!("authority_backfill_fixture_creation elapsed_ms={:.3}", fixture_started.elapsed().as_secs_f64() * 1_000.0);
     let mut connection = open_connection(&path);
     let raw_rows: u64 = connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap();
     let raw_authority_rows: u64 = connection.query_row(

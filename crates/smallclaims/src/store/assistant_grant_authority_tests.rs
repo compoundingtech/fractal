@@ -585,6 +585,52 @@ fn older_build_raw_legacy_replication_cannot_authenticate_on_new_build_reopen() 
 }
 
 #[test]
+fn unsigned_remote_without_membership_drains_once_and_maintenance_goes_idle() {
+    let sender = node("unsigned-remote", None);
+    let grant = append(&sender, SUBJECT, GRANTED, fields());
+    let target = node("reader", None);
+    drain_authority(&target);
+    {
+        let (sequence, previous, hash): (u64, Option<String>, String) = sender.readers.get()
+            .query_row("SELECT replica_sequence,previous_hash,hash FROM batches WHERE id=?1",
+                [&grant.batch_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        let mut connection = target.connection.write();
+        let transaction = connection.transaction().unwrap();
+        // Reproduce a pre-envelope remote import: no local append marker,
+        // replica receipt, signature, or membership window can authenticate it.
+        transaction.execute(
+            "INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![grant.batch_id,grant.origin,sequence,previous,hash,grant.accepted_at_unix_ms.to_string()],
+        ).unwrap();
+        transaction.execute(
+            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![grant.id,grant.batch_id,grant.subject,grant.kind,grant.origin,grant.actor,
+                canonical_json_text(&grant.body).unwrap(),serde_json::to_string(&grant.predecessors).unwrap(),
+                grant.accepted_at_unix_ms.to_string()],
+        ).unwrap();
+        assert!(authority::maintenance_pending(&transaction).unwrap());
+        assert_eq!(transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get::<_,u64>(0)).unwrap(), 1);
+        assert!(authority::backfill_slice(&transaction, Duration::from_millis(100)).unwrap());
+        assert_eq!(transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get::<_,u64>(0)).unwrap(), 0);
+        assert!(!transaction.query_row(
+            "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
+            [&grant.id], |row| row.get::<_,bool>(0)).unwrap());
+        assert!(!authority::maintenance_pending(&transaction).unwrap());
+        transaction.commit().unwrap();
+    }
+    assert!(!target.assistant_grant_authority_maintenance_pending().unwrap());
+    let writes = target.connection.write().total_changes();
+    for _ in 0..3 {
+        assert!(target.advance_assistant_grant_authority_backfill().unwrap());
+        assert!(!target.assistant_grant_authority_maintenance_pending().unwrap());
+    }
+    assert_eq!(target.connection.write().total_changes(), writes, "idle maintenance must not requeue or refresh unsigned evidence");
+    assert_bearer_rejected(&target, &grant);
+}
+
+#[test]
 fn local_append_authenticates_immediately_and_local_unsealed_and_signed_history_survive_backfill() {
     let (store, _) = source();
     let sealed = append(&store, SUBJECT, GRANTED, fields());
