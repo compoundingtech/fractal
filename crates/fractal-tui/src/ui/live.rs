@@ -1252,9 +1252,8 @@ pub fn run(context: Context) -> Result<()> {
                     if generation == resources_generation {
                         if let Err(error) = &outcome {
                             extras.window_errors.insert("ReadPositionsList".into(), error.human());
-                            changed = true;
                         } else {
-                            changed |= extras.window_errors.remove("ReadPositionsList").is_some();
+                            extras.window_errors.remove("ReadPositionsList");
                         }
                         if ui.reads.listed(outcome, Instant::now()) {
                             ui.refresh_tab_statuses();
