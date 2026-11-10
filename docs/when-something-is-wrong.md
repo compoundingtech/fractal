@@ -65,6 +65,15 @@ future is dropped before retry; an unused capability opens no PTY and expires
 after 60 seconds. Upgrade timeouts name that phase and offer Ctrl-R, without an
 automatic retry. The overall setup deadline and single-flight guard still apply.
 
+Without any opt-in variable, every non-successful terminal attempt also emits
+one `tracing::info!` event and is retained in
+`$XDG_CACHE_HOME/st3/stui/attach.log` (otherwise
+`~/.cache/st3/stui/attach.log`), beside `slow.log` and `exits.log`. This uses the
+same cache-log permissions and 100 KB reset bound as those existing logs.
+It records only attempt ID, target agent, phase reached, outcome, and timing;
+it requires no tracing subscriber or OTEL exporter. Start and success events
+remain exclusive to the opt-in sink described below.
+
 For a private, device-local reproduction log, launch the TUI with an absolute
 JSONL destination:
 
