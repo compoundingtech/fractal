@@ -7,10 +7,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
 use crate::model::{
-    BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopAttentionSpec, LoopExhaustionSpec,
-    LoopSpec, LoopStopSpec, MetricSource, MetricSpec, MissionInputKind, MissionInputSpec,
-    MissionSpec, MissionState, ProductSpec, RetrySpec, RevisionCutover, FractalError, StepSpec,
-    UsedMissionSpec, WorkSelector,
+    AuthorityGrant, AuthorityVerb, BaselineSpec, CompletionSpec, DependencySpec, GateSpec,
+    LoopAttentionSpec, LoopExhaustionSpec, LoopSpec, LoopStopSpec, MetricSource, MetricSpec,
+    MissionInputKind, MissionInputSpec, MissionSpec, MissionState, ProductSpec, RetrySpec,
+    RevisionCutover, FractalError, StepSpec, UsedMissionSpec, WorkSelector,
 };
 
 pub const LOOP_ROUND_INPUT: &str = "__st3_loop_round";
@@ -308,6 +308,7 @@ fn parse_mission(
     let mut revision_owners = Vec::new();
     let mut system = false;
     let mut capacity = None;
+    let mut authority = None;
     for child in children.nodes() {
         match child.name().value() {
             "declared-priority" | "declared-lane" | "declared-budgets" => {}
@@ -352,6 +353,21 @@ fn parse_mission(
                     ));
                 }
                 resources.push(reference);
+            }
+            "authority" if top_level => {
+                if authority.is_some() {
+                    return Err(FractalError::new(
+                        "duplicate-mission-field",
+                        format!("mission `{id}` repeats `authority`"),
+                    ));
+                }
+                authority = Some(parse_authority(child, &id)?);
+            }
+            "authority" => {
+                return Err(FractalError::new(
+                    "nested-mission-authority",
+                    format!("mission `{id}` is nested; declare authority on the top-level mission"),
+                ));
             }
             "concurrent-runs" => {
                 if concurrent_runs_seen {
@@ -565,6 +581,7 @@ fn parse_mission(
         declared_lane: admission.lane,
         declared_budgets: admission.budgets,
         resources,
+        authority: authority.unwrap_or_default(),
         inputs,
         max_active_runs,
         timeout_ms,
@@ -595,6 +612,86 @@ fn parse_mission(
     )?;
     mission.revision = hash(&mission)?;
     Ok(mission)
+}
+
+/// `authority { VERB "PATTERN" … }`: what runs of a top-level mission may do as
+/// `mission-run/RUN` (docs/st3/program-engine.md §3). The shape of an agent's `*-authority`
+/// block; `publish`, `start`, `revise` and `cancel` take mission IDs as `mission-authority` does,
+/// `write` takes a subject. The rules are kept in canonical order, so reordering is no revision.
+fn parse_authority(node: &KdlNode, id: &str) -> Result<Vec<AuthorityGrant>, FractalError> {
+    ensure_bare(node)?;
+    let empty = || {
+        FractalError::new(
+            "empty-authority",
+            format!("mission `{id}` authority needs at least one rule"),
+        )
+    };
+    let body = node.children().ok_or_else(empty)?;
+    let mut grants = BTreeSet::new();
+    for rule in body.nodes() {
+        let name = rule.name().value();
+        let verb = AuthorityVerb::ALL
+            .into_iter()
+            .find(|verb| verb.as_str() == name)
+            .ok_or_else(|| {
+                FractalError::new(
+                    "invalid-authority",
+                    format!(
+                        "mission `{id}` authority cannot contain `{name}`; its rules are publish, start, revise, cancel and write"
+                    ),
+                )
+            })?;
+        ensure_no_properties(rule)?;
+        ensure_no_children(rule)?;
+        let pattern = one_string(rule)?;
+        validate_authority_pattern(verb, &pattern)?;
+        if !grants.insert(AuthorityGrant { verb, pattern: pattern.clone() }) {
+            return Err(FractalError::new(
+                "duplicate-authority",
+                format!("mission `{id}` repeats authority `{name} {pattern}`"),
+            ));
+        }
+    }
+    if grants.is_empty() {
+        return Err(empty());
+    }
+    Ok(grants.into_iter().collect())
+}
+
+/// Exact, or a terminal `/*` namespace covering everything under it: a mission ID without
+/// `mission/` for the mission verbs, a subject (or a bare registered family before `/*`) for
+/// `write`.
+fn validate_authority_pattern(verb: AuthorityVerb, pattern: &str) -> Result<(), FractalError> {
+    let invalid = || {
+        FractalError::new(
+            "invalid-authority-pattern",
+            format!(
+                "authority `{} {pattern}` needs {} or a terminal `/*` namespace",
+                verb.as_str(),
+                if verb == AuthorityVerb::Write { "an exact subject" } else { "an exact mission ID without `mission/`" },
+            ),
+        )
+    };
+    let namespace = pattern.strip_suffix("/*");
+    let exact = namespace.unwrap_or(pattern);
+    if exact.is_empty() || exact.contains('*') {
+        return Err(invalid());
+    }
+    if verb != AuthorityVerb::Write {
+        if exact.starts_with("mission/") {
+            return Err(invalid());
+        }
+        return validate_mission_id(exact).map_err(|_| invalid());
+    }
+    // A namespace is a registered family, alone or followed by non-empty path segments.
+    let registry = fractal_schema::registry();
+    let Some(prefix) = namespace else {
+        return registry.validate_subject(exact).map(|_| ()).map_err(|_| invalid());
+    };
+    let well_formed = registry.subject(&format!("{prefix}/_")).is_some()
+        && !prefix.split('/').any(str::is_empty)
+        && !prefix.chars().any(|character| character.is_whitespace() || character.is_control());
+    well_formed.then_some(()).ok_or_else(invalid)
 }
 
 fn parse_loop_group(
@@ -3229,5 +3326,62 @@ mod tests {
             .and_then(|entry| entry.value().as_string())
             .unwrap();
         assert_eq!(command, format!("printf '%s' '{message}'"));
+    }
+
+    fn authority_error(body: &str) -> String {
+        let source = format!(r#"mission "land" state="ready" {{ goal "Land."; step "work" {{ agentless; }}; {body} }}"#);
+        super::parse_missions(&source.parse().unwrap(), "node").unwrap_err().code
+    }
+
+    #[test]
+    fn mission_authority_parses_in_canonical_order_and_enters_the_revision() {
+        use crate::model::{AuthorityGrant, AuthorityVerb};
+        let parse = |authority: &str| {
+            let source = format!(r#"mission "land" state="ready" {{ goal "Land."; step "work" {{ agentless; }}; {authority} }}"#);
+            super::parse_missions(&source.parse().unwrap(), "node").unwrap().remove("land").unwrap()
+        };
+        let mission = parse(r#"authority { write "resource/factory/*"; publish "scratch/*"; start "factory/publish"; cancel "factory/*"; revise "factory/*"; write "custom/factory/landing"; write "resource/*" }"#);
+        let grant = |verb, pattern: &str| AuthorityGrant { verb, pattern: pattern.into() };
+        assert_eq!(mission.authority, [
+            grant(AuthorityVerb::Publish, "scratch/*"),
+            grant(AuthorityVerb::Start, "factory/publish"),
+            grant(AuthorityVerb::Revise, "factory/*"),
+            grant(AuthorityVerb::Cancel, "factory/*"),
+            grant(AuthorityVerb::Write, "custom/factory/landing"),
+            grant(AuthorityVerb::Write, "resource/*"),
+            grant(AuthorityVerb::Write, "resource/factory/*"),
+        ]);
+        let reordered = parse(r#"authority { revise "factory/*"; cancel "factory/*"; start "factory/publish"; publish "scratch/*"; write "resource/*"; write "resource/factory/*"; write "custom/factory/landing" }"#);
+        assert_eq!(reordered.revision, mission.revision);
+        let narrower = parse(r#"authority { revise "factory/*"; cancel "factory/*"; start "factory/publish"; publish "scratch/*"; write "resource/factory/*"; write "custom/factory/landing" }"#);
+        assert_ne!(narrower.revision, mission.revision);
+        let undeclared = parse("");
+        assert!(undeclared.authority.is_empty());
+        assert!(serde_json::to_value(&undeclared).unwrap().get("authority").is_none());
+    }
+
+    #[test]
+    fn mission_authority_refusals() {
+        for (body, code) in [
+            (r#"authority"#, "empty-authority"),
+            (r#"authority {}"#, "empty-authority"),
+            (r#"authority "none""#, "unexpected-value"),
+            (r#"authority { write "resource/a"; }; authority { write "resource/b"; }"#, "duplicate-mission-field"),
+            (r#"authority { write "resource/a"; write "resource/a"; }"#, "duplicate-authority"),
+            (r#"authority { move "agent/a"; }"#, "invalid-authority"),
+            (r#"authority { write "resource/a" mode="audit"; }"#, "unknown-property"),
+            (r#"authority { write "resource/*/x"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "resource/a*"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "*"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "unregistered/a"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "unregistered/*"; }"#, "invalid-authority-pattern"),
+            (r#"authority { write "resource"; }"#, "invalid-authority-pattern"),
+            (r#"authority { start "mission/factory"; }"#, "invalid-authority-pattern"),
+            (r#"authority { start "factory/*/land"; }"#, "invalid-authority-pattern"),
+            (r#"authority { publish "/*"; }"#, "invalid-authority-pattern"),
+            (r#"step "outer" { mission "inner" { goal "Inner."; authority { write "resource/a"; }; step "x" { agentless; }; }; }"#, "nested-mission-authority"),
+        ] {
+            assert_eq!(authority_error(body), code, "{body}");
+        }
     }
 }
