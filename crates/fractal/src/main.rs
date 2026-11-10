@@ -7568,7 +7568,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
         client_relay: fractal_daemon::peer::ClientRelay::from_config(&config)?
             .map(|relay| relay.with_links(store.clone())),
-        native_session_home: std::env::var_os("HOME").map(PathBuf::from),
+        native_session_home: fractal_daemon::instance::native_session_home()?,
         planner_default: config.planner.clone(),
         harness_question_sink: None,
         assistant_receipts: Default::default(),
@@ -18616,7 +18616,7 @@ fn tolerate_driver_api_outage(
     last_warning: &mut Option<Instant>,
 ) -> Result<()> {
     let outage = fractal_daemon::client::daemon_unreachable(&error).map(|outage| outage.summary());
-    let transient = outage.is_some()
+    let transient = daemon_is_unreachable(&error)
         || error.chain().any(|cause| {
             let message = cause.to_string();
             message.contains("incomplete HTTP response")

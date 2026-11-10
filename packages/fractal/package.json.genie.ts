@@ -32,6 +32,7 @@ export default packageJson({
   type: 'module',
   exports: {
     '.': './src/index.ts',
+    './effect': './src/effect.ts',
     './tree': './src/tree.ts',
     './testing': './src/testing.ts',
   },
