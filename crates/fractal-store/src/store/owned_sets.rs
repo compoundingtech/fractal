@@ -13,9 +13,30 @@ const EMPTY_DESIRED_AUTHORITY_QUERY: &str =
         AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='agent.retired'
                        AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))";
 
+/// Owned-set reads memoized for one fixed read snapshot. Status reads ask for the selection of
+/// every member; without this each of them re-validates every member of every set.
+#[derive(Default)]
 struct SnapshotRows {
     connection: usize,
     rows: BTreeMap<Option<u64>, Vec<View>>,
+    selected: BTreeMap<Option<u64>, Vec<View>>,
+    /// Keyed by the set revision's claim and the bound.
+    effective: BTreeMap<(String, Option<u64>), BTreeMap<String, (Member, bool, bool)>>,
+}
+
+/// Read from the snapshot cache, when `connection` holds the snapshot it was made for.
+fn snapshot_cached<T>(connection: &Connection, read: impl FnOnce(&SnapshotRows) -> Option<T>) -> Option<T> {
+    let key = connection as *const Connection as usize;
+    SNAPSHOT_ROWS.with(|slot| slot.borrow().as_ref().filter(|s| s.connection == key).and_then(read))
+}
+
+fn snapshot_cache(connection: &Connection, write: impl FnOnce(&mut SnapshotRows)) {
+    let key = connection as *const Connection as usize;
+    SNAPSHOT_ROWS.with(|slot| {
+        if let Some(snapshot) = slot.borrow_mut().as_mut().filter(|s| s.connection == key) {
+            write(snapshot);
+        }
+    });
 }
 
 thread_local! {
@@ -39,7 +60,7 @@ fn with_snapshot_rows<T>(connection: &Connection, read: impl FnOnce() -> T) -> T
     let _restore = Restore(SNAPSHOT_ROWS.with(|slot| {
         slot.replace(Some(SnapshotRows {
             connection: connection as *const Connection as usize,
-            rows: BTreeMap::new(),
+            ..SnapshotRows::default()
         }))
     }));
     read()
@@ -177,13 +198,7 @@ pub fn subject(name: &str) -> Result<String, FractalError> {
 
 pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
     smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
-    let connection_key = connection as *const Connection as usize;
-    if let Some(rows) = SNAPSHOT_ROWS.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .filter(|snapshot| snapshot.connection == connection_key)
-            .and_then(|snapshot| snapshot.rows.get(&at).cloned())
-    }) {
+    if let Some(rows) = snapshot_cached(connection, |snapshot| snapshot.rows.get(&at).cloned()) {
         return Ok(rows);
     }
     let mut statement = connection.prepare(
@@ -226,14 +241,8 @@ pub fn rows(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, Fract
             blockers: Vec::new(),
         });
     }
-    SNAPSHOT_ROWS.with(|slot| {
-        if let Some(snapshot) = slot
-            .borrow_mut()
-            .as_mut()
-            .filter(|snapshot| snapshot.connection == connection_key)
-        {
-            snapshot.rows.insert(at, views.clone());
-        }
+    snapshot_cache(connection, |snapshot| {
+        snapshot.rows.insert(at, views.clone());
     });
     Ok(views)
 }
@@ -292,6 +301,23 @@ fn stop_declaration(subject: &str) -> Result<DesiredSubject, FractalError> {
 /// A complete winning membership also retires subjects learned only from losing branches.
 /// Such retirement is derived from the winning set claim until the next apply authors a stop.
 pub fn effective_members(
+    connection: &Connection,
+    view: &View,
+    at: Option<u64>,
+) -> Result<BTreeMap<String, (Member, bool, bool)>, FractalError> {
+    let key = (view.claim.clone(), at);
+    if let Some(members) = snapshot_cached(connection, |snapshot| snapshot.effective.get(&key).cloned()) {
+        smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
+        return Ok(members);
+    }
+    let members = effective_members_uncached(connection, view, at)?;
+    snapshot_cache(connection, |snapshot| {
+        snapshot.effective.insert(key, members.clone());
+    });
+    Ok(members)
+}
+
+fn effective_members_uncached(
     connection: &Connection,
     view: &View,
     at: Option<u64>,
@@ -411,6 +437,18 @@ pub fn claim(
 }
 
 pub fn selected(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
+    if let Some(views) = snapshot_cached(connection, |snapshot| snapshot.selected.get(&at).cloned()) {
+        smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
+        return Ok(views);
+    }
+    let views = selected_uncached(connection, at)?;
+    snapshot_cache(connection, |snapshot| {
+        snapshot.selected.insert(at, views.clone());
+    });
+    Ok(views)
+}
+
+fn selected_uncached(connection: &Connection, at: Option<u64>) -> Result<Vec<View>, FractalError> {
     let rows = rows(connection, at)?;
     let references: BTreeMap<_, _> = rows.iter().map(|v| (reference(v), v)).collect();
     let mut winners: BTreeMap<String, View> = BTreeMap::new();
