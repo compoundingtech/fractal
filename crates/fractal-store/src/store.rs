@@ -34,6 +34,11 @@ pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod declarations;
+pub mod desired_batch;
+mod desired_actual;
+mod desired_progress;
+#[cfg(test)]
+mod desired_batch_index_tests;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
@@ -791,7 +796,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6e39e16546c7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1051,6 +1056,23 @@ CREATE TABLE IF NOT EXISTS desired (
     owner_generation TEXT,
     owner_step TEXT
 );
+-- A repair may rewrite a selected row without moving either the claim cut or graph
+-- health. Capture every row write, including raw corrections, in its own transaction.
+CREATE TABLE IF NOT EXISTS local_desired_write_witness (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=0)
+);
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_insert AFTER INSERT ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_update AFTER UPDATE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_delete AFTER DELETE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+-- Sparse kind-filtered desired pages seek one kind's subject range, not the whole graph.
+CREATE INDEX IF NOT EXISTS desired_kind_subject_index ON desired(kind, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_step_index ON desired(owner_step, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_run_index ON desired(owner_run, subject);
 -- Deleting a claim checks these references (foreign keys are on); see
