@@ -39,6 +39,9 @@ pub const RESULT_KEY: &str = "$result";
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
 /// a person keeps its program loaded (§11).
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
+/// How long a run credential stays valid at most. It binds only while its attempt runs, so this
+/// only bounds a credential whose attempt the store never ends.
+const RUN_CREDENTIAL_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf owner=fractal_reconcile::reconcile::program TODO=trace-statement-and-value-representation */ include_str!("program_host.mjs");
 /// How long a crashed host waits before its replacement starts, so a host that cannot start does
 /// not spin.
@@ -148,6 +151,14 @@ impl ProgramEngine {
             Err(reason) => return Ok(Dispatched::Refused(reason)),
         };
         let journal = self.journal(&dispatch.step, dispatch.attempt)?;
+        // The attempt's effects act as its run (docs/st3/program-engine.md §3). The credential
+        // binds only while this attempt is the step's live attempt, so its lifetime is a backstop;
+        // each start or resume mints a new one, and it never enters the journal or a log.
+        let mut env = dispatch.env.clone();
+        env.insert(
+            crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
+            self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?,
+        );
         let mut inner = self.lock();
         if inner.running.get(&dispatch.step).is_some_and(|running| {
             running.dispatch.attempt == dispatch.attempt && inner.host.as_ref().is_some_and(|host| host.generation == running.generation)
@@ -177,7 +188,7 @@ impl ProgramEngine {
             "module": module,
             "sha256": dispatch.program.bundle_hash,
             "payload": dispatch.payload,
-            "env": dispatch.env,
+            "env": env,
             "cwd": dispatch.cwd,
             "journal": journal,
         });
@@ -483,10 +494,12 @@ impl ProgramEngine {
         if let Some(child) = child {
             fields.insert("child".to_owned(), Value::from(child));
         }
+        // The run writes its own journal, as the actor its effects act as.
+        let run = self.store.step_run(step).map_err(smallclaims::error::typed)?.map(|view| view.run);
         self.store.append_claim(&ClaimInput {
             subject: step.to_owned(),
             kind: JOURNAL_KIND.to_owned(),
-            actor: None,
+            actor: run,
             fields,
             evidence: Vec::new(),
             expected_subject: None,
