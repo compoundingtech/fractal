@@ -202,6 +202,16 @@ These accept existing inline representations, not a value-size or cost bound.
 
 The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
 
+### Agent answer atomicity inventory review
+
+The dormant answer writer shares generic append's operation-outcome admission and isolates its mutations in a savepoint. These reviewed exceptions preserve existing value representations; they do not establish size bounds.
+
+| Inventory IDs | Producer and reviewed value flow | Rationale and next step |
+| --- | --- | --- |
+| `lv-h9376410940d5`, `lv-h25f2de100e85`, `lv-hf3bdff08c789` | `fractal_store::store::agent_review_transaction` starts, releases or rolls back a fixed-name savepoint. | Fixed control SQL carries no request/body values; retain explicit rollback isolation while tracing the composed write path. |
+| `lv-hc04950ca3e3d`, `lv-h21a64752ecb4` | `fractal_missions::store::missions::run_review::answer_tests` lists tables and snapshots every stored cell in a real in-memory fixture. | Test-only equality proves claims, events, projections and operation rows do not survive refusal; this unbounded fixture read is not a production size/cost guarantee. Quote table names and trace cell representations if reused outside tests. |
+| `lv-hde1a4495a8b4` | The same test module stores a genuine consumed signature as the next writer's expected signature. | Exercises the real post-insert nonce-replay failure, not a mock. The public signature JSON remains inline fixture data; prepare/reference it before any production reuse. |
+
 ### Conversation-owner inventory review (PR #3116)
 
 The [owner-once change](https://github.com/compoundingtech/fractal/pull/3116)
