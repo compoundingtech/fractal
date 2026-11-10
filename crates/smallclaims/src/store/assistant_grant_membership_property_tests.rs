@@ -84,36 +84,46 @@ fn assert_raw_projection_oracle(store: &Store, expected_windows: &Windows, conte
         .collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(actual_pending, expected_pending, "raw pending/authentication fold: {context}");
     for (claim, trusted) in &pending {
-        if !trusted { continue; }
-        let (key, sequence): (Option<String>, Option<u64>) = connection.query_row(
-            "SELECT auth_member_key,auth_sequence FROM assistant_grant_pending WHERE claim_id=?1",
-            [&claim.id], |row| Ok((row.get(0)?,row.get(1)?)),
-        ).unwrap();
+        let (key, sequence, hash, position): (Option<String>, Option<u64>, Option<String>, Option<u64>) =
+            connection.query_row(
+                "SELECT auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
+                 FROM assistant_grant_pending WHERE claim_id=?1",
+                [&claim.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            ).unwrap();
+        if !trusted {
+            assert_eq!((key, sequence, hash, position), (None, None, None, None),
+                "unauthenticated row retained a proof: {context}");
+            continue;
+        }
         if claim.origin == store.origin && local_ids.contains(&claim.id) {
-            assert_eq!((key, sequence), (None, None), "local admission is not a remote proof");
+            assert_eq!((key, sequence, hash, position), (None, None, None, None),
+                "local admission is not a remote proof");
             continue;
         }
         let key = key.expect("authenticated remote row must record its verified key");
         let sequence = sequence.expect("authenticated remote row must record its proof sequence");
+        let hash = hash.expect("authenticated remote row must record its proof envelope");
+        let position = position.expect("authenticated remote row must record its proof record position");
         let (start, end) = expected_windows.get(&(claim.origin.clone(), key.clone()))
             .expect("recorded proof key must remain in fresh fleet membership");
         assert!(sequence >= *start && end.is_none_or(|end| sequence <= end),
             "recorded proof lost fresh window coverage: {context}");
         let fleet_id = fleet_meta(&connection, "assistant_grant_authority_fleet_id").unwrap().unwrap();
         let shard = fleet_meta(&connection, "shard_id").unwrap();
-        let evidence: Vec<(String, String)> = connection.prepare(
-            "SELECT records.envelope_hash,signatures.signature FROM replica_records AS records
+        let evidence: Vec<String> = connection.prepare(
+            "SELECT signatures.signature FROM replica_records AS records
              JOIN replica_envelopes AS envelopes USING(writer,sequence,envelope_hash)
              JOIN replica_envelope_signatures AS signatures USING(writer,sequence,envelope_hash)
              WHERE records.claim_id=?1 AND records.writer=?2 AND records.sequence=?3
                AND signatures.member_key=?4 AND records.state='valid'
+               AND records.envelope_hash=?5 AND records.position=?6
                AND envelopes.receipt_state IN ('validated','degraded')",
-        ).unwrap().query_map(params![claim.id,claim.origin,sequence,key],
-            |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
+        ).unwrap().query_map(params![claim.id,claim.origin,sequence,key,hash,position],
+            |row| row.get(0)).unwrap()
             .collect::<rusqlite::Result<_>>().unwrap();
-        assert!(evidence.iter().any(|(hash, signature)|
+        assert!(evidence.iter().any(|signature|
             VerifiedEnvelopeSignature::verify(shard.as_deref(), &fleet_id, &claim.origin,
-                sequence, hash, &key, signature).is_some()),
+                sequence, &hash, &key, signature).is_some()),
             "recorded proof was not actually verified: {context}");
     }
 
@@ -690,4 +700,144 @@ fn membership_retraction_reauthenticates_only_rows_using_the_lost_recorded_key()
     assert!(authority::subject_ready(&connection, &removed_grant.subject).is_err());
     drop(connection);
     assert_windows(&target, &target, "only the lost proof key is retracted");
+}
+
+#[test]
+fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
+    for mutation in ["signature-delete", "signature-update", "record-invalid", "record-delete", "envelope-invalid", "envelope-delete", "claim-delete"] {
+        let (anchor, anchor_key) = source();
+        let peer_key = Arc::new(MemberKey::generate().unwrap().0);
+        let peer = node("peer", Some(anchor_key.public()));
+        peer.set_member_key(Some(peer_key.clone())).unwrap();
+        let target = node("reader", Some(anchor_key.public()));
+        append(&anchor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": peer_key.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 0, "mode": "listening"
+        }));
+        receive(&peer, &export(&anchor, &peer));
+        receive(&target, &export(&anchor, &target));
+        let grant = append(&peer, SUBJECT, GRANTED, fields());
+        receive(&target, &export(&peer, &target));
+        assert_windows(&target, &target, "sole signed proof established");
+        let (sequence, hash, position): (u64, String, u64) = target.readers.get().query_row(
+            "SELECT auth_sequence,auth_envelope_hash,auth_record_position
+             FROM assistant_grant_pending WHERE claim_id=?1",
+            [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        {
+            let connection = target.connection.write();
+            let query = match mutation {
+                "signature-delete" =>
+                    "DELETE FROM replica_envelope_signatures
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
+                "signature-update" =>
+                    "UPDATE replica_envelope_signatures SET signature='invalid'
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
+                "record-invalid" =>
+                    "UPDATE replica_records SET state='invalid'
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
+                "record-delete" =>
+                    "DELETE FROM replica_records
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
+                "envelope-invalid" =>
+                    "UPDATE replica_envelopes SET receipt_state=?4
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                "envelope-delete" =>
+                    "DELETE FROM replica_envelopes
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND ?4 IS NOT NULL",
+                "claim-delete" =>
+                    "DELETE FROM claims WHERE id IN(
+                       SELECT claim_id FROM assistant_grant_pending
+                       WHERE origin=?1 AND auth_sequence=?2 AND auth_envelope_hash=?3 AND auth_record_position=?4)",
+                _ => unreachable!(),
+            };
+            let last = if mutation.starts_with("signature-") {
+                SqlValue::Text(peer_key.public().to_owned())
+            } else if mutation == "envelope-invalid" {
+                SqlValue::Text("pending".to_owned())
+            } else {
+                SqlValue::Integer(position as i64)
+            };
+            assert_eq!(connection.execute(query, params![grant.origin,sequence,hash,last]).unwrap(), 1);
+            assert!(authority::subject_ready(&connection, &grant.subject).is_err(),
+                "withdrawal did not fence its dependent: {mutation}");
+            assert!(!authority::contains(&connection, &grant.id).unwrap(),
+                "withdrawn proof still authorized its bearer: {mutation}");
+        }
+        // Keep the original key's coverage intact. This real new window on the
+        // same writer must not hide the queued loss behind an authenticated flag.
+        let future_key = MemberKey::generate().unwrap().0;
+        append(&anchor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": future_key.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 1_000_000, "mode": "listening"
+        }));
+        receive_without_authority_maintenance(&target, &export(&anchor, &target));
+        let expected = windows(&fleet_membership_tx(&target.readers.get()).unwrap());
+        assert_eq!(expected.get(&("peer".to_owned(), peer_key.public().to_owned())), Some(&(0, None)));
+        assert!(expected.contains_key(&("peer".to_owned(), future_key.public().to_owned())));
+        assert!(!target.claim_has_authenticated_member_writer(&grant.id).unwrap(), "{mutation}");
+        assert_windows(&target, &target, mutation);
+        assert!(!authority::contains(&target.readers.get(), &grant.id).unwrap(), "{mutation}");
+    }
+}
+
+#[test]
+fn restored_window_coverage_cancels_pending_retraction_fence() {
+    let (anchor, anchor_key) = source();
+    let peer_key = Arc::new(MemberKey::generate().unwrap().0);
+    let peer = node("peer", Some(anchor_key.public()));
+    peer.set_member_key(Some(peer_key.clone())).unwrap();
+    let target = node("reader", Some(anchor_key.public()));
+    append(&anchor, "host/peer", "fleet.member-admitted", json!({
+        "member_key": peer_key.public(), "via": "member", "sponsor": "anchor",
+        "writer_floor": 0, "mode": "listening"
+    }));
+    receive(&peer, &export(&anchor, &peer));
+    receive(&target, &export(&anchor, &target));
+    let grants: Vec<_> = (0..authority::CLAIMS_PER_SLICE * 3).map(|index| {
+        let suffix = format!("{index:024x}");
+        append(&peer, &format!("custom/client/assistant-v1-{suffix}"), GRANTED,
+            fixture_fields(&suffix, "assistant", 'a'))
+    }).collect();
+    receive(&target, &export(&peer, &target));
+    assert_windows(&target, &target, "restoration fixture established");
+    let removal = append(&anchor, "host/peer", "fleet.member-removed", json!({
+        "member_key": peer_key.public(), "high_water": 0, "reason": "restore coverage regression"
+    }));
+    let removed = export(&anchor, &target);
+    let removal_sequence: u64 = anchor.readers.get().query_row(
+        "SELECT replica_sequence FROM batches WHERE id=?1", [&removal.batch_id],
+        |row| row.get(0),
+    ).unwrap();
+    let proof = signatures(&removed).signatures.into_iter().find(|proof|
+        proof.writer == "anchor" && proof.sequence == removal_sequence).unwrap();
+    receive_without_authority_maintenance(&target, &removed);
+    assert!(!target.advance_assistant_grant_authority_backfill().unwrap());
+    let retained_id: String = target.readers.get().query_row(
+        "SELECT pending.claim_id FROM assistant_grant_pending AS pending
+         JOIN assistant_grant_retractions AS retractions
+           ON pending.origin=retractions.writer AND pending.auth_member_key=retractions.member_key
+         WHERE pending.authenticated=1
+           AND pending.auth_sequence BETWEEN retractions.lower_sequence AND retractions.upper_sequence
+         ORDER BY pending.claim_id LIMIT 1",
+        [], |row| row.get(0),
+    ).unwrap();
+    let retained = grants.iter().find(|grant| grant.id == retained_id).unwrap();
+    assert!(authority::subject_ready(&target.readers.get(), &retained.subject).is_err());
+    // Withdraw only the signed removal. Raw fleet history expands the original
+    // key again while its old retraction page is still outstanding.
+    target.connection.write().execute(
+        "DELETE FROM replica_envelope_signatures
+         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
+        params![proof.writer,proof.sequence,proof.hash,proof.member_key],
+    ).unwrap();
+    target.advance_assistant_grant_authority_backfill().unwrap();
+    assert_established_grants_ready(&target, std::slice::from_ref(retained));
+    let pending_retractions: u64 = target.readers.get().query_row(
+        "SELECT COUNT(*) FROM assistant_grant_retractions WHERE writer='peer' AND member_key=?1",
+        [peer_key.public()], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(pending_retractions, 0, "restored coverage retained a stale subject fence");
+    assert_windows(&target, &target, "restored coverage after partial retraction");
+    assert_established_grants_ready(&target, &grants);
 }

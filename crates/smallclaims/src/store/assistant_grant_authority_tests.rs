@@ -467,6 +467,7 @@ fn reset_projection(connection: &Connection) {
          DELETE FROM assistant_grant_membership_dirty;
          DELETE FROM assistant_grant_retractions;
          DELETE FROM assistant_grant_recompute;
+         DELETE FROM assistant_grant_proof_invalidations;
          UPDATE assistant_grant_membership_state SET applied_generation=-1 WHERE id=1;
          UPDATE meta SET value=value WHERE key='fleet_anchor_key';
          DELETE FROM meta WHERE key='assistant_grant_authority_version'
@@ -1065,7 +1066,7 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
             "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
             params![signature.writer,format!("~{index:08}")]).unwrap();
     }
-    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     let transaction = connection.transaction().unwrap();
     assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
     let position: i64 = transaction.query_row(

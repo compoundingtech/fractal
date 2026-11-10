@@ -109,13 +109,24 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             claim_id TEXT PRIMARY KEY, grant_subject TEXT NOT NULL, kind TEXT NOT NULL,
             origin TEXT NOT NULL, actor TEXT NOT NULL, sequence INTEGER NOT NULL,
             authenticated INTEGER NOT NULL, record TEXT NOT NULL,
-            auth_member_key TEXT, auth_sequence INTEGER);
+            auth_member_key TEXT, auth_sequence INTEGER,
+            auth_envelope_hash TEXT, auth_record_position INTEGER);
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_subject_index
             ON assistant_grant_pending(grant_subject,authenticated,origin,actor,kind);
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_writer_index
             ON assistant_grant_pending(origin,authenticated,sequence,claim_id);
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_evidence_index
             ON assistant_grant_pending(origin,auth_member_key,auth_sequence,claim_id);
+         CREATE INDEX IF NOT EXISTS assistant_grant_pending_signature_index
+            ON assistant_grant_pending(origin,auth_sequence,auth_envelope_hash,auth_member_key,claim_id);
+         CREATE INDEX IF NOT EXISTS assistant_grant_pending_envelope_index
+            ON assistant_grant_pending(origin,auth_sequence,auth_envelope_hash,claim_id);
+         CREATE TABLE IF NOT EXISTS assistant_grant_proof_invalidations (
+            id INTEGER PRIMARY KEY, writer TEXT NOT NULL, sequence INTEGER NOT NULL,
+            envelope_hash TEXT NOT NULL, member_key TEXT NOT NULL,
+            claim_id TEXT NOT NULL DEFAULT '');
+         CREATE INDEX IF NOT EXISTS assistant_grant_proof_invalidations_identity_index
+            ON assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key);
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor (
             claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL, record_rowid INTEGER NOT NULL, member_key TEXT NOT NULL);
@@ -137,6 +148,9 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
          BEGIN INSERT OR IGNORE INTO assistant_grant_dirty VALUES(NEW.id); END;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_delete AFTER DELETE ON claims
+         WHEN EXISTS(SELECT 1 FROM assistant_grant_pending WHERE claim_id=OLD.id)
+         BEGIN INSERT OR IGNORE INTO assistant_grant_dirty VALUES(OLD.id); END;
          DROP TRIGGER IF EXISTS assistant_grant_dirty_signature_insert;
          DROP TRIGGER IF EXISTS assistant_grant_dirty_signature_insert_v2;
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_signature_insert_v3
@@ -159,7 +173,61 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             writer TEXT NOT NULL, member_key TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER,
             PRIMARY KEY(writer,member_key));"
     )?;
+    install_proof_invalidation_triggers(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f117dab1bdd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_local_origin',?1)", [local_origin])?;
+    Ok(())
+}
+
+// Destructive evidence changes are independent of membership invalidation.
+// Triggers enqueue a proof identity in constant work; indexed maintenance
+// visits dependent claims one at a time instead of expanding them in a trigger.
+fn install_proof_invalidation_triggers(connection: &Connection) -> Result<()> {
+    for (table,stem,key,index,changes) in [
+        ("replica_envelope_signatures","signature","OLD.member_key",
+         "assistant_grant_pending_signature_index",
+         "OLD.writer IS NOT NEW.writer OR OLD.sequence IS NOT NEW.sequence OR OLD.envelope_hash IS NOT NEW.envelope_hash OR OLD.member_key IS NOT NEW.member_key OR OLD.signature IS NOT NEW.signature"),
+        ("replica_envelopes","envelope","''",
+         "assistant_grant_pending_envelope_index",
+         "OLD.writer IS NOT NEW.writer OR OLD.sequence IS NOT NEW.sequence OR OLD.envelope_hash IS NOT NEW.envelope_hash OR (OLD.receipt_state IN ('validated','degraded') AND NEW.receipt_state NOT IN ('validated','degraded'))"),
+    ] {
+        let key_filter = if stem=="signature" { "AND auth_member_key=OLD.member_key" } else { "" };
+        let dependent = format!(
+            "SELECT 1 FROM assistant_grant_pending INDEXED BY {index}
+             WHERE origin=OLD.writer AND auth_sequence=OLD.sequence
+               AND auth_envelope_hash=OLD.envelope_hash {key_filter}"
+        );
+        for event in ["DELETE","UPDATE"] {
+            let changed = if event=="UPDATE" { format!("({changes}) AND ") } else { String::new() };
+            connection.execute_batch(&format!(
+                "CREATE TRIGGER IF NOT EXISTS assistant_grant_proof_{stem}_{event}
+                 AFTER {event} ON {table} WHEN {changed}EXISTS({dependent})
+                 BEGIN
+                   INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key)
+                   VALUES(OLD.writer,OLD.sequence,OLD.envelope_hash,{key});
+                 END;"
+            ))?;
+        }
+    }
+    let dependent = "SELECT claim_id FROM assistant_grant_pending
+        WHERE claim_id=OLD.claim_id AND origin=OLD.writer
+          AND auth_sequence=OLD.sequence AND auth_envelope_hash=OLD.envelope_hash
+          AND auth_record_position=OLD.position";
+    for event in ["DELETE","UPDATE"] {
+        let changed = if event=="UPDATE" {
+            "(OLD.writer IS NOT NEW.writer OR OLD.sequence IS NOT NEW.sequence
+              OR OLD.envelope_hash IS NOT NEW.envelope_hash OR OLD.position IS NOT NEW.position
+              OR OLD.claim_id IS NOT NEW.claim_id
+              OR (OLD.state='valid' AND NEW.state<>'valid')) AND "
+        } else { "" };
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS assistant_grant_proof_record_{event}
+             AFTER {event} ON replica_records WHEN {changed}EXISTS({dependent})
+             BEGIN
+               INSERT OR IGNORE INTO assistant_grant_dirty {dependent};
+               DELETE FROM assistant_grant_auth_cursor WHERE claim_id IN ({dependent});
+             END;"
+        ))?;
+    }
     Ok(())
 }
 
@@ -181,7 +249,8 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
             OR EXISTS(SELECT 1 FROM assistant_grant_dirty)
             OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
             OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
-            OR EXISTS(SELECT 1 FROM assistant_grant_recompute)",
+            OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
+            OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)",
         [VERSION], |row| row.get(0),
     ).map_err(internal)?;
     Ok(pending)
@@ -190,18 +259,32 @@ fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, Fract
     connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty AS dirty
                 JOIN claims ON claims.id=dirty.claim_id WHERE claims.subject=?1)
+            OR EXISTS(SELECT 1 FROM assistant_grant_dirty AS dirty
+                JOIN assistant_grant_pending AS pending ON pending.claim_id=dirty.claim_id
+                WHERE pending.grant_subject=?1)
             OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor AS cursor
                 JOIN claims ON claims.id=cursor.claim_id WHERE claims.subject=?1)
             OR EXISTS(SELECT 1 FROM assistant_grant_pending
                 WHERE grant_subject=?1 AND authenticated=0)
             OR EXISTS(SELECT 1 FROM assistant_grant_recompute AS work
-                JOIN claims ON claims.id=work.claim_id WHERE claims.subject=?1)
+                JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
+                WHERE pending.grant_subject=?1)
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending
+                JOIN assistant_grant_proof_invalidations AS work
+                  ON work.writer=pending.origin AND work.sequence=pending.auth_sequence
+                    AND work.envelope_hash=pending.auth_envelope_hash
+                WHERE pending.grant_subject=?1 AND pending.claim_id>work.claim_id
+                  AND (work.member_key='' OR work.member_key=pending.auth_member_key))
             OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending
                 JOIN assistant_grant_retractions AS dirty
                   ON dirty.writer=pending.origin AND dirty.member_key=pending.auth_member_key
                 WHERE pending.grant_subject=?1
                   AND pending.auth_sequence BETWEEN dirty.lower_sequence AND dirty.upper_sequence
-                  AND (pending.auth_sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id))",
+                  AND (pending.auth_sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
+                  AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_windows AS windows
+                    WHERE windows.writer=pending.origin AND windows.member_key=pending.auth_member_key
+                      AND pending.auth_sequence>=windows.start
+                      AND (windows.end IS NULL OR pending.auth_sequence<=windows.end)))",
         [subject], |row| row.get(0),
     ).map_err(internal)
 }
@@ -387,7 +470,21 @@ fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bo
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
         format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1"));
     let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1665a4a8cfdf owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h5520ddeb5d20 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional()?;
-    let Some(claim) = claim else { return Ok(()); };
+    let Some(claim) = claim else {
+        // Trim can remove a receipt and its raw claim in one transaction.
+        // Retire cached state through bounded demotion, not a stuck dirty row.
+        connection.execute(
+            "UPDATE assistant_grant_pending SET authenticated=0,auth_member_key=NULL,
+             auth_sequence=NULL,auth_envelope_hash=NULL,auth_record_position=NULL WHERE claim_id=?1", [id],
+        )?;
+        connection.execute(
+            "INSERT OR IGNORE INTO assistant_grant_recompute
+             SELECT claim_id FROM assistant_grant_pending WHERE claim_id=?1", [id],
+        )?;
+        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+        connection.execute("DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
+        return Ok(());
+    };
     if !KINDS.contains(&claim.kind.as_str()) { return Ok(()); }
     let valid = if claim.kind==GRANTED { base_valid(&claim) }
         else if claim.kind==POLICY { policy_fields(&claim) } else { identity(&claim) };
@@ -400,11 +497,13 @@ fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bo
             "SELECT EXISTS(SELECT 1 FROM assistant_grant_local_appends WHERE claim_id=?1)",
             [&claim.id], |row| row.get(0),
         )?;
-        let previous: Option<(bool,Option<String>,Option<u64>)> = connection.query_row(
-            "SELECT authenticated,auth_member_key,auth_sequence FROM assistant_grant_pending WHERE claim_id=?1",
-            [&claim.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        let previous: Option<(bool,Option<String>,Option<u64>,Option<String>,Option<i64>)> = connection.query_row(
+            "SELECT authenticated,auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
+             FROM assistant_grant_pending WHERE claim_id=?1",
+            [&claim.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
         ).optional()?;
-        let (admitted, previous_key, previous_sequence) = previous.unwrap_or((false,None,None));
+        let (admitted, previous_key, previous_sequence, previous_hash, previous_position) =
+            previous.unwrap_or((false,None,None,None,None));
         // Trust depends on precise evidence, never monotonic admission. Retraction
         // tasks target that dependency; local append is a separate durable fact.
         let authentication = if local_append && claim.origin == local_origin(connection)? {
@@ -412,22 +511,28 @@ fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bo
         } else if membership_current {
             authenticated_claim(connection,&claim.id)?
         } else if admitted {
-            Authentication::Authenticated(previous_key.clone().zip(previous_sequence))
+            Authentication::Authenticated(previous_key.clone().zip(previous_sequence)
+                .zip(previous_hash.clone()).zip(previous_position)
+                .map(|(((key,sequence),hash),position)| (key,sequence,hash,position)))
         } else {
             Authentication::Pending
         };
-        let (authenticated, proof_key, proof_sequence) = match &authentication {
-            Authentication::Authenticated(proof) => (true,proof.as_ref().map(|p|p.0.clone()),proof.as_ref().map(|p|p.1)),
-            Authentication::Unauthenticated => (false,None,None),
-            Authentication::Pending => (admitted,previous_key,previous_sequence),
+        let (authenticated, proof_key, proof_sequence, proof_hash, proof_position) = match &authentication {
+            Authentication::Authenticated(proof) => (true,proof.as_ref().map(|p|p.0.clone()),
+                proof.as_ref().map(|p|p.1),proof.as_ref().map(|p|p.2.clone()),proof.as_ref().map(|p|p.3)),
+            Authentication::Unauthenticated => (false,None,None,None,None),
+            Authentication::Pending => (admitted,previous_key,previous_sequence,previous_hash,previous_position),
         };
-        let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h9cf86ad98d1e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence)
-            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(claim_id) DO UPDATE SET
-              authenticated=excluded.authenticated,auth_member_key=excluded.auth_member_key,auth_sequence=excluded.auth_sequence
+        let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h9cf86ad98d1e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(claim_id) DO UPDATE SET
+              authenticated=excluded.authenticated,auth_member_key=excluded.auth_member_key,auth_sequence=excluded.auth_sequence,
+              auth_envelope_hash=excluded.auth_envelope_hash,auth_record_position=excluded.auth_record_position
             WHERE assistant_grant_pending.authenticated<>excluded.authenticated
                OR assistant_grant_pending.auth_member_key IS NOT excluded.auth_member_key
-               OR assistant_grant_pending.auth_sequence IS NOT excluded.auth_sequence",
-            params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?,proof_key,proof_sequence])? != 0;
+               OR assistant_grant_pending.auth_sequence IS NOT excluded.auth_sequence
+               OR assistant_grant_pending.auth_envelope_hash IS NOT excluded.auth_envelope_hash
+               OR assistant_grant_pending.auth_record_position IS NOT excluded.auth_record_position",
+            params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?,proof_key,proof_sequence,proof_hash,proof_position])? != 0;
         if changed && !admitted && authenticated { attach_claim(connection,&claim)?; }
         if admitted && !authenticated { rebuild_authenticated_subject(connection,&claim)?; }
         if matches!(authentication, Authentication::Pending) {
@@ -474,6 +579,10 @@ fn recompute_one(connection: &Connection) -> Result<bool> {
         recompute_base(connection,&base)?;
     } else {
         connection.execute("DELETE FROM assistant_grant_recompute WHERE claim_id=?1", [&claim_id])?;
+        connection.execute(
+            "DELETE FROM assistant_grant_pending WHERE claim_id=?1
+             AND NOT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&claim_id],
+        )?;
     }
     Ok(true)
 }
@@ -481,8 +590,8 @@ fn recompute_one(connection: &Connection) -> Result<bool> {
 enum Authentication {
     Pending,
     Unauthenticated,
-    // None denotes durable local append; remote proof records key and sequence.
-    Authenticated(Option<(String,u64)>),
+    // None denotes durable local append. Writer is the claim's validated origin.
+    Authenticated(Option<(String,u64,String,i64)>),
 }
 
 #[cfg(test)]
@@ -546,7 +655,7 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
             if signature.as_deref().is_some_and(|signature|
                 VerifiedEnvelopeSignature::verify(shard.as_deref(),&fleet_id,&writer,sequence,&hash,key,signature).is_some()) {
                 connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
-                return Ok(Authentication::Authenticated(Some((key.clone(),sequence))));
+                return Ok(Authentication::Authenticated(Some((key.clone(),sequence,hash,position))));
             }
         }
         if keys.len()==MEMBERSHIP_KEYS_PER_REFRESH {
@@ -619,6 +728,10 @@ impl MembershipUpdate {
             ).optional()?;
             // Additions cannot invalidate a proof. Contractions queue only the
             // recorded key's lost ranges; actual verification can use other keys.
+            // Legitimate removal costs O(rows authenticated by that key), with
+            // bounded transactions and those subjects fenced until rechecked.
+            // Only an authenticated fleet member authorized to remove members
+            // can trigger this membership cost; nonmember relay noise cannot.
             if let Some((old_start,old_end)) = old {
                 let enqueue = |lower: u64, upper: u64| -> Result<()> {
                     if lower<=upper {
@@ -700,6 +813,67 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
     backfill_slice_with_limit(connection, budget, CLAIMS_PER_SLICE, fleet_generation(connection)?==applied)
 }
 
+// A destructive signature/envelope write queues one proof identity, not its
+// history-sized dependent set. Dispatch/authentication costs one shared unit.
+fn proof_invalidation_one(connection: &Connection, membership_current: bool) -> Result<bool> {
+    let task: Option<(i64,String,u64,String,String,String)> = connection.query_row(
+        "SELECT id,writer,sequence,envelope_hash,member_key,claim_id
+         FROM assistant_grant_proof_invalidations ORDER BY id LIMIT 1", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+    ).optional()?;
+    let Some((task,writer,sequence,hash,key,cursor)) = task else { return Ok(false); };
+    let query = if key.is_empty() {
+        "SELECT claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_envelope_index
+         WHERE origin=?1 AND auth_sequence=?2 AND auth_envelope_hash=?3 AND claim_id>?5
+         ORDER BY claim_id LIMIT 1"
+    } else {
+        "SELECT claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_signature_index
+         WHERE origin=?1 AND auth_sequence=?2 AND auth_envelope_hash=?3
+           AND auth_member_key=?4 AND claim_id>?5 ORDER BY claim_id LIMIT 1"
+    };
+    let claim: Option<String> = connection.query_row(query,params![writer,sequence,hash,key,cursor],
+        |row| row.get(0)).optional()?;
+    if let Some(claim) = claim {
+        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
+        refresh_claim_inner(connection,&claim,membership_current)?;
+        connection.execute(
+            "UPDATE assistant_grant_proof_invalidations SET claim_id=?2 WHERE id=?1",
+            params![task,claim],
+        )?;
+    } else {
+        connection.execute("DELETE FROM assistant_grant_proof_invalidations WHERE id=?1", [task])?;
+    }
+    Ok(true)
+}
+
+// Coverage restoration immediately exempts covered dependencies from fencing.
+// Lazily subtract its intersection from one queued range per budget unit, so
+// cancellation itself never expands into an unbounded writer transaction.
+fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, key: &str,
+    lower: u64, upper: u64, sequence: i64, claim: &str) -> Result<bool> {
+    let window: Option<MembershipWindow> = connection.query_row(
+        "SELECT start,end FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
+        params![writer,key], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let Some((start,end)) = window else { return Ok(false); };
+    let covered_lower = lower.max(start);
+    let covered_upper = upper.min(end.unwrap_or(i64::MAX as u64));
+    if covered_lower>covered_upper { return Ok(false); }
+    connection.execute("DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
+    for remainder in [
+        (lower<covered_lower).then(|| (lower,covered_lower-1)),
+        (covered_upper<upper).then(|| (covered_upper+1,upper)),
+    ].into_iter().flatten() {
+        connection.execute(
+            "INSERT INTO assistant_grant_retractions
+             (writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![writer,key,remainder.0,remainder.1,sequence,claim],
+        )?;
+    }
+    Ok(true)
+}
+
 fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut remaining: usize, membership_current: bool) -> Result<bool> {
     let started = Instant::now();
     if remaining==0 { return Ok(false); }
@@ -713,12 +887,22 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
         }
+        if proof_invalidation_one(connection,membership_current)? {
+            remaining -= 1;
+            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+            continue;
+        }
         let retraction: Option<(i64,String,String,u64,u64,i64,String)> = connection.query_row(
             "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,claim_id
              FROM assistant_grant_retractions ORDER BY id LIMIT 1", [],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
         ).optional()?;
         if let Some((task,writer,key,lower,upper,sequence,id)) = retraction {
+            if trim_restored_retraction(connection,task,&writer,&key,lower,upper,sequence,&id)? {
+                remaining -= 1;
+                if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+                continue;
+            }
             let pending: Option<(u64,String)> = connection.query_row(
                 "SELECT auth_sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_evidence_index
                  WHERE origin=?1 AND auth_member_key=?2 AND auth_sequence BETWEEN ?3 AND ?4
@@ -803,7 +987,8 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)
              OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
              OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
-             OR EXISTS(SELECT 1 FROM assistant_grant_recompute)", [], |row| row.get(0))?;
+             OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
+             OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)", [], |row| row.get(0))?;
     if dirty { return Ok(false); }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
     Ok(true)

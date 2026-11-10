@@ -225,6 +225,21 @@ authenticated subjects are not fenced by new membership windows. Durable
 key/range cursors and per-base authority deletion/effective recomputation share
 the 64-unit transaction budget. A membership warning covers only those precise
 proof dependencies beyond its cursor and clears as maintenance advances.
+Restored window coverage immediately exempts covered proof dependencies from
+the retraction fence; maintenance trims or cancels the queued ranges within its
+budget. A legitimate key removal still costs \(O(\text{rows authenticated by
+that key})\) in total, across bounded transactions, and affected subjects remain
+fenced until rechecked. Only an authenticated fleet member already authorized
+to remove members can trigger this membership cost.
+
+Each remote authentication records its complete proof identity: writer,
+sequence, envelope hash, record position and member key. Signature deletion or
+replacement, record invalidation/deletion, and envelope invalidation/deletion
+persistently queue only dependent proofs in the mutating transaction. Indexed
+maintenance visits one dependent claim per unit; an unrelated membership
+addition cannot hide proof withdrawal. Private doctor diagnostics include
+`authentication proof evidence changed`. Raw claims removed by checkpoint trim
+retire their cached authority through the same bounded demotion path.
 These details remain on trusted-local doctor only: paired clients with
 `read.projections` cannot retrieve the provenance check through either the
 operations collection or operation detail. Clients continue to receive generic

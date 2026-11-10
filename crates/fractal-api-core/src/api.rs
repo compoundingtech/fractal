@@ -9521,6 +9521,11 @@ fn assistant_grant_subject_maintenance_checks(
         "SELECT claims.subject, 'dirty claim awaiting projection' AS cause
          FROM assistant_grant_dirty dirty JOIN claims ON claims.id=dirty.claim_id
          UNION
+         SELECT pending.grant_subject, 'retired raw claim awaiting projection'
+         FROM assistant_grant_dirty dirty
+         JOIN assistant_grant_pending pending ON pending.claim_id=dirty.claim_id
+         WHERE NOT EXISTS(SELECT 1 FROM claims WHERE id=dirty.claim_id)
+         UNION
          SELECT claims.subject, 'signature authentication cursor in progress'
          FROM assistant_grant_auth_cursor cursor JOIN claims ON claims.id=cursor.claim_id
          UNION
@@ -9533,9 +9538,21 @@ fn assistant_grant_subject_maintenance_checks(
            ON pending.origin=dirty.writer AND pending.auth_member_key=dirty.member_key
          WHERE pending.auth_sequence BETWEEN dirty.lower_sequence AND dirty.upper_sequence
            AND (pending.auth_sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
+           AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_windows windows
+             WHERE windows.writer=pending.origin AND windows.member_key=pending.auth_member_key
+               AND pending.auth_sequence>=windows.start
+               AND (windows.end IS NULL OR pending.auth_sequence<=windows.end))
          UNION
-         SELECT claims.subject, 'retracted authority effective-state recomputation'
-         FROM assistant_grant_recompute work JOIN claims ON claims.id=work.claim_id
+         SELECT pending.grant_subject, 'authentication proof evidence changed'
+         FROM assistant_grant_proof_invalidations work
+         JOIN assistant_grant_pending pending ON pending.origin=work.writer
+           AND pending.auth_sequence=work.sequence AND pending.auth_envelope_hash=work.envelope_hash
+         WHERE pending.claim_id>work.claim_id
+           AND (work.member_key='' OR pending.auth_member_key=work.member_key)
+         UNION
+         SELECT pending.grant_subject, 'retracted authority effective-state recomputation'
+         FROM assistant_grant_recompute work
+         JOIN assistant_grant_pending pending ON pending.claim_id=work.claim_id
          ORDER BY 1,2",
     )?;
     let rows = statement.query_map([], |row| {
