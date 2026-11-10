@@ -45,8 +45,10 @@ fleet_compat() {
     fleet::previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items \
     fleet::service_grants::previous_release_refuses_service_grants_from_a_candidate_issuer \
     fleet::service_grants::previous_release_refuses_offline_seeded_service_grants_with_its_own_origin \
-    fleet::service_grants::previous_release_refuses_plugin_service_grants_on_same_database_rollback 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 9 passed" "$logs/compat-result.log" || return
+    fleet::service_grants::previous_release_refuses_plugin_service_grants_on_same_database_rollback \
+    fleet::service_grants::previous_release_authorizes_and_revokes_after_authority_projection_rollback \
+    fleet::service_grants::authority_projection_resumes_after_daemon_is_killed_with_committed_partial_backfill 2>&1 | tee "$logs/compat-result.log" || return
+  grep -q "test result: ok. 11 passed" "$logs/compat-result.log" || return
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return

@@ -605,7 +605,7 @@ async fn writer_transaction_rechecks_policy_revision_actor_scope_and_revocation(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() {
+async fn synchronous_send_rechecks_pending_subject_revocation_and_scope_removal_before_commit() {
     let h = Arc::new(Harness::new());
     let paired = h.pair().await;
     let gate = h.root.path().join("mutation-gate");
@@ -614,10 +614,10 @@ async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() 
     let count_messages = || connection.query_row(
         "SELECT count(*) FROM claims WHERE kind='message.sent'", [], |row| row.get::<_, u64>(0),
     ).unwrap();
-    for revoke in [false, true] {
+    for change in ["pending-subject", "scope", "revocation"] {
         h.policy(&paired, scopes()).await;
         let before = count_messages();
-        let request = h.message(AGENT, if revoke { "held-revoke" } else { "held-scope" }).await;
+        let request = h.message(AGENT, &format!("held-{change}")).await;
         for name in ["hold", "entered", "release", "done"] {
             let path = gate.join(name);
             if path.exists() { std::fs::remove_file(path).unwrap(); }
@@ -634,7 +634,14 @@ async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() 
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         assert!(!send.is_finished(), "synchronous send must still await its mutation");
-        if revoke {
+        if change == "pending-subject" {
+            let granted = h.state.store.latest_claim(
+                &grant_subject(&paired), Some("custom.client.assistant.v1.granted"),
+            ).unwrap().unwrap();
+            connection.execute(
+                "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&granted.id],
+            ).unwrap();
+        } else if change == "revocation" {
             h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
         } else {
             h.owner("POST", &grant_path(&paired, "/policy"), &AssistantGrantPolicy {
@@ -651,7 +658,16 @@ async fn synchronous_send_rechecks_revocation_and_scope_removal_before_commit() 
         let (status, denial) = send.await.unwrap();
         assert!(!status.is_success(), "{denial}");
         assert_eq!(denial["code"], "forbidden", "{denial}");
+        assert_eq!(denial["message"], "assistant write authorization changed or expired before commit");
+        assert!(!denial.to_string().contains("not-ready"), "{denial}");
         assert_eq!(count_messages(), before, "denied send must append no message claim");
+        if change == "pending-subject" {
+            connection.execute(
+                "DELETE FROM assistant_grant_dirty WHERE claim_id IN
+                    (SELECT id FROM claims WHERE subject=?1)",
+                [grant_subject(&paired)],
+            ).unwrap();
+        }
     }
 }
 

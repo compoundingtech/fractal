@@ -6,6 +6,7 @@ pub use native::propose;
 pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
 pub use fractal_api_core::api::client_v0::assistant::*;
 pub use fractal_api_core::api::client_v0::assistant::{PRINCIPAL, append, authenticate, authorize_route, device_resources, trusted_issuer};
+use fractal_api_core::api::client_v0::external_grants::{projection_with_witness, revoked};
 pub mod authorization;
 pub mod native;
 pub mod reads;
@@ -208,12 +209,22 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
         "grant":projection}))))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantGrantQuery {
+    witness: Option<String>,
+}
+
 pub async fn inspect(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
-                           AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+                           AxumPath(id): AxumPath<String>, Query(query): Query<AssistantGrantQuery>) -> Result<Json<Value>, ApiError> {
     trusted_issuer(&state, &session)?;
     let granted = latest(&state, &subject(&id)?, GRANTED)?
         .ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
-    Ok(Json(projection(&state, &granted)?))
+    Ok(Json(if query.witness.as_deref() == Some("1") {
+        projection_with_witness(&state, &granted)?
+    } else {
+        projection(&state, &granted)?
+    }))
 }
 
 async fn revoke_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
@@ -226,11 +237,18 @@ async fn revoke_inner(State(state): State<AppState>, Extension(session): Extensi
     if granted.origin != state.store.origin() {
         return Err(forbidden("assistant revocation must run on its authoritative issuer"));
     }
-    if latest(&state, &subject, REVOKED)?.is_none() {
+    if !revoked(&state, &granted)? {
         let previous = effective(&state, &granted)?;
-        append(&state, subject, REVOKED, issuer, json!({"version":1,"grant_id":fields(&granted)?["grant_id"],
-            "principal":principal(fields(&granted)?)?,"issuer":issuer,"transport":session.transport,
-            "timestamp":client_timestamp(client_now_ms()),"outcome":"revoked"}), Some(&previous))?;
+        let source = fields(&granted)?;
+        let mut value = json!({"version":1,"grant_id":source["grant_id"],
+            "principal":principal(source)?,"issuer":issuer,"transport":session.transport,
+            "timestamp":client_timestamp(client_now_ms()),"outcome":"revoked"});
+        // Revocation is not issuance: retain the immutable profile, including
+        // the absence of a profile on legacy assistant grants.
+        if let Some(profile) = source.get("profile") {
+            value["profile"] = profile.clone();
+        }
+        append(&state, subject, REVOKED, issuer, value, Some(&previous))?;
         signal_changed(&state);
     }
     Ok(Json(projection(&state, &granted)?))
@@ -252,7 +270,7 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     if granted.origin != state.store.origin() {
         return Err(forbidden("assistant policy must change on its authoritative issuer"));
     }
-    if latest(&state, &subject, REVOKED)?.is_some() { return Err(forbidden("assistant grant was revoked")); }
+    if revoked(&state, &granted)? { return Err(forbidden("assistant grant was revoked")); }
     let previous = effective(&state, &granted)?;
     // Policy changes must not revive an expired grant: fail closed instead of extending it.
     if fields(&previous)?["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms() {
@@ -304,6 +322,68 @@ mod tests {
             "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
+    }
+
+    fn seeded_grant(state: &AppState, profile: Option<&str>) -> ClaimRecord {
+        let id = "111111111111111111111111";
+        let mut source = json!({"version":1,"grant_id":format!("assistant-grant/{id}"),
+            "principal":PRINCIPAL,"sender_class":"external-assistant","issuer":ISSUER,
+            "session_actor":format!("{PRINCIPAL}/session/assistant-grant/{id}"),
+            "credential_hash":credential_digest("reserved-service-credential"),
+            "device_id":"device/service-history","key_id":"service-history",
+            "scopes":SCOPES[..4],"expires_at_unix_ms":client_now_ms()+3_600_000,
+            "policy_revision":1,"minimal_read_mode":"approval-once","recipient_allowlist":[],
+            "disclosure_consent":true,"consent_evidence":"recorded owner consent"});
+        if let Some(profile) = profile {
+            source["profile"] = json!(profile);
+        }
+        // Retain pre-existing evidence without opening the production issuance gate.
+        state.store.append_claim(&ClaimInput {
+            subject: subject(id).unwrap(), kind: GRANTED.into(), actor: Some(ISSUER.into()),
+            fields: serde_json::from_value(source).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    }
+
+    #[tokio::test]
+    async fn owner_revoke_endpoint_preserves_profiles_and_is_idempotent() {
+        use axum::{body::{Body, to_bytes}, http::Request};
+        use tower::ServiceExt;
+
+        for profile in [None, Some("assistant"), Some("service")] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let granted = seeded_grant(&state, profile);
+            let app = super::super::super::router_for_transport(state.clone(),
+                ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+            let path = "/v1/client/assistant/grants/111111111111111111111111/revoke";
+            // An arbitrary local person must not gain the owner's revocation right.
+            let mut denied = Request::builder().method("POST").uri(path)
+                .header(LOCAL_PERSON_HEADER, "person/other").body(Body::empty()).unwrap();
+            denied.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+            assert_eq!(app.clone().oneshot(denied).await.unwrap().status(), StatusCode::FORBIDDEN);
+            assert!(latest(&state, &granted.subject, REVOKED).unwrap().is_none());
+
+            let mut revocation_id = None;
+            for _ in 0..2 {
+                let mut request = Request::builder().method("POST").uri(path)
+                    .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
+                request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{profile:?}");
+                let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+                assert_eq!(body["value"]["revoked"], true);
+                let revoked = latest(&state, &granted.subject, REVOKED).unwrap().unwrap();
+                assert_eq!(fields(&revoked).unwrap().get("profile"), fields(&granted).unwrap().get("profile"));
+                assert_eq!(revoked.actor.as_deref(), Some(ISSUER));
+                assert_eq!(revoked.origin, granted.origin);
+                if let Some(id) = &revocation_id {
+                    assert_eq!(&revoked.id, id, "repeat revocation must not append another transition");
+                } else {
+                    revocation_id = Some(revoked.id);
+                }
+            }
+        }
     }
 
     async fn begin_assistant(state: &AppState) -> Value {
@@ -362,6 +442,112 @@ mod tests {
         for name in ["verifier", "verifier_key_id", "code_hash", "challenge_expires_at_unix_ms"] {
             assert!(fields(&granted).unwrap().get(name).is_none(), "{name}");
         }
+    }
+
+    #[tokio::test]
+    async fn service_history_does_not_enable_issuance_policy_or_requests() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let granted = seeded_grant(&state, Some("service"));
+        let app = super::super::super::router_for_transport(state.clone(),
+            ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+        for path in ["/v1/client/assistant/summary", "/v1/client/capabilities"] {
+            let request = Request::builder().uri(path)
+                .header(AUTHORIZATION, "Bearer reserved-service-credential")
+                .body(Body::empty()).unwrap();
+            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
+        let policy = json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES[..4],
+            "expires_in_seconds":3600,"disclosure_consent":true,
+            "consent_evidence":"recorded owner consent","minimal_read_mode":"approval-once"});
+        let mut request = Request::builder().method("POST")
+            .uri("/v1/client/assistant/grants/111111111111111111111111/policy")
+            .header(LOCAL_PERSON_HEADER, ISSUER).header("content-type", "application/json")
+            .body(Body::from(policy.to_string())).unwrap();
+        request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+        assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert!(latest(&state, &granted.subject, POLICY).unwrap().is_none());
+
+        let issuance = json!({"api_version":CLIENT_API_VERSION,"device_name":"service",
+            "assistant_id":PRINCIPAL,"profile":"service","scopes":SCOPES[..4],
+            "expires_in_seconds":3600,"disclosure_consent":true,
+            "consent_evidence":"recorded owner consent"});
+        let mut request = Request::builder().method("POST").uri("/v1/client/pairings")
+            .header(LOCAL_PERSON_HEADER, ISSUER).header("content-type", "application/json")
+            .body(Body::from(issuance.to_string())).unwrap();
+        request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(state.store.claims_for_kind_at(BEGUN, None, true, 10).unwrap().claims.is_empty());
+    }
+
+    // Frozen pre-witness shape, independent of today's generated grant model.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct LegacyAssistantGrant {
+        kind: String,
+        id: String,
+        principal: String,
+        sender_class: String,
+        session_actor: String,
+        device_id: String,
+        key_id: String,
+        issuer: String,
+        scopes: Vec<String>,
+        expires_at: String,
+        policy_revision: u64,
+        minimal_read_mode: String,
+        recipient_allowlist: Vec<String>,
+        disclosure_consent: bool,
+        consent_evidence: String,
+        revoked: bool,
+        read_trust: Option<fractal_client::AssistantReadTrust>,
+    }
+
+    #[tokio::test]
+    async fn grant_responses_preserve_strict_legacy_shape_unless_inspect_opts_in() {
+        use axum::{body::{Body, to_bytes}, http::Request};
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let paired = paired(&state).await;
+        serde_json::from_value::<LegacyAssistantGrant>(paired["grant"].clone()).unwrap();
+        let id = paired["grant"]["id"].as_str().unwrap();
+        let app = super::super::super::router_for_transport(state.clone(), ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+        for query in ["", "?witness=0", "?witness=true", "?witness=1"] {
+            let mut request = Request::builder()
+                .uri(format!("/v1/client/assistant/grants/{}{query}", urlencoding::encode(id)))
+                .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
+            request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            let grant = body["value"].clone();
+            if query == "?witness=1" {
+                assert_eq!(grant["conflict"], Value::Null);
+                assert!(grant["cleared_conflicts"].is_array());
+                assert!(serde_json::from_value::<LegacyAssistantGrant>(grant).is_err());
+            } else {
+                serde_json::from_value::<LegacyAssistantGrant>(grant).unwrap();
+            }
+        }
+        let policy = serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "scopes": SCOPES[..4],
+            "disclosure_consent": true, "consent_evidence": "owner approved renewal",
+            "minimal_read_mode": "approval-once"
+        })).unwrap();
+        let Json(changed) = update_policy(State(state.clone()),
+            Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+            AxumPath(id.into()), Json(policy)).await.unwrap();
+        serde_json::from_value::<LegacyAssistantGrant>(changed).unwrap();
+        let Json(revoked) = revoke(State(state),
+            Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+            AxumPath(id.into())).await.unwrap();
+        serde_json::from_value::<LegacyAssistantGrant>(revoked).unwrap();
     }
 
     #[tokio::test]
@@ -549,7 +735,8 @@ mod tests {
                 value["principal"] = json!(replacement);
                 value["session_actor"] = json!(format!("{replacement}/session/{}", paired["grant"]["id"].as_str().unwrap()));
                 append(&state, granted.subject.clone(), POLICY, ISSUER, value, Some(&granted)).unwrap();
-                assert!(authenticate(&state, &credential_digest(paired["credential"].as_str().unwrap()), "fabric-loopback").is_err());
+                let session = authenticate(&state, &credential_digest(paired["credential"].as_str().unwrap()), "fabric-loopback").unwrap().unwrap();
+                assert_eq!(session.authority_actor, principal);
             }
         }
     }
@@ -703,6 +890,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authority_backfill_refusal_is_typed_retryable_and_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let paired = paired(&state).await;
+        state.store.connection.write().execute(
+            "DELETE FROM meta WHERE key='assistant_grant_authority_version'", [],
+        ).unwrap();
+        let app = super::super::super::router_for_transport(
+            state.clone(), ClientTransportBoundary::Unix, &[crate::api::client_v0::routes],
+        );
+        let inspect = format!("/v1/client/assistant/grants/{}",
+            urlencoding::encode(paired["grant"]["id"].as_str().unwrap()));
+        for (path, bearer) in [("/v1/client/assistant/summary", true), (inspect.as_str(), false)] {
+            let mut request = Request::builder().uri(path);
+            if bearer {
+                request = request.header(AUTHORIZATION,
+                    format!("Bearer {}", paired["credential"].as_str().unwrap()));
+            } else {
+                request = request.header(LOCAL_PERSON_HEADER, ISSUER);
+            }
+            let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["code"], "assistant-grant-authority-not-ready");
+            assert_eq!(value["retryable"], true);
+        }
+        while !state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+        assert!(authenticate(&state,
+            &credential_digest(paired["credential"].as_str().unwrap()), "unix").unwrap().is_some());
+    }
+
+    #[tokio::test]
     async fn assistant_revocation_and_expiry_survive_restart() {
         let root=tempfile::tempdir().unwrap(); let state1=state(root.path()); let paired1=paired(&state1).await;
         let digest=credential_digest(paired1["credential"].as_str().unwrap());
@@ -822,7 +1042,7 @@ mod tests {
         assert_eq!(fs::metadata(&profile).unwrap().permissions().mode() & 0o777,0o600);
         assert!(!root.path().join("devices.json").exists());
         let Json(grant)=inspect(State(state),Extension(ClientSession::local(Some(ISSUER)).unwrap()),
-            AxumPath(device.session.grant.id)).await.unwrap();
+            AxumPath(device.session.grant.id), Query(AssistantGrantQuery::default())).await.unwrap();
         assert_eq!(grant["principal"],PRINCIPAL);
         server.abort();
     }

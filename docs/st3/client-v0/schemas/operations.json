@@ -17,6 +17,17 @@
     "public_listener": false,
     "remote_mode": "online-thin-client"
   },
+  "assistant_grant_authority_contract": {
+    "projection_version": 1,
+    "backfill": "resumable-background",
+    "compatibility_reconciliation": "commit-notification-driven-background-dirty-drain",
+    "authorization_during_backfill": "fail-closed",
+    "not_ready_error": {
+      "code": "assistant-grant-authority-not-ready",
+      "http_status": 503,
+      "retryable": true
+    }
+  },
   "agents_publication_contract": {
     "description": "Complete current agents publications with an explicit version-1 collections-stream opt-in. No HTTP endpoint or capability availability is added.",
     "metadata": "AgentsPublicationMetadata",
@@ -136,7 +147,7 @@
     { "id": "action.submit", "method": "POST", "path": "/v1/client/actions", "request": "ActionRequest", "response": "ActionResult" },
     { "id": "pairing.begin", "method": "POST", "path": "/v1/client/pairings", "request": "PairingBegin", "response": "PairingChallenge", "local_only": true },
     { "id": "pairing.complete", "method": "POST", "path": "/v1/client/pairings/{id}/complete", "request": "PairingComplete", "response": "PairedSession" },
-    { "id": "assistant.grant.get", "method": "GET", "path": "/v1/client/assistant/grants/{id}", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1" },
+    { "id": "assistant.grant.get", "method": "GET", "path": "/v1/client/assistant/grants/{id}", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1", "query": { "witness": "optional; only 1 opts into conflict and cleared_conflicts fields for daemon-configured-owner inspection. Omitted or any other value retains the pre-witness response shape. Witnesses are owner-only, never exposed by bearer authentication, pairing or grant mutations. Bearer and pairing profile conflicts return HTTP 409 with code grant-profile-conflict and the fixed message principal has active grants of opposite profiles; revoke one to clear the conflict, without witness details." } },
     { "id": "assistant.grant.revoke", "method": "POST", "path": "/v1/client/assistant/grants/{id}/revoke", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1" },
     { "id": "assistant.grant.policy", "method": "POST", "path": "/v1/client/assistant/grants/{id}/policy", "request": "AssistantGrantPolicy", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1" },
     { "id": "assistant.grant.read-trust", "method": "POST", "path": "/v1/client/assistant/grants/{id}/read-trust", "request": "AssistantReadTrustRequest", "response": "AssistantGrant", "local_only": true, "actor": "daemon-configured-owner", "capability": "assistant.grants.v1", "increments_policy_revision": true },
