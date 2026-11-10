@@ -594,6 +594,30 @@ impl ClientRelay {
         host_id: &str,
         request: &ClientReadRequest,
     ) -> Result<(serde_json::Value, ClientReadProvenance)> {
+        let started = std::time::Instant::now();
+        let result = self.read_traced_inner(host_id, request).await;
+        let operation = match &request.request {
+            ClientReadOperation::Timeline { .. } => Some("timeline"),
+            ClientReadOperation::SessionDetail { .. } => Some("session_detail"),
+            ClientReadOperation::ConversationChanges { after: None, .. } => Some("first_snapshot"),
+            ClientReadOperation::ConversationChanges { .. } => Some("changes"),
+            _ => None,
+        };
+        if let Some(operation) = operation {
+            let owner = result.as_ref().map_or(host_id, |(_, provenance)| provenance.owner_host_id.as_str());
+            crate::otel::record_conversation_relay_read(
+                crate::otel::conversation_owner(owner, &self.node, self.peers.iter().map(|peer| peer.name.as_str())),
+                operation, started.elapsed(),
+            );
+        }
+        result
+    }
+
+    async fn read_traced_inner(
+        &self,
+        host_id: &str,
+        request: &ClientReadRequest,
+    ) -> Result<(serde_json::Value, ClientReadProvenance)> {
         let target = host_id
             .strip_prefix("host/")
             .context("the owner host ID is invalid")?;

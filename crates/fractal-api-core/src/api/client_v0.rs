@@ -2060,6 +2060,7 @@ fn session_messages(
     incarnation: Option<&str>,
     before: Option<u64>,
 ) -> Result<Vec<ClaimRecord>, ApiError> {
+    let (mut messages, started, ended) = crate::otel::conversation_phase("st.conversation.graph_sql_ms", || -> Result<_, ApiError> {
     let (started, ended) = match incarnation {
         Some(incarnation) => state.store.conversation_runtime_span(owner, incarnation)
             .map_err(ApiError::internal)?,
@@ -2067,9 +2068,12 @@ fn session_messages(
     };
     // Every stream item the endpoint has, as the graph's newest sends: a delta read takes those
     // past its cursor's stream position.
-    let mut messages = state.store.conversation_messages_at(
+    let messages = state.store.conversation_messages_at(
         owner, before, 0, Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(0)),
     ).map_err(ApiError::internal)?;
+    crate::otel::conversation_count("st.conversation.graph_rows", messages.len());
+    Ok((messages, started, ended))
+    })?;
     messages.retain(|claim| session_message_belongs(claim, owner, session_id, started, ended));
     Ok(messages)
 }
@@ -2206,6 +2210,7 @@ fn conversation_page_header(
         return None;
     }
     let _header = crate::profile::span("conversation/header");
+    crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     let derived = crate::conversation_header::derive(
         items,
         window_truncated || crate::conversation_header::window_truncated(items),
@@ -2214,6 +2219,7 @@ fn conversation_page_header(
         derived,
         conversation_register_value(state, session_id).as_ref(),
     )
+    })
 }
 
 /// The live latest-wins values for a conversation, e.g. `working`. Wire the register here when
@@ -2273,6 +2279,7 @@ pub fn native_session_messages(
             incarnation.as_deref(),
             snapshot.store_index.checked_add(1),
         )?;
+        crate::otel::conversation_phase("st.conversation.header_overlay_ms", || -> Result<(), ApiError> {
         for claim in messages {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             let from = fields.get("from").and_then(Value::as_str);
@@ -2289,6 +2296,8 @@ pub fn native_session_messages(
             items.push(json!({"id":format!("timeline-entry/{}/{}-content", session_id.trim_start_matches("session/"), &digest[..16]), "sequence":base+1, "revision":1, "timestamp":stamp, "role":role, "type":"content", "final":true, "body":session_message_content(session, session_id, &claim)}));
         }
         items.sort_by(timeline_order);
+            Ok(())
+        })?;
     }
     items.reverse();
     Ok(items)
@@ -2536,6 +2545,7 @@ pub fn native_slice_page_at_generation(
         }
     }
     let limit = cursor.as_ref().map_or(requested_limit, |cursor| cursor.limit);
+    crate::otel::roster_attribute("st.conversation.requested_limit", limit as i64);
     let expires_at_unix_ms = cursor.as_ref().map_or_else(
         || client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS),
         |cursor| cursor.expires_at_unix_ms,
@@ -2590,6 +2600,7 @@ pub fn native_slice_page_at_generation(
     native.has_more |= native.items.len() > limit + 1;
     native.items.truncate(limit + 1);
     let overlay = crate::profile::span("conversation/overlay");
+    let (mut items, mut has_more) = crate::otel::conversation_phase("st.conversation.header_overlay_ms", || {
     // Message sequences are unique, and native_session_messages already returns them
     // newest-first by timestamp and sequence. Compute each full key only once.
     let messages = messages.into_iter().map(|item| {
@@ -2619,8 +2630,10 @@ pub fn native_slice_page_at_generation(
             messages.next().expect("peeked message entry")
         });
     }
-    let mut has_more = items.len() > limit || native.has_more;
+    let has_more = items.len() > limit || native.has_more;
     items.truncate(limit);
+    (items, has_more)
+    });
     drop(overlay);
     let _page_preparation = crate::profile::span("conversation/page-preparation");
     let receipt_source = crate::external_sessions::external_session_id(source.driver, &source.native_id);
@@ -3394,6 +3407,7 @@ fn timeline_value_with_subject(
     query: &ClientListQuery,
     owner_subject: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
+    crate::otel::conversation_scope(|| {
     require_scope(session, "read.projections")?;
     let session_id = client_detail_id("session", id);
     let managed_owner = || match owner_subject {
@@ -3445,6 +3459,7 @@ fn timeline_value_with_subject(
     let managed = managed_owner()?;
     crate::performance::task("conversation/first-page", || {
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
+    })
     })
 }
 
