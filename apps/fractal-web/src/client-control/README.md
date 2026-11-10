@@ -22,6 +22,8 @@ Colocated tests cover crypto/storage, foreground, suppression, indicator states,
 4. State-cells read-position group: `9e66194639`, `0d21c1286b`, `45710bb1d5`. Wrap `state/cells/readPositions.ts` store `advance`, used by both `onSeen` and `useMarkRead` in `web/readPosition.ts`.
 5. [Read-position synchronization #6108](https://github.com/compoundingtech/fractal/pull/6108), inspected at `01fd722d1cdfc4beb916817ab9dc68f0307b437b`: its web delta adds lastProseAt projection/types, not a web synchronization caller. The eventual outbound writer belongs inside the same gated advancement boundary as browser-local persistence.
 
+#6278 stays based on origin/main and consumes #6274's generated TS module and shared vector file after they land on main.
+
 ## Resolved source contract; consumption still blocked
 
 #6274 now specifies the existing phone.inspect/phone.navigate vocabulary, generated visible-state and result-binding/grant types, purpose-first claim-fields canonicalization over the JCS visible-state digest, and P-256/SHA-256 IEEE P1363 signatures with unpadded base64url envelope serialization. The signing interface deliberately remains supplied-byte-only: the future adapter must consume `ClientControl.generated.ts` helpers/types rather than reproduce template fields locally. Native WebCrypto signature bytes are compatible with the specified P1363 format; envelope construction belongs to that adapter, not the identity store. These are source-contract resolutions, not conformance or consumer-readiness claims.
