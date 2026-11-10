@@ -58,6 +58,7 @@ For small independent authorized work, use `fractal work start`. Claim before ex
 | `fractal replication status` | Inspect graph synchronization. |
 | `fractal devices` | Pair, inspect, and revoke clients. |
 | `fractal subject show ID` | Inspect one typed graph subject. |
+| `fractal claims ls --kind KIND --subject-prefix PREFIX` | List claims by kind, exact subject, or subject prefix. |
 | `fractal demo check FILE` | Validate a scripted demo file without playback. |
 | `fractal web [--state-dir DIR]` | Open an authenticated session in the daemon's local web app; does not start another server. |
 
