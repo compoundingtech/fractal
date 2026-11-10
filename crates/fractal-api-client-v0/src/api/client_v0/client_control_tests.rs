@@ -9,10 +9,12 @@ async fn client_control_result_key_and_active_grant_never_authorize_message_send
     let root = tempfile::tempdir().unwrap();
     let (state, key, grant, issuer) = client_control_grants::test_support::fixture(root.path());
     let client = client_control_enrollment::enrolled(&state, &grant.device).unwrap().session;
-    let command = client_commands::issue(&state, &issuer, client_commands::DeviceCommandRequest {
-        api_version: CLIENT_API_VERSION.into(), device: grant.device.clone(), kind: "phone.inspect".into(),
-        args: json!({}), ttl_ms: None, grant_id: Some(grant.grant_id.clone()),
-    }).unwrap();
+    // The existing endpoint's deny-unknown-fields wire decoder must accept the
+    // generated grant field, not just an internally constructed request.
+    let command = client_commands::issue(&state, &issuer, serde_json::from_value(json!({
+        "api_version": CLIENT_API_VERSION, "device": grant.device, "kind": "phone.inspect",
+        "args": {}, "grant_id": grant.grant_id,
+    })).unwrap()).unwrap();
     let binding = ClientResultBinding {
         purpose: "client.device-result.v1".into(), command_kind: "phone.inspect".into(), device: grant.device.clone(),
         session: client.actor.clone(), grant_id: grant.grant_id.clone(), run_id: grant.run_id.clone(),
@@ -26,10 +28,10 @@ async fn client_control_result_key_and_active_grant_never_authorize_message_send
         signature: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.sign(&rng, &client_result_canonical_bytes(&binding).unwrap()).unwrap().as_ref()),
         format: "fields-v1".into(), signed_fields: CLIENT_RESULT_SIGNED_FIELDS.iter().map(|field| (*field).into()).collect(),
     };
-    let result = client_commands::report(&state, &client, client_commands::DeviceResultRequest {
-        command_id: binding.command_id.clone(), outcome: "completed".into(), error_code: None,
-        result: Some(serde_json::to_value(&binding.visible_state).unwrap()), binding: Some(binding), signature: Some(signature.clone()),
-    }).unwrap();
+    let result = client_commands::report(&state, &client, serde_json::from_value(json!({
+        "command_id": binding.command_id, "outcome":"completed", "error_code":null,
+        "result": binding.visible_state, "binding": binding, "signature": signature,
+    })).unwrap()).unwrap();
     assert_eq!(result["state"], "completed");
     assert!(result["receipt_claim_id"].as_str().is_some());
     let snapshot = new_client_snapshot(&state);
