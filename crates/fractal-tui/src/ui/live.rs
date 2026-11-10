@@ -762,10 +762,11 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             let grant = control.active();
-            ui.client_control.run_id = grant.and_then(|grant| grant["run_id"].as_str()).map(str::to_owned);
-            ui.client_control.expires_at = grant.and_then(|grant| grant["expires_at"].as_str())
-                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
-                .map(|stamp| stamp.with_timezone(&chrono::Utc));
+            ui.client_control.run_id = grant.map(|grant| grant.run_id.clone());
+            // Lifecycle frames intentionally contain no grant policy or expiry.
+            // Session expiry bounds the indicator; each command checks its own grant expiry.
+            ui.client_control.expires_at = chrono::DateTime::parse_from_rfc3339(&control.device.session.expires_at)
+                .ok().map(|stamp| stamp.with_timezone(&chrono::Utc));
         }
         while let Ok(update) = incoming.try_recv() {
             match update {

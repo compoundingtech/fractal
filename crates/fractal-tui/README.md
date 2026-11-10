@@ -366,6 +366,11 @@ requires fresh consent and a new launch. Grant expiry, ended/revoked lifecycle
 events and a disconnected control subscription stop execution/signing. Only
 `phone.inspect` and `phone.navigate` to `NowRoot` and a native ask's `Attention`
 screen are supported. Conversation and all answer/mutation commands produce no result.
+The existing commands feed's lifecycle resource drives the indicator and
+termination only. Commands must match an active non-terminal lifecycle grant;
+screens, item binding, expiry and command budget are checked against that
+command's `control_grant`. Duplicate or out-of-order starts cannot replace
+newer context, and ended or revoked grant IDs can never restart.
 Read receipts are disabled for the entire isolated control session, not just
 while a grant is active.
 The shared journey opens an open native ask (`person-step`, presentation kind

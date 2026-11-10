@@ -1,17 +1,18 @@
 //! The TUI adapter for the existing session-scoped device-commands collection.
-//! Wire fields live here until the generated SDK exposes grant lifecycle resources.
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use fractal_client::{Client, device::Device};
 use fractal_schema::client_control::{ClientResultBinding, ClientVisibleState};
 use serde_json::Value;
-use std::{collections::BTreeSet, sync::mpsc};
+use std::{collections::{BTreeMap, BTreeSet}, sync::mpsc};
 
 pub(crate) struct Control {
     pub device: Device,
-    pub grant: Option<Value>,
+    pub grant: Option<fractal_client::ClientControlGrantLifecycle>,
     pub stopped: bool,
     used: BTreeSet<String>,
+    sequences: BTreeMap<String, u64>,
+    terminal: BTreeSet<String>,
 }
 
 pub(crate) fn validate_device(device: &Device, client_socket: &std::path::Path) -> Result<()> {
@@ -77,53 +78,77 @@ fn fresh_timestamp(stamp: &str) -> bool {
 
 impl Control {
     pub fn new(device: Device) -> Self {
-        Self { device, grant: None, stopped: false, used: BTreeSet::new() }
+        Self { device, grant: None, stopped: false, used: BTreeSet::new(),
+            sequences: BTreeMap::new(), terminal: BTreeSet::new() }
     }
 
-    pub fn update_grant(&mut self, grant: Value) {
-        if !self.stopped && grant["device"] == self.device.session.device_id
-            && grant["session"] == self.device.session.session_actor
-            && ["grant_id", "run_id", "actor_agent"].iter()
-                .all(|field| grant[*field].as_str().is_some_and(|value| !value.is_empty()))
-        {
-            if grant["state"] == "active" && fresh(&grant["expires_at"]) {
-                if self.grant.as_ref().is_none_or(|old| old["grant_id"] != grant["grant_id"]) {
+    pub fn update_lifecycle(&mut self, frame: Value) {
+        use fractal_schema::client_control::ClientControlGrantLifecycleState as State;
+        let Ok(frame) = serde_json::from_value::<fractal_client::ClientControlGrantLifecycle>(frame) else { return; };
+        if self.stopped || frame.device != self.device.session.device_id
+            || frame.session != self.device.session.session_actor
+            || frame.grant_id.is_empty() || frame.run_id.is_empty() { return; }
+        if self.grant.as_ref().is_some_and(|active| active.grant_id == frame.grant_id
+            && (active.run_id != frame.run_id || active.item_id != frame.item_id)) { return; }
+        match frame.state {
+            State::Ended | State::Revoked => {
+                self.terminal.insert(frame.grant_id.clone());
+                if self.grant.as_ref().is_some_and(|active| active.grant_id == frame.grant_id) {
+                    self.grant = None;
+                }
+            }
+            State::Started if !self.terminal.contains(&frame.grant_id)
+                && self.sequences.get(&frame.grant_id).is_none_or(|last| frame.sequence > *last) => {
+                self.sequences.insert(frame.grant_id.clone(), frame.sequence);
+                if self.grant.as_ref().is_none_or(|old| old.grant_id != frame.grant_id) {
                     self.used.clear();
                 }
-                self.grant = Some(grant);
-            } else {
-                self.grant = None;
+                self.grant = Some(frame);
             }
+            _ => {}
         }
     }
 
     pub fn ingest(&mut self, frame: &Value) -> Vec<Value> {
         if frame["id"] != "commands" { return Vec::new(); }
         let items = if frame["kind"] == "snapshot" {
-            self.grant = None;
             frame["items"].as_array()
         } else if frame["kind"] == "changes" {
             if self.grant.as_ref().is_some_and(|grant| frame["removes"].as_array()
-                .is_some_and(|removed| removed.contains(&grant["grant_id"]))) {
+                .is_some_and(|removed| removed.iter().any(|id| id.as_str() == Some(grant.header.id.as_str())))) {
+                if let Some(grant) = &self.grant {
+                    self.terminal.insert(grant.grant_id.clone());
+                }
                 self.grant = None;
             }
             frame["upserts"].as_array()
         } else { return Vec::new(); };
         let Some(items) = items else { return Vec::new(); };
-        for item in items.iter().filter(|item| item["kind"] == "client-control-grant") {
-            self.update_grant(item.clone());
+        if frame["kind"] == "snapshot" && self.grant.as_ref().is_some_and(|active|
+            !items.iter().any(|item| item["id"].as_str() == Some(active.header.id.as_str()))) {
+            self.grant = None;
+        }
+        for item in items.iter().filter(|item| item["kind"] == "client-control-grant-lifecycle") {
+            self.update_lifecycle(item.clone());
         }
         items.iter().filter(|item| item["kind"] == "device-command").take(8).cloned().collect()
     }
 
-    pub fn active(&self) -> Option<&Value> {
-        self.grant.as_ref().filter(|grant| !self.stopped && fresh(&grant["expires_at"])
+    pub fn active(&self) -> Option<&fractal_client::ClientControlGrantLifecycle> {
+        self.grant.as_ref().filter(|_| !self.stopped
             && fresh_timestamp(&self.device.session.expires_at))
     }
 
     /// No navigation, signature or result is constructed on any refusal path.
     pub fn allows(&self, command: &Value, current_screen: &str) -> bool {
-        let Some(grant) = self.active() else { return false; };
+        let Some(lifecycle) = self.active() else { return false; };
+        let grant = &command["control_grant"];
+        if grant["grant_id"] != lifecycle.grant_id || grant["run_id"] != lifecycle.run_id
+            || grant["device"] != self.device.session.device_id
+            || grant["session"] != self.device.session.session_actor
+            || !fresh(&grant["expires_at"])
+            || grant.get("item_id").is_some_and(|id| !id.is_null() && id.as_str() != lifecycle.item_id.as_deref())
+        { return false; }
         let Some(id) = command["id"].as_str() else { return false; };
         let Some(verb) = command["command_kind"].as_str() else { return false; };
         let screen = if verb == "phone.inspect" { current_screen }
@@ -140,7 +165,7 @@ impl Control {
             && grant["verbs"].as_array().is_some_and(|verbs| verbs.iter().any(|v| v == verb))
             && grant["screens"].as_array().is_some_and(|screens| screens.iter().any(|s| s == screen))
             && (screen != "Attention" || verb == "phone.inspect"
-                || grant.get("item_id").is_none_or(|id| command["args"]["params"]["id"] == *id))
+                || grant.get("item_id").is_none_or(|id| id.is_null() || command["args"]["params"]["id"] == *id))
             && grant["max_commands"].as_u64().is_some_and(|max| self.used.len() < max as usize)
             && !self.used.contains(id)
     }
@@ -154,9 +179,9 @@ impl Control {
         {
             return Ok(None);
         }
-        let Some(grant) = self.active() else { return Ok(None); };
+        let grant = &command["control_grant"];
         if visible_state.screen == "Attention" && grant.get("item_id").is_some_and(|id|
-            visible_state.opened_item.as_ref().is_none_or(|item| id.as_str() != Some(item.id.as_str()))) {
+            !id.is_null() && visible_state.opened_item.as_ref().is_none_or(|item| id.as_str() != Some(item.id.as_str()))) {
             return Ok(None);
         }
         let binding = ClientResultBinding {
@@ -265,14 +290,18 @@ mod tests {
                 "scopes":["read.projections","control.commands"],"expires_at":"2099-01-01T00:00:00Z"}
         })).unwrap();
         let mut control = Control::new(device);
-        control.update_grant(json!({"kind":"client-control-grant","grant_id":"grant/one","run_id":"run/one",
-            "device":control.device.session.device_id,"session":control.device.session.session_actor,
-            "actor_agent":"agent/fixture","verbs":["phone.inspect","phone.navigate"],
-            "screens":["NowRoot","Attention"],"max_commands":50,"expires_at":"2099-01-01T00:00:00Z","state":"active"}));
+        control.update_lifecycle(json!({"kind":"client-control-grant-lifecycle","id":"grant/one",
+            "revision":"1","updated_at":"2026-11-10T12:00:00Z","reason":"granted",
+            "grant_id":"grant/one","run_id":"run/one","sequence":1,"state":"started",
+            "device":control.device.session.device_id,"session":control.device.session.session_actor}));
         let command = json!({"id":"device-command/one","kind":"device-command",
             "device_id":control.device.session.device_id,"session_actor":control.device.session.session_actor,
             "issued_by":"agent/fixture","grant_id":"grant/one","run_id":"run/one",
             "command_kind":"phone.navigate","args":{"screen":"NowRoot"},
+            "control_grant":{"grant_id":"grant/one","run_id":"run/one",
+                "device":control.device.session.device_id,"session":control.device.session.session_actor,
+                "actor_agent":"agent/fixture","verbs":["phone.inspect","phone.navigate"],
+                "screens":["NowRoot","Attention"],"max_commands":50,"expires_at":"2099-01-01T00:00:00Z"},
             "state":"delivered","expires_at":"2099-01-01T00:00:00Z"});
         (control, command)
     }
@@ -294,17 +323,18 @@ mod tests {
                 "wrong device" => command["device_id"] = json!("device/other"),
                 "wrong session" => command["session_actor"] = json!("session/other"),
                 "wrong actor" => command["issued_by"] = json!("agent/other"),
-                "verb" => control.grant.as_mut().unwrap()["verbs"] = json!(["phone.inspect"]),
-                "screen" => control.grant.as_mut().unwrap()["screens"] = json!(["Attention"]),
-                "expired grant" => control.grant.as_mut().unwrap()["expires_at"] = json!("2000-01-01T00:00:00Z"),
+                "verb" => command["control_grant"]["verbs"] = json!(["phone.inspect"]),
+                "screen" => command["control_grant"]["screens"] = json!(["Attention"]),
+                "expired grant" => command["control_grant"]["expires_at"] = json!("2000-01-01T00:00:00Z"),
                 "expired command" => command["expires_at"] = json!("2000-01-01T00:00:00Z"),
-                "budget" => control.grant.as_mut().unwrap()["max_commands"] = json!(0),
+                "budget" => command["control_grant"]["max_commands"] = json!(0),
                 "read mutation" => command["command_kind"] = json!("phone.message.read"),
                 "conversation" => command["args"] = json!({"screen":"Conversation","params":{"target":"agent/fixture"}}),
                 "answer" => command["command_kind"] = json!("work.answer"),
                 "close" => command["command_kind"] = json!("work.close"),
                 "wrong item" => {
-                    control.grant.as_mut().unwrap()["item_id"] = json!("attention/seed");
+                    command["control_grant"]["item_id"] = json!("attention/seed");
+                    control.grant.as_mut().unwrap().lifecycle.item_id = Some("attention/seed".into());
                     command["args"] = json!({"screen":"Attention","params":{"id":"attention/other"}});
                 }
                 _ => unreachable!(),
@@ -328,27 +358,58 @@ mod tests {
         assert!(control.result(&command, visible()).unwrap().is_none());
         let grant = control.grant.clone().unwrap();
         control.stop();
-        control.update_grant(grant);
+        control.update_lifecycle(serde_json::to_value(grant).unwrap());
         assert!(control.active().is_none());
         assert!(control.result(&command, visible()).unwrap().is_none());
     }
 
     #[test]
-    fn lifecycle_snapshot_revocation_and_removal_end_authority() {
+    fn shared_lifecycle_traces_drive_the_shipped_reducer() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/client-control-lifecycle-v1.json")).unwrap();
+        for trace in vectors["traces"].as_array().unwrap() {
+            let (mut control, mut command) = fixture();
+            control.grant = None;
+            control.sequences.clear();
+            control.device.session.device_id = "device/test-tui".into();
+            control.device.session.session_actor = "client-session/test-tui".into();
+            command["device_id"] = json!(control.device.session.device_id);
+            command["session_actor"] = json!(control.device.session.session_actor);
+            command["grant_id"] = trace["grant_id"].clone();
+            command["run_id"] = json!("mission-run/golden");
+            command["control_grant"]["device"] = command["device_id"].clone();
+            command["control_grant"]["session"] = command["session_actor"].clone();
+            command["control_grant"]["grant_id"] = command["grant_id"].clone();
+            command["control_grant"]["run_id"] = command["run_id"].clone();
+            command["control_grant"]["item_id"] = trace["item_id"].clone();
+            for step in trace["steps"].as_array().unwrap() {
+                let before = control.grant.clone();
+                if let Some(resource) = step.get("resource") {
+                    control.ingest(&json!({"kind":"changes","id":"commands","upserts":[resource],"removes":[]}));
+                }
+                match step["expected"].as_str().unwrap() {
+                    "activate" | "allow-lifecycle-gate-only" => assert!(control.allows(&command, "NowRoot")),
+                    "terminate" | "remain-terminal" | "refuse-terminal-lifecycle" | "refuse-no-active-lifecycle" => {
+                        assert!(control.active().is_none());
+                        assert!(control.result(&command, visible()).unwrap().is_none());
+                    }
+                    "ignore-stale-started" | "ignore-item-mismatch" | "ignore-final-grant" => {
+                        assert_eq!(control.grant, before);
+                    }
+                    expected => panic!("Unhandled shared trace expectation: {expected}"),
+                }
+            }
+        }
         let (mut control, command) = fixture();
-        let mut grant = control.grant.clone().unwrap();
-        control.grant = None;
-        let commands = control.ingest(&json!({"kind":"snapshot","id":"commands",
-            "items":[command.clone(),grant.clone()]}));
-        assert_eq!(commands.len(), 1);
-        assert!(control.allows(&command, "NowRoot"));
-        grant["state"] = json!("revoked");
-        control.ingest(&json!({"kind":"changes","id":"commands","upserts":[grant.clone()],"removes":[]}));
-        assert!(!control.allows(&command, "NowRoot"));
-        grant["state"] = json!("active");
-        control.update_grant(grant);
-        control.ingest(&json!({"kind":"changes","id":"commands","upserts":[],"removes":["grant/one"]}));
-        assert!(!control.allows(&command, "NowRoot"));
+        let mut revoked = serde_json::to_value(control.grant.as_ref().unwrap()).unwrap();
+        revoked["state"] = json!("revoked");
+        revoked["sequence"] = json!(2);
+        control.update_lifecycle(revoked.clone());
+        revoked["state"] = json!("started");
+        revoked["sequence"] = json!(99);
+        control.update_lifecycle(revoked);
+        assert!(control.active().is_none());
+        assert!(control.result(&command, visible()).unwrap().is_none());
     }
 
     #[test]
