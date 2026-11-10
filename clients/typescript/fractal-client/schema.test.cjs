@@ -1335,3 +1335,35 @@ test('notice fixtures preserve rich Options, identifiers and lossless timestamps
     // Existing timestamp annotations retain the established DateTime.Utc contract.
     assert.equal(DateTime.toEpochMillis(Rich.decodeUnknownSync(Rich.Timestamp)(wire)), Date.parse(wire));
 });
+
+test('commands Resource and CollectionFrame decode shared lifecycle vectors', async () => {
+    const [, Rich] = await modules;
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../fixtures/clients/client-control-lifecycle-v1.json'), 'utf8'));
+    for (const row of fixture.resources) {
+        const decoded = Rich.decodeUnknownSync(Rich.Resource, 'strict')(row);
+        assert.equal(decoded.kind, 'client-control-grant-lifecycle');
+        assert.equal(decoded.grant_id, row.grant_id);
+        assert.equal(decoded.state, row.state);
+        assert.equal(decoded.sequence, row.sequence);
+    }
+    for (const frame of fixture.frames) {
+        const decoded = Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict')(frame);
+        assert.equal(decoded.collection, 'commands');
+        const rows = decoded.items ?? decoded.upserts;
+        assert.equal(rows[0].kind, 'client-control-grant-lifecycle');
+    }
+    for (const trace of fixture.traces) {
+        for (const step of trace.steps) {
+            if (step.expected === 'refuse-invalid-frame') {
+                assert.throws(() => Rich.decodeUnknownSync(Rich.Resource, 'strict')(step.resource));
+                assert.throws(() => Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict')({ ...fixture.frames[0], items: [step.resource] }));
+            }
+        }
+    }
+    for (const sequence of [0, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.Resource, 'strict')({ ...fixture.resources[0], sequence }));
+    }
+    assert.throws(() => Rich.decodeUnknownSync(Rich.Resource, 'strict')({ ...fixture.resources[0], state: 'future-state' }));
+});

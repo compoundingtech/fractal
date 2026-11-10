@@ -1,5 +1,6 @@
 //! The authoritative st3 subject, resource, and claim registry.
 
+pub mod client_control;
 pub mod arrangements;
 pub mod custom;
 pub mod accountable;
