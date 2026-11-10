@@ -73,6 +73,7 @@ pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
 pub mod run_credentials;
+pub mod run_authority;
 pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -353,6 +354,8 @@ mod status_summary_tests;
 mod run_eta_tests;
 #[cfg(test)]
 mod run_credentials_tests;
+#[cfg(test)]
+mod run_authority_tests;
 #[cfg(test)]
 mod run_eta_review_tests;
 pub mod client_summary;
@@ -2435,6 +2438,10 @@ pub struct ChildMissionContext {
     pub root_run_id: String,
     pub parent_step_run: String,
     pub default_selector: Option<WorkSelector>,
+    /// Who starts the child when it is not its requester: `mission-run/PARENT` for a child a
+    /// program starts. Its creation claims are written as this actor, and run authority takes it
+    /// as the child's starter (docs/st3/program-engine.md §3).
+    pub started_by: Option<String>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -7952,7 +7959,7 @@ fn adopt_declared_mission_revision_tx(
             &[],
             Some(batch_id),
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         if status == "draining" {
             transaction
                 .execute(
@@ -8047,7 +8054,7 @@ fn adopt_declared_mission_revision_tx(
                 &[],
                 Some(batch_id),
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
             claim_ids.push(claim.id);
         }
     }
@@ -8094,7 +8101,7 @@ fn adopt_declared_mission_revision_tx(
         &[],
         Some(batch_id),
     )
-    .map_err(internal)?;
+    .map_err(smallclaims::error::typed)?;
     claim_ids.push(superseded.id);
     claim_ids.extend(terminalize_generation_steps_tx(
         transaction,
@@ -8122,7 +8129,7 @@ fn adopt_declared_mission_revision_tx(
         &[],
         Some(batch_id),
     )
-    .map_err(internal)?;
+    .map_err(smallclaims::error::typed)?;
     claim_ids.push(created.id);
     Ok((claim_ids, false))
 }
@@ -11605,6 +11612,8 @@ fn replicated_work_validation_fields<'a>(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    run_authority::admit_tx(transaction, origin, actor, kind, subject, &fields)
+        .map_err(anyhow::Error::new)?;
     human_review_reassignment::admit_reassignment(transaction, kind, &fields)
         .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
@@ -21760,7 +21769,7 @@ pub fn terminalize_generation_steps_tx(
             &[],
             batch_id,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(claim.id);
     }
     Ok(claim_ids)
@@ -22230,7 +22239,7 @@ pub fn cancel_descendant_mission_runs_tx(
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(run_claim.id);
         let generation_claim = append_claim_tx(
             transaction,
@@ -22242,7 +22251,7 @@ pub fn cancel_descendant_mission_runs_tx(
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(generation_claim.id);
     }
     Ok(claim_ids)
