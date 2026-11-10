@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomValue } from '@effect/atom-react'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
@@ -10,6 +10,7 @@ import { useConnection, useDataSource } from '../data/react.tsx'
 import { devBarAvailable, toggleDevBar, useDevBarVisible } from '../telemetry/devBarPreference.ts'
 import { deviceAccess, type SettingsBuild } from './settingsModel.ts'
 import { shortcutCaps, shortcutList, type ShortcutDefinition } from './shortcuts.ts'
+import { systemEventsPreference } from './conversationPreferences.ts'
 
 export type SettingsScheme = 'dark' | 'light' | 'system'
 
@@ -40,7 +41,7 @@ export const SettingsControl = ({ scheme, onSchemeChange, build }: SettingsContr
               <div {...stylex.props(styles.body)}>
                 <Section title="Appearance"><ThemeRow scheme={scheme} onSchemeChange={onSchemeChange} /></Section>
                 <Section title="Keyboard shortcuts"><ShortcutList /></Section>
-                <Section title="Dev tools"><DevBarRow /></Section>
+                <Section title="Dev tools"><SystemEventsRow /><DevBarRow /></Section>
                 <Section title="Device and connection"><DeviceFacts build={build} /></Section>
               </div>
             </>}
@@ -83,6 +84,15 @@ const ShortcutKeys = ({ shortcut }: { readonly shortcut: ShortcutDefinition }) =
     {alternative === 0 ? null : <span {...stylex.props(styles.keyOr)}>or</span>}
     {chord.flat().map((cap, index) => <kbd key={index} {...stylex.props(styles.key)}>{cap}</kbd>)}
   </React.Fragment>)
+
+const SystemEventsRow = () => {
+  const [visible, setVisible] = useAtom(systemEventsPreference)
+  const touch = React.useContext(NarrowLayoutContext)
+  return <Aria.Switch isSelected={visible} onChange={setVisible} {...stylex.props(styles.row, styles.switchRow, touch && styles.touch)}>
+    <span {...stylex.props(styles.rowLabel)}>Show all system events</span>
+    <span aria-hidden="true" {...stylex.props(styles.track, visible && styles.trackOn)}><span {...stylex.props(styles.thumb, visible && styles.thumbOn)} /></span>
+  </Aria.Switch>
+}
 
 const DevBarRow = () => {
   const visible = useDevBarVisible()

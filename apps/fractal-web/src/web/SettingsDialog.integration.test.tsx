@@ -71,6 +71,7 @@ it('lists the shortcut table and the devbar switch, and carries no usage entry',
   const { dialog } = await mount()
   expect(within(dialog).getByRole('region', { name: 'Keyboard shortcuts' }).textContent).toContain('Toggle sidebar')
   expect(within(dialog).getByRole('switch', { name: 'Show devbar' })).toBeTruthy()
+  expect(within(dialog).getByRole('switch', { name: 'Show all system events' })).toBeTruthy()
   expect(within(dialog).queryByRole('button', { name: /usage/i })).toBeNull()
 })
 
