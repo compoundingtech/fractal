@@ -323,6 +323,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "terminal.control",
     "control.attention",
     "control.messages",
+    "control.commands",
     "control.launches",
     "control.missions",
     "control.work",

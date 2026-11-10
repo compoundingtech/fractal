@@ -156,6 +156,7 @@ mod request_latency;
 mod client_observations;
 pub mod client_push;
 pub mod client_commands;
+pub mod client_control_enrollment;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
@@ -7391,6 +7392,10 @@ async fn serve_reserved_unix_with_lookup_ready(
         // Every local connection names its caller, so request counts by client are always on.
         let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
+        let operator_peer = UnixOperatorPeer {
+            // Both values are supplied by the kernel, never by request metadata.
+            same_uid: stream.peer_cred().is_ok_and(|credentials| credentials.uid() == unsafe { libc::geteuid() }),
+        };
         // This must precede dispatch: the numeric peer PID can be recycled while
         // a descendant continues using the connector's inherited socket.
         let (peer_process, peer_capture_error) = match local_peer_process(&stream) {
@@ -7461,6 +7466,7 @@ async fn serve_reserved_unix_with_lookup_ready(
                 let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
+                    request.extensions_mut().insert(operator_peer);
                     if let Some(cause) = ancestry_cause {
                         request.extensions_mut().insert(cause);
                     }
@@ -7788,6 +7794,12 @@ fn observed_harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProce
 {
     Err(AncestryUnavailableCause { pid: Some(pid),
         reason: AncestryUnavailableReason::UnsupportedPlatform })
+}
+
+/// Kernel-established Unix connector identity for privileged fixture enrollment.
+#[derive(Clone, Copy, Debug)]
+pub struct UnixOperatorPeer {
+    pub same_uid: bool,
 }
 
 #[derive(Clone)]

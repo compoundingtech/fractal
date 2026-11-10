@@ -98,6 +98,8 @@ mod stream_timeline_tests;
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
     app
+        .route("/v1/client/test-clients/enroll", post(fractal_api_core::api::client_control_enrollment::enroll_http))
+        .route("/v1/client/test-clients/revoke", post(fractal_api_core::api::client_control_enrollment::revoke_http))
         .route("/v1/client/arrangements", get(arrangements::list))
         .route(
             "/v1/client/arrangements/{person_name}/{uuid}",
