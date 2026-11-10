@@ -187,20 +187,35 @@ export interface StepOptions {
 }
 
 /**
+ * The failure a step without `error` delivers, live and on replay: its tag and data fields as a
+ * plain object, without the class's prototype, `Error` members or methods.
+ */
+export type Journaled<E> = E extends unknown
+  ? {
+      readonly [K in keyof E as K extends keyof Error | symbol
+        ? never
+        : E[K] extends (...args: never) => unknown
+          ? never
+          : K]: E[K]
+    }
+  : never
+
+/**
  * A step of a program, journaled under its key (`id`, then `id#2`… for repeats, so `Effect.retry`
  * runs it again under a new key). With an effect it is an `Activity`: replay returns the journaled
  * value decoded with `success` (void without one) or fails again with the journaled typed error,
- * rebuilt with `error` or as `_tag` plus fields. Without an effect it is a worker turn: a child run
- * of the provided `Worker` mission, whose product decoded with `success` is the value.
+ * rebuilt as its class with `error`, or as its plain `Journaled` shape without. Without an effect
+ * it is a worker turn: a child run of the provided `Worker` mission, whose product decoded with
+ * `success` is the value.
  */
 export function step<A, E extends Tagged = never, R = never>(
   options: StepOptions & { readonly success?: undefined; readonly error?: undefined },
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<void, E, R | ProgramServices>
+): Effect.Effect<void, Journaled<E>, R | ProgramServices>
 export function step<S extends Codec, E extends Tagged = never, R = never>(
   options: StepOptions & { readonly success: S; readonly error?: undefined },
   effect: Effect.Effect<S['Type'], E, R>,
-): Effect.Effect<S['Type'], E, R | ProgramServices>
+): Effect.Effect<S['Type'], Journaled<E>, R | ProgramServices>
 export function step<ES extends Codec, S extends Codec = typeof Schema.Void, R = never>(
   options: StepOptions & { readonly success?: S; readonly error: ES },
   effect: Effect.Effect<S['Type'], ES['Type'], R>,

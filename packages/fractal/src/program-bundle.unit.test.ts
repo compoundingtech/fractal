@@ -10,7 +10,6 @@ import { Effect } from 'effect'
 import { ProgramEntry, type HostContextV1, type ProgramExit } from './program-engine.ts'
 import { fakeHost, journalOf } from './program-host.fixture.ts'
 
-const hasBun = spawnSync('bun', ['--version']).status === 0
 const landing = fileURLToPath(
   new URL('../fixtures/programs/factory/land-program/mission.ts', import.meta.url),
 )
@@ -24,11 +23,14 @@ const routine: Readonly<Record<string, readonly [string, unknown]>> = {
   verify: ['verify', { head: 'c1', stale: [] }],
 }
 
-describe.skipIf(hasBun === false)('a program bundle', () => {
+describe('a program bundle', () => {
   it.effect(
     'built with bun --target=bun runs the landing program against a host',
     () =>
       Effect.gen(function* () {
+        // Programs are Bun bundles; `nix develop .#web` puts bun on PATH.
+        const version = spawnSync('bun', ['--version'], { encoding: 'utf8' })
+        expect(version.status, 'bun must be on PATH: run the tests in `nix develop .#web`').toBe(0)
         const cwd = mkdtempSync(join(tmpdir(), 'fractal-program-'))
         const bundle = join(cwd, 'land.mjs')
         const build = spawnSync(

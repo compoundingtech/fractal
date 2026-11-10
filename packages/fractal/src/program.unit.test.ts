@@ -1,7 +1,13 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Data, Effect, Schedule, Schema } from 'effect'
 
-import { AskCancelled, ChildFailed, Fractal, type ProgramExit } from './effect.ts'
+import {
+  AskCancelled,
+  ChildFailed,
+  Fractal,
+  type ProgramExit,
+  type ProgramServices,
+} from './effect.ts'
 import { fakeHost, journalOf, start } from './program-host.fixture.ts'
 import type { AgentRef } from './subject-ref.ts'
 
@@ -88,6 +94,37 @@ describe('program replay', () => {
       expect(effects.splice(0)).toEqual(['check'])
     }),
   )
+
+  it.effect('ends the attempt on a refused journal write even when the body catches defects', () =>
+    Effect.gen(function* () {
+      const ran: string[] = []
+      const catching = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Merge.', reportTo, input: Change },
+        () =>
+          Effect.gen(function* () {
+            yield* Effect.exit(
+              Fractal.step(
+                { id: 'check' },
+                Effect.sync(() => ran.push('check')),
+              ),
+            )
+            yield* Fractal.step(
+              { id: 'merge' },
+              Effect.sync(() => ran.push('merge')),
+            )
+          }),
+      )
+      const exit = yield* start(catching, fakeHost({ nack: 'idempotency-conflict' }))
+      expect(exit).toEqual({
+        _tag: 'Failure',
+        error: {
+          _tag: 'Defect',
+          message: 'the daemon refused the journal entry for `check`: idempotency-conflict',
+        },
+      })
+      expect(ran).toEqual(['check'])
+    }),
+  )
 })
 
 describe('typed failures', () => {
@@ -164,6 +201,30 @@ describe('typed failures', () => {
       expect(host.started).toEqual(['check'])
     }),
   )
+
+  it.effect('fail a program that declares an error class when the step declares it too', () =>
+    Effect.gen(function* () {
+      const refused = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Refuse.', reportTo, input: Change, error: Refused },
+        () =>
+          Fractal.step(
+            { id: 'verify', error: Refused },
+            Effect.fail(new Refused({ reason: 'stale' })),
+          ),
+      )
+      expect(yield* start(refused, fakeHost())).toEqual({
+        _tag: 'Failure',
+        error: { _tag: 'Refused', reason: 'stale' },
+      })
+      // Without `error` the step fails with the plain journaled shape, which is not the class.
+      // @ts-expect-error a plain `{ _tag, reason }` is not a `Refused` instance
+      const plain: Effect.Effect<void, Refused, ProgramServices> = Fractal.step(
+        { id: 'verify' },
+        Effect.fail(new Refused({ reason: 'stale' })),
+      )
+      expect(plain).toBeDefined()
+    }),
+  )
 })
 
 describe('step keys', () => {
@@ -225,8 +286,33 @@ describe('step keys', () => {
       const host = fakeHost()
       const exit = yield* start(twice, host)
       expect(exit).toMatchObject({ _tag: 'Failure', error: { _tag: 'Defect' } })
-      expect(JSON.stringify(exit)).toContain('two concurrent steps share the id `check`')
+      expect(JSON.stringify(exit)).toContain('steps in concurrent branches share the id `check`')
       expect(host.recorded).toEqual([])
+    }),
+  )
+
+  it.effect('refuse one id in two concurrent branches even when the uses do not overlap', () =>
+    Effect.gen(function* () {
+      // Live, the fast branch would take `x` and the slow one `x#2`; on replay `a` returns at once
+      // and the branches would swap keys and values.
+      const branches = Fractal.mission(
+        { meta, id: 'factory/test', goal: 'Branch.', reportTo, input: Change },
+        () =>
+          Effect.asVoid(
+            Effect.all(
+              [
+                Fractal.step({ id: 'a' }, Effect.yieldNow).pipe(
+                  Effect.andThen(Fractal.step({ id: 'x' }, Effect.void)),
+                ),
+                Fractal.step({ id: 'x' }, Effect.void),
+              ],
+              { concurrency: 'unbounded' },
+            ),
+          ),
+      )
+      const exit = yield* start(branches, fakeHost())
+      expect(exit).toMatchObject({ _tag: 'Failure', error: { _tag: 'Defect' } })
+      expect(JSON.stringify(exit)).toContain('steps in concurrent branches share the id `x`')
     }),
   )
 })

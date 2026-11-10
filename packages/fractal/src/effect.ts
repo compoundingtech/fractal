@@ -9,6 +9,7 @@ export {
   ChildFailed,
   ChildRun,
   type InputSchema,
+  type Journaled,
   type ProgramIntent,
   type ProgramMission,
   type StepOptions,
@@ -19,6 +20,7 @@ export {
   type CommandOptions,
   type CommandResult,
   type HostContextV1,
+  type JournalEntry,
   type ProgramExit,
   type ProgramServices,
 } from './program-engine.ts'

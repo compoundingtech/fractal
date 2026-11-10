@@ -35,6 +35,15 @@ export interface CommandResult {
   readonly stderr: string
 }
 
+/** A step's result as the bundle hands it to the daemon to journal. */
+export interface JournalEntry {
+  readonly key: string
+  readonly status: 'completed' | 'failed'
+  readonly value?: unknown
+  readonly error?: unknown
+  readonly ms: number
+}
+
 /** What the program host hands a bundle's entry for one attempt of one program step. */
 export interface HostContextV1 {
   /** The program's step run subject. */
@@ -53,13 +62,7 @@ export interface HostContextV1 {
   readonly signal: AbortSignal
   started(key: string): void
   /** Resolves once the daemon has made the entry durable; rejects on nack or cancel. */
-  record(entry: {
-    readonly key: string
-    readonly status: 'completed' | 'failed'
-    readonly value?: unknown
-    readonly error?: unknown
-    readonly ms: number
-  }): Promise<void>
+  record(entry: JournalEntry): Promise<void>
   /**
    * Starts or adopts the linked child run for `key` (protocol message `run`); the daemon journals
    * its end under `key`.
@@ -88,7 +91,8 @@ export class Program extends Context.Service<
   {
     readonly host: HostContextV1
     readonly occurrences: Map<string, number>
-    readonly active: Set<string>
+    /** By id: the fiber that uses it. */
+    readonly owners: Map<string, number>
     readonly requests: Map<string, () => Promise<ProgramExit>>
   }
 >()('fractal/Program') {}
@@ -100,27 +104,28 @@ export type ProgramServices =
   | WorkflowEngine.WorkflowInstance
 
 /**
- * Runs `use` under the next key of `id`: `id`, then `id#2`, `id#3`… in one execution, which is
- * deterministic for a deterministic body. Two concurrent uses of one id would take their keys in
- * scheduling order, which replay cannot reproduce, so that is a defect.
+ * Runs `use` under the next key of `id`: `id`, then `id#2`, `id#3`… in one execution. Only one
+ * fiber may use an id: repeats within a fiber (a loop, `Effect.retry`) take their keys in program
+ * order, while concurrent branches would take them in completion order, which replay does not
+ * reproduce, so a second fiber using the id is a defect.
  */
 export const keyed = <A, E, R>(
   id: string,
   use: (key: string, program: Program['Service']) => Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R | Program> =>
-  Effect.flatMap(Effect.service(Program), (program): Effect.Effect<A, E, R> => {
-    if (program.active.has(id))
-      return Effect.die(
-        new Error(`two concurrent steps share the id \`${id}\`; give each its own id`),
-      )
-    const n = (program.occurrences.get(id) ?? 0) + 1
-    program.occurrences.set(id, n)
-    program.active.add(id)
-    return Effect.ensuring(
-      use(n === 1 ? id : `${id}#${n}`, program),
-      Effect.sync(() => program.active.delete(id)),
-    )
-  })
+  Effect.withFiber((fiber) =>
+    Effect.flatMap(Effect.service(Program), (program): Effect.Effect<A, E, R> => {
+      const owner = program.owners.get(id)
+      if (owner !== undefined && owner !== fiber.id)
+        return Effect.die(
+          new Error(`steps in concurrent branches share the id \`${id}\`; give each its own id`),
+        )
+      program.owners.set(id, fiber.id)
+      const n = (program.occurrences.get(id) ?? 0) + 1
+      program.occurrences.set(id, n)
+      return use(n === 1 ? id : `${id}#${n}`, program)
+    }),
+  )
 
 /** A typed failure: an error with a string `_tag`. */
 export type Tagged = { readonly _tag: string }
@@ -159,8 +164,19 @@ const notInPrograms = (what: string) =>
   Effect.die(new Error(`${what} is not available in a Fractal program`))
 
 /** The engine of one program attempt; it runs the one workflow registered with it. */
-const hostEngine = (program: Program['Service']): WorkflowEngine.Encoded => {
+const hostEngine = (
+  program: Program['Service'],
+  refuse: (key: string, cause: unknown) => void,
+): WorkflowEngine.Encoded => {
   const { host, requests } = program
+  /** Waits for the ack; a refused entry ends the attempt and never resumes the step. */
+  const durable = (entry: JournalEntry) =>
+    Effect.promise(() =>
+      host.record(entry).catch((cause: unknown) => {
+        refuse(entry.key, cause)
+        return new Promise<never>(() => {})
+      }),
+    )
   const workflows = new Map<
     string,
     (
@@ -224,18 +240,14 @@ const hostEngine = (program: Program['Service']): WorkflowEngine.Encoded => {
         const ms = Date.now() - started
         const { exit } = result
         if (Exit.isSuccess(exit)) {
-          yield* Effect.promise(() =>
-            host.record({ key, status: 'completed', value: exit.value ?? null, ms }),
-          )
+          yield* durable({ key, status: 'completed', value: exit.value ?? null, ms })
         } else if (
           Cause.hasDies(exit.cause) === false &&
           Cause.hasInterrupts(exit.cause) === false
         ) {
           const error = Cause.findErrorOption(exit.cause)
           if (Option.isSome(error))
-            yield* Effect.promise(() =>
-              host.record({ key, status: 'failed', error: error.value, ms }),
-            )
+            yield* durable({ key, status: 'failed', error: error.value, ms })
         }
         return result
       }),
@@ -264,19 +276,31 @@ const encodeJson = <T>(schema: Schema.Codec<T, unknown>, value: T) =>
 /**
  * The `fractal.program.v1` entry: decodes the run's inputs, runs the body as a workflow whose
  * execution is the step run, and returns the success encoded with `output` or the typed failure
- * encoded with `error`. Inputs that do not decode refuse the run with `InvalidInput`; a defect
- * returns `Defect` with the cause. After a cancel the host discards the exit.
+ * encoded with `error`. Inputs that do not decode refuse the run with `InvalidInput`; a defect or
+ * a refused journal entry returns `Defect`. After a cancel the host discards the exit.
  */
 export const programEntry =
   <P, A, E>(definition: ProgramDefinition<P, A, E>) =>
   async (host: HostContextV1): Promise<ProgramExit> => {
+    // Ends the attempt when the daemon cancels it or refuses a journal entry. Interrupting the root
+    // fiber, rather than failing the step, keeps the body from continuing past a result that is
+    // not durable.
+    const stop = new AbortController()
+    const cancel = () => stop.abort()
+    host.signal.addEventListener('abort', cancel, { once: true })
+    if (host.signal.aborted) stop.abort()
+    let refused: string | undefined
+    const refuse = (key: string, cause: unknown) => {
+      refused ??= `the daemon refused the journal entry for \`${key}\`: ${cause instanceof Error ? cause.message : String(cause)}`
+      stop.abort()
+    }
     const program: Program['Service'] = {
       host,
       occurrences: new Map(),
-      active: new Set(),
+      owners: new Map(),
       requests: new Map(),
     }
-    const engine = WorkflowEngine.makeUnsafe(hostEngine(program))
+    const engine = WorkflowEngine.makeUnsafe(hostEngine(program, refuse))
     const workflow = Workflow.make(definition.id, {
       payload: definition.input,
       success: definition.output,
@@ -313,11 +337,13 @@ export const programEntry =
       Effect.provideService(Program, program),
       Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
     )
-    const exit = await Effect.runPromiseExit(attempt, { signal: host.signal })
+    const exit = await Effect.runPromiseExit(attempt, { signal: stop.signal }).finally(() =>
+      host.signal.removeEventListener('abort', cancel),
+    )
+    const message = Exit.isSuccess(exit) ? '' : Cause.pretty(exit.cause).slice(0, 2000)
+    if (host.signal.aborted) return { _tag: 'Failure', error: { _tag: 'Interrupted', message } }
+    if (refused !== undefined)
+      return { _tag: 'Failure', error: { _tag: 'Defect', message: refused } }
     if (Exit.isSuccess(exit)) return exit.value
-    const message = Cause.pretty(exit.cause).slice(0, 2000)
-    return {
-      _tag: 'Failure',
-      error: host.signal.aborted ? { _tag: 'Interrupted', message } : { _tag: 'Defect', message },
-    }
+    return { _tag: 'Failure', error: { _tag: 'Defect', message } }
   }
