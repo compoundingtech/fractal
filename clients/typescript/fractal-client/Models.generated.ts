@@ -1892,6 +1892,9 @@ export type ErrorCode = (
   | "pairing-origin-required"
   | "pairing-restart-required"
   | "pairing-key-mismatch"
+  | "pairing-key-binding-required"
+  | "pairing-already-claimed"
+  | "pairing-claim-invalid"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"
@@ -3026,6 +3029,26 @@ export type PairingComplete = {
   device_public_key: string;
   fabric_node_id?: string;
   key_storage?: "secure-enclave" | "software";
+  proof?: string;
+};
+
+export type PairingKeyApproval = {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  device_key_fingerprint: string;
+};
+
+export type PairingKeyClaim = {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  code: string;
+  device_public_key: string;
+  proof: string;
+};
+
+export type PairingKeyStatus = {
+  device_key_fingerprint?: string;
+  expires_at: Timestamp;
+  kind: "pairing-key-status";
+  status: "awaiting-key" | "awaiting-approval" | "approved" | "completed" | "expired";
 };
 
 export type ParticipantRef = string;
@@ -3108,6 +3131,7 @@ export type PersonPairedSession = {
 
 export type PersonPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
+  binding?: "required" | "optional";
   device_key_fingerprint?: string;
   device_name: string;
   fabric_gateway?: boolean;

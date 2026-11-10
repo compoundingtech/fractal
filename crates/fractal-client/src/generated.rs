@@ -139,6 +139,9 @@ pub enum ErrorCode {
     PairingOriginRequired,
     PairingRestartRequired,
     PairingKeyMismatch,
+    PairingKeyBindingRequired,
+    PairingAlreadyClaimed,
+    PairingClaimInvalid,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
@@ -5111,6 +5114,9 @@ pub enum PairingBegin {
 pub struct PersonPairingBegin {
     pub api_version: String,
     pub device_name: String,
+    /// Absent means optional; required challenges need a scanning-key claim and approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
     /// Binds completion to SHA-256 of the exact device public-key UTF-8 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_key_fingerprint: Option<String>,
@@ -5123,6 +5129,28 @@ pub struct PersonPairingBegin {
     /// Narrows the default limited grant to these limited pairing scopes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingKeyClaim {
+    pub api_version: String,
+    pub code: String,
+    pub device_public_key: String,
+    pub proof: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingKeyApproval {
+    pub api_version: String,
+    pub device_key_fingerprint: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PairingKeyStatus {
+    pub kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_key_fingerprint: Option<String>,
+    pub expires_at: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PairingChallenge {
@@ -5150,6 +5178,9 @@ pub struct PairingComplete {
     pub api_version: String,
     pub code: String,
     pub device_public_key: String,
+    /// Possession proof for required binding, domain-separated from the claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<String>,
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_storage: Option<String>,

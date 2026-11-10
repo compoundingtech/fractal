@@ -13,7 +13,7 @@ import type {
     AttentionBudgetReport,
     MissionDeclaration,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
-    PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
+    PairingComplete, PairingKeyClaim, PairingKeyApproval, PairingKeyStatus, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
@@ -488,6 +488,18 @@ export class FractalClient {
 
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {
         return this.request<PairingChallenge>('POST', '/v1/client/pairings', request, undefined, undefined, requestOptions);
+    }
+
+    async pairingKeyClaim(id: string, request: PairingKeyClaim, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingKeyStatus>> {
+        return this.request<PairingKeyStatus>('POST', `/v1/client/pairings/${encodeURIComponent(routedId(id))}/claim`, request, undefined, undefined, requestOptions);
+    }
+
+    async pairingKeyStatus(id: string, waitMs?: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingKeyStatus>> {
+        return this.request<PairingKeyStatus>('GET', `/v1/client/pairings/${encodeURIComponent(routedId(id))}${query({ wait_ms: waitMs })}`, undefined, undefined, undefined, requestOptions);
+    }
+
+    async pairingKeyApprove(id: string, request: PairingKeyApproval, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingKeyStatus>> {
+        return this.request<PairingKeyStatus>('POST', `/v1/client/pairings/${encodeURIComponent(routedId(id))}/approve`, request, undefined, undefined, requestOptions);
     }
 
     async completePairing(id: string, request: PairingComplete, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairedSession>> {

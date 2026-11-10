@@ -3703,6 +3703,51 @@ impl Client {
     ) -> Result<Envelope<PairingChallenge>, ClientError> {
         self.post("/v1/client/pairings", request).await
     }
+    /// Prove possession of the scanning device key; this does not approve it.
+    pub async fn pairing_key_claim(
+        &self,
+        pairing_id: &str,
+        request: &PairingKeyClaim,
+    ) -> Result<Envelope<PairingKeyStatus>, ClientError> {
+        self.post(
+            &format!(
+                "/v1/client/pairings/{}/claim",
+                pairing_id.trim_start_matches("pairing/")
+            ),
+            request,
+        )
+        .await
+    }
+    /// Observe scanning-key state from the trusted local issuer, optionally waiting for change.
+    pub async fn pairing_key_status(
+        &self,
+        pairing_id: &str,
+        wait_ms: Option<u64>,
+    ) -> Result<Envelope<PairingKeyStatus>, ClientError> {
+        let mut path = format!(
+            "/v1/client/pairings/{}",
+            pairing_id.trim_start_matches("pairing/")
+        );
+        if let Some(wait_ms) = wait_ms {
+            path.push_str(&format!("?wait_ms={wait_ms}"));
+        }
+        self.get(&path).await
+    }
+    /// Approve exactly the presented scanning key from the trusted local issuer.
+    pub async fn pairing_key_approve(
+        &self,
+        pairing_id: &str,
+        request: &PairingKeyApproval,
+    ) -> Result<Envelope<PairingKeyStatus>, ClientError> {
+        self.post(
+            &format!(
+                "/v1/client/pairings/{}/approve",
+                pairing_id.trim_start_matches("pairing/")
+            ),
+            request,
+        )
+        .await
+    }
     pub async fn pairing_complete(
         &self,
         pairing_id: &str,
