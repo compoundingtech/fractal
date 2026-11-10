@@ -49,8 +49,8 @@ version 2
 
   mission "carry" state="ready" {
     goal "Keep claimed work across a revision."
-    step "work" { assigned-to "agent/worker"; goal "Do the claimed work." }
-    step "other" { assigned-to "agent/worker"; goal "Use the first goal." }
+    step "work" { assigned-to "agent/node.worker"; goal "Do the claimed work." }
+    step "other" { assigned-to "agent/node.worker"; goal "Use the first goal." }
   }
 
 "#;

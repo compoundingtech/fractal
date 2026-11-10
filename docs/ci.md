@@ -70,6 +70,9 @@ merge-group/main/manual runs are preserved. Its token has only Actions write and
 Cancellation is asynchronous: the request summary is not terminal cancellation proof,
 and scheduling can start a legacy job before the observer runs. The one-day observation
 records actual build/test job starts as well as accepted requests and final cancellations.
+A cancellation HTTP 409 triggers one identity-checked metadata read: an already completed run
+is successful admission (including skipped runs); a still-active or unqualified run remains an
+explicit conflict failure. The observer does not retry the cancellation or force-cancel.
 GitHub does not emit the requested activity for reruns; do not rerun drafts.
 
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run retains
@@ -1294,8 +1297,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which Fractal builds in. It is
-the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
+The CPU budget (2 cores, the `cpu` objective's `load-max-cores`) comes from [`slo/objectives.kdl`](../slo/objectives.kdl), which Fractal builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.
@@ -1362,7 +1365,7 @@ not past it at the start, at its lowest 5-second sample or at the end.
 
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
-every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+every path a target in [`slo/objectives.kdl`](../slo/objectives.kdl) covers, the targets that
 `GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
 `write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
@@ -1519,6 +1522,7 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
+| `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
 The content guard still rejects real machine/home identities and private fleet configuration
 references. Release workflows remain separate from the required gate; neither package
@@ -1574,6 +1578,47 @@ See Namespace's [resource limits](https://namespace.so/docs/architecture/compute
 and [profile concurrency controls](https://namespace.so/docs/solutions/github-actions/runner-controls/concurrent-runners)
 for the scheduler's limits, and GitHub's [merge queue settings](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
 for the distinction between build concurrency and merge batch size.
+
+## Burst runs
+
+`burst.yml` (generated from `burst.yml.genie.ts`) runs one allowlisted suite on one exact commit,
+on demand, in place of a long local build-host queue. It is not a required check and changes
+no evidence or merge-queue rule.
+
+```sh
+gh workflow run burst.yml --ref main -f sha=FULL_SHA -f suite=cargo-test \
+  -f args='-p fractal-runtime --lib' -f request=REQUEST_ID
+```
+
+| Suite | Command at the requested commit |
+| --- | --- |
+| `cargo-test` | `nix develop -c cargo test --locked ARGS` |
+| `nextest` | `nix develop -c cargo nextest run --locked ARGS` |
+| `st-test-all` | Every whole-run check in `scripts/st-test`'s local table, in its order and unsigned: today `typescript-client`, `genie-freshness`, `ci-script-tests` and `linux-gate` (`scripts/ci-local tests clippy fleet-compat`). The report readers sign nothing here, and the path-filtered `fractal-web` stays with Workspace CI. Takes no `args`. |
+
+`sha` must be 40 lowercase hex characters, `request` must match `^[A-Za-z0-9._-]{1,64}$`, and `args`
+must match `^[A-Za-z0-9_:./=@ ,+-]*$`. `args` reaches the command only through the environment and
+is split on spaces. Only a dispatch of main's workflow runs. The suite commands come from that
+workflow; the scripts they call come from the requested commit, which the `burst` job checks out
+with its credentials dropped and refuses unless `HEAD` is exactly `sha`. Give every dispatch its own
+`request`: runs are grouped by it and never cancelled, but a newer dispatch with the same id
+replaces one that is still waiting in the group.
+
+The `burst` job's token can only read the repository. Two small jobs that never check out `sha`
+post the `burst/SUITE` commit status on it: `pending` validates the inputs and posts pending with
+the run's URL; `report` posts success exactly when the suite exited 0, failure for another exit,
+and error when the suite never finished (setup failure, cancellation, timeout), with the
+description `exit=CODE request=REQUEST`. The suite log is the `burst-log-REQUEST` artifact. The
+last line of the suite step and the job summary is
+`burst suite=SUITE sha=SHA request=REQUEST exit=CODE seconds=N`, and the `burst` job fails exactly
+when `CODE` is not 0.
+
+The job runs on the 8x16 Namespace shape at priority 3, the same class as Performance, so it
+never outranks merge groups or required pull request work. The repository variable
+`BURST_RUNS_ON` (a JSON label array) replaces that runner without a workflow change. Builds use the
+fleet's dev/test settings. The job restores, but never saves, main upkeep's `perf-cost` Nix and
+Cargo entries: the dev shell's tools and the crate registry are warm, and build units the two
+builds share (such as build scripts) are reused; `perf-cost`'s own optimized units are not.
 
 ## Superseded merge groups
 

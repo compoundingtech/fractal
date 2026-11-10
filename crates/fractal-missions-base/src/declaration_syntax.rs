@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::model::FractalError;
@@ -204,26 +203,7 @@ pub fn first_string(node: &KdlNode) -> Result<String, FractalError> {
         .and_then(|value| value_string(value))
 }
 
-pub fn json_value(value: &KdlValue) -> Result<Value, FractalError> {
-    Ok(match value {
-        KdlValue::String(value) => Value::String(value.clone()),
-        KdlValue::Integer(value) => {
-            let integer = i64::try_from(*value).map_err(|_| {
-                FractalError::new(
-                    "integer-range",
-                    "a KDL integer must fit a signed 64-bit value",
-                )
-            })?;
-            Value::Number(integer.into())
-        }
-        KdlValue::Float(value) => Value::Number(
-            serde_json::Number::from_f64(*value)
-                .ok_or_else(|| FractalError::new("invalid-number", "a float must be finite"))?,
-        ),
-        KdlValue::Bool(value) => Value::Bool(*value),
-        KdlValue::Null => Value::Null,
-    })
-}
+pub use crate::declaration_kdl::{json_value, parse_duration};
 
 pub fn one_string(node: &KdlNode) -> Result<String, FractalError> {
     ensure_no_children(node)?;
@@ -245,35 +225,6 @@ pub fn one_string_with_children(node: &KdlNode) -> Result<String, FractalError> 
             ))
         }
     })
-}
-
-pub fn parse_duration(value: &str, positive: bool) -> Result<u64, FractalError> {
-    let (number, multiplier) = if let Some(value) = value.strip_suffix("ms") {
-        (value, 1)
-    } else if let Some(value) = value.strip_suffix('s') {
-        (value, 1_000)
-    } else if let Some(value) = value.strip_suffix('m') {
-        (value, 60_000)
-    } else if let Some(value) = value.strip_suffix('h') {
-        (value, 3_600_000)
-    } else if let Some(value) = value.strip_suffix('d') {
-        (value, 86_400_000)
-    } else {
-        (value, 1_000)
-    };
-    let number = number
-        .parse::<u64>()
-        .map_err(|_| FractalError::new("invalid-duration", format!("invalid duration `{value}`")))?;
-    let duration = number
-        .checked_mul(multiplier)
-        .ok_or_else(|| FractalError::new("duration-range", "duration is too large"))?;
-    if positive && duration == 0 {
-        return Err(FractalError::new(
-            "invalid-duration",
-            "a required duration must be positive",
-        ));
-    }
-    Ok(duration)
 }
 
 pub fn parse_map_child(

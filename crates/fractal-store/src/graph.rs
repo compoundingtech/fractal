@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
+use crate::declaration_kdl::canonical_node;
 pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
@@ -26,6 +27,7 @@ const ROOT_NODES: &[&str] = &[
     "mission-run",
     "planning-session",
     "message",
+    "objective",
     "repair",
     "schedule",
     "stop",
@@ -378,6 +380,12 @@ fn parse_desired_node(
         return Err(FractalError::new(
             "account-inside-mission",
             "an account declaration must be at the root",
+        ));
+    }
+    if kind == "objective" && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
         ));
     }
     match kind {
@@ -1688,6 +1696,7 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     validate_name(&name, false)?;
     match kind {
         "account" => validate_account(node)?,
+        "objective" => validate_objective(node)?,
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -1703,6 +1712,8 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     }
     let subject = match kind {
         "doc" => format!("doc/{name}"),
+        // The kernel reader names the subject, so `objective "objective/x"` is not `objective/x`.
+        "objective" => format!("objective/{name}"),
         "lane" | "observer" | "subscription" | "schedule" if context.owner_run.is_some() => {
             format!(
                 "{kind}/{}/{}",
@@ -1738,6 +1749,23 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
             &name,
         )?;
         context.document_refs.insert(format!("doc/{name}@{hash}"));
+    }
+    Ok(())
+}
+
+/// An objective a fleet declares: the kernel's strict reader, and only an interval over claims
+/// named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
+fn validate_objective(node: &KdlNode) -> Result<(), FractalError> {
+    let objective = crate::objective::parse(&canonical_node(node)?)?;
+    if !objective.declarable() {
+        return Err(FractalError::new(
+            "objective-not-declarable",
+            format!(
+                "objective `{}`: a fleet declares an `interval` objective named NAMESPACE/NAME; `{}` indicators and one-segment names are the objectives Fractal ships",
+                objective.name,
+                objective.indicator.kind()
+            ),
+        ));
     }
     Ok(())
 }
@@ -4431,54 +4459,6 @@ fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result
     Ok(())
 }
 
-fn canonical_node(node: &KdlNode) -> Result<Value, FractalError> {
-    let mut properties = BTreeMap::<String, Value>::new();
-    let mut arguments = Vec::new();
-    for entry in node.entries() {
-        let value = json_value(entry.value())?;
-        if let Some(name) = entry.name() {
-            if properties.insert(name.value().into(), value).is_some() {
-                return Err(FractalError::new(
-                    "duplicate-property",
-                    format!(
-                        "node `{}` repeats property `{}`",
-                        node.name().value(),
-                        name.value()
-                    ),
-                ));
-            }
-        } else {
-            arguments.push(value);
-        }
-    }
-    let children = node
-        .children()
-        .map(|document| {
-            document
-                .nodes()
-                .iter()
-                .map(canonical_node)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut output = Map::new();
-    output.insert("name".into(), Value::String(node.name().value().into()));
-    if !arguments.is_empty() {
-        output.insert("arguments".into(), Value::Array(arguments));
-    }
-    if !properties.is_empty() {
-        output.insert(
-            "properties".into(),
-            serde_json::to_value(properties).expect("BTreeMap serializes"),
-        );
-    }
-    if !children.is_empty() {
-        output.insert("children".into(), Value::Array(children));
-    }
-    Ok(Value::Object(output))
-}
-
 fn hash_json(value: &Value) -> String {
     let bytes = serde_json::to_vec(value).expect("normalized JSON serializes");
     hex::encode(Sha256::digest(bytes))
@@ -4802,6 +4782,72 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    const OBJECTIVE: &str = r#"
+version 2
+
+objective "ops/change-rollout" {
+  about "A change, from its author marking it ready to every member that serves it"
+  indicator "interval" {
+    subject-prefix "custom/acme/change/"
+    start "custom.acme.change-ready" at="ready_at"
+    expect "custom.acme.change-merged" set="hosts" at="merged_at"
+    stop "custom.acme.change-applied" member="host" at="applied_at"
+    cancel "custom.acme.change-abandoned"
+    label "class"
+  }
+  window "7d" min-samples=3
+  target "p50" within="60s"
+  target "p95" within="5m"
+  on-breach "fault" owner="agent/ops/release-manager" backup="agent/ops/observability" condition="change-rollout-slo-missed"
+}
+"#;
+
+    #[test]
+    fn an_objective_is_a_root_declaration_the_kernel_reads() {
+        let intent = parse_intent(OBJECTIVE, "node").unwrap();
+        let desired = &intent.subjects["objective/ops/change-rollout"];
+        assert_eq!((desired.kind.as_str(), desired.member.is_none()), ("objective", true));
+        let objective = crate::objective::parse(&desired.desired).unwrap();
+        assert_eq!(objective.name, "ops/change-rollout");
+        assert!(objective.declarable());
+
+        let nested = parse_execution_intent(OBJECTIVE, "node", "run-1").expect_err("a run cannot own an objective");
+        assert_eq!(nested.code, "objective-inside-mission");
+        let body = OBJECTIVE.trim_start().trim_start_matches("version 2").trim();
+        for inside in [
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  {body}\n  step \"work\" {{ agentless }}\n}}\n"),
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  step \"work\" {{\n    {body}\n  }}\n}}\n"),
+        ] {
+            assert_eq!(parse_intent(&inside, "node").unwrap_err().code, "objective-inside-mission", "{inside}");
+        }
+    }
+
+    #[test]
+    fn only_an_interval_named_namespace_slash_name_is_declarable() {
+        let one_segment = OBJECTIVE.replace("\"ops/change-rollout\"", "\"change-rollout\"");
+        assert_eq!(parse_intent(&one_segment, "node").unwrap_err().code, "objective-not-declarable");
+
+        let native = r#"
+version 2
+objective "ops/statement" {
+  about "One SQL statement"
+  indicator "statement"
+  target "p99" within="25ms"
+  target "max" within="250ms"
+}
+"#;
+        assert_eq!(parse_intent(native, "node").unwrap_err().code, "objective-not-declarable");
+
+        for broken in [
+            OBJECTIVE.replace("  window \"7d\" min-samples=3\n", ""),
+            OBJECTIVE.replace("target \"p95\" within=\"5m\"", "target \"p95\" max=5"),
+            OBJECTIVE.replace("    label \"class\"\n", "    label \"class\"\n    retry \"x\"\n"),
+            OBJECTIVE.replace("backup=\"agent/ops/observability\"", "backup=\"agent/ops/release-manager\""),
+        ] {
+            assert_eq!(parse_intent(&broken, "node").unwrap_err().code, "invalid-objective", "{broken}");
+        }
     }
 
     #[test]

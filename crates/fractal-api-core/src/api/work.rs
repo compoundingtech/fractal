@@ -4,6 +4,7 @@ use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
 use crate::SeatsStoreCore;
 use super::*;
+use super::client_v0::{ClientSession, require_scope};
 
 /// Only a locally bound harness may recover a missing work fence from its own runtime.
 /// Explicit fences are retained so the action's validation can refuse stale callers.
@@ -177,10 +178,72 @@ pub async fn list_work(
     Ok(Json(work))
 }
 
+/// Deliberately independent of the rich native work view: adding a native field
+/// cannot grant service disclosure rights.
+#[derive(serde::Serialize)]
+struct ServiceWork<'a> {
+    subject: &'a str,
+    run: &'a str,
+    generation: &'a str,
+    step: &'a str,
+    attempt: u32,
+    status: &'a str,
+    claimant: &'a Option<String>,
+    claim_incarnation: &'a Option<String>,
+    submitted_incarnation: &'a Option<String>,
+    claim_expires_at_unix_ms: Option<u128>,
+    readiness_epoch: u32,
+    worker_reported: bool,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+    clock: ServiceWorkClock,
+}
+
+#[derive(serde::Serialize)]
+struct ServiceWorkClock {
+    started_at_unix_ms: Option<u128>,
+    paused_until_unix_ms: Option<u128>,
+    waited_ms: u128,
+    elapsed_ms: u128,
+}
+
+impl<'a> From<&'a StepRunView> for ServiceWork<'a> {
+    fn from(step: &'a StepRunView) -> Self {
+        Self {
+            subject: &step.subject,
+            run: &step.run,
+            generation: &step.generation,
+            step: &step.step,
+            attempt: step.attempt,
+            status: &step.status,
+            claimant: &step.claimant,
+            claim_incarnation: &step.claim_incarnation,
+            submitted_incarnation: &step.submitted_incarnation,
+            claim_expires_at_unix_ms: step.claim_expires_at_unix_ms,
+            readiness_epoch: step.readiness_epoch,
+            worker_reported: step.worker_reported,
+            created_at_unix_ms: step.created_at_unix_ms,
+            updated_at_unix_ms: step.updated_at_unix_ms,
+            clock: ServiceWorkClock {
+                started_at_unix_ms: step.execution_started_at_unix_ms,
+                paused_until_unix_ms: step.execution_paused_until_unix_ms,
+                waited_ms: step.execution_waited_ms,
+                elapsed_ms: step.execution_elapsed_ms,
+            },
+        }
+    }
+}
+
 pub async fn get_work(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
-) -> Result<Json<StepRunView>, ApiError> {
+    session: Option<Extension<ClientSession>>,
+) -> Result<Response, ApiError> {
+    let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
+    if let Some(session) = &session
+        && service {
+        require_scope(&session.0, "read.work")?;
+    }
     let subject = if subject.starts_with("step-run/") {
         subject
     } else {
@@ -191,11 +254,28 @@ pub async fn get_work(
         .step_run(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
-    // A seat whose host keeps its receipts acknowledges a wake on that host.
-    super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(step))
+    // Services observe work without acknowledging wakes or changing delivery state.
+    if !service {
+        super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(if service {
+        Json(ServiceWork::from(&step)).into_response()
+    } else {
+        Json(step).into_response()
+    })
+}
+
+pub async fn client_get_work(
+    state: State<AppState>,
+    subject: AxumPath<String>,
+    session: Extension<ClientSession>,
+) -> Result<Response, ApiError> {
+    if !client_v0::external_grants::is_service(&session.0) {
+        return Err(client_v0::forbidden("client work reads require a service principal"));
+    }
+    get_work(state, subject, Some(session)).await
 }
 
 pub async fn wake_work(
@@ -599,7 +679,60 @@ pub async fn post_work_action(
         request.actor.as_deref(),
         &mut request.incarnation,
     )?;
+    if request.actor.as_deref().is_some_and(|actor| actor.starts_with("exec/")) {
+        return exec_clock_response(state, action, subject, request).await;
+    }
     work_action_response_viewing(state, action, subject, request, None, None, lease_view).await
+}
+
+/// `work wait` and `work resume` from a step's own exec, which holds no claim. The exec's launch
+/// is its fence, as an incarnation is a seat's: the request names the start operation its runtime
+/// put in its environment (`ST3_START_OPERATION`) or its generation, and is refused unless that is
+/// the exec's live generation on this host. The fence refuses earlier launches, other attempts and
+/// other hosts; like a seat's incarnation it is not a secret that authenticates the caller.
+async fn exec_clock_response(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+) -> Result<Json<StepRunView>, ApiError> {
+    let Some(launch) = request.incarnation.clone().filter(|launch| !launch.is_empty()) else {
+        return Err(ApiError::bad(FractalError::new(
+            "missing-work-incarnation",
+            "an exec's work action names its launch: the ST3_START_OPERATION its runtime gave it",
+        )));
+    };
+    let store = state.store.clone();
+    let runtime = fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+    let node = state.node.clone();
+    let response = blocking_action(move || {
+        let read = |error: anyhow::Error| FractalError::new("store-read-failed", format!("{error:#}"));
+        let exec = request.actor.as_deref().unwrap_or_default();
+        // An exact retry answers from its record, even after the exec has exited.
+        if store.cached_idempotency_response::<StepRunView>(&request.idempotency_key).map_err(read)?.is_none() {
+            let generation = store
+                .desired_subject_with_writer(exec)
+                .map_err(read)?
+                .and_then(|(desired, _)| desired.member)
+                .filter(|member| !member.terminal && member.host == node)
+                .map(|member| runtime.observe(&member.runtime_id))
+                .transpose()
+                .map_err(read)?
+                .flatten();
+            let live = matches!(&generation, Some(fractal_runtime::ExecObservation::Running(generation))
+                if generation.start_operation.as_deref() == Some(launch.as_str()) || generation.generation_id == launch);
+            if !live {
+                return Err(FractalError::new(
+                    "inactive-work-incarnation",
+                    format!("`{launch}` is not the live launch of `{exec}` on this host"),
+                ));
+            }
+        }
+        store.work_action_answering(&subject, &action, &request, None, None, true)
+    })
+    .await?;
+    signal_changed(&state);
+    Ok(Json(response))
 }
 
 /// Add time to the execution budget of the step attempt this seat holds.
