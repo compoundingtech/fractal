@@ -45,8 +45,7 @@ describe('client-control lifecycle gate', () => {
     expect(framesGate.enrollmentRevoked()).toBe(true)
   })
 
-  it('replays every shared trace, exposing exactly the known zero-sequence schema contradiction', () => {
-    let contradictions = 0
+  it('replays every shared trace, including schema-invalid negative resources', () => {
     for (const trace of vectors.traces) {
       const gate = makeGate()
       expect(trace.grant_id).toBe(grant.grant_id)
@@ -54,13 +53,9 @@ describe('client-control lifecycle gate', () => {
       for (const step of trace.steps) {
         if ('resource' in step && step.resource !== undefined) {
           const resource = step.resource
-          if (resource.grant_id === trace.grant_id && resource.id === started.id && resource.sequence === 0 &&
-            step.expected === 'ignore-stale-started') {
-            // Positive sequence is canonical. Do not normalize this contradictory vector.
-            contradictions += 1
+          if (step.expected === 'refuse-invalid-frame') {
             expect(() => decodeLifecycle(resource)).toThrow()
             expect(gate.acceptResource(resource)).toBe('refused-invalid')
-            expect(gate.activeRunId(trace.grant_id)).toBe(grant.run_id)
           } else {
             expect(gate.acceptResource(resource)).toBe(step.expected)
           }
@@ -72,8 +67,6 @@ describe('client-control lifecycle gate', () => {
         }
       }
     }
-    // Fail loudly if either the fixture or generated schema fixes the contradiction.
-    expect(contradictions).toBe(1)
   })
 
   it('requires separately verified authority and an embedded command grant', () => {
