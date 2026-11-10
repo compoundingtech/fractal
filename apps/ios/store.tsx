@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import Constants from 'expo-constants';
-import { claimPairingKey, pairingClaimRefusal } from './pairingClaim';
+import { claimPairingKey, pairingClaimRefusal, pairingCompletionBinding } from './pairingClaim';
 import { isTestPairingClient, pairingScanSession, type PairingScanSession } from './pairingScan';
 import { submitAnswer } from './answer';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
@@ -793,6 +793,8 @@ function useAppStore(proof?: FabricProfile) {
     let consumed = false;
     let deviceId = '';
     try {
+      if (testPairingClient) await pairingCompletionBinding({ gateway, id, code, key: made, sign: signWithDeviceKey },
+        async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))));
       if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
       const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });

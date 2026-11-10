@@ -13,11 +13,21 @@ export type ClaimPorts = {
 };
 
 /** PR #6291: three UTF-8 lines, lowercase code digest, no trailing LF; native sign returns raw r||s. */
-export async function pairingClaimRequest(claim: PairingClaim, hash: ClaimPorts['hash']) {
+export async function pairingPossessionProof(purpose: 'pairing.claim.v1' | 'pairing.complete.v1', claim: PairingClaim, hash: ClaimPorts['hash']): Promise<string> {
   const digest = await hash(new TextEncoder().encode(claim.code));
   const hex = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
-  const proof = await claim.sign(`pairing.claim.v1\n${claim.id}\n${hex}`, claim.key.handle);
+  return claim.sign(`${purpose}\n${claim.id}\n${hex}`, claim.key.handle);
+}
+
+export async function pairingClaimRequest(claim: PairingClaim, hash: ClaimPorts['hash']) {
+  const proof = await pairingPossessionProof('pairing.claim.v1', claim, hash);
   return { api_version: API_VERSION, code: claim.code, device_public_key: claim.key.key, proof };
+}
+
+/** Completion cannot use an unbound generated request while its possession-proof field is pending. */
+export async function pairingCompletionBinding(claim: PairingClaim, hash: ClaimPorts['hash']): Promise<never> {
+  await pairingPossessionProof('pairing.complete.v1', claim, hash);
+  throw new Error('Pairing refused: this test build cannot submit a completion possession proof yet. Update its generated SDK.');
 }
 
 /** Wire fields, proof encoding and server refusals belong at this one boundary. */

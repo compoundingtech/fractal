@@ -172,6 +172,8 @@ test('test-client shipped store scan actions pass the camera key through claim t
   await actions.prefillScannedPairing('https://gateway.example', 'pair/1', 'code');
   const attempt = pairingHarness('https://gateway.example', {
     testPairingClient: true, scanSession, pairDraft: draft,
+    signWithDeviceKey: async () => 'signature',
+    pairingCompletionBinding: async request => { assert.equal(request.key, key); events.push('complete-proof'); },
     createDeviceKey: async () => { throw new Error('must not create a second key'); },
     FractalClient: class {
       async completePairing(id, request) {
@@ -184,5 +186,5 @@ test('test-client shipped store scan actions pass the camera key through claim t
     },
   });
   await assert.rejects(attempt.complete(), /proof verification failed/);
-  assert.deepEqual(events, ['create', 'camera', 'claim', 'complete']);
+  assert.deepEqual(events, ['create', 'camera', 'claim', 'complete-proof', 'complete']);
 });

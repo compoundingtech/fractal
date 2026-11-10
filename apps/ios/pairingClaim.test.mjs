@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { createHash, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { API_VERSION, ClientError } from '../../clients/typescript/fractal-client/index.ts';
-import { claimPairingKey, pairingClaimRefusal, pairingClaimRequest } from './pairingClaim.ts';
+import { claimPairingKey, pairingClaimRefusal, pairingClaimRequest, pairingPossessionProof, pairingCompletionBinding } from './pairingClaim.ts';
 import { isTestPairingClient, pairingScanSession, scanOutcome } from './pairingScan.ts';
 import { parsePairingQr } from './pairingQr.ts';
 
@@ -108,5 +108,14 @@ test('claim proof verifies as raw 64-byte P-256 over the exact PR 1b three-line 
   assert.equal(request.device_public_key, deviceKey.key);
   assert.equal(verify('sha256', Buffer.from(expected, 'utf8'), { key: pair.publicKey, dsaEncoding: 'ieee-p1363' }, signature), true);
   assert.equal(verify('sha256', Buffer.from(expected + '\n', 'utf8'), { key: pair.publicKey, dsaEncoding: 'ieee-p1363' }, signature), false);
+  const completeProof = await pairingPossessionProof('pairing.complete.v1', { ...candidate, key: deviceKey,
+    sign: async text => sign('sha256', Buffer.from(text), { key: pair.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url'),
+  }, hash);
+  assert.equal(verify('sha256', Buffer.from(expected), { key: pair.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(completeProof, 'base64url')), false);
+  assert.equal(verify('sha256', Buffer.from(expected.replace('pairing.claim.v1', 'pairing.complete.v1')), { key: pair.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(completeProof, 'base64url')), true);
+  await assert.rejects(pairingCompletionBinding({ ...candidate, key: deviceKey,
+    sign: async text => sign('sha256', Buffer.from(text), { key: pair.privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url'),
+  }, hash), /cannot submit a completion possession proof/);
 });
 test.todo('PR 1b SDK: generated claim request/response binding and submitted server refusals');
+test.todo('PR 1b SDK: generated completion possession-proof field binding');
