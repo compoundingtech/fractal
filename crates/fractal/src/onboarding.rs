@@ -425,6 +425,7 @@ async fn apply(
                 expected_subjects: preview.subject_tokens,
                 idempotency_key: hex::encode(hash.finalize()),
                 actor: config.person.clone(),
+                program_bundles: Default::default(),
             },
         )
         .await

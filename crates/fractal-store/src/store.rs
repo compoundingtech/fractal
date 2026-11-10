@@ -71,6 +71,7 @@ pub mod schedule_active_run_tests;
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
+mod program_bundles;
 pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -3389,6 +3390,7 @@ impl Store {
                 schedule_standby::validate_publication(transaction, &self.origin, intent)?;
                 mission_capacity::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
+                program_bundles::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
                 let mut one_shot_sets = BTreeMap::new();

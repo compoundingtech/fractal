@@ -730,8 +730,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/gate-checks", post(runs::start_gate_check))
         .route("/v1/gate-checks/{id}", get(runs::read_gate_check))
         .route("/v1/sets/preview", post(owned_sets::preview))
-        .route("/v1/sets/apply", post(owned_sets::apply))
-        .route("/v1/intent/apply", post(launches::apply_with_bound))
+        .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
+        .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
@@ -11122,6 +11122,7 @@ async fn apply_with_authority(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
     let mut response = state
         .store
         .apply_as(
@@ -11134,6 +11135,46 @@ async fn apply_with_authority(
     response.resolved_kdl = request.intent.kdl;
     signal_changed(&state);
     Ok(Json(response))
+}
+
+/// The request body a publication may use: program bundles travel inside it as base64.
+pub const PUBLICATION_BODY_LIMIT: usize = 32 * 1024 * 1024;
+
+/// Verify each program bundle a publication carries against the hash its intent names, then stage
+/// the bytes as local blobs; the `mission.published` claim that names the hash promotes them
+/// (docs/st3/program-engine.md §4). A bundle the intent does not name is refused, so a publication
+/// cannot stage arbitrary bytes, and nothing is staged unless every bundle checks out.
+pub(crate) fn store_program_bundles(
+    state: &AppState,
+    intent: &crate::model::NormalizedIntent,
+    bundles: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    use base64::Engine as _;
+    let named = intent.missions.values().flat_map(|mission| mission.programs()).map(|(_, program)| program.bundle_hash.as_str()).collect::<BTreeSet<_>>();
+    let mut verified = Vec::with_capacity(bundles.len());
+    for (hash, encoded) in bundles {
+        if !named.contains(hash.as_str()) {
+            return Err(ApiError::bad(FractalError::new(
+                "unused-program-bundle",
+                format!("the publication carries program bundle {hash}, which none of its programs names"),
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).map_err(|error| {
+            ApiError::bad(FractalError::new("invalid-program-bundle", format!("program bundle {hash} is not base64: {error}")))
+        })?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != *hash {
+            return Err(ApiError::bad(FractalError::new(
+                "program-bundle-hash-mismatch",
+                format!("program bundle {hash} has sha256 {actual}"),
+            )));
+        }
+        verified.push(bytes);
+    }
+    for bytes in verified {
+        state.store.put_blob(&bytes).map_err(ApiError::internal)?;
+    }
+    Ok(())
 }
 
 /// One write a rule in audit mode would have refused.

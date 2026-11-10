@@ -346,11 +346,12 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
   produces-mission "generated-mission"
   uses-mission output-of="producer-step"
   after-run "mission-run/RUN_ID"
+  program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"
   gate "NAME" { GATE_BODY }
 }
 ```
 
-`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
+`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, `after-run` and `program` are single fields.
 
 `fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
 
@@ -1214,6 +1215,14 @@ step "wait-for-build" {
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
 To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
+
+### Running a program
+
+`program` runs a step as a program the daemon's program engine executes: one ES module pinned by
+its sha256. The step is agentless and the program alone decides its outcome, so it cannot name
+an agent, gates, products, nested or used missions or `after-run`, and it cannot be a `finally`
+step. `fractal apply` sends the bundle's bytes with the publication; see [Program
+engine](program-engine.md).
 
 ## Run reports
 

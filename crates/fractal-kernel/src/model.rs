@@ -872,11 +872,50 @@ pub struct StepSpec {
     /// completes and fails when it fails or is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run: Option<String>,
+    /// The program bundle this agentless step runs (docs/st3/program-engine.md). The daemon's
+    /// program engine owns the step's outcome. Omitted when absent, so other steps hash as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
     pub gates: Vec<GateSpec>,
     pub nested_mission: Option<Box<MissionSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
+/// hash is part of the step's definition, so a mission revision binds exactly one program. The
+/// field is named `bundle_hash` so publishing the declaration promotes the stored blob and every
+/// replica receives it with the declaration; `bundle` is the author's path, kept as provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgramSpec {
+    pub bundle: String,
+    pub bundle_hash: String,
+    /// How long the program may go without a new journal entry before its run reports it stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+}
+
+impl MissionSpec {
+    /// Every program this mission declares, with its step's path, including nested missions and
+    /// loop rounds.
+    pub fn programs(&self) -> Vec<(&str, &ProgramSpec)> {
+        let mut programs = Vec::new();
+        for step in self.steps.values() {
+            if let Some(program) = &step.program {
+                programs.push((step.path.as_str(), program));
+            }
+            if let Some(nested) = &step.nested_mission {
+                programs.extend(nested.programs());
+            }
+            if let Some(loop_spec) = &step.loop_spec {
+                for mission in [Some(&loop_spec.round), loop_spec.on_keep.as_ref(), loop_spec.on_discard.as_ref()].into_iter().flatten() {
+                    programs.extend(mission.programs());
+                }
+            }
+        }
+        programs
+    }
 }
 
 /// How the resource edge was authored. Older stored URI edges predate this discriminator.
@@ -1745,6 +1784,10 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
+    /// The bytes of each program bundle the intent declares, base64 by sha256 (the
+    /// `ProgramSpec::bundle_hash`). The daemon verifies and stores them before it publishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
