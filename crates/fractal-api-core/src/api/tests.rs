@@ -29,6 +29,90 @@ fn incomplete_linux_environment_is_unavailable() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_run_credential_in_the_environment_binds_a_run_and_never_an_agent_too() {
+    for (case, environment, expected) in [
+        ("credential", b"ST_RUN_CREDENTIAL=secret\0".as_slice(), HarnessAncestry::Run(RunCredential::new("secret"))),
+        ("empty credential", b"ST_RUN_CREDENTIAL=\0".as_slice(), HarnessAncestry::Unavailable),
+        ("credential and agent", b"ST_RUN_CREDENTIAL=secret\0ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Unavailable),
+        ("credential and legacy agent", b"FRACTAL_AGENT=agent/fixture/worker\0ST_RUN_CREDENTIAL=secret\0".as_slice(),
+            HarnessAncestry::Unavailable),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+    assert_eq!(format!("{:?}", RunCredential::new("secret")), "RunCredential(..)");
+}
+
+/// An effect's descendant that clears its own environment is still bound: the walk reads each
+/// ancestor's exec-time environment and finds the credential the effect was started with.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_effects_descendant_binds_its_run() {
+    use std::io::BufRead;
+    let mut effect = std::process::Command::new("sh")
+        .args(["-c", "env -i MARKER=1 sleep 10 & echo $!; wait"])
+        .env("ST_RUN_CREDENTIAL", "secret")
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(effect.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    let pid: u32 = line.trim().parse().unwrap();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    effect.kill().unwrap();
+    let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+    effect.wait().unwrap();
+    assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
+}
+
+/// A request whose ancestry carries a live run credential is attributed to `mission-run/RUN`,
+/// may not name another actor, and writes nothing once its attempt has ended.
+#[tokio::test]
+async fn a_run_credential_binds_requests_to_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let post = |subject: &str, actor: Option<&str>| {
+        let mut body = json!({"subject": subject, "kind": "custom.example.recorded", "fields": {}});
+        if let Some(actor) = actor { body["actor"] = json!(actor); }
+        app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap())
+    };
+    let response = post("custom/example/run-own", None).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let claims = state.store.claims_for("custom/example/run-own", Some("custom.example.recorded")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(step.run.as_str()));
+    assert!(step.run.starts_with("mission-run/"));
+
+    let named = post("custom/example/run-named", Some(&step.run)).await.unwrap();
+    assert_eq!(named.status(), StatusCode::OK);
+    for actor in ["person/operator", "agent/example/worker"] {
+        let before = state.store.index().unwrap();
+        let refused = post("custom/example/run-foreign", Some(actor)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{actor}");
+        let body = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
+    // The attempt ends: the credential no longer binds, and the caller writes nothing.
+    state.store.set_step_run_state_for_tests(&step.subject, "completed", 1);
+    let before = state.store.index().unwrap();
+    let ended = post("custom/example/run-ended", None).await.unwrap();
+    assert_eq!(ended.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn empty_process_environment_is_unavailable() {
     let mut child = std::process::Command::new("sleep").arg("10").env_clear().spawn().unwrap();
     let pid = child.id();
