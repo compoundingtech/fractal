@@ -57,7 +57,16 @@ export const verifyClientResultBinding = async (binding: unknown, signature: str
   try { decoded = decodeBinding(binding) } catch { return false }
   const signatureBytes = fromBase64url(signature)
   if (signatureBytes === undefined) return false
-  const bytes = await clientResultCanonicalBytes(encodeBinding(decoded) as CanonicalBinding) as Uint8Array<ArrayBuffer>
+  const encoded = encodeBinding(decoded)
+  let bytes: Uint8Array<ArrayBuffer>
+  try {
+    bytes = await clientResultCanonicalBytes(encoded as CanonicalBinding) as Uint8Array<ArrayBuffer>
+  } catch (error) {
+    // The generated module exports no refusal class/predicate: its quote helper throws this
+    // exact plain Error. Translate only that refusal here, never duplicate Unicode validation.
+    if (error instanceof Error && error.constructor === Error && error.message === 'Invalid Unicode in client result') return false
+    throw error
+  }
   try {
     return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, signatureBytes, bytes)
   } catch (error) {

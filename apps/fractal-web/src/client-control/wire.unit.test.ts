@@ -68,6 +68,35 @@ describe('web consumption of the repository client-control golden file', () => {
     )).rejects.toMatchObject({ name: 'InvalidAccessError' })
   })
 
+  it.each(['\uD800', '\uDC00'])('refuses generated canonicalizer lone-surrogate failures: %j', async malformed => {
+    const vector = golden.vectors[1]!
+    const binding = vector.input
+    const state = binding.visible_state
+    const opened = state.opened_item
+    if (opened === null) throw new Error('Native Attention golden vector must have an opened item')
+    const bindings: unknown[] = [
+      ...(['device', 'session', 'grant_id', 'run_id', 'command_id', 'error_code'] as const)
+        .map(field => ({ ...binding, [field]: malformed })),
+      ...(['route', 'screen'] as const)
+        .map(field => ({ ...binding, visible_state: { ...state, [field]: malformed } })),
+      { ...binding, visible_state: { ...state, visible_item_ids: [malformed] } },
+      ...(['id', 'title', 'body'] as const)
+        .map(field => ({ ...binding, visible_state: { ...state, opened_item: { ...opened, [field]: malformed } } })),
+    ]
+    const key = await verificationKey()
+    for (const changed of bindings) {
+      // These pass the generated String schemas: refusal must come from the canonicalizer.
+      expect(() => decodeBinding(changed)).not.toThrow()
+      await expect(verifyClientResultBinding(changed, vector.signature_p1363_base64url, key)).resolves.toBe(false)
+    }
+  })
+
+  it('still verifies the shared native Attention signature containing a valid astral pair', async () => {
+    const vector = golden.vectors[1]!
+    expect(vector.input.visible_state.opened_item?.title).toContain('\uD83D\uDE00')
+    await expect(verifyClientResultBinding(vector.input, vector.signature_p1363_base64url, await verificationKey())).resolves.toBe(true)
+  })
+
   it.each([
     { screen: 'NowRoot', params: null },
     { screen: 'NowRoot', unexpected: 'value' },
