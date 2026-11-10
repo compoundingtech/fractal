@@ -1106,17 +1106,17 @@ mod tests {
             assert!(error(&without(name)).contains("there is no"), "{name}");
         }
         for (from, to) in [
-            ("target \"cores\" max=1.0", "target \"cores\" max=-1.0"),
-            ("target \"cores\" max=1.0", "target \"cores\" max=0.4"),
+            ("target \"cores\" max=1", "target \"cores\" max=-1.0"),
+            ("target \"cores\" max=1", "target \"cores\" max=0.4"),
             ("target \"idle-cores\" max=0.5", "target \"idle-cores\" max=0.0"),
             ("target \"idle-cores\" max=0.5", "target \"idle-cores\" max=#nan"),
-            ("load-max-cores 2.0", "load-max-cores #inf"),
+            ("load-max-cores 2", "load-max-cores #inf"),
             ("idle-min-minutes 10", "idle-min-minutes 0"),
             ("idle-min-minutes 10", "idle-min-minutes 61"),
             ("idle-min-minutes 10", "idle-min-minutes 10.5"),
-            ("    load-max-cores 2.0\n", ""),
+            ("    load-max-cores 2\n", ""),
             ("  target \"idle-cores\" max=0.5\n", ""),
-            ("target \"live-gb\" max=8.0", "target \"live-gb\" max=0.0"),
+            ("target \"live-gb\" max=8", "target \"live-gb\" max=0.0"),
             ("  indicator \"statement\"\n", "  indicator \"statement\"\n  typo 1\n"),
             ("target \"live-share\" min-percent=99", "target \"live-share\" min-percent=99.5"),
             ("target \"open\" max=0", "target \"open\" max=0.5"),
