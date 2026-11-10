@@ -3,6 +3,9 @@ import { AppState, unstable_batchedUpdates } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
+import Constants from 'expo-constants';
+import { claimPairingKey, pairingClaimRefusal } from './pairingClaim';
+import { isTestPairingClient, pairingScanSession, type PairingScanSession } from './pairingScan';
 import { submitAnswer } from './answer';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
@@ -129,6 +132,15 @@ function observedContext(route: Route, fabricPath: 'direct' | 'relay' | 'unknown
 
 function useAppStore(proof?: FabricProfile) {
   const proofRef = useRef(proof); proofRef.current = proof;
+  const testPairingClient = isTestPairingClient(Constants.expoConfig?.extra);
+  const scanSession = useRef<PairingScanSession | null>(null);
+  if (!scanSession.current) scanSession.current = pairingScanSession(testPairingClient, {
+    create: createDeviceKey, remove: removeDeviceKey, sign: signWithDeviceKey,
+    claim: claim => claimPairingKey(claim, {
+      fetch: gatewayFetch(),
+      hash: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))),
+    }),
+  });
   /** The snapshot the windows last showed: a terminal key may be fenced by it, since any earlier one of this host is accepted. */
   const lastSnapshot = useRef('');
   const [order, setOrder] = useState<Tab[]>(tabOrder(null));
@@ -776,7 +788,7 @@ function useAppStore(proof?: FabricProfile) {
     // A member that grants paired phones its gateway over Fabric learns this phone's NodeID here.
     const node = fabricBuilt ? fabricNode || await fabricIdentity().catch(() => '') : '';
     const fabricFields = pairingFabricNode(advertisement.capabilities, node);
-    const made = await createDeviceKey();
+    const made = testPairingClient ? scanSession.current!.takeCompletionKey({ gateway, id, code }) : await createDeviceKey();
     if (!made) throw new Error('This build cannot make a device key; update the phone app.');
     let consumed = false;
     let deviceId = '';
@@ -905,12 +917,15 @@ function useAppStore(proof?: FabricProfile) {
       if (!gateway || !id.trim() || !code.trim()) return false;
       setBusy(true);
       try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) {
-        setError(pairDraft?.scanned ? 'Could not pair this device. The previous pairing was kept. Check the separately copied fingerprint and start a fresh pairing on the trusted machine; inspect its devices if the code was consumed.' : errorText(e));
+        setError(testPairingClient ? pairingClaimRefusal(e) ?? errorText(e) : pairDraft?.scanned ? 'Could not pair this device. The previous pairing was kept. Check the separately copied fingerprint and start a fresh pairing on the trusted machine; inspect its devices if the code was consumed.' : errorText(e));
         return false;
       } finally { setBusy(false); }
     },
     /** A QR proposes only a draft; saved routing, credential and root pin remain untouched. */
-    prefillScannedPairing(gateway: string, id: string, code: string) {
+    scanPairingQr(camera: () => Promise<string | null>) { return scanSession.current!.scan(camera); },
+    cancelPairingScan() { return scanSession.current!.discard(); },
+    async prefillScannedPairing(gateway: string, id: string, code: string) {
+      await scanSession.current!.claim({ gateway, id, code });
       setPairDraft({ gateway, id, code, scanned: true });
       setPairingIssue('Enter the fingerprint copied separately from the trusted machine before completing this pairing.');
     },
@@ -929,7 +944,7 @@ function useAppStore(proof?: FabricProfile) {
       const pin = saved ? (JSON.parse(saved) as PhoneProfile).personRootFingerprint : undefined;
       setPairingIssue(credential && !pin ? REPAIR_WARNING : 'Enter the fingerprint copied separately from the trusted machine before completing this pairing.');
     },
-    cancelPairDraft() { setPairDraft(null); setPairingIssue(''); },
+    cancelPairDraft() { void scanSession.current!.discard(); setPairDraft(null); setPairingIssue(''); },
     /** Choose the carrier. Fabric is an opt-in and needs a saved target; the saved gateway stays as it is. */
     async setCarrier(choice: CarrierChoice) {
       await saveProfileRouting({ carrier: choice, members: fabricMemberList });

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
 import { retryTransient, notApplied } from '../../clients/typescript/fractal-client/index.ts';
+import { pairingScanSession } from './pairingScan.ts';
 
 const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
 const slice = (start, end, method = false) => {
@@ -88,6 +89,7 @@ const pairingHarness = (gateway = 'https://gateway.example', fabric = {}) => {
   const dependencies = {
     proof: undefined, validatePairingTrust: () => 'trusted fingerprint', canVerifyPairing: () => true,
     PROFILE_KEY: 'profile', pairDraft: null,
+    testPairingClient: false, scanSession: { current: null },
     SecureStore: {
       getItemAsync: async key => profiles.get(key),
       setItemAsync: async (key, value) => { events.push('commit'); profiles.set(key, value); },
@@ -153,4 +155,34 @@ test('scanned pairing stays pinned to its gateway despite a different ready Fabr
   assert.deepEqual(attempt.requests, [`${gateway}/v1/client/capabilities?accepts=fabric-gateway-grant`, gateway]);
   assert.equal(attempt.profiles.get('profile'), attempt.oldProfile);
   console.log('PASS scanned pairing stays pinned to its gateway despite a different ready Fabric member');
+});
+
+test('test-client shipped store scan actions pass the camera key through claim to actual completion', async () => {
+  const key = { key: 'prepared-public-key', handle: 'prepared-handle', storage: 'secure-enclave' };
+  const events = [];
+  const scanSession = { current: pairingScanSession(true, {
+    create: async () => { events.push('create'); return key; },
+    remove: async () => {}, sign: async () => 'signature',
+    claim: async request => { assert.equal(request.key, key); events.push('claim'); },
+  }) };
+  let draft;
+  const scanActions = slice('    scanPairingQr(', '    /** Re-pair', true);
+  const actions = new Function('scanSession', 'setPairDraft', 'setPairingIssue', `return ${scanActions};`)(scanSession, value => { draft = value; }, () => {});
+  await actions.scanPairingQr(async () => { events.push('camera'); return 'qr'; });
+  await actions.prefillScannedPairing('https://gateway.example', 'pair/1', 'code');
+  const attempt = pairingHarness('https://gateway.example', {
+    testPairingClient: true, scanSession, pairDraft: draft,
+    createDeviceKey: async () => { throw new Error('must not create a second key'); },
+    FractalClient: class {
+      async completePairing(id, request) {
+        assert.equal(id, 'pair/1');
+        assert.equal(request.device_public_key, key.key);
+        assert.equal(request.key_storage, key.storage);
+        events.push('complete');
+        return { value: { kind: 'paired-session', device_id: 'device/test' } };
+      }
+    },
+  });
+  await assert.rejects(attempt.complete(), /proof verification failed/);
+  assert.deepEqual(events, ['create', 'camera', 'claim', 'complete']);
 });
