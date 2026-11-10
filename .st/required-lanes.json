@@ -631,7 +631,7 @@
         "scripts/script-test-supervisor",
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
-        "slo/targets.toml",
+        "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
         "wit"
       ]
@@ -837,7 +837,7 @@
         "scripts/script-test-supervisor",
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
-        "slo/targets.toml",
+        "slo/objectives.kdl",
         "vendor/libghostty-vt-sys",
         "wit"
       ]
