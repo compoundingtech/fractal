@@ -1020,6 +1020,24 @@ public struct ClientControlGrantLifecycleResource: Codable, Sendable, Identifiab
     enum CodingKeys: String, CodingKey {
         case id, kind, revision, updatedAt = "updated_at", grantID = "grant_id", runID = "run_id", itemID = "item_id", device, session, state, reason, sequence
     }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        kind = try values.decode(String.self, forKey: .kind)
+        revision = try values.decode(String.self, forKey: .revision)
+        updatedAt = try values.decode(String.self, forKey: .updatedAt)
+        grantID = try values.decode(String.self, forKey: .grantID)
+        runID = try values.decode(String.self, forKey: .runID)
+        device = try values.decode(String.self, forKey: .device)
+        session = try values.decode(String.self, forKey: .session)
+        itemID = try values.decodeIfPresent(String.self, forKey: .itemID)
+        state = try values.decode(ClientControlGrantLifecycleState.self, forKey: .state)
+        reason = try values.decode(String.self, forKey: .reason)
+        sequence = try values.decode(UInt64.self, forKey: .sequence)
+        guard sequence >= 1 && sequence <= 9_007_199_254_740_991 else {
+            throw DecodingError.dataCorruptedError(forKey: .sequence, in: values, debugDescription: "Lifecycle sequence must be a positive JSON-safe integer")
+        }
+    }
 }
 /// Existing commands snapshot/changes frames; lifecycle rows share Resource decoding.
 public struct ClientCommandsCollectionFrame: Codable, Sendable {
