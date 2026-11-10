@@ -1574,71 +1574,266 @@ public struct PairingKeyStatus: Codable, Sendable {
     public let deviceKeyFingerprint: String?
     enum CodingKeys: String, CodingKey { case kind, status, expiresAt = "expires_at", deviceKeyFingerprint = "device_key_fingerprint" }
 }
-public struct PairingExchangeEmpty: Codable, Sendable { public init() {} }
+public struct PairingExchangeEmpty: Codable, Sendable {
+    public init() {}
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: PairingWireKey.self)
+        guard fields.allKeys.isEmpty else { throw pairingWireError(decoder, "Expected an empty pairing body") }
+    }
+    public func encode(to encoder: Encoder) throws { _ = encoder.container(keyedBy: PairingWireKey.self) }
+}
+
+private struct PairingWireKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
+}
+
+private func pairingWireError(_ decoder: Decoder, _ message: String) -> DecodingError {
+    .dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: message))
+}
+
+private func pairingWireFields(_ decoder: Decoder, allowed: Set<String>) throws {
+    let fields = try decoder.container(keyedBy: PairingWireKey.self)
+    guard fields.allKeys.allSatisfy({ allowed.contains($0.stringValue) }) else {
+        throw pairingWireError(decoder, "Unexpected pairing field")
+    }
+}
 /// Keep secret in memory only; do not log or persist a permit or its QR payload.
 public struct PairingFabricPermit: Codable, Sendable {
     public let nodeID, attemptID, secret: String
     public init(nodeID: String, attemptID: String, secret: String) { self.nodeID = nodeID; self.attemptID = attemptID; self.secret = secret }
     enum CodingKeys: String, CodingKey { case nodeID = "node_id", attemptID = "attempt_id", secret }
 }
+public enum PairingQrTag: String, Codable, Sendable { case pairing = "fractal.pairing" }
+public enum PairingQrVersion: Sendable {
+    case v1
+    case v2(PairingFabricPermit)
+}
+
+/// Version two carries a fabric permit; version one cannot carry one.
 public struct PairingQrPayload: Codable, Sendable {
-    public let tag: String
-    public let version: UInt8
+    public var tag: PairingQrTag { .pairing }
+    public let version: PairingQrVersion
     public let gateway, id, code: String
     public let expiresAtUnixMS: Int64
-    public let fabric: PairingFabricPermit?
-    public init(tag: String = "fractal.pairing", version: UInt8, gateway: String, id: String, code: String, expiresAtUnixMS: Int64, fabric: PairingFabricPermit? = nil) {
-        self.tag = tag; self.version = version; self.gateway = gateway; self.id = id; self.code = code; self.expiresAtUnixMS = expiresAtUnixMS; self.fabric = fabric
+    public init(version: PairingQrVersion, gateway: String, id: String, code: String, expiresAtUnixMS: Int64) {
+        self.version = version; self.gateway = gateway; self.id = id; self.code = code; self.expiresAtUnixMS = expiresAtUnixMS
     }
     enum CodingKeys: String, CodingKey { case tag = "_tag", version, gateway, id, code, expiresAtUnixMS = "expires_at_unix_ms", fabric }
+    public init(from decoder: Decoder) throws {
+        try pairingWireFields(decoder, allowed: ["_tag", "version", "gateway", "id", "code", "expires_at_unix_ms", "fabric"])
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        _ = try fields.decode(PairingQrTag.self, forKey: .tag)
+        switch try fields.decode(UInt8.self, forKey: .version) {
+        case 1:
+            guard !fields.contains(.fabric) else { throw pairingWireError(decoder, "Version one must not carry fabric") }
+            version = .v1
+        case 2: version = .v2(try fields.decode(PairingFabricPermit.self, forKey: .fabric))
+        default: throw pairingWireError(decoder, "Unsupported pairing QR version")
+        }
+        gateway = try fields.decode(String.self, forKey: .gateway)
+        id = try fields.decode(String.self, forKey: .id)
+        code = try fields.decode(String.self, forKey: .code)
+        expiresAtUnixMS = try fields.decode(Int64.self, forKey: .expiresAtUnixMS)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(tag, forKey: .tag)
+        switch version {
+        case .v1: try fields.encode(1, forKey: .version)
+        case .v2(let permit):
+            try fields.encode(2, forKey: .version)
+            try fields.encode(permit, forKey: .fabric)
+        }
+        try fields.encode(gateway, forKey: .gateway)
+        try fields.encode(id, forKey: .id)
+        try fields.encode(code, forKey: .code)
+        try fields.encode(expiresAtUnixMS, forKey: .expiresAtUnixMS)
+    }
 }
+
+public enum PairingCapabilityState: String, Codable, Sendable { case granted }
+public enum PairingAdvertisedCapability: String, Sendable, CaseIterable, Hashable, Codable {
+    case deviceKeyProofs = "device-key-proofs"
+    case fabricGatewayGrant = "fabric-gateway-grant"
+    case pairingKeyBinding = "pairing-key-binding"
+    public var id: String { rawValue }
+    public var version: UInt32 { self == .pairingKeyBinding ? 2 : 1 }
+    public var state: PairingCapabilityState { .granted }
+    enum CodingKeys: String, CodingKey { case id, version, state }
+    public init(from decoder: Decoder) throws {
+        try pairingWireFields(decoder, allowed: ["id", "version", "state"])
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try fields.decode(String.self, forKey: .id)
+        guard let capability = Self(rawValue: id),
+              try fields.decode(UInt32.self, forKey: .version) == capability.version else {
+            throw pairingWireError(decoder, "Unsupported pairing capability or version")
+        }
+        _ = try fields.decode(PairingCapabilityState.self, forKey: .state)
+        self = capability
+    }
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(id, forKey: .id)
+        try fields.encode(version, forKey: .version)
+        try fields.encode(state, forKey: .state)
+    }
+}
+
 public struct PairingAdvertisement: Codable, Sendable {
     public let apiVersion: String
     public let capabilities: [PairingAdvertisedCapability]
-    public init(apiVersion: String, capabilities: [PairingAdvertisedCapability]) { self.apiVersion = apiVersion; self.capabilities = capabilities }
+    public init(apiVersion: String, capabilities: [PairingAdvertisedCapability]) throws {
+        guard !capabilities.isEmpty, capabilities.count <= 3, Set(capabilities).count == capabilities.count else {
+            throw EncodingError.invalidValue(capabilities, .init(codingPath: [], debugDescription: "Expected one to three unique pairing capabilities"))
+        }
+        self.apiVersion = apiVersion; self.capabilities = capabilities
+    }
     enum CodingKeys: String, CodingKey { case apiVersion = "api_version", capabilities }
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        let capabilities = try fields.decode([PairingAdvertisedCapability].self, forKey: .capabilities)
+        guard !capabilities.isEmpty, capabilities.count <= 3, Set(capabilities).count == capabilities.count else {
+            throw pairingWireError(decoder, "Expected one to three unique pairing capabilities")
+        }
+        self.apiVersion = try fields.decode(String.self, forKey: .apiVersion)
+        self.capabilities = capabilities
+    }
 }
-public struct PairingAdvertisedCapability: Codable, Sendable {
-    public let id: String
-    public let version: UInt32
-    public let state: String
-    public init(id: String, version: UInt32, state: String = "granted") { self.id = id; self.version = version; self.state = state }
-}
+
 public enum PairingExchangeOperation: String, Codable, Sendable {
     case capabilities, claim, approvalWait = "approval-wait", complete, ack
 }
-/// Body is the canonical request model for op, not a handwritten JSON copy.
-public struct PairingExchangeRequest<Body: Codable & Sendable>: Codable, Sendable {
-    public let v: UInt8
+
+/// The operation is derived from the canonical typed body, never independently supplied.
+public enum PairingExchangeRequestBody: Sendable {
+    case capabilities
+    case claim(PairingKeyClaim)
+    case approvalWait(PairingApprovalWaitRequest)
+    case complete(PairingComplete)
+    case ack(PairingExchangeAck)
+    public var op: PairingExchangeOperation {
+        switch self {
+        case .capabilities: .capabilities
+        case .claim: .claim
+        case .approvalWait: .approvalWait
+        case .complete: .complete
+        case .ack: .ack
+        }
+    }
+}
+
+public struct PairingExchangeRequest: Codable, Sendable {
+    public var v: UInt8 { 1 }
     public let requestID: String
-    public let op: PairingExchangeOperation
-    public let body: Body
-    public init(requestID: String, op: PairingExchangeOperation, body: Body) { self.v = 1; self.requestID = requestID; self.op = op; self.body = body }
+    public var op: PairingExchangeOperation { body.op }
+    public let body: PairingExchangeRequestBody
+    public init(requestID: String, body: PairingExchangeRequestBody) { self.requestID = requestID; self.body = body }
+    public static func capabilities(requestID: String) -> Self { .init(requestID: requestID, body: .capabilities) }
+    public static func claim(requestID: String, body: PairingKeyClaim) -> Self { .init(requestID: requestID, body: .claim(body)) }
+    public static func approvalWait(requestID: String, body: PairingApprovalWaitRequest) -> Self { .init(requestID: requestID, body: .approvalWait(body)) }
+    public static func complete(requestID: String, body: PairingComplete) -> Self { .init(requestID: requestID, body: .complete(body)) }
+    public static func ack(requestID: String, body: PairingExchangeAck) -> Self { .init(requestID: requestID, body: .ack(body)) }
     enum CodingKeys: String, CodingKey { case v, requestID = "request_id", op, body }
+    public init(from decoder: Decoder) throws {
+        try pairingWireFields(decoder, allowed: ["v", "request_id", "op", "body"])
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        guard try fields.decode(UInt8.self, forKey: .v) == 1 else { throw pairingWireError(decoder, "Unsupported pairing exchange version") }
+        requestID = try fields.decode(String.self, forKey: .requestID)
+        let bodyDecoder = try fields.superDecoder(forKey: .body)
+        switch try fields.decode(PairingExchangeOperation.self, forKey: .op) {
+        case .capabilities:
+            _ = try PairingExchangeEmpty(from: bodyDecoder)
+            body = .capabilities
+        case .claim:
+            try pairingWireFields(bodyDecoder, allowed: ["api_version", "code", "device_public_key", "proof"])
+            body = .claim(try PairingKeyClaim(from: bodyDecoder))
+        case .approvalWait:
+            try pairingWireFields(bodyDecoder, allowed: ["pairing_id", "key_fingerprint"])
+            body = .approvalWait(try PairingApprovalWaitRequest(from: bodyDecoder))
+        case .complete:
+            try pairingWireFields(bodyDecoder, allowed: ["api_version", "code", "device_public_key", "proof", "key_storage", "fabric_node_id"])
+            body = .complete(try PairingComplete(from: bodyDecoder))
+        case .ack:
+            try pairingWireFields(bodyDecoder, allowed: ["request_id"])
+            body = .ack(try PairingExchangeAck(from: bodyDecoder))
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(v, forKey: .v)
+        try fields.encode(requestID, forKey: .requestID)
+        try fields.encode(op, forKey: .op)
+        switch body {
+        case .capabilities: try fields.encode(PairingExchangeEmpty(), forKey: .body)
+        case .claim(let body): try fields.encode(body, forKey: .body)
+        case .approvalWait(let body): try fields.encode(body, forKey: .body)
+        case .complete(let body): try fields.encode(body, forKey: .body)
+        case .ack(let body): try fields.encode(body, forKey: .body)
+        }
+    }
 }
 public struct PairingExchangeRefusal: Codable, Sendable {
     public let code: ErrorCode
     public let message: String
     public init(code: ErrorCode, message: String) { self.code = code; self.message = message }
 }
-/// One reply envelope for every operation, with its typed success body.
+/// A success and a refusal cannot coexist or both be absent.
+public enum PairingExchangeOutcome<Body: Codable & Sendable>: Sendable {
+    case ok(Body)
+    case refused(PairingExchangeRefusal)
+}
+
+/// One reply envelope and one common refusal for every operation.
 public struct PairingExchangeReply<Body: Codable & Sendable>: Codable, Sendable {
-    public let v: UInt8
+    public var v: UInt8 { 1 }
     public let requestID: String
-    public let ok: Bool
-    public let body: Body?
-    public let refusal: PairingExchangeRefusal?
-    public init(requestID: String, ok: Bool, body: Body? = nil, refusal: PairingExchangeRefusal? = nil) { self.v = 1; self.requestID = requestID; self.ok = ok; self.body = body; self.refusal = refusal }
+    public let outcome: PairingExchangeOutcome<Body>
+    public init(requestID: String, outcome: PairingExchangeOutcome<Body>) { self.requestID = requestID; self.outcome = outcome }
     enum CodingKeys: String, CodingKey { case v, requestID = "request_id", ok, body, refusal }
+    public init(from decoder: Decoder) throws {
+        try pairingWireFields(decoder, allowed: ["v", "request_id", "ok", "body", "refusal"])
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        guard try fields.decode(UInt8.self, forKey: .v) == 1 else { throw pairingWireError(decoder, "Unsupported pairing exchange version") }
+        requestID = try fields.decode(String.self, forKey: .requestID)
+        if try fields.decode(Bool.self, forKey: .ok) {
+            guard fields.contains(.body), !fields.contains(.refusal), !(try fields.decodeNil(forKey: .body)) else {
+                throw pairingWireError(decoder, "Successful pairing reply requires only a body")
+            }
+            outcome = .ok(try fields.decode(Body.self, forKey: .body))
+        } else {
+            guard fields.contains(.refusal), !fields.contains(.body) else {
+                throw pairingWireError(decoder, "Refused pairing reply requires only a refusal")
+            }
+            outcome = .refused(try fields.decode(PairingExchangeRefusal.self, forKey: .refusal))
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(v, forKey: .v)
+        try fields.encode(requestID, forKey: .requestID)
+        switch outcome {
+        case .ok(let body):
+            try fields.encode(true, forKey: .ok)
+            try fields.encode(body, forKey: .body)
+        case .refused(let refusal):
+            try fields.encode(false, forKey: .ok)
+            try fields.encode(refusal, forKey: .refusal)
+        }
+    }
 }
 public struct PairingApprovalWaitRequest: Codable, Sendable {
     public let pairingID, keyFingerprint: String
     public init(pairingID: String, keyFingerprint: String) { self.pairingID = pairingID; self.keyFingerprint = keyFingerprint }
     enum CodingKeys: String, CodingKey { case pairingID = "pairing_id", keyFingerprint = "key_fingerprint" }
 }
+public enum PairingApprovalStatus: String, Codable, Sendable { case approved }
 public struct PairingApprovalWaitApproved: Codable, Sendable {
-    public let status, keyFingerprint, approvedAt: String
-    public init(keyFingerprint: String, approvedAt: String) { self.status = "approved"; self.keyFingerprint = keyFingerprint; self.approvedAt = approvedAt }
+    public let status: PairingApprovalStatus
+    public let keyFingerprint, approvedAt: String
+    public init(keyFingerprint: String, approvedAt: String) { self.status = .approved; self.keyFingerprint = keyFingerprint; self.approvedAt = approvedAt }
     enum CodingKeys: String, CodingKey { case status, keyFingerprint = "key_fingerprint", approvedAt = "approved_at" }
 }
 public struct PairingExchangeAck: Codable, Sendable {
@@ -1646,9 +1841,11 @@ public struct PairingExchangeAck: Codable, Sendable {
     public init(requestID: String) { self.requestID = requestID }
     enum CodingKeys: String, CodingKey { case requestID = "request_id" }
 }
+public enum PairingAdmissionState: String, Codable, Sendable { case pending = "admission-pending" }
 public struct PairingAdmissionPending: Codable, Sendable {
-    public let state, pairingID: String
-    public init(pairingID: String) { self.state = "admission-pending"; self.pairingID = pairingID }
+    public let state: PairingAdmissionState
+    public let pairingID: String
+    public init(pairingID: String) { self.state = .pending; self.pairingID = pairingID }
     enum CodingKeys: String, CodingKey { case state, pairingID = "pairing_id" }
 }
 public struct PairingResultRequest: Codable, Sendable {
@@ -1667,7 +1864,17 @@ public struct PairingChallenge: Codable, Sendable {
     public let principal: AssistantPrincipal?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
     enum CodingKeys: String, CodingKey { case kind, pairingID = "pairing_id", code, expiresAt = "expires_at", personRootFingerprint = "person_root_fingerprint", principal, grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
 }
-public struct PairingComplete: Codable, Sendable { public let apiVersion: String; public let code: String; public let devicePublicKey: String; public var proof: String? = nil; public var keyStorage: String? = nil; public var fabricNodeID: String? = nil; enum CodingKeys: String, CodingKey { case apiVersion = "api_version", code, devicePublicKey = "device_public_key", proof, keyStorage = "key_storage", fabricNodeID = "fabric_node_id" } }
+public struct PairingComplete: Codable, Sendable {
+    public let apiVersion, code, devicePublicKey: String
+    public var proof: String?
+    public var keyStorage: String?
+    public var fabricNodeID: String?
+    public init(apiVersion: String, code: String, devicePublicKey: String, proof: String? = nil, keyStorage: String? = nil, fabricNodeID: String? = nil) {
+        self.apiVersion = apiVersion; self.code = code; self.devicePublicKey = devicePublicKey
+        self.proof = proof; self.keyStorage = keyStorage; self.fabricNodeID = fabricNodeID
+    }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", code, devicePublicKey = "device_public_key", proof, keyStorage = "key_storage", fabricNodeID = "fabric_node_id" }
+}
 public enum PairedSession: Codable, Sendable {
     case person(PersonPairedSession), assistant(AssistantPairedSession)
     public init(from decoder: Decoder) throws {

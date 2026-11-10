@@ -4203,7 +4203,7 @@ export type MessageBodyEncoded = typeof MessageBody.Encoded
 /** Static unauthenticated pairing preflight; no envelope, presence update or graph information. */
 export const PairingAdvertisement = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
-  "capabilities": Schema.Array(Schema.Union([Schema.Struct({ "id": Schema.Literals(["device-key-proofs","fabric-gateway-grant"]), "state": Schema.Literal("granted"), "version": Schema.Literal(1) }), Schema.Struct({ "id": Schema.Literal("pairing-key-binding"), "state": Schema.Literal("granted"), "version": Schema.Literal(2) })], { mode: "oneOf" })).check(Schema.isMinLength(1)).check(Schema.isMaxLength(3))
+  "capabilities": Schema.Array(Schema.Union([Schema.Struct({ "id": Schema.Literals(["device-key-proofs","fabric-gateway-grant"]), "state": Schema.Literal("granted"), "version": Schema.Literal(1) }), Schema.Struct({ "id": Schema.Literal("pairing-key-binding"), "state": Schema.Literal("granted"), "version": Schema.Literal(2) })], { mode: "oneOf" })).check(Schema.isMinLength(1)).check(Schema.isMaxLength(3)).check(Schema.isUnique())
 }).annotate({ identifier: "PairingAdvertisement", description: "Static unauthenticated pairing preflight; no envelope, presence update or graph information." }))()
 export type PairingAdvertisement = typeof PairingAdvertisement.Type
 export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
