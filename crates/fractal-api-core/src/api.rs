@@ -8161,7 +8161,8 @@ pub async fn guard_bound_request(
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
+    // A publication carries program bundles, so the buffer matches the publication route limit.
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT)
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
@@ -8203,7 +8204,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.map_err(ApiError::internal)?;
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT).await.map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
         && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
     {

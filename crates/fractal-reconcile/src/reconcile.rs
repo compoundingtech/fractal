@@ -11473,6 +11473,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
                     }
+                    // The program engine alone decides a program step's outcome: nothing here
+                    // completes it, so it stays working until the engine runs it.
+                    if step.spec.program.is_some() {
+                        return Ok(changed);
+                    }
                     if !view.agentless && !view.worker_reported {
                         return Ok(changed);
                     }
@@ -21128,6 +21133,7 @@ pub mod tests {
     mod start_preemption;
     mod seat_admission_queue;
     mod terminal_step_guard;
+    mod program_step_hold;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
