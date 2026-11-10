@@ -3651,7 +3651,9 @@ permit deadline (at most ten minutes). There is no continuation token.
 Return exactly one reply, whose success body is
 `{status:"approved",key_fingerprint,approved_at}` (RFC3339 timestamp), or whose
 typed refusal has code `pairing-rejected`, `pairing-expired`,
-`pairing-key-mismatch`, or `pairing-wait-busy`; refusal message is optional.
+`pairing-key-mismatch`, `pairing-wait-busy`, or `pairing-request-conflict`.
+Every refusal uses the single `PairingExchangeRefusal` type: both code and
+message are required. `PairingExchangeReply` is the only reply envelope type.
 Only one approval wait may be outstanding per attempt. A concurrent wait with a
 new request ID returns `pairing-wait-busy`. An identical request rejoins the wait
 or replays the reply; after restart, derive its answer from durable approval state.
