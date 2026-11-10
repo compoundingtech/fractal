@@ -7,7 +7,8 @@ export const createEmbedNavigation = (initial: string): WorkspaceNavigation => {
   return {
     getLocation: () => location,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
-    navigate: (next) => {
+    // This single-location store has no Back stack: push and replace both update the same slot.
+    navigate: (next, _options) => {
       if (next === location) return
       location = next
       listeners.forEach(listener => listener())
