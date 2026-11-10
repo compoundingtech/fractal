@@ -22,15 +22,15 @@
           "route": "/inbox",
           "screen": "NowRoot",
           "visible_item_ids": [
-            "message/seed"
+            "step-run/ask-golden/ask"
           ],
           "opened_item": null
         }
       },
-      "canonical_visible_state": "{\"opened_item\":null,\"route\":\"/inbox\",\"screen\":\"NowRoot\",\"visible_item_ids\":[\"message/seed\"]}",
-      "visible_state_sha256": "f1b171d18c588f8d7bf6df15c3b2189632e6b2192faf64be714ea0e93b1e40fa",
-      "canonical_bytes": "smallclaims-claim-fields-v1\npurpose=\"client.device-result.v1\"\ncommand_kind=\"phone.inspect\"\ndevice=\"device/test-tui\"\nsession=\"client-session/test-tui\"\ngrant_id=\"client-control-grant/golden\"\nrun_id=\"mission-run/golden\"\ncommand_id=\"device-command/golden-0\"\noutcome=\"completed\"\nerror_code=null\nvisible_state_sha256=\"f1b171d18c588f8d7bf6df15c3b2189632e6b2192faf64be714ea0e93b1e40fa\"",
-      "signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXhyH3-4fQmuiZMfjBipdGKJyo7H1eIQ4nJVLpk44Q-3LA",
+      "canonical_visible_state": "{\"opened_item\":null,\"route\":\"/inbox\",\"screen\":\"NowRoot\",\"visible_item_ids\":[\"step-run/ask-golden/ask\"]}",
+      "visible_state_sha256": "4cfea1d08a82607334d7c43e6781b5ae1c2c5066145a5965391e99994a9fd453",
+      "canonical_bytes": "smallclaims-claim-fields-v1\npurpose=\"client.device-result.v1\"\ncommand_kind=\"phone.inspect\"\ndevice=\"device/test-tui\"\nsession=\"client-session/test-tui\"\ngrant_id=\"client-control-grant/golden\"\nrun_id=\"mission-run/golden\"\ncommand_id=\"device-command/golden-0\"\noutcome=\"completed\"\nerror_code=null\nvisible_state_sha256=\"4cfea1d08a82607334d7c43e6781b5ae1c2c5066145a5965391e99994a9fd453\"",
+      "signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXiuu76h6230PGyTZfFujp1lxwC70zSTNzoxlic27FPzmg",
       "negative_bindings": [
         {
           "purpose": "message.send",
@@ -46,7 +46,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -65,7 +65,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -84,7 +84,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -103,7 +103,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -122,7 +122,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -141,7 +141,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -160,7 +160,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -179,7 +179,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -198,7 +198,7 @@
             "route": "/inbox",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -217,7 +217,7 @@
             "route": "/tampered",
             "screen": "NowRoot",
             "visible_item_ids": [
-              "message/seed"
+              "step-run/ask-golden/ask"
             ],
             "opened_item": null
           }
@@ -237,23 +237,23 @@
         "outcome": "completed",
         "error_code": null,
         "visible_state": {
-          "route": "/inbox/message/seed",
-          "screen": "Conversation",
+          "route": "/attention/step-run/ask-golden/ask",
+          "screen": "Attention",
           "visible_item_ids": [
-            "message/seed",
+            "step-run/ask-golden/ask",
             "message/é😀"
           ],
           "opened_item": {
-            "id": "message/seed",
+            "id": "step-run/ask-golden/ask",
             "title": "Seed é 😀",
             "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
           }
         }
       },
-      "canonical_visible_state": "{\"opened_item\":{\"body\":\"Line 1\\n\\t\\\"\\\\\\u0000\\u001f<>/  \",\"id\":\"message/seed\",\"title\":\"Seed é 😀\"},\"route\":\"/inbox/message/seed\",\"screen\":\"Conversation\",\"visible_item_ids\":[\"message/seed\",\"message/é😀\"]}",
-      "visible_state_sha256": "000b60d79d2f6dd48278100222bc4d479adc8e530e922264c1a69bcdb3749220",
-      "canonical_bytes": "smallclaims-claim-fields-v1\npurpose=\"client.device-result.v1\"\ncommand_kind=\"phone.navigate\"\ndevice=\"device/test-tui\"\nsession=\"client-session/test-tui\"\ngrant_id=\"client-control-grant/golden\"\nrun_id=\"mission-run/golden\"\ncommand_id=\"device-command/golden-1\"\noutcome=\"completed\"\nerror_code=null\nvisible_state_sha256=\"000b60d79d2f6dd48278100222bc4d479adc8e530e922264c1a69bcdb3749220\"",
-      "signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXjB9ZRAQfZ5iiyRkjiPK6RlzvDHFcq0ODjctNAo_Bb3lQ",
+      "canonical_visible_state": "{\"opened_item\":{\"body\":\"Line 1\\n\\t\\\"\\\\\\u0000\\u001f<>/  \",\"id\":\"step-run/ask-golden/ask\",\"title\":\"Seed é 😀\"},\"route\":\"/attention/step-run/ask-golden/ask\",\"screen\":\"Attention\",\"visible_item_ids\":[\"step-run/ask-golden/ask\",\"message/é😀\"]}",
+      "visible_state_sha256": "2203b99e4166cda8d04df74ed0c00043490699105058540edb39b86dbf094db3",
+      "canonical_bytes": "smallclaims-claim-fields-v1\npurpose=\"client.device-result.v1\"\ncommand_kind=\"phone.navigate\"\ndevice=\"device/test-tui\"\nsession=\"client-session/test-tui\"\ngrant_id=\"client-control-grant/golden\"\nrun_id=\"mission-run/golden\"\ncommand_id=\"device-command/golden-1\"\noutcome=\"completed\"\nerror_code=null\nvisible_state_sha256=\"2203b99e4166cda8d04df74ed0c00043490699105058540edb39b86dbf094db3\"",
+      "signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXi45Ckt8qvn0tLGFBvQ7AEZ-86R5CQtnzYJQ5kea6paXQ",
       "negative_bindings": [
         {
           "purpose": "message.send",
@@ -266,14 +266,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -290,14 +290,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -314,14 +314,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -338,14 +338,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -362,14 +362,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -386,14 +386,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -410,14 +410,14 @@
           "outcome": "completed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -434,14 +434,14 @@
           "outcome": "failed",
           "error_code": null,
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -458,14 +458,14 @@
           "outcome": "completed",
           "error_code": "tampered",
           "visible_state": {
-            "route": "/inbox/message/seed",
-            "screen": "Conversation",
+            "route": "/attention/step-run/ask-golden/ask",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
@@ -483,13 +483,13 @@
           "error_code": null,
           "visible_state": {
             "route": "/tampered",
-            "screen": "Conversation",
+            "screen": "Attention",
             "visible_item_ids": [
-              "message/seed",
+              "step-run/ask-golden/ask",
               "message/é😀"
             ],
             "opened_item": {
-              "id": "message/seed",
+              "id": "step-run/ask-golden/ask",
               "title": "Seed é 😀",
               "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
             }
