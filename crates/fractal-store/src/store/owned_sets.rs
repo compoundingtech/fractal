@@ -101,6 +101,9 @@ pub struct Request {
     pub options: Options,
     pub actor: String,
     pub idempotency_key: String,
+    /// The program bundles the set declares, base64 by sha256, as `ApplyRequest` carries them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

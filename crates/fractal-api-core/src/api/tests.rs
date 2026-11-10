@@ -4254,6 +4254,7 @@ fn apply_request(state: &AppState, source: &str, actor: &str, key: &str) -> Appl
         expected_subjects: preview.subject_tokens,
         idempotency_key: key.into(),
         actor: Some(actor.into()),
+        program_bundles: Default::default(),
     }
 }
 
@@ -6665,6 +6666,14 @@ async fn mission_resolves_a_bare_document_to_immutable_bytes() {
 }
 
 async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value) {
+    preview_and_apply_with_bundles(app, kdl, BTreeMap::new()).await
+}
+
+async fn preview_and_apply_with_bundles(
+    app: Router,
+    kdl: &str,
+    program_bundles: BTreeMap<String, String>,
+) -> (Value, StatusCode, Value) {
     let (status, preview) = json_request(
         app.clone(),
         "/v1/intent/mission",
@@ -6691,11 +6700,80 @@ async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value)
                 .unwrap(),
             idempotency_key: format!("apply-{}", hex::encode(Sha256::digest(kdl))),
             actor: Some("person/alex".into()),
+            program_bundles,
         })
         .unwrap(),
     )
     .await;
     (preview, status, applied)
+}
+
+/// A publication carries its program bundles as base64, so both caller guards buffer a body up to
+/// the publication route limit (32 MiB) and hand a body past 16 MiB on whole.
+#[tokio::test]
+async fn caller_guards_pass_a_publication_body_past_sixteen_mebibytes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let padding = "a".repeat(20 * 1024 * 1024);
+    for (bound, body) in [
+        (Some("agent/example/publisher"), format!(r#"{{"actor":"agent/example/publisher","pad":"{padding}"}}"#)),
+        (None, format!(r#"{{"pad":"{padding}"}}"#)),
+    ] {
+        let mut request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        if bound.is_none() {
+            request.extensions_mut().insert(HarnessAncestry::Unavailable);
+        }
+        let passed = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = to_bytes(passed.into_body(), PUBLICATION_BODY_LIMIT).await.unwrap();
+        assert_eq!(bytes.len(), body.len(), "{bound:?}");
+    }
+}
+
+#[tokio::test]
+async fn publication_stores_the_program_bundle_its_declaration_names() {
+    use base64::Engine as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let app = router(state);
+    let bytes = b"export default {}";
+    let hash = hex::encode(Sha256::digest(bytes));
+    let kdl = format!(
+        "version 2\nmission \"land\" state=\"ready\" {{\n  goal \"Land.\"\n  step \"program\" {{ program \"/bundles/land.mjs\" sha256=\"{hash}\" }}\n}}"
+    );
+    let encoded = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let before = store.index().unwrap();
+    // A declaration whose bytes this member never received would be refused by every replica.
+    let (_, status, error) = preview_and_apply(app.clone(), &kdl).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "missing-program-bundle");
+    let (_, status, error) =
+        preview_and_apply_with_bundles(app.clone(), &kdl, BTreeMap::from([(hash.clone(), encoded(b"export default 2"))])).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "program-bundle-hash-mismatch");
+    let (_, status, error) = preview_and_apply_with_bundles(
+        app.clone(),
+        &kdl,
+        BTreeMap::from([(hash.clone(), encoded(bytes)), ("0".repeat(64), encoded(b""))]),
+    )
+    .await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "unused-program-bundle");
+    assert_eq!(store.index().unwrap(), before);
+    assert_eq!(store.get_blob(&hash).unwrap(), None);
+
+    let (_, status, applied) =
+        preview_and_apply_with_bundles(app, &kdl, BTreeMap::from([(hash.clone(), encoded(bytes))])).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(store.get_blob(&hash).unwrap().as_deref(), Some(&bytes[..]));
+    // The published definition names the blob by `bundle_hash`, which promotes and replicates it.
+    let published = store.latest_claim("mission/land", Some("mission.published")).unwrap().unwrap();
+    assert!(published.body.to_string().contains(&format!("\"bundle_hash\":\"{hash}\"")), "{}", published.body);
 }
 
 #[tokio::test]
@@ -6938,6 +7016,7 @@ mission "invalid-message" state="ready" {
             expected_subjects: BTreeMap::new(),
             idempotency_key: "reject-invalid-nested-message".into(),
             actor: Some("person/alex".into()),
+            program_bundles: Default::default(),
         })
         .unwrap(),
     )

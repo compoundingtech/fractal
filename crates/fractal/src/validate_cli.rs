@@ -29,6 +29,10 @@ pub(super) fn run_validate(args: &ValidateArgs, json_output: bool) -> Result<()>
             .with_context(|| format!("read {}", path.display()))?;
         let intent = fractal_store::graph::parse_intent(&source, "local")
             .with_context(|| format!("validate {}", path.display()))?;
+        for program in crate::program_bundles::programs(&intent) {
+            crate::program_bundles::read_program_bundle(program)
+                .with_context(|| format!("validate {}", path.display()))?;
+        }
         for (id, subject) in intent.subjects {
             subjects.push(ValidatedSubject {
                 kind: subject.kind,
