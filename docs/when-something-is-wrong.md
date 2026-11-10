@@ -55,6 +55,9 @@ wall time: an active envelope, transaction commit, and its finalization are not
 preemptible. A long background hold can therefore still delay an interactive
 request even when scheduling priority is correct.
 
+Replication verdict pages use background loans and revalidate trust roots after
+each acquisition, including the transaction that activates the authority fold.
+
 Compare the caller site and hold stages before attributing a slow request to
 queue priority or changing admission chunk sizes.
 
