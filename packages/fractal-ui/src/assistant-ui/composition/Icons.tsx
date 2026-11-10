@@ -4,7 +4,7 @@ import { geometryVars as g } from '../composition-tokens.stylex'
 
 export type IconName =
   | 'search' | 'plus' | 'pencil' | 'gear' | 'swap' | 'clock'
-  | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer'
+  | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer' | 'terminal'
   | 'attach' | 'image' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'folder' | 'message' | 'dot' | 'info'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
@@ -22,6 +22,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   'chevron-down': <path d="M3.5 6 8 10.5 12.5 6" />,
   'chevrons-left': <path d="M9.5 3.5 5 8l4.5 4.5M13 3.5 8.5 8l4.5 4.5" />,
   panel: <><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M10 3v10" /></>,
+  terminal: <><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M4.75 6.25 6.75 8l-2 1.75M8.5 10h2.75" /></>,
   more: <><circle cx="3.5" cy="8" r=".75" fill="currentColor" /><circle cx="8" cy="8" r=".75" fill="currentColor" /><circle cx="12.5" cy="8" r=".75" fill="currentColor" /></>,
   drawer: <><rect x="2" y="4" width="12" height="8" rx="1.5" /><path d="M2 7.5h12M4.5 9.75h.01M6.5 9.75h2" /></>,
   attach: <path d="M10.5 5.5 5.8 10.2a1.9 1.9 0 0 0 2.7 2.7l4.9-4.9a3.4 3.4 0 0 0-4.8-4.8L3.4 8.4a4.9 4.9 0 0 0 6.9 6.9l3.2-3.2" />,
