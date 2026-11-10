@@ -259,6 +259,10 @@ round-robin cursor, so an addition backlog cannot keep dirty subjects fenced.
 Late dirty work sorting before the saved cursor wraps within the same slice,
 without waiting for a later maintenance wakeup. Repeated cursor or recheck writes
 retain one work-set entry even under an outer SQL upsert's conflict policy.
+A claim with a durable proof recheck has exactly one authentication-cursor
+owner: the recheck verifier. Ordinary dirty dispatch consumes a bounded skip
+unit for that claim rather than authenticating it a second time; otherwise
+finishing a dirty page could clear the cursor and restart the recheck forever.
 Original authentication cursors never rewind for membership additions. Key
 pages seek `(writer,start,member_key)` with start at or below the receipt sequence;
 expired windows are filtered after the fixed candidate limit and still consume

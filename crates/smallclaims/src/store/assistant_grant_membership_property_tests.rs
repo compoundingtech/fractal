@@ -781,6 +781,34 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             "writer_floor": 1_000_000, "mode": "listening"
         }));
         receive_without_authority_maintenance(&target, &export(&anchor, &target));
+        if mutation == "envelope-invalid" {
+            let mut writer = target.connection.write();
+            let connection = writer.transaction().unwrap();
+            let receipt_state: String = connection.query_row(
+                "SELECT receipt_state FROM replica_envelopes
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                params![grant.origin,sequence,hash], |row| row.get(0),
+            ).unwrap();
+            assert!(matches!(receipt_state.as_str(), "validated" | "degraded"),
+                "real receive must repair the pending receipt with its still-valid signature");
+            // Backlog validation legitimately restores a pending receipt during
+            // the real admission receive. A valid signature cache may authorize
+            // that validated receipt again; this case instead tests evidence
+            // that remains withdrawn when authority maintenance finally runs.
+            assert_eq!(connection.execute(
+                "UPDATE replica_envelopes SET receipt_state='pending'
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                params![grant.origin,sequence,hash],
+            ).unwrap(), 1);
+            assert!(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+                [&grant.id], |row| row.get::<_,bool>(0),
+            ).unwrap(), "renewed withdrawal must retain the real verification obligation");
+            assert!(authority::subject_ready(&connection, &grant.subject).is_err());
+            assert!(!authority::contains(&connection, &grant.id).unwrap(),
+                "renewed receipt withdrawal must immediately fence bearer authority");
+            connection.commit().unwrap();
+        }
         let expected = windows(&fleet_membership_tx(&target.readers.get()).unwrap());
         assert_eq!(expected.get(&original_key), Some(&original_window));
         assert!(expected.contains_key(&("peer".to_owned(), future_key.public().to_owned())));
@@ -969,7 +997,7 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
             assert!(connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM assistant_grant_membership_windows
                  WHERE writer='peer' AND member_key=?1 AND start=?2)",
-                params![future_key.public(),floor], |row| row.get::<_,bool>(0),
+                params![future_key.public(),floor + 1], |row| row.get::<_,bool>(0),
             ).unwrap(), "signed admission must actually reach membership");
             if let (Some(before), Some(after)) = (&previous, &next) {
                 assert!(after > before, "future-only admission restarted or stalled the original cursor");
@@ -1028,6 +1056,23 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
             "writer_floor": 0, "mode": "listening"
         }));
         receive_without_authority_maintenance(&target, &export(&anchor, &target));
+    }
+    if matches!(coverage, AlternateProofCoverage::AlreadyAdmitted) {
+        // A dirty refresh and the durable recheck must share one verifier.
+        // Bound completion here so cursor restarts fail before the oracle's drain.
+        let mut finished = false;
+        for _ in 0..key_pages + 3 {
+            if target.advance_assistant_grant_authority_backfill().unwrap() {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "dual-signed recheck did not finish within its bounded key pages");
+        assert!(!target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)
+             OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+            [&grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap(), "completed dual-signed maintenance retained its original retry obligation");
     }
     // Newly eligible earlier keys have independent retry work; the original
     // search need not restart or survive until that work restores authority.

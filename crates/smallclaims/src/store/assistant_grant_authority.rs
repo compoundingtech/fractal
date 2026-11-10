@@ -1120,7 +1120,16 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
                 [&dirty_after], |row| row.get(0),
             ).optional()?;
             if let Some(claim) = dirty {
-                refresh_claim_inner(connection,&claim,membership_current)?;
+                let recheck_owned: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+                    [&claim], |row| row.get(0),
+                )?;
+                // One verifier owns the cursor and discharges its obligation.
+                // A dirty refresh must not finish its page and clear the cursor
+                // only for the recheck phase to restart the same search.
+                if !recheck_owned {
+                    refresh_claim_inner(connection,&claim,membership_current)?;
+                }
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
                 )?;

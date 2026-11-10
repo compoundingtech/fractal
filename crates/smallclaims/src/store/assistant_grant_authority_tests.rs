@@ -1115,10 +1115,16 @@ fn late_signature_restarts_an_in_progress_key_cursor_before_its_old_position() {
             params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
     }).unwrap();
     let mut connection = target.connection.write();
+    let member_start: u64 = connection.query_row(
+        "SELECT start FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
+        params![signature.writer,signature.member_key], |row| row.get(0),
+    ).unwrap();
+    // The cursor now orders by (window start,key), not key alone. Keep these
+    // windows in the same start range so the genuine key precedes the cursor.
     for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*2) {
         connection.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
-            params![signature.writer,format!("~{index:08}")]).unwrap();
+            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
+            params![signature.writer,format!("~{index:08}"),member_start]).unwrap();
     }
     connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     let transaction = connection.transaction().unwrap();
