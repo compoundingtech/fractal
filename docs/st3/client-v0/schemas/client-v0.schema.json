@@ -4438,12 +4438,22 @@
         "device_public_key": { "type": "string" }, "bound_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "creation_id": { "type": "string" }, "attempt_id": { "type": "string" }, "permit_deadline": { "$ref": "#/$defs/Timestamp" },
         "confirm_request": { "$ref": "#/$defs/PairingFabricConfirmRequest" },
-        "confirm_receipt": { "type": "object", "description": "Full retained Fabric confirm receipt, including committed_at and policy_revision." },
+        "confirm_receipt": { "type": "object", "additionalProperties": true, "required": ["committed_at", "policy_revision", "node_id"], "properties": { "committed_at": { "$ref": "#/$defs/Timestamp" }, "policy_revision": { "type": "integer", "minimum": 0 }, "node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }, "description": "Full retained Fabric confirm receipt. Unknown fields are retained, while the reconciliation inputs remain typed." },
         "committed_at": { "$ref": "#/$defs/Timestamp" }, "policy_revision": { "type": "integer", "minimum": 0 },
         "completion": { "$ref": "#/$defs/PairedSession" }, "grant_id": { "$ref": "#/$defs/Id" },
         "result_fetched_at": { "$ref": "#/$defs/Timestamp" }, "remove_peer_receipt": { "type": "object" }, "revoke_receipt": { "type": "object" },
-        "refused": { "type": "boolean" }
-      }
+        "cleanup_reason": { "type": "string", "minLength": 1 }, "cleanup_started_at": { "$ref": "#/$defs/Timestamp" },
+        "refused": { "const": true, "description": "Present only for terminal refused S5 closures, which have no confirmation or grant." }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "enum": ["S2", "S3"] } } }, "then": { "required": ["confirm_receipt", "committed_at", "policy_revision"] } },
+        { "if": { "properties": { "state": { "const": "S3" } } }, "then": { "required": ["completion", "grant_id"] } },
+        { "if": { "properties": { "state": { "enum": ["S4", "S5"] } } }, "then": { "required": ["cleanup_reason", "cleanup_started_at"] } },
+        { "if": { "properties": { "state": { "enum": ["S4", "S5"] } }, "anyOf": [{ "required": ["confirm_receipt"] }, { "required": ["grant_id"] }] }, "then": { "required": ["confirm_receipt", "committed_at", "policy_revision"] } },
+        { "if": { "properties": { "state": { "const": "S5" } }, "required": ["confirm_receipt"] }, "then": { "required": ["remove_peer_receipt"] } },
+        { "if": { "properties": { "state": { "const": "S5" } }, "required": ["grant_id"] }, "then": { "required": ["revoke_receipt"] } },
+        { "if": { "required": ["refused"] }, "then": { "properties": { "state": { "const": "S5" }, "confirm_receipt": false, "committed_at": false, "policy_revision": false, "grant_id": false, "completion": false } } }
+      ]
     },
     "PairingChallenge": {
       "oneOf": [
