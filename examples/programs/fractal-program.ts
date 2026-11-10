@@ -95,14 +95,20 @@ function step<A, E, R>(options: StepOptions<A>, body?: Effect.Effect<unknown, E,
     const exit = yield* Effect.exit(body).pipe(Effect.ensuring(Effect.sync(() => run.active.delete(options.id))))
     const ms = Date.now() - started
     if (Exit.isSuccess(exit)) {
-      // Decode once at the boundary; the journal holds the encoded form, so replay decodes the same way.
-      const value = options.success ? Schema.decodeUnknownSync(options.success as never)(exit.value) : exit.value
-      const encoded = options.success ? Schema.encodeUnknownSync(options.success as never)(value) : (value ?? null)
+      // Decode once at the boundary; the journal holds the encoded form, so replay decodes the same
+      // way. Without a schema the value is what JSON keeps, live as on replay.
+      const value = options.success
+        ? Schema.decodeUnknownSync(options.success as never)(exit.value)
+        : JSON.parse(JSON.stringify(exit.value ?? null))
+      const encoded = options.success ? Schema.encodeUnknownSync(options.success as never)(value) : value
       yield* Effect.promise(() => run.host.record({ key, status: 'completed', value: encoded, ms }))
       return value as A
     }
     const error = Cause.findErrorOption(exit.cause)
     if (Option.isNone(error)) return yield* Effect.failCause(exit.cause as Cause.Cause<never>)
+    // Only a tagged error replays as itself; anything else is a defect and is not journaled.
+    if (tagOf(error.value) === undefined)
+      return yield* Effect.die(new Error(`step \`${key}\` failed with an untagged error: ${String(error.value)}`))
     yield* Effect.promise(() => run.host.record({ key, status: 'failed', error: encodeError(error.value), ms }))
     return yield* Effect.fail(error.value as E)
   })

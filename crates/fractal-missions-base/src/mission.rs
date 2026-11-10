@@ -1497,6 +1497,14 @@ fn parse_step(
                 format!("step `{path}` runs a program, which alone decides its outcome; remove its gates, products, nested or used missions and after-run"),
             ));
         }
+        if finally {
+            // Cancellation cleanup ends agentless final work that has no runtime process; a program
+            // compensates inside its body instead.
+            return Err(FractalError::new(
+                "program-step-outcome",
+                format!("step `{path}` runs a program, so it cannot be a finally step; compensate inside the program"),
+            ));
+        }
         agentless = true;
     }
     if agentless

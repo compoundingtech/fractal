@@ -47,7 +47,7 @@ const record = (run, entry) =>
     if (run.controller.signal.aborted) return reject(run.controller.signal.reason)
     const seq = ++run.seq
     run.acks.set(seq, { resolve, reject })
-    send({ t: 'journal', step: run.step, seq, ...entry })
+    send({ t: 'journal', step: run.step, attempt: run.attempt, seq, ...entry })
   })
 
 /** Step effects run as their own process groups, so a cancelled program leaves nothing behind. */
@@ -101,7 +101,7 @@ const start = async (message) => {
       cwd: message.cwd,
       journal: new Map(message.journal.map((entry) => [entry.key, entry])),
       signal: run.controller.signal,
-      started: (key) => send({ t: 'journal', step: run.step, key, status: 'started' }),
+      started: (key) => send({ t: 'journal', step: run.step, attempt: run.attempt, key, status: 'started' }),
       record: (entry) => record(run, entry),
       spawn: (argv, options) => spawnChild(run, argv, options),
     })
@@ -110,18 +110,21 @@ const start = async (message) => {
   }
   if (runs.get(message.step) !== run || run.controller.signal.aborted) return
   runs.delete(message.step)
-  send({ t: 'done', step: message.step, exit })
+  send({ t: 'done', step: message.step, attempt: message.attempt, exit })
 }
 
 const lines = createInterface({ input: process.stdin })
 lines.on('line', (line) => {
   const message = JSON.parse(line)
+  if (message.t === 'start') return void start(message)
   const run = runs.get(message.step)
-  if (message.t === 'start') void start(message)
-  else if (message.t === 'ack') {
-    run?.acks.get(message.seq)?.resolve()
-    run?.acks.delete(message.seq)
-  } else if (message.t === 'cancel' && run !== undefined) {
+  if (run === undefined || run.attempt !== message.attempt) return // another attempt's message
+  const pending = run.acks.get(message.seq)
+  if (message.t === 'ack' || message.t === 'nack') {
+    run.acks.delete(message.seq)
+    if (message.t === 'ack') pending?.resolve()
+    else pending?.reject(new Error(message.error))
+  } else if (message.t === 'cancel') {
     runs.delete(message.step)
     stop(run, message.reason)
   }

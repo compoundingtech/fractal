@@ -6,16 +6,19 @@
 //! which talks to this module over its stdin and stdout only. That pipe is the host's only write
 //! path, so a host orphaned by a dead daemon can never journal anything.
 //!
-//! Protocol (one JSON object per line):
+//! Protocol (one JSON object per line; every message after `start` names its step and attempt, and
+//! a message for another attempt than the one running is dropped):
 //! - daemon → host: `start` {step, attempt, module, sha256, payload, env, cwd, journal},
-//!   `ack` {step, seq} once a completed or failed entry is durable, `cancel` {step, reason}.
-//! - host → daemon: `journal` {step, seq, key, status, value?, error?, ms?} and
-//!   `done` {step, exit: {_tag: "Success", value} | {_tag: "Failure", error}}.
+//!   `ack` {step, attempt, seq} once a completed or failed entry is durable, `nack` {step, attempt,
+//!   seq, error} when it could not be written, `cancel` {step, attempt, reason}.
+//! - host → daemon: `journal` {step, attempt, seq, key, status, value?, error?, ms?} and
+//!   `done` {step, attempt, exit: {_tag: "Success", value} | {_tag: "Failure", error}}.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -34,6 +37,8 @@ const HOST_SOURCE: &str = include_str!("program_host.mjs");
 /// not spin.
 const HOST_RESTART_DELAY: Duration = Duration::from_millis(500);
 const JOURNAL_PAGE: usize = 500;
+/// The step states in which the engine runs a program step's current attempt.
+const RUNNING_STATES: [&str; 3] = ["ready", "working", "blocked"];
 
 /// One program step this daemon runs.
 #[derive(Clone, Debug)]
@@ -57,7 +62,15 @@ pub enum Dispatched {
 
 struct Host {
     child: Child,
-    stdin: ChildStdin,
+    /// Lines for the host's stdin. A writer thread owns the pipe, so neither the reconciler nor the
+    /// reader thread ever blocks on a host that stopped reading.
+    lines: mpsc::Sender<Vec<u8>>,
+    generation: u64,
+}
+
+struct Running {
+    dispatch: Dispatch,
+    /// The host generation running it; a host that exits takes exactly its own programs with it.
     generation: u64,
 }
 
@@ -65,7 +78,7 @@ struct Host {
 struct Inner {
     host: Option<Host>,
     generations: u64,
-    running: HashMap<String, Dispatch>,
+    running: HashMap<String, Running>,
 }
 
 pub struct ProgramEngine {
@@ -80,10 +93,15 @@ impl ProgramEngine {
         Arc::new(Self { store, wake, dir, inner: Mutex::default() })
     }
 
-    /// Start or resume `dispatch` unless the host already runs that attempt.
+    /// Start or resume `dispatch` unless the live host already runs that attempt.
     pub fn dispatch(self: &Arc<Self>, dispatch: Dispatch) -> Result<Dispatched> {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        if inner.running.get(&dispatch.step).is_some_and(|running| running.attempt == dispatch.attempt) {
+        let live = inner.host.as_ref().map(|host| host.generation);
+        if inner
+            .running
+            .get(&dispatch.step)
+            .is_some_and(|running| running.dispatch.attempt == dispatch.attempt && Some(running.generation) == live)
+        {
             return Ok(Dispatched::Running);
         }
         let module = match self.pinned_module(&dispatch.program) {
@@ -102,15 +120,15 @@ impl ProgramEngine {
             "cwd": dispatch.cwd,
             "journal": journal,
         });
-        self.ensure_host(&mut inner)?;
+        let generation = self.ensure_host(&mut inner)?;
         eprintln!(
             "fractal: program {} attempt {} started with {} journaled steps",
             dispatch.step,
             dispatch.attempt,
             journal.len()
         );
-        inner.running.insert(dispatch.step.clone(), dispatch);
-        send(&mut inner, &message)?;
+        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation });
+        send(&inner, &message);
         Ok(Dispatched::Started)
     }
 
@@ -135,8 +153,9 @@ impl ProgramEngine {
         Ok(pinned)
     }
 
-    /// The entries replay returns: every completed step, and the failures of this attempt (a retried
-    /// attempt resumes after its completed steps and runs failed ones again).
+    /// The entries replay returns: the completed steps and typed failures of this attempt. A
+    /// retried attempt starts from the top, because an earlier attempt's compensation may have
+    /// undone what its completed steps did.
     fn journal(&self, step: &str, attempt: u32) -> Result<Vec<Value>> {
         let mut claims = Vec::new();
         let mut before = None;
@@ -153,23 +172,28 @@ impl ProgramEngine {
         let mut entries = Vec::new();
         for claim in claims {
             let fields = &claim.body["fields"];
-            let entry_attempt = fields["attempt"].as_u64().unwrap_or_default();
+            if fields["attempt"].as_u64() != Some(u64::from(attempt)) {
+                continue;
+            }
             match fields["status"].as_str() {
                 Some("completed") => entries.push(json!({"key": fields["key"], "_tag": "Success", "value": fields["value"]})),
-                Some("failed") if entry_attempt == u64::from(attempt) => {
-                    entries.push(json!({"key": fields["key"], "_tag": "Failure", "error": fields["error"]}))
-                }
+                Some("failed") => entries.push(json!({"key": fields["key"], "_tag": "Failure", "error": fields["error"]})),
                 _ => {}
             }
         }
         Ok(entries)
     }
 
-    fn ensure_host(self: &Arc<Self>, inner: &mut Inner) -> Result<()> {
-        if let Some(host) = inner.host.as_mut()
-            && host.child.try_wait()?.is_none()
-        {
-            return Ok(());
+    /// The live host's generation, starting a host when there is none or the last one exited.
+    fn ensure_host(self: &Arc<Self>, inner: &mut Inner) -> Result<u64> {
+        if let Some(host) = inner.host.as_mut() {
+            if host.child.try_wait()?.is_none() {
+                return Ok(host.generation);
+            }
+            // Its reader thread resumes the programs it ran (see `host_exited`).
+            if let Some(mut host) = inner.host.take() {
+                let _ = host.child.wait();
+            }
         }
         let script = self.dir.join(format!("host-{}.mjs", &hex::encode(sha2::Sha256::digest(HOST_SOURCE))[..12]));
         if !script.is_file() {
@@ -189,15 +213,19 @@ impl ProgramEngine {
         inner.generations += 1;
         let generation = inner.generations;
         eprintln!("fractal: program host {generation} started (pid {})", child.id());
-        inner.host = Some(Host { child, stdin, generation });
+        let (lines, queue) = mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("program-host-{generation}-in"))
+            .spawn(move || write_host(stdin, queue))?;
         let engine = Arc::clone(self);
         std::thread::Builder::new()
-            .name(format!("program-host-{generation}"))
+            .name(format!("program-host-{generation}-out"))
             .spawn(move || engine.read_host(stdout, generation))?;
-        Ok(())
+        inner.host = Some(Host { child, lines, generation });
+        Ok(generation)
     }
 
-    fn read_host(self: Arc<Self>, stdout: std::process::ChildStdout, generation: u64) {
+    fn read_host(self: Arc<Self>, stdout: ChildStdout, generation: u64) {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             let message = match serde_json::from_str::<Value>(&line) {
@@ -207,46 +235,58 @@ impl ProgramEngine {
                     continue;
                 }
             };
-            if let Err(error) = self.handle(&message) {
+            if let Err(error) = self.handle(&message, generation) {
                 eprintln!("fractal: program host message {line}: {error:#}");
             }
         }
         self.host_exited(generation);
     }
 
-    fn handle(&self, message: &Value) -> Result<()> {
+    fn handle(&self, message: &Value, generation: u64) -> Result<()> {
         let step = message["step"].as_str().ok_or_else(|| anyhow!("message without a step"))?;
-        let attempt = {
+        let attempt = message["attempt"].as_u64().ok_or_else(|| anyhow!("message without an attempt"))?;
+        let program = {
             let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(dispatch) = inner.running.get(step) else {
-                return Ok(()); // A cancelled or finished program; its late messages change nothing.
-            };
-            dispatch.attempt
+            match inner.running.get(step) {
+                // A message from an attempt or host this engine no longer runs changes nothing.
+                Some(running) if u64::from(running.dispatch.attempt) == attempt && running.generation == generation => {
+                    running.dispatch.program.sha256.clone()
+                }
+                _ => return Ok(()),
+            }
         };
+        let attempt = u32::try_from(attempt)?;
         match message["t"].as_str() {
-            Some("journal") => self.journal_entry(step, attempt, message),
-            Some("done") => self.done(step, message),
+            Some("journal") => self.journal_entry(step, attempt, &program, message),
+            Some("done") => self.done(step, attempt, message),
             other => Err(anyhow!("unknown message type {other:?}")),
         }
     }
 
-    fn journal_entry(&self, step: &str, attempt: u32, message: &Value) -> Result<()> {
-        // A step that ended by other means (cancelled, timed out) stops its program at the next
-        // journal write instead of running more effects.
-        if let Some(view) = self.store.step_run(step)?
-            && matches!(view.status.as_str(), "completed" | "failed" | "cancelled")
-        {
-            let reason = format!("the step is {}", view.status);
-            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            inner.running.remove(step);
-            return send(&mut inner, &json!({"t": "cancel", "step": step, "reason": reason}));
+    /// Stop the program if its step no longer runs this attempt (ended, cancelled, timed out or
+    /// retried). True when it was stopped.
+    fn stop_if_left(&self, step: &str, attempt: u32) -> Result<bool> {
+        let left = match self.store.step_run(step)? {
+            Some(view) => {
+                (view.attempt != attempt || !RUNNING_STATES.contains(&view.status.as_str())).then(|| {
+                    format!("the step is {} at attempt {}", view.status, view.attempt)
+                })
+            }
+            None => Some("the step run no longer exists".to_owned()),
+        };
+        let Some(reason) = left else { return Ok(false) };
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.running.remove(step);
+        send(&inner, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+        Ok(true)
+    }
+
+    fn journal_entry(&self, step: &str, attempt: u32, program: &str, message: &Value) -> Result<()> {
+        if self.stop_if_left(step, attempt)? {
+            return Ok(());
         }
         let key = message["key"].as_str().ok_or_else(|| anyhow!("journal entry without a key"))?;
         let status = message["status"].as_str().ok_or_else(|| anyhow!("journal entry without a status"))?;
-        let program = {
-            let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            inner.running.get(step).map(|dispatch| dispatch.program.sha256.clone()).unwrap_or_default()
-        };
         let mut fields = BTreeMap::from([
             ("key".to_owned(), Value::from(key)),
             ("status".to_owned(), Value::from(status)),
@@ -258,14 +298,10 @@ impl ProgramEngine {
                 fields.insert(name.to_owned(), value.clone());
             }
         }
-        // A completed key is final for the step run; a failure is final for its attempt. The key
-        // fences a double execution: a second, different result for one key is refused.
-        let idempotency_key = match status {
-            "completed" => Some(format!("program:{step}:{key}:completed")),
-            "failed" => Some(format!("program:{step}:{attempt}:{key}:failed")),
-            _ => None,
-        };
-        self.store.append_claim(&ClaimInput {
+        // One result per key and attempt. The key fences a double execution: a second, different
+        // result for one key is refused.
+        let idempotency_key = (status != "started").then(|| format!("program:{step}:{attempt}:{key}:{status}"));
+        let written = self.store.append_claim(&ClaimInput {
             subject: step.to_owned(),
             kind: JOURNAL_KIND.to_owned(),
             actor: None,
@@ -273,22 +309,34 @@ impl ProgramEngine {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key,
-        })?;
-        if status != "started" {
-            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            send(&mut inner, &json!({"t": "ack", "step": step, "seq": message["seq"]}))?;
+        });
+        if status == "started" {
+            return written.map(|_| ()).map_err(Into::into);
+        }
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let seq = &message["seq"];
+        match written {
+            Ok(_) => send(&inner, &json!({"t": "ack", "step": step, "attempt": attempt, "seq": seq})),
+            // The program must not continue past a result that is not durable: the step fails.
+            Err(error) => send(
+                &inner,
+                &json!({"t": "nack", "step": step, "attempt": attempt, "seq": seq, "error": format!("journal write refused: {error}")}),
+            ),
         }
         Ok(())
     }
 
-    fn done(&self, step: &str, message: &Value) -> Result<()> {
+    fn done(&self, step: &str, attempt: u32, message: &Value) -> Result<()> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner).running.remove(step);
+        if self.stop_if_left(step, attempt)? {
+            return Ok(());
+        }
         let exit = &message["exit"];
         let (status, reason) = match exit["_tag"].as_str() {
             Some("Success") => ("completed", None),
             _ => ("failed", Some(failure_reason(&exit["error"]))),
         };
         self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner).running.remove(step);
         eprintln!("fractal: program {step} {status}");
         (self.wake)();
         Ok(())
@@ -298,14 +346,19 @@ impl ProgramEngine {
     fn host_exited(self: Arc<Self>, generation: u64) {
         let resume = {
             let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            if inner.host.as_ref().is_none_or(|host| host.generation != generation) {
-                return;
-            }
-            if let Some(mut host) = inner.host.take() {
+            if inner.host.as_ref().is_some_and(|host| host.generation == generation)
+                && let Some(mut host) = inner.host.take()
+            {
                 let status = host.child.wait();
                 eprintln!("fractal: program host {generation} exited ({status:?})");
             }
-            inner.running.drain().map(|(_, dispatch)| dispatch).collect::<Vec<_>>()
+            let gone = inner
+                .running
+                .iter()
+                .filter(|(_, running)| running.generation == generation)
+                .map(|(step, _)| step.clone())
+                .collect::<Vec<_>>();
+            gone.iter().filter_map(|step| inner.running.remove(step)).map(|running| running.dispatch).collect::<Vec<_>>()
         };
         if resume.is_empty() {
             return;
@@ -327,13 +380,21 @@ impl ProgramEngine {
     }
 }
 
-fn send(inner: &mut Inner, message: &Value) -> Result<()> {
-    let host = inner.host.as_mut().ok_or_else(|| anyhow!("no program host"))?;
-    let mut line = serde_json::to_vec(message)?;
-    line.push(b'\n');
-    host.stdin.write_all(&line)?;
-    host.stdin.flush()?;
-    Ok(())
+/// Queue one line for the live host. A host that is gone drops it; its programs resume on the next.
+fn send(inner: &Inner, message: &Value) {
+    if let Some(host) = inner.host.as_ref() {
+        let mut line = serde_json::to_vec(message).unwrap_or_default();
+        line.push(b'\n');
+        let _ = host.lines.send(line);
+    }
+}
+
+fn write_host(mut stdin: ChildStdin, queue: mpsc::Receiver<Vec<u8>>) {
+    for line in queue {
+        if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
+            return;
+        }
+    }
 }
 
 /// A typed failure keeps its tag and fields, so `fractal missions show` says which error ended
@@ -399,26 +460,25 @@ mod tests {
     }
 
     #[test]
-    fn replay_returns_completed_steps_and_only_this_attempts_failures() {
+    fn replay_returns_this_attempts_results_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let engine = engine(dir.path());
         let step = "step-run/generation/program";
-        entry(&engine, step, "classify", "completed", 1, json!({"classes": ["routine"]}));
-        entry(&engine, step, "check", "started", 1, Value::Null);
-        entry(&engine, step, "check", "failed", 1, json!({"_tag": "StepFailed", "step": "check"}));
-        entry(&engine, step, "verify-local#2", "completed", 2, json!({"stale": []}));
-        let first = engine.journal(step, 1).unwrap();
+        entry(&engine, step, "merge", "completed", 1, json!({"commit": "c1"}));
+        entry(&engine, step, "publish-local", "started", 1, Value::Null);
+        entry(&engine, step, "publish-local", "failed", 1, json!({"_tag": "StepFailed", "step": "publish"}));
+        entry(&engine, step, "revert", "completed", 1, json!({"reverted": ["c1"]}));
+        entry(&engine, step, "merge", "completed", 2, json!({"commit": "c2"}));
         assert_eq!(
-            first,
+            engine.journal(step, 1).unwrap(),
             vec![
-                json!({"key": "classify", "_tag": "Success", "value": {"classes": ["routine"]}}),
-                json!({"key": "check", "_tag": "Failure", "error": {"_tag": "StepFailed", "step": "check"}}),
-                json!({"key": "verify-local#2", "_tag": "Success", "value": {"stale": []}}),
+                json!({"key": "merge", "_tag": "Success", "value": {"commit": "c1"}}),
+                json!({"key": "publish-local", "_tag": "Failure", "error": {"_tag": "StepFailed", "step": "publish"}}),
+                json!({"key": "revert", "_tag": "Success", "value": {"reverted": ["c1"]}}),
             ]
         );
-        // A retried attempt keeps what completed and runs the failed step again.
-        let second = engine.journal(step, 2).unwrap();
-        assert_eq!(second.iter().map(|entry| entry["key"].as_str().unwrap()).collect::<Vec<_>>(), ["classify", "verify-local#2"]);
+        // A retried attempt never replays the first attempt, whose revert undid its merge.
+        assert_eq!(engine.journal(step, 2).unwrap(), vec![json!({"key": "merge", "_tag": "Success", "value": {"commit": "c2"}})]);
     }
 
     #[test]

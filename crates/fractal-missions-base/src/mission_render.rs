@@ -325,6 +325,9 @@ mod tests {
         assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}"; gate "g" {{ exists "resource/x"; }};"#)), "program-step-outcome");
         assert_eq!(error(r#"program "/b.mjs" sha256="ABC";"#), "invalid-program");
         assert_eq!(error(&format!(r#"program "b.mjs" sha256="{sha}";"#)), "invalid-program");
+        let in_finally = format!(r#"mission "test" state="ready" {{ goal "Land."; step "work" {{ agentless; }}
+            finally {{ step "program" {{ program "/b.mjs" sha256="{sha}"; }} }} }}"#);
+        assert_eq!(crate::mission::parse_missions(&in_finally.parse().unwrap(), "node").unwrap_err().code, "program-step-outcome");
     }
 
     #[test]
