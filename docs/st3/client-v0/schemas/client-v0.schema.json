@@ -518,6 +518,16 @@
       "properties": {"command_id": {"type": "string", "pattern": "^device-command/.+"}, "outcome": {"$ref": "#/$defs/DeviceCommandOutcome"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}, "binding": {"$ref": "#/$defs/ClientResultBinding"}, "signature": {"$ref": "#/$defs/DeviceSignature"}},
       "description": "Terminal phone report; authenticated pairing supplies the device identity. The daemon clock adjudicates expiry."
     },
+    "ClientControlGrantLifecycle": {
+      "allOf": [{"$ref": "#/$defs/ResourceHeader"}], "type": "object",
+      "required": ["id", "kind", "revision", "updated_at", "grant_id", "run_id", "device", "session", "state", "reason", "sequence"],
+      "properties": {
+        "kind": {"const": "client-control-grant-lifecycle"}, "grant_id": {"type": "string"}, "item_id": {"type": "string"},
+        "run_id": {"type": "string"}, "device": {"type": "string"}, "session": {"type": "string"},
+        "state": {"enum": ["started", "ended", "revoked"]}, "reason": {"type": "string"},
+        "sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      }
+    },
     "DeviceCommand": {
       "allOf": [{"$ref": "#/$defs/ResourceHeader"}],
       "type": "object",
@@ -742,6 +752,7 @@
       "machine",
       "device",
       "device-command",
+      "client-control-grant-lifecycle",
       "operation",
       "history",
       "session",
@@ -3172,6 +3183,7 @@
         {
           "$ref": "#/$defs/DeviceCommand"
         },
+        {"$ref": "#/$defs/ClientControlGrantLifecycle"},
         {
           "$ref": "#/$defs/Operation"
         },
