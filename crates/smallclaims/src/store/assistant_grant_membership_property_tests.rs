@@ -795,15 +795,23 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             // the real admission receive. A valid signature cache may authorize
             // that validated receipt again; this case instead tests evidence
             // that remains withdrawn when authority maintenance finally runs.
+            let queued_before: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM assistant_grant_proof_invalidations
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=''",
+                params![grant.origin,sequence,hash], |row| row.get(0),
+            ).unwrap();
             assert_eq!(connection.execute(
                 "UPDATE replica_envelopes SET receipt_state='pending'
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 params![grant.origin,sequence,hash],
             ).unwrap(), 1);
-            assert!(connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
-                [&grant.id], |row| row.get::<_,bool>(0),
-            ).unwrap(), "renewed withdrawal must retain the real verification obligation");
+            let queued_after: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM assistant_grant_proof_invalidations
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=''",
+                params![grant.origin,sequence,hash], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(queued_after, queued_before+1,
+                "renewed withdrawal must enqueue its own bounded verification obligation");
             assert!(authority::subject_ready(&connection, &grant.subject).is_err());
             assert!(!authority::contains(&connection, &grant.id).unwrap(),
                 "renewed receipt withdrawal must immediately fence bearer authority");
