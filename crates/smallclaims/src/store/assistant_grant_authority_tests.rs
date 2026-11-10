@@ -1182,6 +1182,48 @@ fn unsigned_pending_revoke_fences_only_its_established_subject_after_dirty_work_
     assert_eq!(decisions(&target, 0), vec![independent.id]);
 }
 
+#[test]
+fn subject_readiness_seeks_only_its_indexed_obligations_with_large_unrelated_queues() {
+    let store = node("issuer", None);
+    let grant = append(&store, SUBJECT, GRANTED, fields());
+    let independent = independent_grant(&store);
+    drain_authority(&store);
+    let connection = store.connection.write();
+    connection.execute(
+        "UPDATE assistant_grant_pending SET auth_member_key='lost-key',auth_sequence=7,
+         auth_envelope_hash='proof' WHERE claim_id=?1", [&grant.id],
+    ).unwrap();
+    connection.execute(
+        "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
+         VALUES(?1,'lost-key',7,7)", [&grant.origin],
+    ).unwrap();
+    let cost = |subject: &str| {
+        let mut statement = connection.prepare(authority::SUBJECT_PENDING_QUERY).unwrap();
+        let pending: bool = statement.query_row([subject], |row| row.get(0)).unwrap();
+        (pending,statement.get_status(StatementStatus::VmStep),
+            statement.get_status(StatementStatus::FullscanStep))
+    };
+    let fenced = cost(&grant.subject);
+    let clean = cost(&independent.subject);
+    assert!(fenced.0);
+    assert!(!clean.0);
+    assert_eq!(fenced.2,0);
+    assert_eq!(clean.2,0);
+    for index in 0..4096 {
+        let writer = format!("unrelated-{index}");
+        connection.execute(
+            "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
+             VALUES(?1,'lost-key',0,100)", [&writer],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key)
+             VALUES(?1,7,'proof','lost-key')", [&writer],
+        ).unwrap();
+    }
+    assert_eq!(cost(&grant.subject),fenced);
+    assert_eq!(cost(&independent.subject),clean);
+}
+
 include!("assistant_grant_receipt_cost_tests.rs");
 
 #[path = "assistant_grant_membership_property_tests.rs"]

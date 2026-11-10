@@ -131,6 +131,14 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor (
             claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL, record_rowid INTEGER NOT NULL, member_key TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS assistant_grant_coverage_epochs (
+            writer TEXT PRIMARY KEY, epoch INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor_epochs (
+            claim_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL);
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_auth_cursor_epoch_delete
+         AFTER DELETE ON assistant_grant_auth_cursor BEGIN
+            DELETE FROM assistant_grant_auth_cursor_epochs WHERE claim_id=OLD.claim_id;
+         END;
          CREATE TABLE IF NOT EXISTS assistant_grant_membership_dirty (
             writer TEXT PRIMARY KEY, sequence INTEGER NOT NULL, claim_id TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS assistant_grant_retractions (
@@ -258,41 +266,44 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
     ).map_err(internal)?;
     Ok(pending)
 }
-fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
-    connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty AS dirty
-                JOIN claims ON claims.id=dirty.claim_id WHERE claims.subject=?1)
-            OR EXISTS(SELECT 1 FROM assistant_grant_dirty AS dirty
-                JOIN assistant_grant_pending AS pending ON pending.claim_id=dirty.claim_id
-                WHERE pending.grant_subject=?1)
-            OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor AS cursor
-                JOIN claims ON claims.id=cursor.claim_id WHERE claims.subject=?1)
+// Keep the subject lookup outermost even when the global work queues are large.
+// Cost still grows with this subject's claims and matching proof obligations.
+pub const SUBJECT_PENDING_QUERY: &str =
+        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
+                CROSS JOIN assistant_grant_dirty AS dirty
+                WHERE claims.subject=?1 AND dirty.claim_id=claims.id)
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                CROSS JOIN assistant_grant_dirty AS dirty
+                WHERE pending.grant_subject=?1 AND dirty.claim_id=pending.claim_id)
+            OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
+                CROSS JOIN assistant_grant_auth_cursor AS cursor
+                WHERE claims.subject=?1 AND cursor.claim_id=claims.id)
             OR EXISTS(SELECT 1 FROM assistant_grant_pending
                 WHERE grant_subject=?1 AND authenticated=0)
-            OR EXISTS(SELECT 1 FROM assistant_grant_recompute AS work
-                JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
-                WHERE pending.grant_subject=?1)
-            OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks AS work
-                JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
-                WHERE pending.grant_subject=?1)
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending
-                JOIN assistant_grant_proof_invalidations AS work
-                  ON work.writer=pending.origin AND work.sequence=pending.auth_sequence
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                CROSS JOIN assistant_grant_recompute AS work
+                WHERE pending.grant_subject=?1 AND work.claim_id=pending.claim_id)
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                CROSS JOIN assistant_grant_proof_rechecks AS work
+                WHERE pending.grant_subject=?1 AND work.claim_id=pending.claim_id)
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                CROSS JOIN assistant_grant_proof_invalidations AS work INDEXED BY assistant_grant_proof_invalidations_identity_index
+                WHERE work.writer=pending.origin AND work.sequence=pending.auth_sequence
                     AND work.envelope_hash=pending.auth_envelope_hash
-                WHERE pending.grant_subject=?1 AND pending.claim_id>work.claim_id
+                  AND pending.grant_subject=?1 AND pending.claim_id>work.claim_id
                   AND (work.member_key='' OR work.member_key=pending.auth_member_key))
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending
-                JOIN assistant_grant_retractions AS dirty
-                  ON dirty.writer=pending.origin AND dirty.member_key=pending.auth_member_key
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                CROSS JOIN assistant_grant_retractions AS dirty INDEXED BY assistant_grant_retractions_writer_key_index
+                ON dirty.writer=pending.origin AND dirty.member_key=pending.auth_member_key
                 WHERE pending.grant_subject=?1
                   AND pending.auth_sequence BETWEEN dirty.lower_sequence AND dirty.upper_sequence
                   AND (pending.auth_sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
                   AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_windows AS windows
                     WHERE windows.writer=pending.origin AND windows.member_key=pending.auth_member_key
                       AND pending.auth_sequence>=windows.start
-                      AND (windows.end IS NULL OR pending.auth_sequence<=windows.end)))",
-        [subject], |row| row.get(0),
-    ).map_err(internal)
+                      AND (windows.end IS NULL OR pending.auth_sequence<=windows.end)))";
+fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
+    connection.query_row(SUBJECT_PENDING_QUERY, [subject], |row| row.get(0)).map_err(internal)
 }
 /// A pending proof or unauthenticated revoke fences only its grant subject.
 pub fn subject_ready(connection: &Connection, subject: &str) -> Result<(), FractalError> {
@@ -625,9 +636,17 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
         return Ok(Authentication::Unauthenticated);
     };
     let shard = fleet_meta(connection,"shard_id")?;
+    // Coverage may add a valid key below this cursor, or for an earlier record.
+    // Epochs restart only in-flight work, without a history-sized cursor update.
+    let epoch: i64 = connection.query_row(
+        "SELECT COALESCE((SELECT epoch FROM assistant_grant_coverage_epochs
+         WHERE writer=(SELECT origin FROM claims WHERE id=?1)),0)",
+        [id], |row| row.get(0))?;
     let cursor: Option<(i64,i64,String)> = connection.query_row(
-        "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
-        [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor AS cursor
+         WHERE claim_id=?1 AND COALESCE((SELECT epoch FROM assistant_grant_auth_cursor_epochs
+           WHERE claim_id=cursor.claim_id),0)=?2",
+        params![id,epoch], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
     let initial = cursor.is_none();
     let (position_cursor,rowid_cursor,key_cursor) = cursor.unwrap_or((i64::MIN,i64::MIN,String::new()));
     let record: Option<(i64,i64,String,u64,String,bool)> = connection.query_row(
@@ -683,6 +702,10 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
          ON CONFLICT(claim_id) DO UPDATE SET position=excluded.position,
             record_rowid=excluded.record_rowid,member_key=excluded.member_key",
         params![id,position,record_rowid,next_key])?;
+    connection.execute(
+        "INSERT INTO assistant_grant_auth_cursor_epochs VALUES(?1,?2)
+         ON CONFLICT(claim_id) DO UPDATE SET epoch=excluded.epoch",
+        params![id,epoch])?;
     Ok(Authentication::Pending)
 }
 pub const AUTHENTICATION_KEYS_QUERY: &str =
@@ -781,6 +804,13 @@ impl MembershipUpdate {
                 _ => false,
             };
             if adds_coverage {
+                // In-flight admitted rows retain authenticated=1 while paging,
+                // so the unauthenticated retry queue alone cannot reach them.
+                // Their durable obligations resume against this new epoch.
+                connection.execute(
+                    "INSERT INTO assistant_grant_coverage_epochs VALUES(?1,1)
+                     ON CONFLICT(writer) DO UPDATE SET epoch=epoch+1", [writer],
+                )?;
                 // A new proof may cover even an earlier failed row. Only already
                 // unauthenticated history restarts; established subjects stay live.
                 connection.execute(

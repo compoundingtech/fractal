@@ -488,27 +488,9 @@ fn learned_fence_revalidates_signed_transition(kind: &str) {
         receive(&target, &export(&peer, &target));
         assert_windows(&target, &target, "signed transition before fence");
         assert!(authority::transition(&target.readers.get(), &grant, kind).unwrap().is_some());
-        {
-            let connection = target.connection.write();
-            let authenticated: bool = connection.query_row(
-                "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
-                [&transition.id], |row| row.get(0),
-            ).unwrap();
-            assert!(authenticated);
-            // Only the recorded key beyond the cursor is queued. Its transition
-            // fences this subject even though the base itself is behind it.
-            connection.execute(
-                "INSERT INTO assistant_grant_retractions
-                 (writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
-                 VALUES(?1,?2,?3,?4,?3,?5)",
-                params![grant.origin,peer_key.public(),grant_sequence,i64::MAX,grant.id],
-            ).unwrap();
-            assert!(authority::subject_ready(&connection, SUBJECT).is_err());
-            assert!(!authority::contains(&connection, &grant.id).unwrap());
-            assert!(authority::by_credential(&connection, &"a".repeat(64)).unwrap().is_none());
-            assert!(authority::transition(&connection, &grant, kind).is_err());
-        }
-        assert_windows(&target, &target, "authenticated writer queue drained");
+        // A queued retraction alone is not a fence while the recorded proof
+        // remains covered. Learn a real removal instead: only the transition
+        // lies beyond its high-water, while the base grant keeps coverage.
         let removal = append(&anchor, "host/peer", "fleet.member-removed", json!({
             "member_key": peer_key.public(), "high_water": grant_sequence,
             "reason": "membership equivalence regression"
@@ -861,4 +843,109 @@ fn restored_window_coverage_cancels_pending_retraction_fence() {
     assert_eq!(pending_retractions, 0, "restored coverage retained a stale subject fence");
     assert_windows(&target, &target, "restored coverage after partial retraction");
     assert_established_grants_ready(&target, &grants);
+}
+
+// Use only real admitted keys and cryptographically valid signatures. The
+// alternate proof predates the cursor, so membership is the only late evidence.
+fn admitted_recheck_finds_alternate_proof(seed: u64, add_coverage: bool) {
+    let (anchor, anchor_key) = source();
+    let mut keys: Vec<_> = (0..authority::MEMBERSHIP_KEYS_PER_REFRESH + 2)
+        .map(|_| Arc::new(MemberKey::generate().unwrap().0)).collect();
+    keys.sort_by(|left, right| left.public().cmp(right.public()));
+    let low = keys.remove(0);
+    let high = keys.pop().unwrap();
+    let (original, alternate) = if add_coverage { (high, low) } else { (low, high) };
+    let peer = node("peer", Some(anchor_key.public()));
+    peer.set_member_key(Some(original.clone())).unwrap();
+    let target = node("reader", Some(anchor_key.public()));
+    let mut admitted = keys;
+    admitted.push(original.clone());
+    if !add_coverage { admitted.push(alternate.clone()); }
+    let mut state = seed;
+    shuffle(&mut admitted, &mut state);
+    for key in admitted {
+        append(&anchor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": key.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 0, "mode": "listening"
+        }));
+    }
+    receive(&peer, &export(&anchor, &peer));
+    receive(&target, &export(&anchor, &target));
+    let grant = append(&peer, SUBJECT, GRANTED, fields());
+    let granted = export(&peer, &target);
+    receive(&target, &granted);
+    assert_windows(&target, &target, "original proof established");
+    let recorded_key: String = target.readers.get().query_row(
+        "SELECT auth_member_key FROM assistant_grant_pending WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(recorded_key, original.public());
+    let mut alternate_proof = signatures(&granted).signatures.into_iter().find(|proof| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records
+             WHERE claim_id=?1 AND writer=?2 AND sequence=?3 AND envelope_hash=?4)",
+            params![grant.id,proof.writer,proof.sequence,proof.hash],
+            |row| row.get::<_,bool>(0),
+        ).unwrap()
+    }).unwrap();
+    alternate_proof.member_key = alternate.public().to_owned();
+    alternate_proof.signature = alternate.sign(&crate::fleet::envelope_signature_message_in(
+        None, FLEET, &alternate_proof.writer, alternate_proof.sequence, &alternate_proof.hash,
+    ));
+    insert_raw_signature(&target.connection.write(), &alternate_proof);
+    append(&anchor, "host/peer", "fleet.member-removed", json!({
+        "member_key": original.public(), "high_water": 0, "reason": "alternate proof regression"
+    }));
+    receive_without_authority_maintenance(&target, &export(&anchor, &target));
+    assert!(!target.advance_assistant_grant_authority_backfill().unwrap());
+    {
+        let connection = target.readers.get();
+        let (authenticated, key): (bool, String) = connection.query_row(
+            "SELECT pending.authenticated,cursor.member_key
+             FROM assistant_grant_pending AS pending
+             JOIN assistant_grant_auth_cursor AS cursor USING(claim_id)
+             WHERE pending.claim_id=?1",
+            [&grant.id], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert!(authenticated, "fixture must retry an already admitted row");
+        if add_coverage {
+            assert!(key.as_str() > alternate.public(), "new key must be below the saved cursor");
+        }
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+            [&grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap(), "mid-page retry lost its durable obligation");
+        assert!(authority::subject_ready(&connection, SUBJECT).is_err());
+        assert!(!authority::contains(&connection, &grant.id).unwrap());
+    }
+    if add_coverage {
+        append(&anchor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": alternate.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 0, "mode": "listening"
+        }));
+        receive_without_authority_maintenance(&target, &export(&anchor, &target));
+    }
+    // Membership coverage must restart even an authenticated row's in-flight
+    // search. A cached flag is not permission to skip a newly eligible earlier key.
+    assert_windows(&target, &target, &format!("seed={seed} add_coverage={add_coverage}"));
+    let recorded_key: String = target.readers.get().query_row(
+        "SELECT auth_member_key FROM assistant_grant_pending WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(recorded_key, alternate.public());
+    assert_established_grants_ready(&target, std::slice::from_ref(&grant));
+}
+
+#[test]
+fn newly_admitted_key_below_mid_page_cursor_reauthenticates_already_admitted_row() {
+    for seed in 1..=4 {
+        admitted_recheck_finds_alternate_proof(seed, true);
+    }
+}
+
+#[test]
+fn same_row_dual_signed_proof_survives_recorded_key_removal_after_mid_page_recheck() {
+    for seed in 1..=4 {
+        admitted_recheck_finds_alternate_proof(seed, false);
+    }
 }

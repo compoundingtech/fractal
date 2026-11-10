@@ -246,6 +246,16 @@ clear that obligation, including when revalidation changes a record to invalid
 or repaired and refreshes its envelope in the same transaction. Only maintenance
 using current membership can discharge it after verification finishes; partial
 authentication pages retain the obligation and subject fence.
+Coverage additions increment a durable per-writer epoch. An authentication cursor
+resumes only in the epoch in which it was created; otherwise it restarts before
+the first record/key, including for a previously admitted row under recheck.
+This prevents a newly eligible key below the cursor from being missed without
+updating every cursor or revisiting already settled authenticated history.
+Subject readiness starts with indexed subject claims and probes the queued
+obligations by their keys; unrelated queue growth does not cause a queue scan.
+It is not constant cost: a subject with many claims or matching proof/range
+obligations costs more. The q39 measurement must include queued retractions for
+the measured subject, not only a clean subject or unrelated queued work.
 These details remain on trusted-local doctor only: paired clients with
 `read.projections` cannot retrieve the provenance check through either the
 operations collection or operation detail. Clients continue to receive generic
