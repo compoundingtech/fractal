@@ -6326,7 +6326,7 @@ mod declared_admission_tests {
     use super::*;
     use crate::model::{DeclaredBudgets, DeclaredLane, DeclaredPriority};
 
-    const FIELDS: &str = r#"declared-priority "normal"; declared-lane "check"; declared-budgets { cpu-seconds 300; memory-max "8G"; disk-max "20G"; token-budget 100000; }"#;
+    const FIELDS: &str = r#"declared-priority "normal"; declared-lane "check"; declared-budgets { memory-max "8G"; disk-max "20G"; }"#;
 
     #[test]
     fn agent_and_mission_authoring_roundtrip() {
@@ -6339,7 +6339,7 @@ mod declared_admission_tests {
         assert_eq!(member.declared_priority, Some(DeclaredPriority::Normal));
         assert_eq!(member.declared_lane, Some(DeclaredLane::Check));
         assert_eq!(member.declared_budgets, mission.declared_budgets);
-        assert_eq!(mission.declared_budgets.as_ref().unwrap().cpu_seconds, Some(300));
+        assert_eq!(mission.declared_budgets.as_ref().unwrap().memory_max.as_deref(), Some("8G"));
         fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
         let json = serde_json::to_value(&intent).unwrap();
         let decoded: NormalizedIntent = serde_json::from_value(json).unwrap();
@@ -6348,6 +6348,36 @@ mod declared_admission_tests {
         let rendered = source.parse::<KdlDocument>().unwrap().to_string();
         let reparsed = parse_intent(&rendered, "node").unwrap();
         assert_eq!(reparsed.subjects["agent/example/worker"].member.as_ref().unwrap().declared_budgets, member.declared_budgets);
+    }
+
+    #[test]
+    fn mission_numeric_budgets_authoring_roundtrip() {
+        let source = r#"version 2
+mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seconds 300; token-budget 100000; attention "person/reviewer" asks=3; } }
+"#;
+        let intent = parse_intent(source, "node").unwrap();
+        let budgets = intent.missions["example/work"].declared_budgets.as_ref().unwrap();
+        assert_eq!(budgets.cpu_seconds, Some(300));
+        assert_eq!(budgets.token_budget, Some(100_000));
+        assert_eq!(budgets.attention[0].person, "person/reviewer");
+        assert_eq!(budgets.attention[0].asks, 3);
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+        let decoded: NormalizedIntent = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
+        assert_eq!(decoded.missions["example/work"].declared_budgets.as_ref(), Some(budgets));
+        let rendered = source.parse::<KdlDocument>().unwrap().to_string();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(reparsed.missions["example/work"].declared_budgets.as_ref(), Some(budgets));
+    }
+
+    #[test]
+    fn agent_authoring_refuses_mission_only_numeric_budgets() {
+        for (child, field) in [("cpu-seconds", "cpu_seconds"), ("token-budget", "token_budget")] {
+            let source = format!("version 2\nagent \"example/worker\" {{ command \"true\"; declared-budgets {{ {child} 300; }} }}");
+            let error = parse_intent(&source, "node").unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], format!("declared_budgets.{field}"));
+            assert_eq!(error.details["subject"], "agent/example/worker");
+        }
     }
 
     #[test]
@@ -6378,9 +6408,28 @@ mod declared_admission_tests {
         let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
         assert_eq!(error.details["field"], "declared_priority");
         intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = None;
+        for (budgets, field) in [
+            (DeclaredBudgets { cpu_seconds: Some(300), ..DeclaredBudgets::default() }, "declared_budgets.cpu_seconds"),
+            (DeclaredBudgets { token_budget: Some(100_000), ..DeclaredBudgets::default() }, "declared_budgets.token_budget"),
+            (DeclaredBudgets { attention: vec![crate::model::DeclaredAttentionBudget { person: "person/reviewer".into(), asks: 3 }], ..Default::default() }, "declared_budgets.attention"),
+        ] {
+            intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_budgets = Some(budgets);
+            let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], field);
+            assert_eq!(error.details["subject"], "agent/example/worker");
+        }
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_budgets = None;
         intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets { token_budget: Some(0), ..DeclaredBudgets::default() });
         let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
         assert_eq!(error.details["field"], "declared_budgets.token_budget");
+        assert_eq!(error.details["subject"], "mission/example/work");
+        intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets {
+            attention: vec![crate::model::DeclaredAttentionBudget { person: "person/reviewer".into(), asks: 0 }], ..Default::default()
+        });
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.code, "invalid-declared-admission");
+        assert_eq!(error.details["field"], "declared_budgets.attention[person/reviewer].asks");
         assert_eq!(error.details["subject"], "mission/example/work");
     }
 
@@ -6429,5 +6478,21 @@ mod declared_admission_tests {
             "intent.desired", &desired.subject, &body,
         ).unwrap();
         fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+    }
+    #[test]
+    fn attention_refuses_agents_steps_and_deferred_agents() {
+        let fields = r#"declared-budgets { attention "person/reviewer" asks=3; }"#;
+        for declaration in [
+            format!(r#"agent "example/worker" {{ command "true"; {fields}; }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; step "one" {{ goal "Work."; {fields}; }} }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; agent "worker" {{ command "true"; {fields}; }}; step "work" {{ goal "Work."; }} }}"#),
+        ] {
+            let error = parse_intent(&format!("version 2\n{declaration}"), "node")
+                .and_then(|intent| fractal_missions_base::declared_admission::validate_publication(&intent).map(|()| intent))
+                .unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], "declared_budgets.attention");
+            assert!(error.details["subject"].is_string());
+        }
     }
 }

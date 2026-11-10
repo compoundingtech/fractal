@@ -144,6 +144,22 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/custom/decision-inputs",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests",
+        "interactive configured-owner pairing requires an authenticated publisher device and native person decision ask, absent from generated cost stores; browser_pairing_tests covers admission and pending limits; the pending count scans browser request history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/{id}/redeem",
+        "one-use interactive redemption requires a receipt-authenticated request and its exact answered native person ask, absent from generated cost stores; browser_pairing_tests covers pending, deny, expiry, exact scopes and single use; request, answer and completion lookups are subject-keyed, but receipt and completion write costs are not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/revoke-current",
+        "browser self-revocation requires its real paired bearer and operation receipts, absent from generated cost stores; browser_pairing_tests covers authenticated revocation; subject-keyed completion and request reads plus the revocation write are not measured here",
+    ),
+    (
         "POST /v1/fleet/admission-override",
         "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
     ),
@@ -193,6 +209,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/harness-prompts/state",
         "one newest harness.observed read by its subject index and one answer read by its operation index",
+    ),
+    (
+        "GET /v1/client/attention-budget",
+        "ordinary read probes use a raw Unix person header, which this recipient-authenticated route rejects; the paired push fixture does not seed scaling mission/person native asks and lineage; attention_budget API tests cover scoped admission, recipient revalidation and text-free reports, but populated report cost is not measured here",
     ),
     // Aliases: the same handler as a measured route under the name a person reads.
     (
@@ -1829,6 +1849,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
     }
 
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -1941,6 +1962,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = fractal_daemon::api::router(AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -3050,6 +3072,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),

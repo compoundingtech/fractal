@@ -1073,6 +1073,34 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionBudgetDeclared = ({
+  asks: number;
+  state: "declared";
+} | {
+  state: "undeclared";
+});
+
+export type AttentionBudgetReport = {
+  charged: number;
+  declared: AttentionBudgetDeclared;
+  fleet_complete: false;
+  inclusive: number;
+  local_claim_index: number;
+  mission: string;
+  not_charged: number;
+  person: string;
+  request_refs: Array<AttentionBudgetRequestRef>;
+  request_refs_complete: boolean;
+  unattributed_for_person: number;
+  window_end_inclusive_unix_ms: number;
+  window_start_exclusive_unix_ms: number;
+};
+
+export type AttentionBudgetRequestRef = {
+  claim_id: string;
+  subject: string;
+};
+
 export type AttentionLaunchAgent = {
   harness: string | null;
   host: string | null;
@@ -1621,7 +1649,13 @@ export type DeclaredAdmission = {
   priority?: DeclaredPriority;
 };
 
+export type DeclaredAttentionBudget = {
+  asks: number;
+  person: string;
+};
+
 export type DeclaredBudgets = {
+  attention?: Array<DeclaredAttentionBudget>;
   cpu_seconds?: number;
   disk_max?: string;
   memory_max?: string;
@@ -1811,7 +1845,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2425,9 +2459,17 @@ export type MissionActionOffer = {
 export type MissionDeclaration = {
   legacy: boolean;
   mission: string;
+  provenance?: MissionDeclarationProvenance;
   published_at: number;
   revision: Revision;
   text: string;
+};
+
+export type MissionDeclarationProvenance = {
+  commit: string;
+  path: string;
+  renderer?: string;
+  repository: string;
 };
 
 export type MissionId = string;
@@ -2541,13 +2583,16 @@ export type MissionStep = {
   agentless?: boolean;
   assignee?: (ActorRef | null);
   attempt: number;
+  attempts?: Array<MissionStepAttempt>;
   blocked_reason?: string | null;
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
   completed_at?: number | null;
   constraints?: Array<string>;
+  eta?: MissionStepEta;
   goals?: Array<string>;
+  history_complete?: boolean;
   id: Id;
   keep_open?: boolean;
   last_progress?: string | null;
@@ -2562,8 +2607,25 @@ export type MissionStep = {
   started_at?: number | null;
   state: WorkState;
   title?: string | null;
+  transitions?: Array<MissionStepTransition>;
+  waits?: Array<MissionStepWait>;
   wake?: (MissionWake | null);
   wake_reason?: string | null;
+};
+
+export type MissionStepAttempt = {
+  claimant: (ActorRef | null);
+  ended_at: number | null;
+  n: number;
+  outcome: ("done" | "failed" | "cancelled" | "running" | string);
+  reason?: string;
+  started_at: number | null;
+};
+
+export type MissionStepEta = {
+  high_ms: number;
+  low_ms: number;
+  samples: number;
 };
 
 export type MissionStepPresentation = {
@@ -2585,6 +2647,43 @@ export type MissionStepPresentation = {
   | "failed"
   | "pending"
 ;
+};
+
+export type MissionStepTransition = {
+  at: number;
+  attempt: number;
+  event: (
+  "state"
+  | "carried"
+  | "retried"
+  | "claimed"
+  | "submitted"
+  | "failed"
+  | "released"
+  | "nudged"
+ | string);
+  idle_since?: number;
+  reason?: string;
+  status: (
+  "waiting-person"
+  | "waiting"
+  | "ready"
+  | "claimed"
+  | "blocked"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "cancelled"
+ | string);
+};
+
+export type MissionStepWait = {
+  attempt: number;
+  end: number | null;
+  kind: ("you" | "paused" | "retry" | "dependency" | "queue" | string);
+  reason?: string;
+  start: number;
+  until?: number;
 };
 
 export type MissionStuck = {

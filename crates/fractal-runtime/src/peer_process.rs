@@ -84,6 +84,14 @@ impl PeerProcessIdentity {
         self.pid
     }
 
+    /// Accept-time generation token for diagnostic correlation, not fresh authority.
+    pub fn diagnostic_start_token(&self) -> Option<u64> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        { Some(self.start_token) }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { None }
+    }
+
     /// Match an inspected generation to the accept-time witness, including liveness.
     pub fn validate_generation(&self, pid: u32, start_token: u64) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]

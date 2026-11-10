@@ -16,6 +16,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(Store::open_memory("lease-owner").unwrap()),

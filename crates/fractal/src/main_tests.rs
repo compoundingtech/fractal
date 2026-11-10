@@ -634,6 +634,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -1078,6 +1079,116 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
         Some("a".into())
     );
     assert!(leave_receipt_confirmation(Some(&removed)).is_err());
+}
+
+#[test]
+fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
+    let missing = Cli::try_parse_from(["fractal", "budgets", "attention"])
+        .err()
+        .expect("attention budget requires a mission");
+    assert_eq!(missing.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(Cli::try_parse_from([
+        "fractal", "budgets", "attention", "--mission", "mission/example",
+    ]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "fractal", "budgets", "attention", "mission/example",
+    ]).expect("positional mission parses without optional filters");
+    assert!(!cli.json);
+    let Command::Budgets {
+        command: BudgetsCommand::Attention { mission, actor: _, person, at },
+    } = cli.command else {
+        panic!("expected budgets attention");
+    };
+    assert_eq!(mission, "mission/example");
+    assert_eq!(person, None);
+    assert_eq!(at, None);
+
+    for arguments in [
+        vec![
+            "fractal", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000", "--json",
+        ],
+        vec![
+            "fractal", "--json", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments)
+            .expect("attention budget filters and global JSON parse");
+        assert!(cli.json);
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(mission, "mission/example");
+        assert_eq!(actor.as_deref(), Some("agent/node.desk"));
+        assert_eq!(person.as_deref(), Some("person/operator"));
+        assert_eq!(at, Some(1_794_182_400_000_u128));
+    }
+    for actor in ["person/operator", "agent/node.desk"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "budgets", "attention", "mission/example", "--as", actor,
+        ]).expect("attention budget accepts a concrete acting person or agent");
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { actor: parsed, person, .. },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(parsed.as_deref(), Some(actor));
+        assert_eq!(person, None, "acting identity is not the recipient filter");
+    }
+}
+
+#[tokio::test]
+async fn attention_budget_generated_unix_client_requires_an_acting_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = fractal_daemon::api::tests_shared::state(directory.path());
+    let source = r#"version 2
+agent "desk" { workspace "."; command "true"; restart always; }
+mission "example/budget" state="ready" {
+  goal "Gather decisions."
+  step "work" { assigned-to "agent/node.desk"; goal "Ask the recipient." }
+}
+"#;
+    let intent = fractal_daemon::graph::parse_intent(source, "node").unwrap();
+    let preview = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply_as(
+        &intent, &preview.subject_tokens, "budget-cli-fixture", Some("person/operator"),
+    ).unwrap();
+
+    let socket = directory.path().join("budget.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = fractal_daemon::api::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let actor = fractal_drivers::contracts::env("ST_AGENT")
+        .filter(|actor| actor.starts_with("agent/"))
+        .unwrap_or_else(|| "agent/node.desk".into());
+    let response = attention_budget_client(
+        &endpoint, Some(&actor), Some("person/operator"),
+    ).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap();
+    assert_eq!(response.value.mission, "mission/example/budget");
+    assert_eq!(response.value.person, "person/operator");
+    assert_eq!(response.value.inclusive, 0);
+
+    let error = generated_client(&endpoint, None).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap_err();
+    let GeneratedClientError::Api(ClientErrorCode::Forbidden, message, envelope) = error else {
+        panic!("expected the actorless client's revalidation error, got {error:?}");
+    };
+    assert_eq!(message, "the client session grant is absent");
+    assert_eq!(envelope.code, ClientErrorCode::Forbidden);
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
@@ -2466,6 +2577,8 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 fn declared_admission_human_output_is_explicitly_not_enforced() {
     let mut agent = stopped_agent(serde_json::Value::Null);
     assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
+    // Historical agent responses still decode and display mission-only numeric
+    // budgets; this is read compatibility, not a new-authoring fixture.
     agent.declared_admission = Some(serde_json::from_value(serde_json::json!({
         "priority": "normal", "lane": "check",
         "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
@@ -2819,6 +2932,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -2916,6 +3030,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -2996,6 +3111,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -6209,6 +6325,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
@@ -6309,6 +6426,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
@@ -8409,6 +8527,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -9619,6 +9738,7 @@ impl MovedSeat {
             cedar.apply_internal(&fractal_daemon::parse_intent(source, "cedar").unwrap(), "moved-seat").unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),

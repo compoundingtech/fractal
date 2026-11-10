@@ -168,6 +168,7 @@ impl Daemon {
         let store = Arc::new(Store::open(&state_dir.join("claims.sqlite3"), NODE).unwrap());
         let notify = Arc::new(Notify::new());
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),

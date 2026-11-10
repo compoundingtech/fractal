@@ -1124,6 +1124,36 @@ pub struct CanonicalNode {
     pub children: Vec<CanonicalNode>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionBudgetReport {
+    pub mission: String,
+    pub person: String,
+    pub window_start_exclusive_unix_ms: u128,
+    pub window_end_inclusive_unix_ms: u128,
+    pub local_claim_index: u64,
+    pub declared: AttentionBudgetDeclared,
+    pub charged: usize,
+    pub inclusive: usize,
+    pub not_charged: usize,
+    pub unattributed_for_person: usize,
+    pub fleet_complete: bool,
+    pub request_refs: Vec<AttentionBudgetRequestRef>,
+    pub request_refs_complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttentionBudgetDeclared {
+    Declared { asks: u64 },
+    Undeclared,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionBudgetRequestRef {
+    pub claim_id: String,
+    pub subject: String,
+}
+
 /// Canonical compiler values of an applied seat, mission, or schedule publication.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PublicationDefinition {
@@ -1142,6 +1172,19 @@ pub struct MissionDeclaration {
     pub published_at: u64,
     pub text: String,
     pub legacy: bool,
+    /// The source the revision's first publication recorded; absent without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<MissionDeclarationProvenance>,
+}
+
+/// Where a mission revision's source lives. Inert text; nothing is fetched.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionDeclarationProvenance {
+    pub repository: String,
+    pub commit: String,
+    pub path: String,
+    #[serde(default)]
+    pub renderer: Option<String>,
 }
 
 /// Applied desired state, not the original declaration file or a proposed mission revision.
@@ -1166,6 +1209,7 @@ pub struct AgentWorkspace {
 }
 /// Declared admission — declared, not enforced.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredBudgets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_seconds: Option<u64>,
@@ -1175,6 +1219,14 @@ pub struct DeclaredBudgets {
     pub disk_max: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<DeclaredAttentionBudget>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredAttentionBudget {
+    pub person: String,
+    pub asks: u64,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DeclaredAdmission {
@@ -1629,6 +1681,67 @@ pub struct MissionStep {
     /// When st last nudged this held step's holder for idling with nothing set to wake it.
     #[serde(default)]
     pub nudged_at: Option<String>,
+    /// Mission detail only, on the runs it enriches: each attempt, oldest first. Absent elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<Vec<MissionStepAttempt>>,
+    /// Mission detail only: the intervals this step waited, by start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<Vec<MissionStepWait>>,
+    /// Mission detail only: state changes and stall markers, oldest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transitions: Option<Vec<MissionStepTransition>>,
+    /// False when the per-step caps dropped older history entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_complete: Option<bool>,
+    /// Mission detail only: this remaining step's own p25/p75 duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta: Option<MissionStepEta>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepAttempt {
+    pub n: u64,
+    /// An ActorRef: agent, daemon, or person.
+    #[serde(default)]
+    pub claimant: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    /// `done`, `failed`, `cancelled`, `running`, or a later word.
+    pub outcome: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepWait {
+    /// `you`, `paused`, `retry`, `dependency`, `queue`, or a later word.
+    pub kind: String,
+    pub attempt: u64,
+    pub start: u64,
+    #[serde(default)]
+    pub end: Option<u64>,
+    #[serde(default)]
+    pub until: Option<u64>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepTransition {
+    pub at: u64,
+    pub status: String,
+    pub attempt: u64,
+    /// The claim behind it; `nudged` is a stall marker.
+    pub event: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub idle_since: Option<u64>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepEta {
+    pub low_ms: u64,
+    pub high_ms: u64,
+    pub samples: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionWake {

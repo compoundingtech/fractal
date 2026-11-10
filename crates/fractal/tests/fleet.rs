@@ -8425,6 +8425,10 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
         wait_until("each member of this build counts all three", 60, || async { agent_mail_counted(node).await == 3 }).await;
     }
     assert_eq!(shard_file_claims(&a, items[0].0), 1, "the replayed send wrote nothing");
+    // Shard admission precedes the release's asynchronous mail-index mirror.
+    wait_until("the release counts what it mirrors", 60, || async {
+        agent_mail_counted(&o).await == if release_mirrors { 3 } else { 0 }
+    }).await;
     let release_counts = agent_mail_counted(&o).await;
     assert_eq!(release_counts, if release_mirrors { 3 } else { 0 }, "the release counts only what it mirrors");
     for node in [&a, &b, &o] {
@@ -8448,6 +8452,9 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     for node in [&a, &b] {
         wait_until("each member of this build counts the late item", 60, || async { agent_mail_counted(node).await == 4 }).await;
     }
+    wait_until("the rolled-back member counts what it mirrors", 60, || async {
+        agent_mail_counted(&o).await == if release_mirrors { 4 } else { 3 }
+    }).await;
     assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
     o.stop();
     o.binary = PathBuf::from(st3());

@@ -80,6 +80,8 @@ fn deadline_and_default(
     default_ms: Option<u64>,
     now: u128,
 ) -> Result<Option<AskDeadline>, FractalError> {
+    // Capability requests always expire, independently of the optional work-ask policy.
+    let default_ms = if input.actor == "daemon/browser-pairing" { Some(300_000) } else { default_ms };
     let Some(default_ms) = default_ms else {
         if input.deadline_ms.is_some() || input.default_answer.is_some() {
             return Err(FractalError::new(
@@ -364,6 +366,8 @@ pub trait PersonWorkStore {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
             update_only: bool,
+            // Authenticated paired-device grant subject and its session actor, never JSON input.
+            device: Option<(&str, &str)>,
         ) -> Result<StepRunView, FractalError>;
     /// The images an ask's request carries, found by the ask's person step, with who asked and
     /// whom it asks: what a blob read needs to authorize the person looking at them.
@@ -403,10 +407,8 @@ pub trait PersonWorkStore {
 impl PersonWorkStore for Store {
 
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
-        if !input.person.starts_with("person/")
-            || input.person.matches('/').count() != 1
-            || input.person == "person/"
-            || !input.actor.starts_with("agent/")
+        if !crate::model::person_subject(&input.person)
+            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing")
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
@@ -508,7 +510,7 @@ impl PersonWorkStore for Store {
     }
 
     fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, FractalError> {
-        self.finish_person_step_kind(input, true, None, true)
+        self.finish_person_step_kind(input, true, None, true, None)
     }
 
     fn finish_person_step_authorized(
@@ -517,7 +519,7 @@ impl PersonWorkStore for Store {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
         ) -> Result<StepRunView, FractalError> {
-        self.finish_person_step_kind(input, cancel, authorization, false)
+        self.finish_person_step_kind(input, cancel, authorization, false, None)
     }
 
     fn finish_person_step_kind(
@@ -526,6 +528,7 @@ impl PersonWorkStore for Store {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
             update_only: bool,
+            device: Option<(&str, &str)>,
         ) -> Result<StepRunView, FractalError> {
         if let Some(authorization) = authorization
             && (authorization.scope != "write.assistant.answers" || authorization.owner != input.actor || cancel)
@@ -554,6 +557,38 @@ impl PersonWorkStore for Store {
             let ask = request(tx, &subject).map_err(internal)?;
             if update_only && ask.as_ref().is_none_or(|ask| !is_update(ask)) {
                 return Err(FractalError::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
+            }
+            let mut browser_approval = None;
+            if ask.as_ref().is_some_and(|ask| ask.actor.as_deref() == Some("daemon/browser-pairing")) {
+                let refused = || FractalError::new("forbidden", "browser pairing approval requires a paired device with control.pairing");
+                if authorization.is_some() || input.delegation.is_some() || !input.actor.starts_with("person/") {
+                    return Err(refused());
+                }
+                let (grant, session_actor) = device.ok_or_else(refused)?;
+                let paired = tx.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h782476474caf owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */
+                    &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.pairing-completed' ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                    [grant], claim_from_row).optional().map_err(internal)?.ok_or_else(refused)?;
+                let fields = &paired.body["fields"];
+                let revoked = fractal_store::pairing::completion_is_revoked(tx, &paired.subject, &paired.id, &paired.origin).map_err(internal)?;
+                let allows_pairing = fields["scopes"].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope == "control.pairing"));
+                if !fractal_store::pairing::completion_is_trusted(tx, &paired.id, &paired.origin, paired.actor.as_deref(), fields, now_ms()).map_err(internal)?
+                    || revoked || fields["person_id"] != input.actor || fields["session_actor"] != session_actor
+                    || fields["expires_at_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now_ms())
+                    || !allows_pairing
+                    || ask.as_ref().is_none_or(|ask| ask.body["fields"]["deadline_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now_ms()))
+                {
+                    return Err(refused());
+                }
+                let ask = ask.as_ref().ok_or_else(refused)?;
+                let request_id = ask.body["fields"]["key"].as_str()
+                    .and_then(|key| key.strip_prefix("browser-pairing:"))
+                    .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+                    .ok_or_else(refused)?;
+                browser_approval = Some(json!({
+                    "ask":subject,"episode":ask.id,"person":input.actor,"request_id":request_id,
+                    "grant_id":paired.id,"grant_subject":paired.subject
+                }));
             }
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
@@ -641,6 +676,13 @@ impl PersonWorkStore for Store {
                 body["evidence"] = json!(response_evidence);
             }
             let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(response_actor), &body, &evidence, None).map_err(claim_append_error)?;
+            if let Some(mut fields) = browser_approval {
+                fields["answer_id"] = json!(claim.id);
+                let receipt = append_claim_tx(tx, &self.origin, &format!("custom/client/browser-answer-{}", claim.id),
+                    "custom.client.pairing-browser-answer-admitted", Some(response_actor),
+                    &json!({"fields":fields}), std::slice::from_ref(&claim.id), None).map_err(claim_append_error)?;
+                fractal_store::pairing::append_operation_receipt_tx(tx, &receipt).map_err(internal)?;
+            }
             // Past its deadline the ask's own member applies the default, which a later answer on
             // another member must not race; answers before it win (`standing_responses`). The
             // stored time decides, so it is checked here, and refusing rolls this write back.
@@ -986,7 +1028,7 @@ impl PersonWorkStore for Store {
                 stable_input.actor = actor;
                 &stable_input
             };
-            if !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
+            if input.actor != "daemon/browser-pairing" && !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
                 return Err(FractalError::new("missing-ask-owner", "the requester must have an existing agent declaration; declare the agent before asking"));
             }
             let key = if input.new_run.is_some() {

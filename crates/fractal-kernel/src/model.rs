@@ -306,6 +306,18 @@ impl<'de> Deserialize<'de> for DeclaredLane {
     }
 }
 
+/// The concrete person identity shape used by native person asks.
+pub fn person_subject(value: &str) -> bool {
+    value.starts_with("person/") && value.matches('/').count() == 1 && value != "person/"
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredAttentionBudget {
+    pub person: String,
+    pub asks: u64,
+}
+
 /// Declared, not enforced; absence does not mean zero or unlimited.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -318,6 +330,8 @@ pub struct DeclaredBudgets {
     pub disk_max: Option<String>,
     #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<DeclaredAttentionBudget>,
 }
 
 impl DeclaredBudgets {
@@ -326,6 +340,7 @@ impl DeclaredBudgets {
             && self.memory_max.is_none()
             && self.disk_max.is_none()
             && self.token_budget.is_none()
+            && self.attention.is_empty()
     }
 }
 
