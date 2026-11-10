@@ -7806,7 +7806,7 @@ fn a_retired_mission_leaves_the_current_view_at_once_after_a_failed_run() {
     let store = Store::open_memory("node").unwrap();
     let failed = failed_takeover_run(&store, &["deploy-check"]);
     store
-        .retire_mission(&failed.mission, "person/operator", "retire-failed")
+        .retire_mission(&failed.mission, "person/operator", "retire-failed", None)
         .unwrap();
     let current = store.mission_collection_ids(false, 0, 50).unwrap();
     assert!(!current.contains(&failed.mission), "{current:?}");
@@ -8518,7 +8518,7 @@ fn a_retired_mission_leaves_the_lists_keeps_its_history_and_returns_when_publish
     assert!(listed(&store, false));
 
     let retired = store
-        .retire_mission("mission/takeover", "person/operator", "retire-takeover")
+        .retire_mission("mission/takeover", "person/operator", "retire-takeover", None)
         .unwrap();
     assert_eq!(retired.state, MissionState::Retired);
     assert_ne!(retired.revision, ready.revision);
@@ -8556,14 +8556,14 @@ fn a_retired_mission_leaves_the_lists_keeps_its_history_and_returns_when_publish
     );
     assert_eq!(
         store
-            .retire_mission("mission/takeover", "person/operator", "retire-takeover")
+            .retire_mission("mission/takeover", "person/operator", "retire-takeover", None)
             .unwrap(),
         retired,
         "the same request is answered from its first result"
     );
     assert_eq!(
         store
-            .retire_mission("takeover", "person/operator", "retire-again")
+            .retire_mission("takeover", "person/operator", "retire-again", None)
             .unwrap_err()
             .code,
         "mission-already-retired"
@@ -8611,7 +8611,7 @@ fn a_mission_with_an_active_run_is_not_retired() {
         })
         .unwrap();
     let refused = store
-        .retire_mission("takeover", "person/operator", "retire-active")
+        .retire_mission("takeover", "person/operator", "retire-active", None)
         .unwrap_err();
     assert_eq!(refused.code, "mission-has-active-run");
     assert!(refused.message.contains(&run.subject));

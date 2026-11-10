@@ -1716,6 +1716,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "retire-incarnation-mismatch",
   "invalid-custody-successor",
   "custody-pending",
+  "set-managed-subject",
   "attention-migrated",
   "arrangement-exists",
   "arrangement-folder-exists",

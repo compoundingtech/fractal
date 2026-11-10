@@ -1678,6 +1678,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "source.debt.recorded",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
+            "source.debt.closed",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
+            "source.audited",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
             "mission.published",
             &["mission"],
             WritePolicy::AuthorizedRequester,
@@ -3245,6 +3272,34 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "owned-set.revised" => &[
             ("revision", required_string()),
             ("body", required_object()),
+        ],
+        "source.debt.recorded" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("repository", required_string()),
+            ("ref", required_string()),
+            ("sha", required_string()),
+            ("verb", required_string()),
+            ("reason", required_string()),
+            ("claim", string()),
+            ("revision", string()),
+            ("request", string()),
+            ("pointers", array()),
+            ("before", any()),
+            ("after", any()),
+        ],
+        "source.debt.closed" => &[
+            ("debt", required_string()),
+            ("set", required_string()),
+            ("outcome", required_string()),
+            ("set_revision", required_string()),
+            ("publisher", any()),
+        ],
+        "source.audited" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("verb", required_string()),
+            ("refusal", required_string()),
         ],
         "mission.published" => &[
             ("revision", string()),
@@ -4975,6 +5030,9 @@ mod tests {
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
         current.claims.remove("program.step").unwrap();
+        for kind in ["source.debt.recorded", "source.debt.closed", "source.audited"] {
+            current.claims.remove(kind).unwrap();
+        }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
