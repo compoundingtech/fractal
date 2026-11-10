@@ -1,4 +1,5 @@
 import type { AgentSchema, MissionInput, ScheduleSchema, WorkSchema } from './mod.ts'
+import type { ObjectiveInput } from './objective.ts'
 import type {
   SubjectKind,
   SubjectDefinition,
@@ -107,6 +108,12 @@ export const defineMission: Define<'mission', MissionIntent> = define('mission')
 
 /** Defines the scheduled mission declared by a `schedule.ts` module. */
 export const defineSchedule: Define<'schedule', ScheduleIntent> = define('schedule')
+
+/** Objective fields for an `objective.ts` module; the name, if given, must be its path ID. */
+export type ObjectiveIntent = ObjectiveInput
+
+/** Defines the objective declared by an `objective.ts` module; see `Fractal.objective`. */
+export const defineObjective: Define<'objective', ObjectiveIntent> = define('objective')
 
 /** The defining module's `import.meta`; the loader derives the subject ID from the module's path. */
 type Meta = { readonly meta: { readonly url: string } }

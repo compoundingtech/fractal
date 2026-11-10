@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
+use crate::declaration_kdl::canonical_node;
 pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
@@ -4426,54 +4427,6 @@ fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result
         ));
     }
     Ok(())
-}
-
-fn canonical_node(node: &KdlNode) -> Result<Value, FractalError> {
-    let mut properties = BTreeMap::<String, Value>::new();
-    let mut arguments = Vec::new();
-    for entry in node.entries() {
-        let value = json_value(entry.value())?;
-        if let Some(name) = entry.name() {
-            if properties.insert(name.value().into(), value).is_some() {
-                return Err(FractalError::new(
-                    "duplicate-property",
-                    format!(
-                        "node `{}` repeats property `{}`",
-                        node.name().value(),
-                        name.value()
-                    ),
-                ));
-            }
-        } else {
-            arguments.push(value);
-        }
-    }
-    let children = node
-        .children()
-        .map(|document| {
-            document
-                .nodes()
-                .iter()
-                .map(canonical_node)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut output = Map::new();
-    output.insert("name".into(), Value::String(node.name().value().into()));
-    if !arguments.is_empty() {
-        output.insert("arguments".into(), Value::Array(arguments));
-    }
-    if !properties.is_empty() {
-        output.insert(
-            "properties".into(),
-            serde_json::to_value(properties).expect("BTreeMap serializes"),
-        );
-    }
-    if !children.is_empty() {
-        output.insert("children".into(), Value::Array(children));
-    }
-    Ok(Value::Object(output))
 }
 
 fn hash_json(value: &Value) -> String {
