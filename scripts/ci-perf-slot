@@ -47,7 +47,7 @@ Measuring a change (docs/ci.md, "Performance gate")
   Run the load test above on your branch alone: the slot makes sure nothing else of ours is
   measuring at the same time. Its report is a table of each request's p50/p99/max against its
   budget, and the daemon's CPU in cores. The budgets that apply are the absolute p99 budget of
-  every request and the 2-core CPU ceiling (slo/targets.toml); locally there is no baseline, so
+  every request and the 2-core CPU ceiling (slo/objectives.kdl); locally there is no baseline, so
   those are the whole gate. CI adds the relative gate, twice the worst of main's last five
   reports, when you dispatch Performance on your branch. A run that misses a budget fails; do not retry it into
   passing, find the cause.
