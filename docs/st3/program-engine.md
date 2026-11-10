@@ -189,6 +189,56 @@ the authority of whoever started the run, and nothing else. The daemon writes jo
 that actor. Changing `authority` is a mission revision, so factory classifies it as an
 authority-class change.
 
+#### Run authority
+
+**Grammar.** A top-level mission may declare one `authority` block in the shape of the agent
+`*-authority` blocks, one `VERB "PATTERN"` rule per line. `publish`, `start`, `revise` and `cancel`
+take mission IDs exactly as `mission-authority` does (no `mission/` prefix); `write` takes a
+subject, or a registered family alone, before `/*`. A pattern is exact or a terminal `/*`
+namespace covering everything under it. Parsing refuses the block in a nested or loop body, a
+repeated block or rule, an empty block, an unknown verb and any other `*`. There is no `"none"`
+form: a mission without the block grants its runs nothing. The block is a field of the mission
+spec, kept in canonical order and absent when undeclared, so existing revisions hash unchanged and
+changing it is a mission revision. Publication holds a revision that declares it until every
+member advertises `mission_authority=1`, as for `capacity`.
+
+**Starter.** A run's starter is the actor of its `mission-run.created`: its requester, or, for a
+child a program starts (§6), the parent run, `mission-run/PARENT`. The requester stays the human.
+The starter's authority is evaluated when the run writes, not copied at start, so a starter that
+loses authority takes it from its running runs.
+
+**Effective authority** of `mission-run/RUN` is the `authority` of its current generation's
+revision intersected with its starter's. A run starter contributes its own effective authority,
+recursively, so a child never exceeds its parent. A person, agent or daemon starter contributes all
+authority in free mode, and the rules that restrict it (`rule.set` in enforce mode) decide each of
+the run's writes as well. With exact-or-namespace patterns the intersection is exact: for each
+pair with one verb, the narrower pattern if one covers the other, nothing otherwise.
+
+**Credential.** For each start or resume of an attempt the engine mints a store capability of kind
+`program-run` whose subject is the step run and whose incarnation is the attempt (the secret is
+hashed at rest and never journaled), and passes it as `ST_RUN_CREDENTIAL` in the `start`
+message's `env`. The host spreads the run env last, so an effect cannot replace it.
+
+**Binding.** The ancestry walk reads `ST_RUN_CREDENTIAL` from each ancestor's exec-time environment
+beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds neither. The daemon
+binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
+live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
+binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
+routes, no person headers, and `actor`/`requester` must be the run. The CLI defaults its actor to
+the run when the credential is present. The same-UID boundary is cooperative, as for agents.
+
+**Journal.** The engine writes `program.step` claims as `mission-run/RUN`; a run may always journal
+on its own step runs, whatever it declares.
+
+**Enforcement** is one decision at the store's write admission, beside the rules gate, for every
+claim whose actor is a run. The claim names the grant it needs: `mission.published` on `mission/ID`
+needs `publish ID`; a run's creation and its initial generation need `start ID`; a later generation
+needs `revise ID`; any other claim needs `write SUBJECT`. Setting another run's outcome takes a
+person or agent actor, so a run cannot cancel one. The daemon's `[programs] authority` says what
+a write outside the authority does: `enforce` refuses it with `run-authority-denied`; `audit`
+lets it through and records `rule.audited` on `rule/run-authority`, so a new program can discover
+the grants it needs.
+
 ### 4. Versioning
 
 A program's revision is its bundle hash: `sha256` is part of the step definition, so it enters the
