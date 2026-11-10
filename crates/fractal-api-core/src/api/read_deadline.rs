@@ -825,6 +825,96 @@ pub fn query<T>(
     })
 }
 
+/// Install a stream's per-snapshot budget before borrowing its already-admitted
+/// connection. SQLite cancellation and live-reader tracking then see that scope.
+#[track_caller]
+pub fn query_with_permit<T>(
+    store: &super::Store,
+    route: &'static str,
+    duration: Duration,
+    permit: smallclaims::sqlite::ReadPermit,
+    work: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let budget = read_budget::current()
+        .map(|parent| parent.child(duration))
+        .unwrap_or_else(|| ReadBudget::new(route, duration));
+    read_budget::with(Some(budget.clone()), || {
+        budget.check()?;
+        let result = store.readers.request_read_with_permit(permit, work)?;
+        budget.check()?;
+        result
+    })
+}
+
+#[cfg(test)]
+mod snapshot_budget_tests {
+    use super::*;
+
+    #[test]
+    fn admitted_snapshot_budget_is_fresh_bounded_and_restores_its_parent() {
+        let store = super::super::Store::open_memory("snapshot-budget").unwrap();
+        let duration = Duration::from_millis(1_500);
+        for _ in 0..2 {
+            let permit = store.readers.try_admit_read().unwrap();
+            query_with_permit(&store, "/v1/client/collections", duration, permit, || {
+                assert!(store.readers.has_request_reader());
+                let budget = read_budget::current().unwrap();
+                assert!(budget.remaining() <= duration);
+                assert!(!budget.expired());
+                Ok(())
+            }).unwrap();
+            assert!(read_budget::current().is_none());
+            assert!(!store.readers.has_request_reader());
+        }
+        let start = std::time::Instant::now();
+        let parent = ReadBudget::with_clock_for_test("/parent", Duration::from_secs(1), Arc::new(move || start));
+        read_budget::with(Some(parent.clone()), || {
+            let permit = store.readers.try_admit_read().unwrap();
+            query_with_permit(&store, "/v1/client/collections", duration, permit, || {
+                assert!(read_budget::current().unwrap().remaining() <= Duration::from_secs(1));
+                Ok(())
+            }).unwrap();
+            assert_eq!(read_budget::current().unwrap().route(), "/parent");
+        });
+        assert!(!parent.expired());
+        parent.cancel();
+        let error = read_budget::with(Some(parent), || {
+            let permit = store.readers.try_admit_read().unwrap();
+            query_with_permit(&store, "/v1/client/collections", duration, permit,
+                || -> anyhow::Result<()> { panic!("a cancelled parent must not borrow a reader") })
+        }).unwrap_err();
+        assert_eq!(smallclaims::error::typed(error).code, "read-deadline");
+        assert!(store.readers.try_admit_read().is_some());
+    }
+
+    #[test]
+    fn admitted_snapshot_installs_sqlite_cancellation_before_borrowing() {
+        let store = super::super::Store::open_memory("snapshot-cancellation").unwrap();
+        let now = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let clock = now.clone();
+        let start = std::time::Instant::now();
+        let parent = ReadBudget::with_clock_for_test("/parent", ORDINARY,
+            Arc::new(move || start + Duration::from_millis(clock.load(std::sync::atomic::Ordering::SeqCst))));
+        let result = read_budget::with(Some(parent), || {
+            let permit = store.readers.try_admit_read().unwrap();
+            query_with_permit(&store, "/v1/client/collections", Duration::from_millis(1_500), permit, || {
+                store.read_snapshot(|_| {
+                    let connection = store.readers.get();
+                    now.store(1_501, std::sync::atomic::Ordering::SeqCst);
+                    let result = connection.query_row(
+                        "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n",
+                        [], |row| row.get::<_, u64>(0));
+                    assert!(result.is_err(), "the snapshot budget must interrupt SQL itself");
+                    Ok(())
+                })
+            })
+        });
+        assert_eq!(smallclaims::error::typed(result.unwrap_err()).code, "read-deadline");
+        assert!(store.readers.try_admit_read().is_some());
+        assert!(read_budget::current().is_none());
+    }
+}
+
 pub fn error(error: &WorkError) -> Option<ApiError> {
     match error {
         WorkError::Deadline(_) => Some(ApiError::bad(crate::model::FractalError::new(

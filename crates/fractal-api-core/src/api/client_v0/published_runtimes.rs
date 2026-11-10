@@ -65,6 +65,40 @@ fn not_ready() -> ApiError {
     }
 }
 
+/// Reuse only the caller's exact graph cut. Inventories also read work and fleet
+/// membership in their SQL snapshot; a merely older runtime publication would
+/// splice two different cuts into one machine resource.
+pub(super) fn at_snapshot(
+    store: &Store,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+) -> Option<Vec<Value>> {
+    let ListRead::Served(publication, _) = store.published_runtime_list().current() else {
+        return None;
+    };
+    if publication.cut != snapshot.store_index {
+        return None;
+    }
+    let mut items = publication.rows.items.as_ref().clone();
+    restrict_access(&mut items, session);
+    Some(items)
+}
+
+fn restrict_access(items: &mut [Value], session: &ClientSession) {
+    // Publications record eligibility, never a particular caller's authority.
+    // Mutate only caller-owned rows, not the shared publication or cursor cache.
+    for item in items {
+        if let Some(access) = item["terminal_access"].as_object_mut() {
+            for (name, allowed) in [("read", session.allows("terminal.read")),
+                ("input", session.allows("terminal.control")), ("resize", session.allows("terminal.control"))] {
+                if !allowed {
+                    access.insert(name.into(), json!("unavailable"));
+                }
+            }
+        }
+    }
+}
+
 pub fn page(
     state: &AppState,
     snapshot: ClientSnapshot,
@@ -137,17 +171,6 @@ pub fn page(
         };
         (snapshot, page)
     };
-    // Publications record capability eligibility, never a particular caller's authority.
-    // Restrict only the cloned page, leaving the shared publication and cache untouched.
-    for item in &mut page.items {
-        if let Some(access) = item["terminal_access"].as_object_mut() {
-            for (name, allowed) in [("read", session.allows("terminal.read")),
-                ("input", session.allows("terminal.control")), ("resize", session.allows("terminal.control"))] {
-                if !allowed {
-                    access.insert(name.into(), json!("unavailable"));
-                }
-            }
-        }
-    }
+    restrict_access(&mut page.items, session);
     Ok((Extension(snapshot), Json(page)))
 }
