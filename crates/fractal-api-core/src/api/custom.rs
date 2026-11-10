@@ -436,7 +436,7 @@ mod tests {
         assert!(!second.page.has_more);
         assert!(second.page.next_cursor.is_none());
         assert!(second.page.cursor_expires_at.is_none());
-        let tail = records::generic_claims_page(&state.store, Default::default(), None, 0, Some(oldest.store_index + 1), true, 1).unwrap();
+        let tail = records::generic_claims_page(&state.store, Default::default(), None, 0, Some(oldest.store_index + 1), true, 1, None).unwrap();
         assert_eq!(tail.claims[0].id, oldest.id);
         assert!(tail.next_cursor.is_none(), "hidden tail must not create another page");
     }

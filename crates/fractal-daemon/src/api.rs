@@ -29,3 +29,6 @@ pub fn router(state: AppState) -> Router {
 pub fn fabric_router(state: AppState) -> Router {
     fabric_router_with(state, ROUTE_FAMILIES)
 }
+
+#[cfg(test)]
+mod service_read_tests;
