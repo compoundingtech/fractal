@@ -23,7 +23,7 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 | --- | --- |
 | `fractal now` | Understand what needs action. |
 | `fractal agents ls` | Inspect agents and readiness. |
-| `fractal agents show ID` | Inspect one agent's current state. |
+| `fractal agents show ID` | Inspect one agent's current state and its charter. |
 | `fractal agents queue ID` | Inspect its ordered runs. |
 | `fractal missions ls` | List missions and current work. |
 | `fractal missions show ID` | Inspect a definition or run. |
@@ -40,7 +40,7 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 
 With `--json`, the preview names a `predicted_actions` entry for every changed
 subject. `publish-only` means publishing a declaration without a member launch
-change, including description/grouping-only agent edits with or without a
+change, including description (charter) or grouping-only agent edits with or without a
 harness. Launch changes retain their existing actions (such as
 `observe-or-start` or `restart`); runtime interruption and suspension decisions
 still take precedence.
@@ -58,6 +58,7 @@ For small independent authorized work, use `fractal work start`. Claim before ex
 | `fractal replication status` | Inspect graph synchronization. |
 | `fractal devices` | Pair, inspect, and revoke clients. |
 | `fractal subject show ID` | Inspect one typed graph subject. |
+| `fractal claims ls --kind KIND --subject-prefix PREFIX` | List claims by kind, exact subject, or subject prefix. |
 | `fractal demo check FILE` | Validate a scripted demo file without playback. |
 | `fractal web [--state-dir DIR]` | Open an authenticated session in the daemon's local web app; does not start another server. |
 
