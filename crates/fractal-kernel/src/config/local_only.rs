@@ -133,6 +133,7 @@ mod tests {
         let root = home.path().join(".st-instance/client-control-fixture");
         let mut config = Config {
             state_dir: root.join("state/st3"),
+            socket: root.join("run/fractal.sock"),
             client_gateway_socket: root.join("run/fractal-client.sock"),
             ..Config::default()
         };

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Constrain the reserved fixture privileged operator listener and legacy binding alias to the fixture-derived paths.",
+  "replay": { "status": "none", "detail": "No claim replay or store mutation." },
+  "schema": { "status": "none", "detail": "No protocol schema changes." },
+  "rules": { "status": "changed", "detail": "Reserved fixture privileged socket overrides, symlink leaves and parent aliases are refused before identity, store and bind effects." },
+  "compatibility": { "status": "none", "detail": "Ordinary instance privileged listener configuration is unchanged." },
+  "downtime": { "status": "none", "detail": "Source publication does not configure or restart a service." },
+  "manual": { "status": "changed", "detail": "Fixture privileged listeners must use the own instance root run/fractal.sock path." },
+  "recovery": { "status": "none", "detail": "Refusal occurs before startup effects; no store recovery is needed." }
+}
