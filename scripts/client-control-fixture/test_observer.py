@@ -9,7 +9,7 @@ import observer
 
 class ObserverTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        self.temporary = tempfile.TemporaryDirectory(dir=Path('/tmp').resolve())
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name)
         self.profile = self.home / '.st-instance/client-control-fixture/client-profiles/tui'

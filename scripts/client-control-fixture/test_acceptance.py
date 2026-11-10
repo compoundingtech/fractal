@@ -100,7 +100,7 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(result['unread_bit'], 'not-supported-for-native-asks')
 
     def test_complete_synthetic_artifacts_are_not_runtime_authorization(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory:
             record, evidence = synthetic(Path(directory))
             result = acceptance.validate(evidence, record)
             self.assertEqual({row['status'] for row in result['rows'].values()}, {'EVIDENCE_COMPLETE'})

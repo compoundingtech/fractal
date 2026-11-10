@@ -119,7 +119,7 @@ class PacketTests(unittest.TestCase):
 
     def test_catalog_is_actual_separate_and_tamper_evident(self):
         ask, items, claims, grants, health, services = evidence()
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             path = seed.instance_root(home) / 'run/fractal.sock'
             fabric_home, control = packet.fabric_paths(home)
@@ -155,7 +155,7 @@ class PacketTests(unittest.TestCase):
                 packet.teardown(record, home / 'run/fractal.sock', home)
 
     def test_dedicated_fabric_paths_commands_and_refusals(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             own, control = packet.fabric_paths(home)
             plan = packet.fabric_commands(home)
@@ -177,7 +177,7 @@ class PacketTests(unittest.TestCase):
                 packet.fabric_paths(home)
 
     def test_socket_normal_client_alternate_and_symlink_refusals(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             own = seed.instance_root(home) / 'run/fractal.sock'
             own.parent.mkdir(parents=True)

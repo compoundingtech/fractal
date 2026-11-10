@@ -24,7 +24,7 @@ class FixtureSeedTests(unittest.TestCase):
                 seed.validate_text(f'No {char} syntax')
 
     def test_exact_own_operator_socket_only(self):
-        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as temporary:
             home = Path(temporary)
             own = home / '.st-instance' / seed.INSTANCE / 'run/fractal.sock'
             own.parent.mkdir(parents=True)
@@ -54,7 +54,7 @@ class FixtureSeedTests(unittest.TestCase):
                 seed.operator_socket(own, home)
 
     def test_missing_socket_never_creates_or_launches_anything(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.object(seed.subprocess, 'run') as run:
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as temporary, patch.object(seed.subprocess, 'run') as run:
             home = Path(temporary)
             own = home / '.st-instance' / seed.INSTANCE / 'run/fractal.sock'
             with patch.dict(seed.os.environ, {'HOME': str(home)}), self.assertRaises(FileNotFoundError):
@@ -63,7 +63,7 @@ class FixtureSeedTests(unittest.TestCase):
             self.assertFalse(own.parent.exists())
 
     def test_root_receipt_matches_rust_bytes_without_newline_normalization(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as temporary:
             home = Path(temporary)
             migrated = home / '.fractal-instance' / seed.INSTANCE
             migrated.mkdir(parents=True)

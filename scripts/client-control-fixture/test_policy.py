@@ -44,7 +44,7 @@ def bindings_for(home):
 
 class PolicyTests(unittest.TestCase):
     def test_bindings_use_existing_concrete_safe_selectors(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             bindings = bindings_for(home)
             result = policy.compile_policy(bindings, home)
@@ -53,7 +53,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(result['ios']['expected_churn'], [])
 
     def test_unowned_glob_missing_and_whole_file_identity_selectors_refused(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             original = bindings_for(home)
             for field, value in [('name', 'not-in-source-inventory'),
@@ -67,7 +67,7 @@ class PolicyTests(unittest.TestCase):
                     policy.compile_policy(bindings, home)
 
     def test_private_profile_must_be_omitted_and_source_inventory_pinned(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             original = bindings_for(home)
             for change in ('inventory', 'omission', 'safe-export', 'unobserved'):
@@ -84,7 +84,7 @@ class PolicyTests(unittest.TestCase):
                     policy.compile_policy(bindings, home)
 
     def test_placeholders_resolve_from_named_record_provenance_and_freeze(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             bindings = bindings_for(home)
             result = policy.compile_policy(bindings, home)
@@ -98,7 +98,7 @@ class PolicyTests(unittest.TestCase):
                 policy.compile_policy(bindings, home)
 
     def test_opaque_churn_requires_read_only_json_export(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+        with tempfile.TemporaryDirectory(dir=Path('/tmp').resolve()) as directory, patch.dict(os.environ, {'HOME': directory}):
             home = Path(directory)
             bindings = bindings_for(home)
             row = bindings['clients']['ios']
