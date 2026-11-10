@@ -349,13 +349,22 @@ Restore verifies signatures, envelope and claim hashes through normal admission,
 chains, reapplies replicated repairs, and replays projections with the current code. Pre-membership envelopes retain their
 unsigned legacy wire representation. As in normal replication, later membership changes do not
 revoke envelopes already admitted. Missing or undecodable envelopes fail the restore. Unknown
-or quarantined claim records retain the normal admission behavior; the admitted source digest
-must still match exactly.
+claim records retain the normal admission behavior. Operation envelopes without portable
+member admission remain quarantined: their bytes are preserved, but their claims provide no
+authority. `operation_envelopes_quarantined` reports the count, and a counts-only warning
+indicates that pairing or terminal attachment must be repeated. On a standalone daemon,
+pairings and terminal attachments do not survive backup restoration.
+This quarantine is permanent: later member signatures do not restore admission.
+The append-only `replica_restore_quarantine` ledger survives subsequent archives
+and restores. Any archive carrying quarantine uses version `6`, which older
+readers refuse; archives without quarantine retain their existing version.
 
 The complete envelope-log digest always has to match, including certified tombstone identities.
-With the same registry fingerprint, the claim source digest and count also have to match. The
-fingerprint covers the known claim kinds and shared projection layout, as it does for sync.
-With the same schema and fingerprint, all table digests and the graph digest also have to match.
+Without quarantined operation envelopes, the same registry fingerprint requires the claim
+source digest and count to match. The fingerprint covers known claim kinds and shared
+projection layout, as it does for sync. With the same schema and fingerprint, all table and
+graph digests must also match. Quarantining operation envelopes reports rebuilt digests and
+`projections_match: false`; other invalid or unknown claim history still refuses that restore.
 An older schema or registry can produce
 new projections after an upgrade, including previously unknown claims: JSON output reports the source and rebuilt graph digests,
 `projections_match`, and rebuilt table digests so that this difference is visible. Envelope payloads

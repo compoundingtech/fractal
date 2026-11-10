@@ -32,6 +32,40 @@ keeps its current build while new CLI invocations use the installed build. Follo
 the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
 
+### Service-grant refusal on the pinned baseline
+
+The service downgrade fixtures target the baseline in
+`.github/fleet-compat-baseline.json` (v0.3.30, commit
+`9146398018b0835728266cf8269f0d96f02ad652`). Service credentials remain disabled
+in production. A service grant must use a `plugin/<host>/<name>` principal,
+never an assistant principal. The candidate refuses service-profile issuance
+and authentication, including the counterexample `assistant/chatgpt` plus
+`profile=service`; the closed assistant pairing grammar cannot issue that shape.
+
+The old binary ignores the profile field, but refuses plugin service grants
+through its exact `assistant/chatgpt` principal check and refuses non-assistant
+scopes through its closed assistant scope set. Replicated grants additionally
+fail its authoritative-origin check. The ignored fleet tests exercise both
+issuer-origin roles and a candidate → old → candidate restart on the same database,
+with retained GRANTED/POLICY claims and live, expired, and revoked assistant
+controls. Fixtures are signed offline by the candidate store using the stopped
+node's own origin and existing node/principal keys: the public claims API refuses
+these authority kinds, and the old binary cannot issue service grants. A candidate-only
+test exercises the same offline seeding, restart, replication, and refusal path.
+The rollback fixture also characterizes owner inspection: the old
+binary labels a plugin service record as an assistant grant even though its
+credential cannot authenticate.
+
+This is only a service-credential refusal boundary, **not a general rollback
+guarantee**. With an authoritative-origin grant written offline using that node's
+signing keys, the old binary can authenticate the deliberately seeded
+`assistant/chatgpt` + service-profile counterexample when it has assistant scopes.
+This fixture is not issuable through the supported pairing API and is not a
+demonstrated remote authorization bypass. Unknown-field retention or a successful owner inspect
+is not evidence of safe authorization. Any future service issuance must retain
+the plugin-principal invariant and revisit compatibility before enabling it.
+
+
 ### Additive claims and unknown-field retention
 
 During the window, optional claim fields must be additive: absence preserves old
@@ -70,6 +104,43 @@ Design sketch (**open, [#4002](https://github.com/compoundingtech/fractal/issues
 The active-member definition, authenticated freshness/absence evidence, durable
 activation record, and re-sync completion/write fence are unresolved protocol
 details in #4002. A local timeout alone is not authority to remove a member.
+
+### Declared admission publication
+
+Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
+empty budgets block) requires every active fleet incarnation to advertise
+`features.declared_admission=1` in its latest own-origin, authenticated, signed
+`daemon.started` claim anchored to the admitted incarnation. Publications containing
+attention additionally require `features.declared_attention=1` from every active
+incarnation, including the local daemon, in that same advertisement. The publication
+gate requires signed, current, unambiguous membership and fails closed on missing,
+false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy
+writers with `declared-admission-feature-barrier`. A refusal rejects the full
+publication before any declaration is written; an old member never receives a
+new-child publication through a refused write. Attention-free declarations continue
+publishing in mixed fleets with version-1 declared-admission support. Upgrade all
+active members or fence legacy peers before publishing attention.
+Keep every member on a supporting binary while populated metadata exists.
+This is an ongoing requirement. The gate checks support only at write time.
+It does not prevent a member from starting an old binary later.
+It does not prevent an old member from joining later.
+An old member drops agent metadata and fails mission revision validation.
+Remove attention with supporting readers before a mixed-version rollback; remove
+all declared-admission metadata before rolling back to readers that lack version-1
+declared-admission support.
+
+New agent authoring accepts only peak `memory-max` and `disk-max` budgets.
+`cpu-seconds` and `token-budget` are mission-run totals, including all retries,
+and refuse new agent publication through CLI and API paths. Historical agent
+readers and wire types retain those fields unchanged; replay is unchanged.
+The compatibility assessment found no published uses: the supplied search of
+`schickling/factory` at `origin/main` (`b2dacb7`) and dotfiles `nixpkgs/smalltalk`
+found zero matches for `declaredBudgets`, `tokenBudget`, `cpuSeconds`,
+`token-budget`, or `cpu-seconds`. This evidence is scoped to those sources,
+not a claim about every external declaration.
+
+This per-feature gate does not establish the general adjacent-release guarantee
+described above. See [declared admission](priority.md#declared-admission).
 
 ### Checkpoints in a mixed fleet
 
@@ -177,6 +248,35 @@ the **previous published stable release → current candidate**, not a permanent
 source. Both pins record the release tag, its full source commit and native release archive
 URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published `bin/st3`;
 historical messaging uses the channel source from the same release commit.
+
+CI prepares each pinned native archive once per workflow. The Ubuntu producer uses an
+`actions/cache` entry keyed by target and the pin's SHA256 across runs, then uploads the
+verified bytes as an artifact retained for seven days. Artifact names include the producer's
+`github.run_attempt`, so reruns never overwrite bytes used by another attempt. The producer
+exports each artifact name as a job output; a consumer-only rerun uses that retained output,
+not its own attempt number. Fleet and messaging share artifacts when their pins match.
+Downstream jobs download the producer-selected numeric artifact ID to a private directory,
+using the bounded transfer implementation from `scripts/ci-test-archive`. They check the
+authenticated ZIP identity, size and digest before opening it, then reverify the pinned
+archive's SHA256 and `BUILD.json` source/target before atomically publishing consumer bytes.
+Artifact metadata must match the current run ID and its event's source identity: the PR head
+from the event payload on `pull_request`, or `GITHUB_SHA` on push and merge-group runs.
+The PR merge-checkout SHA is not the artifact API's workflow-run head.
+`COMPAT_BASELINE_ARCHIVE` supplies those bytes, never a live release download. Producer job
+IDs also namespace artifact names so ordinary and projected proof producers cannot collide.
+Artifacts bridge GitHub-hosted, Namespace and macOS runners without
+assuming their cache backends are shared. Missing or corrupt artifacts fail closed;
+producer cache hits are also reverified. Evidence-only gates do not depend on archives.
+
+On a preparation cache miss, `scripts/compat-baseline` first downloads the pinned browser
+URL. HTTP 502, 503 and 504 receive two retries after 1 and 3 seconds. Once exhausted,
+or on another HTTP 5xx or a timeout, it resolves the same release asset through GitHub's
+API, with at most two attempts per API request and a 60-second timeout per request.
+`GH_TOKEN` (or `GITHUB_TOKEN`) authenticates API requests without forwarding credentials
+on redirects. Diagnostics on stderr identify which path supplied the archive. Both paths
+must pass the same SHA256 and `BUILD.json` checks; `--save-archive` atomically retains the
+verified original bytes for caching. `COMPAT_BASELINE_ARCHIVE` bypasses network access
+and its digest is checked even when the extracted binary is already present.
 
 After each stable publication, release automation opens a baseline maintenance PR against
 `main`. It derives the source from `RELEASE.json`, verifies the dereferenced tag and the two

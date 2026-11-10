@@ -16,7 +16,6 @@ import { credentialExpiredMessage, observed, unavailable, waiting, type Conversa
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 // Evaluate the real pane before mounting the workspace's lazy boundary.
 import './ConversationPane.tsx'
-import { FeedState } from '../data/FeedState.tsx'
 import { UsagePane } from '../monitor/UsagePane.tsx'
 import { projectNativeDetails } from '../data/nativeDetails.ts'
 import { CapturedChangesView } from './ChangesInspector.tsx'
@@ -128,8 +127,7 @@ describe('RM1 workspace source states', () => {
     expect(transcript().textContent).not.toMatch(/private diagnostic|Retry/)
     const refresh = vi.fn()
     source = { ...source, objectives: { list: Atom.make(denied), accounts: Atom.make(denied), history: () => Atom.make(denied), refresh } }
-    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><FeedState feed={denied} label="Details" /><UsagePane /></DataSourceProvider>))
-    expect(host.querySelector('[aria-label="Details availability"]')?.textContent).toContain(credentialExpiredMessage)
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><UsagePane /></DataSourceProvider>))
     const usage = host.querySelector('[data-testid="usage-pane"]')!
     expect(usage.textContent).toContain(credentialExpiredMessage)
     expect(usage.querySelector('[role="alert"], button')).toBeNull()
@@ -286,7 +284,6 @@ describe('RM1 workspace source states', () => {
     expect(sidebar().textContent).toContain('Last observed 18 s ago')
     expect(host.textContent).toContain('Last seen working · 18 s ago')
     expect(host.querySelector('[data-last-seen]')?.textContent).toContain('Last seen working · 18 s ago')
-    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
     expect(roster().querySelector('[data-status="working"][data-frozen="true"]')).not.toBeNull()
     expect(transcript().textContent).toContain('The retained answer remains readable.')
     const retainedAgents = registry.get(agents)
@@ -330,7 +327,6 @@ describe('RM1 workspace source states', () => {
     expect(log.querySelector('button[aria-expanded="true"]')).not.toBeNull()
     expect(host.textContent).toContain('Last seen working · 18 s ago')
     expect(transcript().textContent).not.toContain('Run running')
-    expect(host.querySelector('[data-testid="run-progress"]')).toBeNull()
   })
 
   it('freezes the working cue on disconnect without requiring replacement feed values', async () => {

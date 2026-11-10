@@ -57,6 +57,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "agent-messages", run: agent_messages::open },
     Hook { name: "arrangements", run: arrangements::open },
     Hook { name: "limits", run: limits::open_limits },
+    Hook { name: "usage-credits", run: usage_credits::open },
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },
@@ -108,8 +109,13 @@ pub const APPEND: &[AppendProjector] = &[
     },
     AppendProjector {
         name: "limits",
-        takes: Takes::Kinds(&["harness.limits"]),
+        takes: Takes::Kinds(&["harness.limits", "usage.limits.observed"]),
         project: |transaction, _| limits::flush_limits(transaction).map(drop),
+    },
+    AppendProjector {
+        name: "usage-credits",
+        takes: Takes::Kinds(&["usage.limits.observed"]),
+        project: usage_credits::project,
     },
     AppendProjector {
         name: "arrangements",
@@ -132,6 +138,11 @@ pub const APPEND: &[AppendProjector] = &[
 /// claim of the range has its event row.
 pub const REPLICATED: &[AppendProjector] = &[
     AppendProjector {
+        name: "usage-credits",
+        takes: Takes::Kinds(&["usage.limits.observed"]),
+        project: usage_credits::project,
+    },
+    AppendProjector {
         name: "arrangement-project",
         takes: Takes::Kinds(&["arrangement.edited"]),
         project: arrangements::project_replicated,
@@ -153,6 +164,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::flush },
     Hook { name: "agent-messages", run: agent_messages::flush },
     Hook { name: "limits", run: |transaction| limits::flush_limits(transaction).map(drop) },
+    Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },
     Hook { name: "run-eta", run: run_eta::flush },
     Hook { name: "ordered-membership", run: ordered_membership::flush },
@@ -170,6 +182,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "glass-heads", run: glass_heads::rebuild },
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
+    Hook { name: "usage-credits", run: usage_credits::rebuild },
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
     Hook { name: "wake-lookup", run: wake_lookup::rebuild },
@@ -186,6 +199,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/directive-notes", run: directive_notes::rebuild },
     ReplayStage { phase: "full-replay/custom", run: custom::rebuild },
     ReplayStage { phase: "full-replay/arrangements", run: arrangements::rebuild },
+    ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },

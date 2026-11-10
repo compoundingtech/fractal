@@ -170,7 +170,7 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
 }
 
 pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
-            grant_id: Option<&str>, result: &Result<T, ApiError>) -> Result<(), ApiError> {
+            grant_id: Option<&str>, requested_principal: Option<&str>, result: &Result<T, ApiError>) -> Result<(), ApiError> {
     let mut random = [0_u8; 12];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     let mut referenced = Vec::new();
@@ -187,7 +187,7 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
         subject: format!("custom/client/assistant-audit-v1-{}", hex::encode(random)),
         kind: "custom.client.assistant.v1.audit".into(), actor: Some(actor.into()),
         fields: serde_json::from_value(json!({"version":1,"operation":operation,
-            "issuer":state.owning_person,"principal":audit_principal.as_deref().unwrap_or(PRINCIPAL),"actor":actor,"transport":transport,
+            "issuer":state.owning_person,"principal":audit_principal.as_deref().or(requested_principal).unwrap_or(PRINCIPAL),"actor":actor,"transport":transport,
             "grant_id":grant_id,"timestamp":client_timestamp(client_now_ms()),
             "outcome":if result.is_ok() {"accepted"} else {"denied"},
             "denial_code":result.as_ref().err().map(|error| error.code.as_str()),
@@ -412,6 +412,41 @@ mod tests {
         assert_eq!(principal(&json!({})).unwrap(), PRINCIPAL);
         for value in [Value::Null, json!("plugin/host/service"), json!("assistant/unknown")] {
             assert!(principal(&json!({"principal":value})).is_err());
+        }
+    }
+
+    #[test]
+    fn service_profile_cannot_issue_or_authenticate_as_an_assistant() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.owning_person = Some("person/owner".into());
+        for (number, requested_principal) in [
+            (1, "plugin/issuer/service"), (2, PRINCIPAL),
+        ] {
+            let id = format!("{number:024x}");
+            let source = json!({"profile":"service", "principal":requested_principal,
+                "grant_id":id, "issuer":"person/owner",
+                "session_actor":format!("{requested_principal}/session/{id}"),
+                "expires_at_unix_ms":4_102_444_800_000_u64,
+                "credential_hash":credential_digest(&id),
+                "scopes":["read.assistant.summary"], "minimal_read_mode":"approval-once",
+                "disclosure_consent":true});
+            let subject = subject(&id).unwrap();
+            // In particular, assistant/chatgpt + service is never an issuable shape.
+            assert!(append(&state, subject.clone(), GRANTED, "person/owner", source.clone(), None).is_err());
+            assert!(latest(&state, &subject, GRANTED).unwrap().is_none());
+            // Generic claim retention must not turn that same shape into API authority.
+            let granted = state.store.append_claim(&ClaimInput {
+                subject:subject.clone(), kind:GRANTED.into(), actor:Some("person/owner".into()),
+                fields:serde_json::from_value(source.clone()).unwrap(), evidence:Vec::new(),
+                expected_subject:Some(None), idempotency_key:None,
+            }).unwrap();
+            state.store.append_claim(&ClaimInput {
+                subject, kind:POLICY.into(), actor:Some("person/owner".into()),
+                fields:serde_json::from_value(source).unwrap(), evidence:vec![granted.id.clone()],
+                expected_subject:Some(Some(granted.id)), idempotency_key:None,
+            }).unwrap();
+            assert!(authenticate(&state, &credential_digest(&id), "unix").is_err());
         }
     }
 

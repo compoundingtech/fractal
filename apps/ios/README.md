@@ -14,6 +14,31 @@ The TypeScript human error helpers match Rust's explicit `human()` / `human_mess
 
 An already paired phone can use **Fleet › this connection › re-pair this device**, including in Release, to open the form on its saved gateway. Cancel leaves the profile untouched. Replacement first confirms notification cleanup, then verifies the new grant before the single SecureStore commit; a failed replacement retains the old profile.
 Re-pairing refuses before sending the code if Fabric is connected to another member. URL gateways receive pairing directly at their saved URL, never through an unrelated Fabric bridge. A Fabric-only gateway requires the connected member's exact node and service. The replacement credential and the gateway used for that pairing are saved together.
+Begin the replacement pairing on the member served by that saved gateway (or the selected
+Fabric member), not another trusted fleet machine. Completion is origin-bound even when the
+pending challenge has replicated. With QR pairing, run the pair command on the member served
+by `--gateway`; a configured different member is refused offline before begin. The CLI then
+checks the gateway's public health node and refuses a different member; an unreachable gateway
+or health response without a node prints a warning. Neither the QR nor a gateway forwarder
+changes where pairing begins.
+
+For a staged device renewal, simply open the app (or bring it back to the foreground).
+The phone checks its saved paired gateway and reachable Fabric member profiles using its
+existing device key, not its old bearer. A saved person-root pin is required: the app
+verifies that pin and the signed request before showing the member, person, and exact scopes.
+Tap **Approve** and authenticate with Face ID, Touch ID, or the device passcode. There is
+no code, QR scan, fingerprint entry, or settings step in this renewal flow.
+Renewal creates a separate non-exportable Secure Enclave candidate and uses a fresh native
+device-owner authentication immediately before its approval signature. Ordinary message
+signing remains prompt-free. Renewal has no software-key fallback; a simulator or phone
+without an available Secure Enclave cannot approve it. After notification cleanup, both
+the old key and candidate sign the same bound request; the app checks the returned grants
+against its saved root pin and candidate before one SecureStore profile replacement.
+Failures retain the old profile and delete the uncommitted candidate. Saved routing is unchanged.
+`deviceRenewal.test.mjs` covers protocol binding, pinned proof verification, cancellation,
+and atomic replacement; `nativeDeviceKey.test.mjs` covers the native bridge contract.
+Run these on Linux with `node --experimental-transform-types --import ./testHooks.mjs --test deviceRenewal.test.mjs nativeDeviceKey.test.mjs`.
+Swift compilation and physical-device authentication require macOS and a phone.
 
 Terminal creation failures, including an answer without a terminal ID, appear in the error banner. Feed live/recovery transitions and successful background reads do not dismiss action feedback; dismiss the banner or complete a successful action to clear it.
 Alternatively, start `fractal devices pair` with its explicit `--gateway` URL and select **Scan pairing QR code** on the phone's pairing screen. Scanning only fills a candidate gateway, pairing ID and code; copy the person-root fingerprint separately, then tap **Pair this device**. A change of gateway (including its base path) requires confirmation before the form changes. Cancelling the scan or that confirmation preserves the existing draft and saved profile. The saved credential and root pin are replaced only after successful pairing. Expired or invalid QR codes are rejected without showing their contents; camera denial leaves manual entry on the same screen. QR scanning requires a fresh native build with the local `fractal-pairing-scanner` Expo module and camera permission; it does not work in Expo Go.

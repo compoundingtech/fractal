@@ -149,7 +149,7 @@ mission "service-planned" state="ready" {
 async fn paired_devices_and_browser_sessions_cannot_use_service_claim_routes() {
     let root = tempfile::tempdir().unwrap();
     let state = tests_shared::state(root.path());
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject:"custom/client/service-route-device".into(),kind:"custom.client.pairing-completed".into(),
         actor:Some(OWNER.into()),fields:serde_json::from_value(json!({
             "credential_hash":credential_digest("device-only"),"session_actor":"person/owner/session/device",
@@ -157,6 +157,7 @@ async fn paired_devices_and_browser_sessions_cannot_use_service_claim_routes() {
         })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
     for app in [router(state.clone()),fabric_router(state.clone())] {
+        assert_eq!(request(&app,"GET","/v1/client/work",Some("device-only"),Value::Null).await.0,StatusCode::OK);
         for path in ["/v1/client/claims","/v1/client/claims/by-id/absent"] {
             assert_eq!(request(&app,"GET",path,Some("device-only"),Value::Null).await.0,StatusCode::FORBIDDEN);
             assert_eq!(request(&app,"GET",path,None,Value::Null).await.0,StatusCode::FORBIDDEN);
