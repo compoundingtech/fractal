@@ -83,10 +83,6 @@ const rustTestJunitUpload = (name: string) => [
   },
 ]
 
-// Project the flake's immutable input into checkout: signing jobs need Python, not a Nix shell.
-const shadowLock = JSON.parse(readFileSync(new URL('../../flake.lock', import.meta.url), 'utf8'))
-const shadowSource = shadowLock.nodes[shadowLock.nodes.root.inputs.mergemaster].locked
-
 // Run before Rust fixture consumers; the required freshness lane also covers all client lanes.
 const sidebarFixtureStep = nixDevelopStep({
   name: 'Validate public sidebar fixtures and scrubber self-tests',
@@ -857,39 +853,40 @@ git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warni
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
   --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"`,
         },
-        // Live decision comparison is report-only; no required job depends on this producer.
-        // main-upkeep projects these same steps into proof-evidence-note-linux-gate.
-        { name: 'Remove the key before shadow comparison', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
-        {
-          name: 'Check out the flake-pinned mergemaster shadow source',
-          if: "${{ always() && steps.configure.outcome == 'success' }}",
-          'continue-on-error': true,
-          uses: 'actions/checkout@v4',
-          with: { repository: `${shadowSource.owner}/${shadowSource.repo}`, ref: shadowSource.rev, path: '.mergemaster-shadow', 'persist-credentials': false },
-        },
+        // Shadow verification: what would a gate that fetched these refs from the remote say about each lane? Reported
+        // in the job summary only; it gates nothing, runs from the BASE commit's scripts (absent there: skipped), and
+        // is fail-soft like every other step of this job.
         {
           name: 'Shadow-verify the published notes',
           if: "${{ always() && steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
 [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
-comparison=()
-if grep -q -- --compare-shadow "$shadow"; then
-  comparison=(--compare-shadow "$GITHUB_WORKSPACE/.mergemaster-shadow/scripts/ci-evidence-shadow" --comparison-out "$RUNNER_TEMP/evidence-shadow-comparison")
-else
-  echo "::notice::accepted base predates mergemaster comparison; no comparison cases"
-fi
 python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \\
-  --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --optional "${evidenceLaneNames.join(',')}" --remote origin \\
-  "\${comparison[@]}"`,
+  --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --optional "${evidenceLaneNames.join(',')}" --remote origin`,
         },
-        {
-          name: 'Retain shadow decisions and lane counts',
-          if: 'always()',
-          'continue-on-error': true,
-          uses: 'actions/upload-artifact@v4',
-          with: { name: 'evidence-shadow-comparison-${{ github.run_attempt }}', path: '${{ runner.temp }}/evidence-shadow-comparison/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
-        },
+        { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
+      ],
+    },
+    // Non-required, keyless: the signing job stays unchanged; both evaluators share a remote snapshot.
+    'evidence-shadow-compare': {
+      needs: ['evidence-note-linux-gate'], 'runs-on': 'ubuntu-latest', permissions: { contents: 'read' },
+      'timeout-minutes': 10, 'continue-on-error': true,
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+        { name: 'Compare live shadow decisions (not gate coverage)', run: `mkdir -p "$RUNNER_TEMP/evidence-base"
+git fetch --quiet origin "$BASE_SHA" && git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+key_path=.st/evidence-keys; [ -z "$(git ls-tree "$BASE_SHA" -- .fractal/evidence-keys)" ] || key_path=.fractal/evidence-keys
+git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys"
+shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+grep -q -- --snapshot-tree "$shadow" || { echo "::notice::missing comparison coverage: accepted base predates C"; exit 1; }
+mm=$(nix eval --raw --no-write-lock-file .#mergemasterSource)
+python3 "$shadow" --snapshot-tree "$(git rev-parse 'HEAD^{tree}')" --keys "$RUNNER_TEMP/evidence-keys" --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" \\
+  --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" \\
+  --compare-shadow "$mm/scripts/ci-evidence-shadow" --comparison-out "$RUNNER_TEMP/evidence-shadow-comparison"` },
+        { uses: 'actions/upload-artifact@v4', if: 'always()', with: { name: 'evidence-shadow-comparison-${{ github.run_attempt }}', path: '${{ runner.temp }}/evidence-shadow-comparison/', 'if-no-files-found': 'ignore', 'retention-days': 7 } },
       ],
     },
     // CI's per-crate rust-tests notes (docs/per-crate-test-signing.md, section 14), signed with the `evidence-signing` key from the test
@@ -991,6 +988,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
   }),
 }, {
   "hm-module-eval": "Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.",
+  "evidence-shadow-compare": "Fetches immutable source and evidence only; compiles nothing.",
   "swift-client-changes": "Classifies Git paths only; builds nothing.", "swift-client": "Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.", "evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
 )
 }

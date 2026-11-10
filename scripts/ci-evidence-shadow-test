@@ -161,6 +161,13 @@ with tempfile.TemporaryDirectory() as directory:
     stub.write_text(stub.read_text().replace(repr(moved), repr(tagged)))
     done = shadow('--verifier', str(stub), checks='linux-tests')
     assert 'check=linux-tests' in done.stdout and 'reason=verifier_exit_1' not in done.stdout and 'ok=1 ' in done.stdout, done.stdout
+    done = subprocess.run([sys.executable, str(SHADOW), '--snapshot-tree', tree, '--keys', str(keys),
+                           '--checks', 'linux-tests,absent-lane', '--remote', 'sink', '--compare-shadow', str(SHADOW),
+                           '--comparison-out', str(comparison)], cwd=publisher, capture_output=True, text=True, env=ENV)
+    assert done.returncode == 0, done.stderr
+    snapshot = json.loads((comparison / 'lane-summary.json').read_text())
+    assert snapshot['population']['names'] == ['linux-tests', 'absent-lane'] and 'other runs' in snapshot['population']['source'], snapshot
+    assert len(snapshot['lanes']) == 2 and all(row['cases'] == 1 and row['unexplained_diff_count'] == 0 for row in snapshot['lanes']), snapshot
     for name in ('tag', 'ref'):
         for bad in ('refs/heads/main', 'refs/tags/v1.0', f'refs/tags/evidence/{record}', f'refs/tags/evidence/input/unit/{tree}/{record}'):
             published['accepted'][0][name] = bad

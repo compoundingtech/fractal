@@ -22,11 +22,9 @@ The same lines go to $GITHUB_STEP_SUMMARY as a table. The exit status is 0 whate
 only a usage error is 2. Take this script and the verifier from the accepted base, not from the
 tree under test.
 
-With --compare-shadow PATH, load the pinned external shadow's lane evaluator and run it alongside
-this one on the same fetched snapshot, each with its own verifier. --comparison-out retains raw
-verifier output, full decision JSON and normalized lane counts; the summary counts live cases only,
-not historical coverage. Only JSON formatting/stderr-only differences are explained automatically;
-all decision JSON differences remain unexplained. Differences never change the exit status.
+With --compare-shadow PATH, both real lane evaluators share a frozen snapshot and retain raw outputs
+and normalized counts. --snapshot-tree discovers remote tree-prefixed records, including other runs.
+Only raw formatting/stderr differences are explained; all semantic differences remain unexplained.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -96,26 +94,18 @@ def compare_shadow(args, lanes, published, fetched, scratch, tree, optional):
         spec.loader.exec_module(module)
         return module
 
-    external = load('mergemaster_shadow', args.compare_shadow)
-    captures = {}
-    original = external.run
+    def evaluator(name, path):
+        module, captured = load(name, path), {}
+        original = module.run
+        def capture(*argv, **kwargs):
+            done = original(*argv, **kwargs)
+            captured[argv[argv.index('--check') + 1]] = done
+            return done
+        module.run = capture
+        return module, captured
 
-    def capture(*argv, **kwargs):
-        done = original(*argv, **kwargs)
-        captures[argv[argv.index('--check') + 1]] = done
-        return done
-
-    external.run = capture
-    old_captures = {}
-
-    def old_run(*argv, **kwargs):
-        done = run(*argv, **kwargs)
-        old_captures[argv[argv.index('--check') + 1]] = done
-        return done
-
-    # A separate module instance keeps interception local to this comparison.
-    local = load('fractal_shadow', __file__)
-    local.run = old_run
+    local, old_captures = evaluator('fractal_shadow', __file__)
+    external, captures = evaluator('mergemaster_shadow', args.compare_shadow)
     with ThreadPoolExecutor(max_workers=2) as workers:
         old = workers.submit(local.lane_lines, lanes, published, fetched, scratch, tree, args.verifier, args.keys, optional)
         new = workers.submit(external.lane_lines, lanes, published, fetched, scratch, tree,
@@ -158,7 +148,10 @@ def compare_shadow(args, lanes, published, fetched, scratch, tree, optional):
         print('evidence-shadow-compare v1 ' + json.dumps(row, sort_keys=True))
     destination = Path(args.comparison_out)
     destination.mkdir(parents=True, exist_ok=True)
-    (destination / 'lane-summary.json').write_text(json.dumps({'schema_version': 1, 'tree': tree, 'lanes': summaries}, indent=2) + '\n')
+    population = {'names': lanes, 'source': 'all remote tree-prefixed records at fetch time, including other runs; not the producer same-run set' if args.snapshot_tree else 'same-run publish set',
+                  'out_of_scope': 'rust-tests/member and full gate contexts: step D; not gate coverage',
+                  'interpretation': 'missing comparison is missing coverage; equal errors are not parity; no_note is not record-verification proof; only raw formatting/stderr diffs explained, all semantic diffs unexplained'}
+    (destination / 'lane-summary.json').write_text(json.dumps({'schema_version': 1, 'tree': tree, 'population': population, 'lanes': summaries}, indent=2) + '\n')
     (destination / 'decisions.jsonl').write_text(''.join(json.dumps(row, sort_keys=True) + '\n' for row in decisions))
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
@@ -170,7 +163,9 @@ def compare_shadow(args, lanes, published, fetched, scratch, tree, optional):
 
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--publish-result', required=True, help="the JSON evidence-publish printed")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--publish-result', help="the JSON evidence-publish printed")
+    source.add_argument('--snapshot-tree', help='snapshot every remote tree-prefixed record for this tree')
     parser.add_argument('--keys', required=True, help='allowed-signers file from the base commit')
     parser.add_argument('--checks', required=True, help='comma-separated lanes to report')
     parser.add_argument('--verifier', default=str(HERE / 'evidence-verify'))
@@ -186,7 +181,20 @@ def main(argv):
         return 2
     started = time.monotonic()
     try:
-        data = json.loads(Path(args.publish_result).read_text())
+        snapshot_targets = {}
+        if args.snapshot_tree:
+            if not OID.match(args.snapshot_tree):
+                raise ValueError('bad snapshot tree')
+            listed = run('git', '-C', args.repo, 'ls-remote', '--refs', args.remote,
+                         f'refs/notes/evidence/{args.snapshot_tree}/*', f'refs/tags/evidence/{args.snapshot_tree}/*')
+            if listed.returncode:
+                raise RuntimeError('cannot snapshot remote evidence refs')
+            snapshot_targets = {ref: oid for oid, ref in (line.split() for line in listed.stdout.decode().splitlines()) if REF.match(ref) and OID.match(oid)}
+            accepted = [{'record': ref.rsplit('/', 1)[1], 'ref': ref, 'check': lanes[0]} for ref in snapshot_targets]
+            accepted += [dict(accepted[0], check=check) for check in lanes] if accepted else []
+            data = {'tree': args.snapshot_tree, 'accepted': accepted}
+        else:
+            data = json.loads(Path(args.publish_result).read_text())
         tree = data['tree']
         accepted = data.get('accepted') or []
         # An entry may name its tag and its ref (the tree-prefixed layouts); without either it is refs/notes/evidence/<record>.
@@ -209,9 +217,12 @@ def main(argv):
         run('git', 'init', '-q', '--bare', str(scratch))
         # A scratch repository holding only what a gate would fetch: the records, nothing local from this job.
         remote = run('git', '-C', args.repo, 'remote', 'get-url', args.remote).stdout.decode().strip() or args.remote
-        for record in sorted(set(published.values())):
+        for record in sorted(refs if args.snapshot_tree else set(published.values())):
+            ref = refs[record]
             done = run('git', '-C', str(scratch), 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', remote,
-                       f'{refs[record]}:{refs[record]}')
+                       f'{snapshot_targets.get(ref, ref)}:{ref}')
+            if args.snapshot_tree and done.returncode:
+                raise RuntimeError('incomplete remote snapshot; no comparison coverage')
             if done.returncode == 0:
                 fetched.add(record)
         optional = set(filter(None, args.optional.split(',')))
