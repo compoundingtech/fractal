@@ -326,7 +326,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
     ),
   )
   const timeout = intent.timeout === undefined ? {} : { timeout: intent.timeout }
-  return {
+  const declaration = {
     id,
     state: 'ready',
     reportTo: intent.reportTo,
@@ -347,6 +347,7 @@ const programDeclaration = Effect.fnUntraced(function* ({
       },
     ],
   }
+  return { declaration, bundle, sha256 }
 })
 
 /** Lowers a mission intent's references and decodes the native mission it declares. */
@@ -421,7 +422,7 @@ const loadModule = Effect.fnUntraced(function* <C>({
           catch: (cause) =>
             new SubjectTreeError({ path, message: 'Subject factory failed', cause }),
         })
-      : yield* programDeclaration({
+      : (yield* programDeclaration({
           root,
           file,
           path,
@@ -429,7 +430,7 @@ const loadModule = Effect.fnUntraced(function* <C>({
           // A program definition's intent is the one `Fractal.mission(intent, program)` checked.
           intent: source as ProgramIntent<InputSchema, Schema.Codec<unknown>, undefined>,
           programs,
-        })
+        })).declaration
   // Definitions take their ID from the path; an explicit `id` in the intent must still agree.
   const identified =
     definition !== undefined && typeof intent === 'object' && intent !== null
@@ -521,7 +522,7 @@ export const programMission = Effect.fn('fractal.programMission')(function* ({
       (cause) => new SubjectTreeError({ path, message: `${id} is not a subject ID`, cause }),
     ),
   )
-  const declaration = yield* programDeclaration({
+  const { declaration, bundle, sha256 } = yield* programDeclaration({
     root,
     file,
     path,
@@ -530,7 +531,6 @@ export const programMission = Effect.fn('fractal.programMission')(function* ({
     programs: { bundleDir, bun },
   })
   const intent = yield* decodeMission({ root, path, kind: 'mission', intent: declaration })
-  const { bundle, sha256 } = declaration.steps[0].program
   return { kdl: emit([missionNode(intent as MissionInput<string>)]), bundle, sha256 }
 })
 
