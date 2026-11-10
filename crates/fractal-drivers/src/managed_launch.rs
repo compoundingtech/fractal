@@ -21,7 +21,7 @@ pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value, sub
         return Ok(());
     }
     ensure!(subject.starts_with("agent/"), "managed harness launch requires a fenced agent subject");
-    let path = resolve_from_source(harness, argv, spec, &|name| std::env::var_os(name))?;
+    let path = resolve_from_source(harness, argv, spec, &|name| std::env::var_os(name), &|_| Ok(()))?;
     if let Some(existing) = PROVIDER_ENVIRONMENT.get() {
         ensure!(existing.path == path && existing.subject == subject,
             "driver already selected a different managed provider environment");
@@ -33,13 +33,15 @@ pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value, sub
 }
 
 /// Resolve a daemon seat using the effective captured launch environment, without global state.
+/// Register profile and wrapper inputs before reading or validating them, including on failure.
 pub fn resolve_with_environment(
     harness: &str,
     argv: &mut [String],
     spec: &serde_json::Value,
     environment: &std::collections::BTreeMap<String, String>,
+    input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<std::ffi::OsString> {
-    resolve_from_source(harness, argv, spec, &|name| environment.get(name).map(std::ffi::OsString::from))
+    resolve_from_source(harness, argv, spec, &|name| environment.get(name).map(std::ffi::OsString::from), input)
 }
 
 /// Person-owned terminal bindings retain their native harness launch contract.
@@ -62,6 +64,7 @@ fn resolve_from_source(
     argv: &mut [String],
     spec: &serde_json::Value,
     env: &impl Fn(&str) -> Option<std::ffi::OsString>,
+    input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<std::ffi::OsString> {
     ensure!(matches!(harness, "omp" | "claude" | "codex"), "unsupported managed harness {harness}");
     if is_person_bound(spec)? {
@@ -72,7 +75,7 @@ fn resolve_from_source(
         .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("AGENT_PERSONA is not UTF-8")))
         .transpose()?;
     let persona = environment_persona.as_deref().unwrap_or("generalist");
-    resolve_for_persona(harness, argv, &profile, persona)?;
+    resolve_for_persona(harness, argv, &profile, persona, input)?;
     let bin = Path::new(&argv[0]).parent().context("managed wrapper has no parent")?;
     prefixed_path(bin, env("PATH").as_deref())
 }
@@ -95,8 +98,10 @@ fn resolve_for_persona(
     argv: &mut [String],
     profile: &Path,
     persona: &str,
+    input: &dyn Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     let program = argv.first_mut().context("managed provider argv is empty")?;
+    input(profile)?;
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(profile)
             .with_context(|| format!("read managed runtime profile {}", profile.display()))?,
@@ -114,6 +119,7 @@ fn resolve_for_persona(
         ))?;
     ensure!(bin.is_absolute(), "managed wrapper directory must be absolute: {}", bin.display());
     let wrapper = bin.join(harness);
+    input(&wrapper)?;
     let metadata = std::fs::metadata(&wrapper)
         .with_context(|| format!("managed {harness} wrapper is missing: {}; refusing raw provider", wrapper.display()))?;
     ensure!(metadata.is_file(), "managed {harness} wrapper is not a file: {}", wrapper.display());
@@ -206,7 +212,7 @@ mod tests {
             }
             for program in [harness.to_owned(), format!("/raw/bin/{harness}")] {
                 let mut argv = vec![program, "--model".into(), "example".into()];
-                resolve_for_persona(harness, &mut argv, &profile, "generalist").unwrap();
+                resolve_for_persona(harness, &mut argv, &profile, "generalist", &|_| Ok(())).unwrap();
                 assert_eq!(Path::new(&argv[0]), wrapper);
                 assert_eq!(&argv[1..], ["--model", "example"]);
             }
@@ -218,7 +224,7 @@ mod tests {
         let (_root, bin, profile) = fixture();
         for program in ["omp", "/raw/bin/omp"] {
             let mut argv = vec![program.to_owned()];
-            let error = resolve_for_persona("omp", &mut argv, &profile, "generalist").unwrap_err();
+            let error = resolve_for_persona("omp", &mut argv, &profile, "generalist", &|_| Ok(())).unwrap_err();
             assert!(format!("{error:#}").contains(bin.join("omp").to_str().unwrap()));
             assert_eq!(argv[0], program);
         }
@@ -228,7 +234,7 @@ mod tests {
     fn missing_wrapper_directory_refuses() {
         let (_root, bin, profile) = fixture();
         std::fs::remove_dir(&bin).unwrap();
-        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist").unwrap_err();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist", &|_| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains(bin.join("omp").to_str().unwrap()));
     }
 
@@ -236,14 +242,14 @@ mod tests {
     fn missing_profile_key_refuses_raw_provider() {
         let (_root, _bin, profile) = fixture();
         std::fs::write(&profile, "{}").unwrap();
-        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist").unwrap_err();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist", &|_| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains(WRAPPER_DIRECTORY_KEY));
     }
 
     #[test]
     fn missing_persona_does_not_fall_back_to_generalist() {
         let (_root, _bin, profile) = fixture();
-        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "unknown").unwrap_err();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "unknown", &|_| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains("personas.launch.unknown.harnessBin"));
     }
 
@@ -281,7 +287,7 @@ mod tests {
             ("AGENT_PERSONA".into(), "steward".into()),
         ]);
         let mut argv = ["omp".into()];
-        resolve_with_environment("omp", &mut argv, &serde_json::json!({}), &environment).unwrap();
+        resolve_with_environment("omp", &mut argv, &serde_json::json!({}), &environment, &|_| Ok(())).unwrap();
         assert_eq!(Path::new(&argv[0]), wrapper);
     }
 
@@ -309,10 +315,10 @@ mod tests {
     fn malformed_profile_and_relative_wrapper_directory_refuse() {
         let (_root, _bin, profile) = fixture();
         std::fs::write(&profile, "{").unwrap();
-        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist").unwrap_err();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist", &|_| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains("parse managed runtime profile"));
         std::fs::write(&profile, r#"{"personas":{"launch":{"generalist":{"harnessBin":"relative/bin"}}}}"#).unwrap();
-        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist").unwrap_err();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist", &|_| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains("managed wrapper directory must be absolute"));
     }
 
@@ -340,7 +346,7 @@ mod tests {
         for (profile, bin) in [(&first_profile, &first_bin), (&second_profile, &second_bin)] {
             symlink(profile, &link).unwrap();
             let mut argv = ["codex".into(), "--version".into()];
-            let path = resolve_with_environment("codex", &mut argv, &serde_json::json!({}), &environment).unwrap();
+            let path = resolve_with_environment("codex", &mut argv, &serde_json::json!({}), &environment, &|_| Ok(())).unwrap();
             assert_eq!(Path::new(&argv[0]), bin.join("codex"));
             assert_eq!(std::env::split_paths(&path).next().unwrap(), *bin);
             let output = std::process::Command::new(&argv[0]).arg(&argv[1]).env("PATH", path).output().unwrap();
@@ -348,7 +354,7 @@ mod tests {
             std::fs::remove_file(&link).unwrap();
         }
         symlink(root.path().join("missing-profile.json"), &link).unwrap();
-        let error = resolve_with_environment("codex", &mut ["codex".into()], &serde_json::json!({}), &environment).unwrap_err();
+        let error = resolve_with_environment("codex", &mut ["codex".into()], &serde_json::json!({}), &environment, &|_| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains("read managed runtime profile"));
     }
 
@@ -361,7 +367,7 @@ mod tests {
         let environment = std::collections::BTreeMap::from([("PATH".into(), "/native/bin".into())]);
         for harness in ["omp", "claude", "codex"] {
             let mut argv = [format!("/native/{harness}")];
-            let path = resolve_with_environment(harness, &mut argv, &spec, &environment).unwrap();
+            let path = resolve_with_environment(harness, &mut argv, &spec, &environment, &|_| Ok(())).unwrap();
             assert_eq!(path, std::ffi::OsStr::new("/native/bin"));
             assert_eq!(argv[0], format!("/native/{harness}"));
         }
@@ -370,7 +376,7 @@ mod tests {
             "arguments": ["pty/agent/worker/019a0000-0000-7000-8000-000000000001"],
         }]});
         assert!(!is_person_bound(&agent_binding).unwrap());
-        assert!(resolve_with_environment("omp", &mut ["omp".into()], &agent_binding, &environment).is_err());
+        assert!(resolve_with_environment("omp", &mut ["omp".into()], &agent_binding, &environment, &|_| Ok(())).is_err());
     }
 
     #[test]

@@ -85,7 +85,7 @@ mod managed_declaration_tests {
             ]).unwrap().command else { panic!("driver expected") };
             let declaration = managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap();
             fractal_drivers::managed_launch::resolve_with_environment(
-                &args.driver, &mut args.argv, &declaration, &environment,
+                &args.driver, &mut args.argv, &declaration, &environment, &|_| Ok(()),
             ).unwrap();
             assert_eq!(Path::new(&args.argv[0]), wrapper);
         }

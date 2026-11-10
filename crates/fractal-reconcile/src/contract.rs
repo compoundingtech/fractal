@@ -85,7 +85,7 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
         // changing the daemon's environment or selecting process-global driver state.
         let mut argv = [provider.into_owned()];
         let path = fractal_drivers::managed_launch::resolve_with_environment(
-            harness, &mut argv, &desired.desired, &environment,
+            harness, &mut argv, &desired.desired, &environment, input,
         )?;
         environment.insert("PATH".into(), path.into_string().map_err(|_| anyhow::anyhow!("managed provider PATH is not UTF-8"))?);
         let [program] = argv;
