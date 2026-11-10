@@ -159,13 +159,19 @@ pub fn terminal_document(
     if cwd == "." {
         tags.entries_mut().push(KdlEntry::new_prop("st3.cwd", "home"));
     }
+    // Older launching hosts ignore the home intent, so keep the shell-side cd during rollout.
+    let command = if cwd == "." {
+        "cd \"${HOME:-.}\" 2>/dev/null; exec \"${SHELL:-/bin/sh}\" -i"
+    } else {
+        "exec \"${SHELL:-/bin/sh}\" -i"
+    };
     let mut terminal = kdl_node("pty", [identity.as_str()]);
     let mut body = KdlDocument::new();
     body.nodes_mut().extend([
         kdl_node("name", [args.name.as_str()]),
         kdl_node("host", [host]),
         kdl_node("workspace", [cwd]),
-        kdl_node("command", ["exec \"${SHELL:-/bin/sh}\" -i"]),
+        kdl_node("command", [command]),
         kdl_node("restart", ["never"]),
         tags,
     ]);
@@ -273,7 +279,10 @@ mod tests {
             ..Default::default()
         };
         let plain = terminal_document("person/example", "one", &args, "host", ".", "key");
-        assert!(!plain.contains("cd "), "{plain}");
+        assert!(
+            plain.contains("cd \\\"${HOME:-.}\\\" 2>/dev/null; exec"),
+            "{plain}"
+        );
         assert!(plain.contains("${SHELL:-/bin/sh}"), "{plain}");
         let document = plain.parse::<KdlDocument>().unwrap();
         let body = document.nodes()[1].children().unwrap();
@@ -288,6 +297,24 @@ mod tests {
             body.get("workspace").unwrap().get(0).unwrap().as_string(),
             Some("/srv/work")
         );
+        // The command also lands in HOME when an older runtime launches it.
+        for (home, expected) in [(Some("/tmp"), "/tmp"), (Some("/no/such/dir"), "/")] {
+            let mut shell = std::process::Command::new("sh");
+            shell.current_dir("/");
+            shell.args(["-c", "cd \"${HOME:-.}\" 2>/dev/null; pwd"]);
+            match home {
+                Some(home) => shell.env("HOME", home),
+                None => shell.env_remove("HOME"),
+            };
+            let out = shell.output().unwrap();
+            let expected = std::fs::canonicalize(expected).unwrap();
+            let got = String::from_utf8(out.stdout).unwrap();
+            assert_eq!(
+                std::fs::canonicalize(got.trim()).unwrap(),
+                expected,
+                "HOME={home:?}"
+            );
+        }
     }
     #[test]
     fn created_agents_use_checkout_for_new_and_existing_branches_and_keep_plain_workspaces() {
