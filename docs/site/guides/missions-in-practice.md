@@ -6,7 +6,7 @@ order: 2
 
 # Missions in practice
 
-KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+KDL is the runnable format. TS samples declare the same file with the in-repo [`fractal` package](https://github.com/compoundingtech/fractal/tree/main/packages/fractal), which renders exactly the KDL shown; it is not published to npm yet. Effect mission samples show the program form, `Fractal.mission(intent, program)`, a roadmap API that does not run yet. Use KDL for the runnable commands in these guides.
 
 Use the worker from [Your first agent](../getting-started/first-agent.md). The examples use `person/ada`; substitute your configured person.
 
@@ -15,6 +15,7 @@ Use the worker from [Your first agent](../getting-started/first-agent.md). The e
 Save this as `missions/readme.kdl` in the worker workspace:
 
 ```ts group=mission variant=effect
+// Roadmap: program-form missions do not run yet. The TS tab declares this mission as data.
 import { Effect } from 'effect'
 import { Fractal } from 'fractal/effect'
 import { worker } from '../worker'
@@ -57,51 +58,46 @@ export const mission = Fractal.mission(
 ```
 
 ```ts group=mission variant=ts
+// garden/readme/mission.ts
 import { Fractal } from 'fractal'
-import { worker } from '../worker'
 
-const ada = Fractal.person({ id: 'ada' })
+import worker from '../worker/agent.ts'
 
-export const mission = Fractal.mission(
-  {
-    id: 'garden/readme',
-    state: 'ready',
-    timeout: '1h',
-    reportTo: ada,
-    goal: 'README.md introduces this workspace and has a human approval.',
-    constraints: [
-      'Only edit README.md. Do not commit or publish changes.',
-    ],
-  },
-  async () => {
-    await Fractal.Worker.provide(worker, async () => {
-      await Fractal.step({
-        id: 'prepare',
-        timeout: '30m',
-        goal: 'README.md contains a clear one-paragraph workspace introduction.',
-      })
-    })
+const ada = Fractal.person('person/ada')
 
-    await Fractal.step(
-      { id: 'approve' },
-      async () => {
-        const answer = await Fractal.ask({
+export default Fractal.mission({
+  meta: import.meta,
+  state: 'ready',
+  reportTo: worker,
+  goal: 'README.md introduces this workspace and has a human approval.',
+  constraints: ['Only edit README.md. Do not commit or publish changes.'],
+  steps: [
+    {
+      id: 'prepare',
+      timeout: '30m',
+      assignedTo: worker,
+      goal: 'README.md contains a clear one-paragraph workspace introduction.',
+    },
+    {
+      id: 'approve',
+      agentless: true,
+      dependsOn: [{ step: 'prepare', state: 'completed' }],
+      gates: [
+        {
+          kind: 'human',
           name: 'Ada approves the README',
           reviewer: ada,
           question: 'Is the README ready to use?',
-        })
-        if (answer._tag === 'Rejected') {
-          throw new Error('README rejected')
-        }
-      },
-    )
-  },
-)
+        },
+      ],
+    },
+  ],
+})
 ```
 
 ```kdl group=mission variant=kdl
 version 2
-mission "garden/readme" state="ready" {
+mission "garden/readme" report-to="agent/garden/worker" state="ready" {
   goal "README.md introduces this workspace and has a human approval."
   constraint "Only edit README.md. Do not commit or publish changes."
   step "prepare" timeout="30m" {
@@ -110,8 +106,10 @@ mission "garden/readme" state="ready" {
   }
   step "approve" {
     agentless
-    depends-on { step "prepare" completed }
-    gate "Ada approves the README" type="human" {
+    depends-on {
+      step "prepare" "completed"
+    }
+    gate "Ada approves the README" mode="approve" type="human" {
       reviewer "person/ada"
       question "Is the README ready to use?"
     }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correct the v18 convergence seed trim expectation from hosted CI evidence (test only)",
+  "replay": {"status": "none", "detail": "Test-only correction: hosted run 42793993503 establishes seeds 2 and 34 as non-trimming for corpus v18. Production replay and divergence assertions are unchanged."},
+  "schema": {"status": "none", "detail": "No registry or generated corpus change."},
+  "rules": {"status": "none", "detail": "No production rule change; existing exact trim and majority-trim assertions remain."},
+  "compatibility": {"status": "none", "detail": "No wire, client or stored-state change."},
+  "downtime": {"status": "none", "detail": "No operator downtime is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}

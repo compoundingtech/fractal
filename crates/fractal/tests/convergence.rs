@@ -1855,9 +1855,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v17 adds operation receipts to kind selection, shifting the shared RNG schedule.
-/// Hosted run 42507264532 observed seed 2 converge without trimming; the other fixed seeds trim.
-const NEVER_TRIMS: &[u64] = &[2];
+/// Corpus v18 adds durable expiry to kind selection, shifting the shared RNG schedule.
+/// Hosted run 42793993503 observed seeds 2 and 34 converge without trimming; the other fixed seeds trim.
+const NEVER_TRIMS: &[u64] = &[2, 34];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
