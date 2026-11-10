@@ -85,9 +85,11 @@ export const createAlertAnswers = () => {
     landings.delete(id)
     landing.landed()
   }
-  const finish = (id: string, result: AnswerResult) => {
+  const finish = (answer: PendingAnswer, result: AnswerResult) => {
+    const id = answer.item.id
     const pending = state.pending.get(id)
-    if (pending === undefined) return
+    // The same alert can ask again while an earlier answer is still in flight. Its completion owns only its entry.
+    if (pending !== answer) return
     if (result._tag === 'Refused') {
       // Rollback: the alert returns where the feed holds it. Selection, focus and every draft stay as they are.
       set({
@@ -109,10 +111,11 @@ export const createAlertAnswers = () => {
     send: (item: Native.Attention, label: string, run: () => Promise<AnswerResult>): void => {
       if (hidesAlert(state, item)) return
       const failed = without(state.failed, item.id)
-      set({ ...state, failed, pending: withEntry(state.pending, item.id, { item, label, phase: 'sending' }), ...(state.flash?.id === item.id ? { flash: undefined } : {}) })
+      const answer: PendingAnswer = { item, label, phase: 'sending' }
+      set({ ...state, failed, pending: withEntry(state.pending, item.id, answer), ...(state.flash?.id === item.id ? { flash: undefined } : {}) })
       run().then(
-        (result) => finish(item.id, result),
-        () => finish(item.id, { _tag: 'Refused', detail: 'The answer could not be confirmed; check the alert before answering again. It was not sent again.' }),
+        (result) => finish(answer, result),
+        () => finish(answer, { _tag: 'Refused', detail: 'The answer could not be confirmed; check the alert before answering again. It was not sent again.' }),
       )
     },
     /** Every authoritative frame. An answer is done once it was accepted and the frame no longer holds its alert. */
