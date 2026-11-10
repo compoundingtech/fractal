@@ -85,6 +85,15 @@ fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     &CORPUS
 }
 
+/// Whether every replica admits `kind` only from a keyed member's signed envelope, by the
+/// daemon's own admission rule.
+fn keyed_only(kind: &str) -> bool {
+    use smallclaims::store::Runtime as _;
+    static RUNTIME: std::sync::LazyLock<fractal_store::store::FractalRuntime> =
+        std::sync::LazyLock::new(Default::default);
+    RUNTIME.requires_keyed_envelope(kind)
+}
+
 #[test]
 fn the_corpus_includes_every_registry_kind() {
     for kind in fractal_schema::registry().claims.keys() {
@@ -989,7 +998,13 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
-        self.claim_of(spec, index)
+        let input = self.claim_of(spec, index)?;
+        // Every replica admits some kinds, such as an operation authorization, only from a keyed
+        // member's signed envelope and holds an unkeyed writer's as unsigned. These nodes have no
+        // member keys, so such a claim would stay pending on every other node and hold every later
+        // checkpoint back; production writes it only on keyed members. The input is still drawn,
+        // so a seed whose store refused it keeps its schedule.
+        (!keyed_only(&input.kind)).then_some(input)
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
@@ -1601,9 +1616,12 @@ impl World {
                     None => {}
                 }
             }
-            for id in held.keys() {
+            for (id, claim) in &held {
                 if !oracle_claims.contains_key(id) {
-                    failures.push(format!("{name}: holds {id}, which the oracle never saw"));
+                    failures.push(format!(
+                        "{name}: holds {id} ({} on {}, from {}), which the oracle never saw",
+                        claim.kind, claim.subject, claim.origin
+                    ));
                 }
             }
             if node.old_build {
