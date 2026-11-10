@@ -53,7 +53,7 @@ pub(super) fn status(connection: &Connection, subject: &str) -> Result<Option<&'
          FROM (SELECT kind FROM claims WHERE subject=?1
                UNION ALL SELECT kind FROM local_message_marks WHERE message=?1
                UNION ALL SELECT kind FROM local_stream_lifecycle WHERE subject=?1)",
-    )?.query_row([subject], |row| row.get(0))?;
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-hcb03abb7c6f1 owner=fractal_store::store::message_expiry TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
     Ok(Some(if rank & 3 == 0 { "expired" } else if rank & 4 != 0 { "closed" } else if rank & 2 != 0 { "read" } else { "delivered" }))
 }
 

@@ -88,7 +88,7 @@ END;
 ",
     )?;
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h57332bf5c3ee owner=fractal_store::store::stream_mirror TODO=prepare-body-and-predecessor-values */ "
+        /* sqlite-large-value: allow-for-now lv-hb9877ca0c664 owner=fractal_store::store::stream_mirror TODO=prepare-body-and-predecessor-values */ "
 -- A mirrored send, and its close, queue the item's client selector header as a graph claim on
 -- the subject does (client_messages.rs); the fold builds it from the mirror row. Each says the
 -- stream headers are not whole until this build's fold has run (STREAM_WHOLE_MARKER there).

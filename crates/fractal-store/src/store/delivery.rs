@@ -420,7 +420,7 @@ impl Store {
         let fast_recipient = recipient.as_deref();
         let bare_recipient = fast_recipient.map(message_bare_recipient);
         if let (Some(recipient), Some(bare_recipient)) = (fast_recipient, bare_recipient) {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb1df5e67cfcb owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h33d3af81f481 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
                 concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'
