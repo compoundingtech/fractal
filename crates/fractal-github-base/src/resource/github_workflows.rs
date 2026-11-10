@@ -157,7 +157,7 @@ const WORKSPACE_WORKFLOW: &str = "Workspace CI";
 const WORKSPACE_WORKFLOW_PATH: &str = ".github/workflows/fleet.yml";
 /// A merge group's head branch: `gh-readonly-queue/BASE/pr-N-SHA`.
 const MERGE_GROUP_BRANCH_PREFIX: &str = "gh-readonly-queue/";
-/// The series these runs feed, as `slo/targets.toml` names them.
+/// The series these runs feed, as `slo/objectives.kdl` names them.
 pub const CRITICAL_PATH_SERIES: &str = "ci/workspace-critical-path";
 pub const MERGE_QUEUE_SERIES: &str = "ci/merge-queue";
 pub const FLAKES_SERIES: &str = "ci/flakes";

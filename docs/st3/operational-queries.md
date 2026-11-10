@@ -1,5 +1,85 @@
 # Operational queries
 
+## Bulk desired declarations
+
+Use `fractal subject desired --json [--all | SUBJECT...] [--kind K]` to read desired
+declarations and selected declaration tokens with cheap actual summaries, without
+reducing status or folding cards. The existing CLI noun is `subject`, singular.
+An empty subject selection means all declarations; explicit names are exact IDs.
+The API is `GET /v1/desired?subject=ID&subject=ID&kind=K&limit=N&cursor=TOKEN`.
+Repeated URL-encoded `subject` parameters select exact names; omitting them selects all.
+`kind` and `cursor` are optional. At most 1,000 supplied names are accepted
+(`desired-batch-limit` otherwise). Page limit defaults to 1,000 and cannot exceed 1,000;
+zero or an over-limit value returns HTTP 422 `desired-page-limit`.
+Each page is `{"items":[...],"next_cursor":null,"store_index":123}`: `items` contains
+flattened `DesiredSubject` entries plus `desired_token` and optional extensible `actual`,
+`next_cursor` is an opaque string or `null`, and `store_index` is a `u64`.
+All sources for a page are read in one store snapshot.
+
+The cursor binds the store origin, pinned claim read cut, shared graph projection progress,
+desired row-write generation, selection filters, limit and last subject. The graph projection
+frontier covers both selected desired declarations and mission definitions; backlog projection
+can advance it without appending a claim or changing `store_index`. A durable per-store
+generation advances transactionally on every desired row insert, update or delete, including
+repair that leaves the claim cut and graph health unchanged. Continue with unchanged subjects,
+kind and limit. Each continuation validates the claim cut, graph health/frontier and row-write
+generation with bounded reads in the same pinned snapshot; any change returns typed
+`desired-cursor-expired`, never a silent
+restart or retry. No historical snapshot or pagination cache is retained. The CLI follows
+every cursor with limit 1,000 and unchanged
+filters, then prints one final JSON array. Any page failure, including cursor invalidation,
+fails the command without partial stdout.
+
+This GET inherits the single desired GET's `read.projections` authorization, deadline and
+read admission, including refusal of paired devices without that scope. It remains a read
+during fleet drain and performs no status reduction or cold card folds.
+See the [CLI reference](../site/reference/cli.md#bulk-desired-declarations) for the
+selection and response contract. Missing actual fields are not negative observations:
+fetch the card with `fractal subject show SUBJECT` or `fractal agents show AGENT`.
+
+The kind filter matches the literal desired declaration kind. Stopped and terminally
+retired agents have kind `stop`, not `agent`; unfiltered all includes their retained
+declarations. Agent revision summaries also apply to those retained declarations.
+Synthesized published mission entries have `desired_token: null`, matching mission
+cards, because mission publications are not desired-table rows. Their publication
+claim IDs are not replacement desired tokens; compare `actual.revision` and
+`actual.digest` for declaration changes.
+For agents, `actual` contains only the maintained published declaration `revision`
+when available, matching the card's desired content revision. It omits runtime
+`status`, `operation_status`, `state`, `host`, `incarnation_id`, `suspension`, `hold`,
+`kind`, and `repo`, and card-level `actual_origin` and `projection`
+(`layer`, `runtime_incarnation`). Those have no cheap, correct maintained source
+for this snapshot path: fetch the card. For bulk roster status, use
+`fractal agents ls --all --json`; roster fields such as `state`, `host_id`, and
+`operational` are not interchangeable with card state, host, or projection fields.
+
+A retained member containing an unsupported enum variant anywhere in its schema,
+or an unknown field in a structure that rejects unknown fields, produces
+`actual: {"unavailable":{"code":"member-version-unproven"}}` for that item,
+instead of failing the batch. Its declaration and selected token remain in the page;
+the current daemon omits `member` when it cannot decode it. The unavailable marker
+replaces the normal actual summary, so it carries no revision. Other items keep their
+normal summaries. The authority is the full `MemberSpec` serde schema, including
+nested discriminators and `deny_unknown_fields` structures, not a numeric wire version.
+Malformed JSON, wrong types, missing required fields, database, mission,
+declaration-body and other unrelated failures still fail the page.
+The CLI retains raw extensible item JSON from newer servers, including member
+payloads it cannot itself decode, and preserves unavailable markers.
+
+Non-agent actual summaries contain the published declaration `revision` and `digest`,
+plus `state` when cheaply maintained (`draft`, `ready`, or `retired` for missions).
+They never contain the published body. `digest` is `sha256:` followed by lowercase
+hexadecimal SHA-256 of the UTF-8 canonical JSON text of the published declaration:
+recursively sort object keys, preserve array order, and use compact JSON with no
+whitespace. The input is the declaration itself, not the surrounding
+`PublicationDefinition` metadata, revision, or selected desired token.
+
+The raw paged desired API is not a client-v0 operation. The committed Rust, Swift and
+TypeScript clients are generated from `docs/st3/client-v0/schemas/operations.json`
+and `client-v0.schema.json`, so this route does not change those inputs or outputs.
+Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
+it also invokes `rustfmt` internally. No generator execution is needed for this route.
+
 ## Single-subject status reads
 
 `GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain

@@ -18,7 +18,7 @@ pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
 
 /// Closed authority profiles: callers cannot register a profile or mix its rights.
-/// Service is reserved and cannot issue credentials or authorize any request.
+/// Service authentication is supported, but production issuance remains disabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Profile {
     Assistant,
@@ -122,6 +122,15 @@ fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
 }
 
 pub fn principal(source: &Value) -> Result<&str, ApiError> {
+    if Profile::stored(source)? == Profile::Service {
+        return source["principal"].as_str().filter(|principal| {
+            let mut parts = principal.split('/');
+            let component = |part: Option<&str>| part.is_some_and(|part| !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)));
+            parts.next() == Some("plugin") && component(parts.next())
+                && component(parts.next()) && parts.next().is_none()
+        }).ok_or_else(|| forbidden("invalid service principal"));
+    }
     crate::store::assistant_write::principal(source)
         .ok_or_else(|| forbidden("invalid assistant principal"))
 }
@@ -263,8 +272,12 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     let source = fields(&policy)?;
     let principal = principal(source)?;
     let granted_fields = fields(granted)?;
-    assistant_profile(granted_fields)?;
-    assistant_profile(source)?;
+    let profile = Profile::stored(granted_fields)?;
+    profile.compatible(Profile::stored(source)?)?;
+    if profile == Profile::Service {
+        digest_only(granted_fields)?;
+        digest_only(source)?;
+    }
     if self::principal(granted_fields)? != principal
         || ["grant_id", "session_actor", "issuer"].iter().any(|key| source[*key] != granted_fields[*key])
         || source["session_actor"].as_str().and_then(|actor| actor.strip_prefix(principal))
@@ -278,11 +291,14 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     if latest(state, &granted.subject, REVOKED)?.is_some()
         || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms()
         || source["issuer"] != owning_person(state)?
-        || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow")) || source["disclosure_consent"] != true {
+        || (profile == Profile::Assistant
+            && (!matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
+                || source["disclosure_consent"] != true)) {
         return Err(forbidden("assistant grant was revoked, expired, or has invalid policy"));
     }
-    let scopes = source["scopes"].as_array().ok_or_else(|| forbidden("assistant scopes absent"))?
-        .iter().map(|value| value.as_str().filter(|scope| SCOPES.contains(scope)).map(str::to_owned))
+    let allowed = if profile == Profile::Service { SERVICE_SCOPES } else { SCOPES };
+    let scopes = source["scopes"].as_array().ok_or_else(|| forbidden("external grant scopes absent"))?
+        .iter().map(|value| value.as_str().filter(|scope| allowed.contains(scope)).map(str::to_owned))
         .collect::<Option<BTreeSet<_>>>().ok_or_else(|| forbidden("assistant scopes invalid"))?;
     Ok(ClientSession { actor: source["session_actor"].as_str()
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: principal.into(),
@@ -295,6 +311,9 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
 }
 
 pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
+    if is_service(session) {
+        return authorize_service(session, request);
+    }
     if !matches!(session.authority_actor.as_str(), PRINCIPAL | MCP_PRINCIPAL) {
         return Err(forbidden("external grant profile has no allowed routes"));
     }
@@ -311,6 +330,70 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
     Ok(())
 }
 
+pub const SERVICE_SCOPES: &[&str] = &["read.claims", "read.work", "read.documents"];
+
+pub fn is_service(session: &ClientSession) -> bool {
+    session.authority_actor.starts_with("plugin/")
+}
+
+/// This closed registry is also used for native aliases. HEAD and upgrades are not reads.
+fn authorize_service(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
+    let path = request.uri().path();
+    let scope = match path {
+        "/v1/client/claims" | "/v1/claims" => Some("read.claims"),
+        "/v1/client/documents" | "/v1/client/documents/content"
+            | "/v1/documents" | "/v1/documents/content" => Some("read.documents"),
+        _ if ["/v1/client/claims/by-id/", "/v1/claims/by-id/"].iter()
+            .any(|prefix| path.strip_prefix(prefix).is_some_and(|id| !id.is_empty() && !id.contains('/'))) =>
+            Some("read.claims"),
+        _ if ["/v1/client/work-items/", "/v1/work-items/"].iter()
+            .any(|prefix| path.strip_prefix(prefix).is_some_and(|subject| !subject.is_empty())) =>
+            Some("read.work"),
+        _ => None,
+    };
+    if request.method() != axum::http::Method::GET
+        || request.headers().contains_key(axum::http::header::UPGRADE)
+        || (session.transport == "fabric-loopback" && !path.starts_with("/v1/client/"))
+        || !scope.is_some_and(|scope| session.allows(scope)) {
+        return Err(forbidden("service requires a registered pure GET and its exact read scope"));
+    }
+    if scope == Some("read.documents") {
+        return Err(service_documents_forbidden());
+    }
+    Ok(())
+}
+
+/// No consumer-owned document namespace is declared: the allowlist is deliberately empty.
+pub fn service_documents_forbidden() -> ApiError {
+    forbidden("service document namespace allowlist is empty")
+}
+
+/// The only graph mutation admitted on behalf of a service read. The daemon signs as itself.
+pub const SERVICE_AUDIT_KINDS: &[&str] = &["custom.client.service.v1.read-window"];
+const AUDIT_WINDOW_MS: u128 = 60_000;
+static SERVICE_AUDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn audit_service_read(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
+    let _guard = SERVICE_AUDIT.lock().map_err(ApiError::internal)?;
+    let grant = session.pairing_grant.as_deref().ok_or_else(|| forbidden("service grant absent"))?;
+    let window = client_now_ms() / AUDIT_WINDOW_MS;
+    let subject = format!("custom/client/service-read-{}-{window}", credential_digest(grant));
+    let kind = SERVICE_AUDIT_KINDS[0];
+    if latest(state, &subject, kind)?.is_some() {
+        return Ok(());
+    }
+    state.store.append_claim(&ClaimInput {
+        subject, kind: kind.into(), actor: Some(format!("daemon/{}", state.store.origin())),
+        fields: serde_json::from_value(json!({
+            "version":1, "grant":grant, "principal":session.authority_actor,
+            "window_start_unix_ms":window * AUDIT_WINDOW_MS,
+            "window_ms":AUDIT_WINDOW_MS
+        })).map_err(ApiError::internal)?,
+        evidence: Vec::new(), expected_subject: Some(None), idempotency_key: None,
+    }).map_err(ApiError::bad)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,10 +405,25 @@ mod tests {
         pub(super) static ADMISSION_NOW: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
     }
 
-    fn concurrent_grants(profiles: [&str; 2]) -> (usize, usize) {
+    fn concurrent_grants(profiles: [&str; 2], seed_conflicting_service: bool) -> (usize, usize, usize) {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
         state.owning_person = Some("person/owner".into());
+        if seed_conflicting_service {
+            // Service/assistant principal namespaces cannot collide through
+            // append after the service read gate. Preserve the legacy persisted
+            // conflict case without bypassing principal validation.
+            state.store.append_claim(&ClaimInput {
+                subject: subject("333333333333333333333333").unwrap(),
+                kind: GRANTED.into(), actor: Some("person/owner".into()),
+                fields: serde_json::from_value(json!({
+                    "profile":"service","principal":PRINCIPAL,"issuer":"person/owner",
+                    "expires_at_unix_ms":u64::MAX,
+                    "credential_hash":credential_digest("persisted service conflict")
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: Some(None), idempotency_key: None,
+            }).unwrap();
+        }
         let barrier = std::sync::Barrier::new(2);
         let results = std::thread::scope(|scope| {
             let handles = profiles.into_iter().enumerate().map(|(index, profile)| {
@@ -334,10 +432,13 @@ mod tests {
                 scope.spawn(move || {
                     SERVICE_PROFILE.set(true);
                     let id = if index == 0 { "111111111111111111111111" } else { "222222222222222222222222" };
-                    let source = json!({"profile":profile,"grant_id":id,"principal":PRINCIPAL,
-                        "issuer":"person/owner","session_actor":format!("{PRINCIPAL}/session/{id}"),
+                    let principal = if profile == "service" { "plugin/test/reader" } else { PRINCIPAL };
+                    let source = json!({"profile":profile,"grant_id":id,"principal":principal,
+                        "issuer":"person/owner","session_actor":format!("{principal}/session/{id}"),
                         "expires_at_unix_ms":u64::MAX,"minimal_read_mode":"approval-once",
-                        "disclosure_consent":true,"scopes":["read.assistant.summary"],
+                        "disclosure_consent":true,
+                        "scopes":if profile == "service" { json!(["read.claims","read.work"]) }
+                            else { json!(["read.assistant.summary"]) },
                         "credential_hash":credential_digest(id)});
                     let subject = subject(id).unwrap();
                     let begun = append(state, subject.clone(), BEGUN, "person/owner", source.clone(), None).unwrap();
@@ -348,12 +449,13 @@ mod tests {
             handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
         });
         let admitted = results.iter().filter(|result| result.is_ok()).count();
+        let refused = results.iter().filter(|result| result.is_err()).count();
         let usable = std::thread::spawn(move || {
             SERVICE_PROFILE.set(true);
             results.iter().filter_map(|result| result.as_ref().ok())
                 .filter(|grant| session(&state, grant, "http").is_ok()).count()
         }).join().unwrap();
-        (admitted, usable)
+        (admitted, refused, usable)
     }
 
     // 98e550cb's Rust-only admission, retained independently as the differential
@@ -408,13 +510,20 @@ mod tests {
             ("legacy-default-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
             ("null-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
             ("mcp-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("service-principal-live", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("service-principal-expired", json!({"expires_at_unix_ms":99}), vec![], 0, false, false),
         ];
         for (name, mut source, policies, revokes, replicated, denied) in cases {
             let root = tempfile::tempdir().unwrap();
             let mut state = crate::api::tests_shared::state(root.path());
             state.owning_person = Some("person/owner".into());
-            source["profile"] = json!("service");
-            if name == "null-principal" {
+            let service_namespace = name.starts_with("service-principal-");
+            source["profile"] = json!(if service_namespace { "assistant" } else { "service" });
+            if service_namespace {
+                // Legacy persisted opposite-profile evidence must still fence
+                // a valid plugin principal, without relaxing issuance parsing.
+                source["principal"] = json!("plugin/test/reader");
+            } else if name == "null-principal" {
                 source["principal"] = Value::Null;
             } else if name != "legacy-default-principal" {
                 source["principal"] = json!(if matches!(name, "unrelated-principal" | "mcp-principal") { MCP_PRINCIPAL } else { PRINCIPAL });
@@ -451,13 +560,15 @@ mod tests {
             for owner in [Some("person/owner"), None] {
                 state.owning_person = owner.map(str::to_owned);
                 for profile in ["assistant", "service"] {
-                    let principal = if name == "mcp-principal" { MCP_PRINCIPAL } else { PRINCIPAL };
+                    let principal = if profile == "service" { "plugin/test/reader" }
+                        else if name == "mcp-principal" { MCP_PRINCIPAL } else { PRINCIPAL };
                     let candidate = json!({"profile":profile,"principal":principal});
                     let old = rust_only_admission(&state, &candidate).map_err(|error| error.code);
                     let new = admit_profile(&state, &candidate).map_err(|error| error.code);
                     assert_eq!(new, old, "{name}: owner={owner:?}, profile={profile}");
                     if owner.is_some() {
-                        assert_eq!(new.is_err(), denied && profile == "assistant", "{name}: expected decision");
+                        let conflicting_profile = if service_namespace { "service" } else { "assistant" };
+                        assert_eq!(new.is_err(), denied && profile == conflicting_profile, "{name}: expected decision");
                     }
                 }
             }
@@ -513,14 +624,14 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_opposite_profiles_have_exactly_one_usable_grant() {
-        assert_eq!(concurrent_grants(["assistant", "service"]), (1, 1));
+    fn concurrent_assistant_grants_refuse_a_persisted_opposite_profile() {
+        assert_eq!(concurrent_grants(["assistant", "assistant"], true), (0, 2, 0));
     }
 
     #[test]
     fn concurrent_same_profile_grants_remain_usable() {
-        assert_eq!(concurrent_grants(["assistant", "assistant"]), (2, 2));
-        assert_eq!(concurrent_grants(["service", "service"]), (2, 2));
+        assert_eq!(concurrent_grants(["assistant", "assistant"], false), (2, 0, 2));
+        assert_eq!(concurrent_grants(["service", "service"], false), (2, 0, 2));
     }
 
     #[test]
@@ -635,3 +746,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "external_grants_service_tests.rs"]
+mod service_tests;

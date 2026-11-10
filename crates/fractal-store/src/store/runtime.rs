@@ -464,6 +464,13 @@ impl Runtime for FractalRuntime {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
         self.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND {
+            let gate = self.extensions.get::<message_expiry::ReceiptGate>();
+            let _held = gate.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let admission = |connection: &Connection| message_expiry::validate_shard(self, connection, &input.subject);
+            return append_claim_with_commit_context(store, input, None, None, None, None,
+                ClaimCommitContext { expiry_writer: true, admission: Some(&admission), ..Default::default() });
+        }
         append_claim_fenced_outcome(store, input, None)
     }
 
@@ -754,6 +761,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     if fresh {
         let transaction = connection.unchecked_transaction()?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h31d1ed089c5e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        desired_progress::initialize_write_witness(&transaction)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
@@ -761,6 +769,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        desired_progress::initialize_write_witness(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
@@ -980,6 +989,9 @@ mod schema_install_tests {
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch(smallclaims::store::SCHEMA).unwrap();
         install_initial_schema(&writer, true).unwrap();
+        writer.execute(
+            "UPDATE local_desired_write_witness SET generation=7 WHERE id=1", [],
+        ).unwrap();
         writer
             .execute_batch("PRAGMA user_version=18; BEGIN IMMEDIATE;")
             .unwrap();
@@ -988,6 +1000,29 @@ mod schema_install_tests {
         install_initial_schema(&reader, false).unwrap();
         assert!(reader.is_autocommit());
         assert!(reader.execute_batch("BEGIN IMMEDIATE;").is_err());
+        assert_eq!(reader.total_changes(), 0, "complete schema installation must not write");
+        assert_eq!(reader.query_row(
+            "SELECT generation FROM local_desired_write_witness WHERE id=1",
+            [], |row| row.get::<_, u64>(0),
+        ).unwrap(), 7, "reopen must preserve the durable generation");
+    }
+
+    #[test]
+    fn runtime_schema_initializes_only_a_missing_desired_write_witness() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        install_initial_schema(&connection, true).unwrap();
+        connection.execute(
+            "DELETE FROM local_desired_write_witness WHERE id=1", [],
+        ).unwrap();
+        install_initial_schema(&connection, false).unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT generation FROM local_desired_write_witness WHERE id=1",
+            [], |row| row.get::<_, u64>(0),
+        ).unwrap(), 0);
+        let changes = connection.total_changes();
+        install_initial_schema(&connection, false).unwrap();
+        assert_eq!(connection.total_changes(), changes, "an initialized witness needs no write");
     }
 
     #[test]

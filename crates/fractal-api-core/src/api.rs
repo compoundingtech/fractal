@@ -564,7 +564,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
-        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier") {
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier" | "agent-charter-feature-barrier") {
             body["applied"] = json!("none");
         }
         if let Some(applied) = body["details"].get("applied").cloned() {
@@ -653,6 +653,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
         .route("/v1/client/documents/content", get(client_documents::document_get))
         .route("/v1/client/documents", get(client_documents::documents_list))
+        .route("/v1/client/claims", get(records::client_list_claims))
+        .route("/v1/client/claims/by-id/{id}", get(records::client_get_claim))
+        .route("/v1/client/work-items/{*subject}", get(work::client_get_work))
         .route("/v1/client/document-references", get(client_documents::document_references))
         .route("/v1/client/push-registration", post(client_push::register)
             .delete(client_push::unregister)
@@ -833,6 +836,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
@@ -1620,12 +1624,12 @@ pub fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
-/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+/// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
     request_latency().lock().unwrap().targets_only(Instant::now())
 }
 
-/// Every target's live windows, and every path's: see `slo/targets.toml`.
+/// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
@@ -1635,8 +1639,8 @@ fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
 }
 
-/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
-/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// Close each UTC minute of the member's CPU as it ends, for the `cpu` objective in
+/// `slo/objectives.kdl`: read the daemon's CPU at the boundary beside the newest reading each of
 /// the `workers` replication workers this member runs has sent, note a replication catch-up, and
 /// check the seats of the minute closed one boundary earlier, once every harness observation
 /// stamped inside it has committed. The first boundary is this daemon's start.
@@ -2106,6 +2110,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-document-reference"
         | "invalid-declared-admission"
         | "declared-admission-feature-barrier"
+        | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
@@ -2766,11 +2771,11 @@ pub fn client_work_resources(
         // that chooses its next work and wake.
         let seat_ready = match actor {
             Some(actor) => {
-                let seat = if actor.contains('/') {
-                    actor.to_owned()
-                } else {
-                    format!("agent/{actor}")
-                };
+                // Queue lookup uses the same canonical actor as the shared seat selector,
+                // including when persisted steps still use a legacy spelling.
+                let actor = smallclaims::store::normalize_actor(actor, "agent");
+                let seat = fractal_schema::canonical_agent_actor(&actor)
+                    .unwrap_or(std::borrow::Cow::Borrowed(&actor));
                 let order = store.seat_run_order(&seat)?;
                 let steps = work
                     .iter()
@@ -2999,7 +3004,7 @@ fn client_work_values(
                 "definition_id": work.definition_hash,
                 "path": work.step,
                 "title": work.title,
-                "assigned_to": work.assigned_to,
+                "assigned_to": work.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "last_progress": work.progress_summary,
                 "progress_at": work.progress_at_unix_ms.map(client_timestamp),
                 "state": state,
@@ -3007,7 +3012,7 @@ fn client_work_values(
                 "gate_kind": gate_kind,
                 "attempt": work.attempt,
                 "readiness_epoch": work.readiness_epoch,
-                "claimant": work.claimant,
+                "claimant": work.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "claim_incarnation": work.claim_incarnation,
                 "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
@@ -11286,6 +11291,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
     Ok(rows)
 }
 

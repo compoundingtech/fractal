@@ -1388,10 +1388,25 @@ async fn run_agent_inspection(
                     current.push(step);
                 }
             }
+            // The charter is the description of the declaration the seat runs now; a stopped or
+            // retired seat's current declaration is not an agent and has none.
+            let charter = status_for(&client, &agent.header.id)
+                .await?
+                .subjects
+                .into_iter()
+                .find(|status| status.subject == agent.header.id)
+                .and_then(|status| status.desired)
+                .filter(|desired| desired.get("name").and_then(Value::as_str) == Some("agent"))
+                .and_then(|desired| {
+                    fractal_daemon::model::canonical_child_string(&desired, "description")
+                });
             print!(
                 "{}",
                 render_client_agent(&agent, &current, current_unix_ms()?)
             );
+            if let Some(charter) = charter {
+                print!("{}", render_agent_charter(&charter));
+            }
             return Ok(());
         }
         AgentsCommand::New(_)
