@@ -1315,6 +1315,18 @@ export type ClientControlGrant = {
   verbs: Array<string>;
 };
 
+export type ClientControlGrantLifecycle = {
+  device: string;
+  grant_id: string;
+  item_id?: string;
+  kind: "client-control-grant-lifecycle";
+  reason: string;
+  run_id: string;
+  sequence: number;
+  session: string;
+  state: "started" | "ended" | "revoked";
+} & ResourceHeader;
+
 export type ClientControlRefusal = "device-not-test-client" | "grant-missing" | "grant-expired" | "screen-not-granted" | "verb-not-granted" | "budget-exhausted" | "actor-not-granted";
 
 export type ClientDiagnosticBreadcrumb = "native-start" | "js-start" | "root-mounted" | "foreground" | "background" | "previous-launch-unclean";
@@ -3404,7 +3416,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | ClientControlGrantLifecycle | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceCollectionName = 
   "missions"

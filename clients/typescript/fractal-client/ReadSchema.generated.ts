@@ -1684,6 +1684,24 @@ export const ClientControlGrant = /*#__PURE__*/ (() => Schema.Struct({
 export type ClientControlGrant = typeof ClientControlGrant.Type
 export type ClientControlGrantEncoded = typeof ClientControlGrant.Encoded
 
+export const ClientControlGrantLifecycle = /*#__PURE__*/ (() => Schema.Struct({
+  "device": Schema.String,
+  "grant_id": Schema.String,
+  "id": Id,
+  "item_id": optionalKey(Schema.String),
+  "kind": Schema.Literal("client-control-grant-lifecycle"),
+  "operational": optionalKey(Operational),
+  "reason": Schema.String,
+  "revision": Revision,
+  "run_id": Schema.String,
+  "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "session": Schema.String,
+  "state": Schema.Literals(["started","ended","revoked"]),
+  "updated_at": Timestamp
+}).annotate({ identifier: "ClientControlGrantLifecycle" }))()
+export type ClientControlGrantLifecycle = typeof ClientControlGrantLifecycle.Type
+export type ClientControlGrantLifecycleEncoded = typeof ClientControlGrantLifecycle.Encoded
+
 /** One conversation header field: its latest value, where it came from and when. */
 export const ConversationHeaderField = /*#__PURE__*/ (() => Schema.Struct({
   "as_of": Timestamp,
@@ -2820,7 +2838,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
+  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","client-control-grant-lifecycle","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -3064,6 +3082,7 @@ export const Resource = /*#__PURE__*/ (() => Schema.Union([
   Machine,
   Device,
   DeviceCommand,
+  ClientControlGrantLifecycle,
   Operation,
   History,
   Session,
