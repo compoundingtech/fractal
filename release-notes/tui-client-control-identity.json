@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal fixture client exposes a read-only public identity and secret-redacted profile snapshot for independent observation.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Normal profiles are refused; existing fixture profiles are read without modification."},
+  "downtime": {"status": "none", "detail": "No restart or activation."},
+  "manual": {"status": "changed", "detail": "Use tui client-control identity --profile PATH --json for public identity and a redacted snapshot. Secret values are replaced by a fixed sentinel and their SHA-256."},
+  "recovery": {"status": "none", "detail": "No profile writes or runtime effects to undo."}
+}

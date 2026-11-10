@@ -4,6 +4,7 @@
 mod ci_test_paths;
 
 mod connection;
+mod client_control;
 mod environment;
 mod ui;
 mod version;
@@ -751,6 +752,11 @@ pub struct Args {
     #[arg(skip)]
     endpoint: Option<PathBuf>,
     #[arg(skip)]
+    client_control_socket: Option<PathBuf>,
+    /// Isolated paired profile for fixture-only device commands (never a normal profile).
+    #[arg(long, conflicts_with = "local")]
+    pub client_control_profile: Option<PathBuf>,
+    #[arg(skip)]
     initial_subject: Option<String>,
     #[arg(skip)]
     playback: Option<ui::playback::Playback>,
@@ -804,6 +810,22 @@ pub enum Action {
     /// unless they are typing a message or `--keep-focus` says to leave it. The request waits
     /// for fractal to know the subject, so an agent made a moment ago can be opened.
     Open(OpenArgs),
+    /// Read-only fixture client observation; never pairs or opens the interface.
+    ClientControl {
+        #[command(subcommand)]
+        action: ClientControlAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ClientControlAction {
+    /// Print public identity and a secret-redacted profile snapshot without writing.
+    Identity {
+        #[arg(long)]
+        profile: std::path::PathBuf,
+        #[arg(long, required = true)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -825,6 +847,12 @@ pub struct OpenArgs {
 }
 
 impl Args {
+    /// The CLI supplies this only after selecting the named fixture instance.
+    pub fn with_client_control_socket(mut self, socket: PathBuf) -> Self {
+        self.client_control_socket = Some(socket);
+        self
+    }
+
     /// Override local socket discovery with the CLI's global endpoint option.
     pub fn with_endpoint(mut self, endpoint: PathBuf) -> Self {
         self.endpoint = Some(endpoint);
@@ -967,8 +995,14 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
 /// Run the TUI before starting a CLI runtime. This owns its runtime and terminal guards,
 /// and sets the client name before any connection can initialize the shared name lock.
 pub fn run(mut options: Args) -> Result<()> {
-    if let Some(Action::Open(open)) = options.action.take() {
-        return open_in_terminal_ui(&open);
+    match options.action.take() {
+        Some(Action::Open(open)) => return open_in_terminal_ui(&open),
+        Some(Action::ClientControl { action: ClientControlAction::Identity { profile, json: _ } }) => {
+            let identity = client_control::identity(&profile, &connection::profile_path()?)?;
+            println!("{}", serde_json::to_string(&identity)?);
+            return Ok(());
+        }
+        None => {}
     }
     anyhow::ensure!(!options.classic, CLASSIC_GONE);
     let process_started = std::time::Instant::now();
@@ -1001,7 +1035,19 @@ pub fn run(mut options: Args) -> Result<()> {
     let local = args.iter().any(|arg| arg == "--local");
     let client_only = args.iter().any(|arg| arg == "--client");
     anyhow::ensure!(!(local && client_only), "Choose --client or --local");
-    let profile = if local {
+    let control_device = if let Some(path) = options.client_control_profile.as_deref() {
+        let socket = options.client_control_socket.as_ref()
+            .context("Client control requires --instance client-control-fixture")?;
+        anyhow::ensure!(options.endpoint.as_ref() == Some(socket),
+            "Client control requires --endpoint pointing to the fixture client socket");
+        let normal = connection::profile_path()?;
+        let device = client_control::load_fixture_device(path, &normal)?;
+        client_control::validate_device(&device, socket)?;
+        Some(device)
+    } else { None };
+    let profile = if let Some(device) = &control_device {
+        Some(connection::Profile { devices: vec![device.clone()] })
+    } else if local {
         None
     } else if std::env::var_os("XDG_CONFIG_HOME").is_none() && std::env::var_os("HOME").is_none() {
         None
@@ -1088,6 +1134,7 @@ pub fn run(mut options: Args) -> Result<()> {
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
         requests,
         playback: options.playback,
+        client_control: control_device,
     })
     .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
