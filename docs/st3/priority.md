@@ -192,6 +192,33 @@ supporting readers before a mixed-version rollback. Old KDL and typed authoring
 already reject unknown budget members rather than silently dropping attention.
 There is no database, replay or enforcement change.
 
+### Selector rules (priority, aging, no preemption)
+
+Status: definitions only. No selector applies these rules yet. Both the seat-queue
+shadow selector (owned by st-budgets and Fractal Product Lead) and the later
+job-admission selector (owned by the gate-slot retirement program) use this contract.
+The rules take a queue as a parameter: a seat queue or a job queue. Use only the
+declared priority values and unordered lanes listed above.
+
+**No preemption.** A selector chooses only among waiting entries. It never stops,
+pauses or reorders running work, and never takes away a held claim or slot.
+
+**Aging and grace.** Treat a waiting entry below the highest priority as one priority
+level higher once it has waited longer than its queue's grace interval. Within one
+priority level, keep FIFO order by queue join time.
+
+The grace interval is the p90 of observed waits for normal-priority entries in that
+queue, over a pinned time window. Measure each wait from ready or queue join to first
+claim or admission, as applicable to the queue. Each replica computes the interval
+from its own history. Every selector decision records the window, the method and
+the value. If the window has no observed normal-priority wait, the grace interval is
+unknown. Then the selector does not reorder by priority: it keeps FIFO order by queue
+join time and records the grace interval as unknown.
+
+**Current state.** The seat queue is FIFO with manual moves. The budgets-v1 step
+`seat-shadow` will only record shadow decisions for one dedicated seat; FIFO still
+decides. Turning on active admission needs Johannes's separate approval.
+
 ### Attention report
 
 The client-v0 operation
@@ -321,9 +348,12 @@ admission of new attempts is affected.
 **Authority and failure.**
 
 - Each mission run has one authoritative ledger writer: the replica that admits the run's jobs.
-- If the ledger is unreachable in admission mode, new attempts of a capped mission wait,
-  and running attempts continue.
-- A replica never admits against a copy that it cannot prove current.
+- The single ledger writer is fenced like a step claim, so a replica failover cannot
+  admit twice.
+- In admission mode, `budget-ledger-unavailable` is a typed WAIT reason, not a refusal.
+  It applies when the ledger is unreachable or when the writer cannot prove its copy
+  current. The attempt waits, and running attempts continue.
+- Keep this WAIT distinct from the refusal `budget-cannot-fit`.
 
 **Report fields** (per mission run):
 

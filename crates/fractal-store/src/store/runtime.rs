@@ -268,6 +268,17 @@ impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
         Some(self.observer_actuals.clone())
     }
+    fn admit_writer_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        writer: &str,
+        kind: &str,
+        subject: &str,
+    ) -> Result<(), FractalError> {
+        // A document a run binds is decided by its run authority, as its claims are.
+        super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
+    }
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
         let Ok(value) = serde_json::from_str::<Value>(response) else {

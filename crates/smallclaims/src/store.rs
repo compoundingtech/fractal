@@ -6666,6 +6666,7 @@ impl Store {
                 if let Some(writer) = writer {
                     principals::rules_gate_tx(transaction, &self.origin, writer, "doc.bound", name)
                         .map_err(crate::error::typed)?;
+                    self.runtime.admit_writer_tx(transaction, &self.origin, writer, "doc.bound", name)?;
                 }
                 let mut body = json!({ "name": name, "hash": hash, "size": bytes.len() });
                 idempotency::attach(&mut body, idempotency_key).map_err(internal)?;

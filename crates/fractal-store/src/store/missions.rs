@@ -396,6 +396,9 @@ impl Store {
             request.requester.as_deref().unwrap_or("person/requester"),
             "person",
         );
+        // The starter writes the run's creation: its requester, or the run that started it.
+        let starter = child.as_ref().and_then(|child| child.started_by.clone())
+            .unwrap_or_else(|| requester.clone());
         let mode = request.mode.as_deref().unwrap_or("run");
         if !matches!(mode, "run" | "eval") {
             return Err(FractalError::new(
@@ -514,19 +517,21 @@ impl Store {
             &self.origin,
             &subject,
             "mission-run.created",
-            Some(&requester),
+            Some(&starter),
             &body,
             &[],
             None,
             &request.idempotency_key,
         )
-        .map_err(internal)?;
+        // A typed refusal, such as a starter without the authority to start this mission, keeps
+        // its code.
+        .map_err(smallclaims::error::typed)?;
         append_claim_tx(
             &transaction,
             &self.origin,
             &generation_subject,
             "run-generation.created",
-            Some(&requester),
+            Some(&starter),
             &json!({"fields": {
                 "run": subject,
                 "revision": mission.revision,
@@ -536,7 +541,7 @@ impl Store {
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         stages.enter("view");
         let view = created_mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
         stages.enter("idempotency-record");

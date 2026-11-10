@@ -2,7 +2,18 @@ import assert from 'node:assert/strict';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof.ts';
+import { fabricGrantProblem, pairingFabricNode, requirePairingAdvertisement, validatePairingTrust, verifyPairing } from './pairingProof.ts';
+
+test('pairing advertisement accepts both namespaces and refuses unrelated versions', () => {
+  const capabilities = [{ id: 'device-key-proofs', version: 1, state: 'granted' }];
+  for (const api_version of ['st3.client.v0', 'fractal.client.v0']) {
+    assert.doesNotThrow(() => requirePairingAdvertisement({ api_version, capabilities }));
+    assert.throws(() => requirePairingAdvertisement({ api_version, capabilities: [] }), /does not support/);
+  }
+  for (const api_version of ['unrelated.client.v0', 'st3.client.v1', undefined]) {
+    assert.throws(() => requirePairingAdvertisement({ api_version, capabilities }), /does not support/);
+  }
+});
 
 // Public receipts exported from a real, isolated daemon predating fingerprint support.
 const vector = JSON.parse(readFileSync(new URL('../../fixtures/clients/device-pairing-proofs-v1.json', import.meta.url)));
