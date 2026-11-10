@@ -1,7 +1,6 @@
 import { useAtomValue } from '@effect/atom-react'
 import { Devbar } from '@overeng/devbar'
 import type { DevbarPanel, DevbarSegment } from '@overeng/devbar'
-import { BuildIdentitySegment } from '@overeng/devbar/build-identity'
 import { darkDevbarTheme, lightDevbarTheme } from '@overeng/devbar/themes'
 import { makeMeters, makeSeries } from '@overeng/meters'
 import type { FpsValue } from '@overeng/meters'
@@ -19,7 +18,8 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
-import { Changelog, useChangelogUnseen } from '../changelog/Changelog.tsx'
+import { ChangelogContent, useChangelogDisclosure, useChangelogUnseen } from '../changelog/Changelog.tsx'
+import { BuildChangesSegment } from './BuildChangesSegment.tsx'
 import { reserveDevbarSpace } from './devbarSpace.ts'
 import { counters } from './measurement/index.ts'
 import { setDevBarDefault, toggleDevBar, useDevBarVisible } from './devBarPreference.ts'
@@ -164,6 +164,7 @@ const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { rea
     { id: 'meters', label: 'Meters', render: () => <MetersPanel dark={dark} detail={detail} setDetail={setDetail} /> },
   ], [dark, detail])
   const hasUnseen = useChangelogUnseen()
+  const changelog = useChangelogDisclosure()
   const segments = React.useMemo<readonly DevbarSegment[]>(() => [
     // Every meter is a segment, so one row flows left to right and one overflow covers them all; freezing lives in the drawer's strips.
     ...compactBlocks.map((block) => ({
@@ -177,10 +178,24 @@ const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { rea
       ),
     })),
     ...transportSegments({ meters, theme: dark ? darkMeterTheme : lightMeterTheme, onOpenDetail: openDetail }),
-    { id: 'version', render: () => <BuildIdentitySegment identity={buildIdentity} /> },
-    // Recent changes outlast transport detail; when overflowed, the +N control mirrors the unseen dot.
-    { id: 'changelog', priority: 1, hasAlert: hasUnseen, render: () => <Changelog dark={dark} /> },
-  ], [dark, hasUnseen, openDetail])
+    // One build entry: identity and recent changes outlast transport detail; when overflowed, the +N control mirrors the unseen dot.
+    {
+      id: 'build',
+      priority: 1,
+      hasAlert: hasUnseen,
+      render: () => (
+        <BuildChangesSegment
+          identity={buildIdentity}
+          deploymentId={deploymentId}
+          dark={dark}
+          hasUnseen={hasUnseen}
+          onChangesSeen={changelog.acknowledge}
+          onPrefetch={changelog.prefetch}
+          changes={(firstEntryRef) => <ChangelogContent firstEntryRef={firstEntryRef} />}
+        />
+      ),
+    },
+  ], [changelog, dark, hasUnseen, openDetail])
   const host = React.useRef<HTMLDivElement>(null)
   React.useLayoutEffect(() => host.current === null ? undefined : reserveDevbarSpace(host.current), [shown])
   if (!shown) return null
