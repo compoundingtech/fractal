@@ -2366,6 +2366,8 @@ enum HarnessQuestionsCommand {
 
 #[derive(Subcommand)]
 enum SubjectCommand {
+    /// Read declarations, selected tokens and cheap actual summaries in one snapshot.
+    Desired(SubjectDesiredArgs),
     /// Reply to a custom source under its current revision and waiting episode.
     Reply {
         subject: String,
@@ -2395,6 +2397,19 @@ enum SubjectCommand {
     Show(SubjectShowArgs),
     /// Show bounded immutable history for one subject.
     History(TraceArgs),
+}
+
+#[derive(Args)]
+struct SubjectDesiredArgs {
+    /// Exact subject IDs; omission selects all declarations.
+    #[arg(value_name = "SUBJECT", conflicts_with = "all")]
+    subjects: Vec<String>,
+    /// Select all declarations (also the default when no subjects are supplied).
+    #[arg(long)]
+    all: bool,
+    /// Restrict the selected declarations to this kind.
+    #[arg(long, value_name = "K")]
+    kind: Option<String>,
 }
 
 #[derive(Args)]
@@ -11650,8 +11665,52 @@ async fn run_harness_questions(
     }
 }
 
+async fn subject_desired_items(
+    client: &Client,
+    args: &SubjectDesiredArgs,
+) -> Result<Vec<Value>> {
+    // Retained member payloads can come from newer daemons. Only decode the page
+    // envelope here; preserve each extensible item exactly as the server supplied it.
+    #[derive(serde::Deserialize)]
+    struct DesiredPage {
+        items: Vec<Value>,
+        next_cursor: Option<String>,
+        #[serde(rename = "store_index")]
+        _store_index: u64,
+    }
+    let mut selection = String::from("/v1/desired?limit=1000");
+    for subject in &args.subjects {
+        selection.push_str("&subject=");
+        selection.push_str(&urlencoding::encode(subject));
+    }
+    if let Some(kind) = &args.kind {
+        selection.push_str("&kind=");
+        selection.push_str(&urlencoding::encode(kind));
+    }
+    let mut items = Vec::new();
+    let selection_len = selection.len();
+    loop {
+        let DesiredPage { items: page_items, next_cursor, .. } =
+            client.get(&selection).await?;
+        items.extend(page_items);
+        match next_cursor {
+            Some(next) => {
+                selection.truncate(selection_len);
+                selection.push_str("&cursor=");
+                selection.push_str(&urlencoding::encode(&next));
+            }
+            None => return Ok(items),
+        }
+    }
+}
+
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {
     match command {
+        SubjectCommand::Desired(args) => {
+            // Do not emit partial output if any continuation has expired or otherwise fails.
+            let result = subject_desired_items(client, &args).await?;
+            print_value(&result, json_output)
+        }
         SubjectCommand::Reply {
             subject,
             registration,
@@ -21856,3 +21915,6 @@ mod tests;
 
 #[cfg(test)]
 mod terminal_ui_tests;
+
+#[cfg(test)]
+mod subject_desired_cli_tests;

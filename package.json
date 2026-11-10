@@ -8,6 +8,7 @@
     "clients/typescript/fractal-declarations",
     "clients/typescript/fractal-scenarios",
     "clients/typescript/fractal-views",
+    "packages/fractal",
     "packages/fractal-sdk",
     "packages/fractal-ui"
   ],
