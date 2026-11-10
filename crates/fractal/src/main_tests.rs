@@ -1800,6 +1800,17 @@ fn a_harness_cannot_act_as_another_agent() {
 }
 
 #[test]
+fn a_program_effect_acts_as_its_run() {
+    assert_eq!(run_actor(Some("secret"), Some("abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(Some("secret"), Some("mission-run/abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(None, Some("abc")), None);
+    assert_eq!(run_actor(Some(""), Some("abc")), None);
+    assert_eq!(run_actor(Some("secret"), Some("")), None);
+    assert_eq!(parse_actor_subject("mission-run/abc").as_deref(), Ok("mission-run/abc"));
+    assert!(parse_actor_subject("mission-run/").is_err());
+}
+
+#[test]
 fn execution_actor_options_parse_and_fail_closed() {
     for (path, tail) in [
         (["changes", "sync"], vec!["--repository", "fixture/garden"]),

@@ -245,7 +245,15 @@ a mission ID without `mission/`; `write` takes a subject, or a registered family
 block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
 mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
 is. A mission without the block grants its runs nothing. The block is stored with the revision;
-the daemon does not yet bind a run actor or enforce it. An older member would quarantine a
+the daemon does not enforce it yet. A request whose caller's ancestry carries a live run credential
+(`ST_RUN_CREDENTIAL`, one per program attempt) is bound to `mission-run/RUN`: like a bound agent, it
+may not call internal routes, send a person header or name another `actor` or `requester`, and its
+writes are attributed to the run. The credential binds only while its attempt is the step run's
+current, live attempt; one that no longer binds leaves the caller unverifiable, and an
+environment that carries both a credential and `ST_AGENT` binds neither. A bound run writes no
+seat's `doc/agents/…` document. The CLI defaults its actor to `mission-run/$ST_MISSION_RUN` when the
+credential is present; the daemon accepts that actor from the trusted Unix client only when the
+request's credential binds the same run. An older member would quarantine a
 revision that declares it (it hashes the mission without the field), so publication holds such a
 revision until every member advertises `mission_authority=1` on its `daemon.started`
 (`mission-authority-unavailable`, also an `apply --dry-run` blocker), as for `capacity`
