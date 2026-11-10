@@ -267,8 +267,9 @@ async fn assistant_read_trust_accepts_legacy_and_fractal_versions() {
     for version in ["st3.client.v0", "fractal.client.v0"] {
         let mut trust=fixture.trust_request();
         trust.api_version=version.into();
-        pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
             AxumPath(fixture.grant.clone()),Json(trust)).await.unwrap();
+        assert!(grant["policy_revision"].as_u64().is_some());
     }
 }
 
