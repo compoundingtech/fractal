@@ -4,7 +4,7 @@
  * sha256. Node-only; it runs Bun.
  */
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 import { Data, Effect, FileSystem } from 'effect'
@@ -38,7 +38,9 @@ const entryCheck = (bundle: string) =>
 /**
  * Bundles `module` with `bun build --target=bun` and writes it to `<bundleDir>/<sha256>.mjs`.
  * Bun names inlined modules by their path relative to `cwd`, so building from the tree root keeps
- * the bytes, and the hash, independent of where the tree is checked out.
+ * the bytes, and the hash, independent of where the tree is checked out. Only a bundle that is a
+ * program reaches `bundleDir`, and it appears there whole: it is renamed into place, and a bundle
+ * already present under its hash is never rewritten.
  */
 export const bundleProgram = Effect.fnUntraced(function* ({
   module,
@@ -65,19 +67,22 @@ export const bundleProgram = Effect.fnUntraced(function* ({
   })
   if (build.status !== 0)
     return yield* new ProgramBundleError({ message: `bun build failed:\n${build.output.trim()}` })
+  const check = yield* run({ bun, cwd, args: ['--eval', entryCheck(built)] })
+  if (check.status !== 0)
+    return yield* new ProgramBundleError({
+      message: `${module} is not a program: ${check.output.trim()}`,
+    })
   const bytes = yield* fs.readFile(built).pipe(Effect.mapError(failed('cannot read the bundle')))
   const sha256 = createHash('sha256').update(bytes).digest('hex')
   const bundle = join(bundleDir, `${sha256}.mjs`)
-  yield* fs
-    .makeDirectory(bundleDir, { recursive: true })
-    .pipe(
-      Effect.andThen(fs.writeFile(bundle, bytes)),
+  const present = yield* fs.exists(bundle).pipe(Effect.mapError(failed(`cannot read ${bundle}`)))
+  if (!present) {
+    const staged = join(bundleDir, `.${sha256}.${randomUUID()}.tmp`)
+    yield* fs.makeDirectory(bundleDir, { recursive: true }).pipe(
+      Effect.andThen(fs.writeFile(staged, bytes)),
+      Effect.andThen(fs.rename(staged, bundle)),
       Effect.mapError(failed(`cannot write ${bundle}`)),
     )
-  const check = yield* run({ bun, cwd, args: ['--eval', entryCheck(bundle)] })
-  if (check.status !== 0)
-    return yield* new ProgramBundleError({
-      message: `${bundle} is not a program: ${check.output.trim()}`,
-    })
+  }
   return { bundle, sha256 }
 }, Effect.scoped)
