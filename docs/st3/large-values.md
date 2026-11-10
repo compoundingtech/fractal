@@ -532,6 +532,26 @@ and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
 
+## Assistant principal admission index review
+
+`fractal_store::store` owns schema site `lv-hb9696ca837f7`, replacing
+`lv-h22c8c670811c`. The added principal admission index retains claim-kind TEXT
+and the effective principal JSON field inline; absent principals use the fixed
+`assistant/chatgpt` key. The composite seek changes neither claim bodies nor
+admission semantics. These keys remain variable-size, and SQLite maintains them
+on insertion and deletion; indexed lookup is not a byte-size or startup-cost
+proof. The producer maintainer retains `chunk-or-reference-variable-columns`
+responsibility while preserving effective-principal matching and claim authority.
+
+`fractal_api_core::api::client_v0::external_grants` owns the conservative
+read-only sink `lv-h99f1a302c7b1`. Its prepared admission query binds fixed claim
+kinds, an assistant principal and an optional expiry cutoff, then returns claim
+IDs after revocation and latest-policy filtering. It adds no writer or body copy;
+principal, subject and claim-ID TEXT keys remain variable-size. The producer
+maintainer retains `trace-statement-and-value-representation` responsibility for
+these bindings and returned identifiers; fewer candidates and indexed seeks do
+not establish encoded-size or execution-cost bounds.
+
 ## Incremental observed credit heads
 
 `fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,
