@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn conversations_follow_the_wire_pattern_and_bound() {
-        for valid in ["agent/fleet/seat", "session/019a-abc", "a/b", "agent-2/x"] {
+        for valid in ["agent/fleet/fixture-seat", "session/019a-abc", "a/b", "agent-2/x"] {
             assert!(valid_conversation(valid), "{valid}");
         }
         for invalid in ["", "agent", "agent/", "Agent/x", "1agent/x", "agent/a b", "/x", "agent_x/y"] {
@@ -132,7 +132,7 @@ mod tests {
         let subject = "read-position/person/ada";
         validate_fields(subject, &fields(json!({"owner":"person/ada","conversation":"agent/a/b","at_ms":0}))).unwrap();
         for invalid in [
-            json!({"owner":"person/bob","conversation":"agent/a/b","at_ms":1}),
+            json!({"owner":"person/robin","conversation":"agent/a/b","at_ms":1}),
             json!({"owner":"person/ada","conversation":"agent","at_ms":1}),
             json!({"owner":"person/ada","conversation":"agent/a/b","at_ms":-1}),
             json!({"owner":"person/ada","conversation":"agent/a/b","at_ms":1.5}),
@@ -147,8 +147,8 @@ mod tests {
     fn only_the_person_or_a_fleet_agent_advances() {
         let subject = "read-position/person/ada";
         validate_actor(subject, Some("person/ada")).unwrap();
-        validate_actor(subject, Some("agent/fleet/seat")).unwrap();
-        for actor in [None, Some("person/bob"), Some("requester")] {
+        validate_actor(subject, Some("agent/fleet/fixture-seat")).unwrap();
+        for actor in [None, Some("person/robin"), Some("requester")] {
             assert_eq!(validate_actor(subject, actor).unwrap_err().code, "read-position-owner-forbidden");
         }
         validate_actor("glass/person/ada/x", None).unwrap();

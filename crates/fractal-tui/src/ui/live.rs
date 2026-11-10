@@ -3292,7 +3292,7 @@ mod tests {
             window_errors: BTreeMap::from([("ReadPositions".into(), "subscription refused".into())]),
             ..Extras::default()
         };
-        assert_eq!(adapt::world(&Model::default(), "person/reader", &extras).stale,
+        assert_eq!(adapt::world(&Model::default(), "person/robin", &extras).stale,
             ["ReadPositions: subscription refused"]);
     }
 
@@ -4293,7 +4293,7 @@ mod tests {
         assert!(reads.listed(Ok(Some(listed)), now));
         assert!(!reads.unread(conversation, Some(at + 30_000)));
         assert!(reads.due(now, true).is_empty(), "nothing st does not already keep");
-        assert!(read_positions(&client, "person/blake", false).await.is_err(), "another person's positions are refused");
+        assert!(read_positions(&client, "person/robin", false).await.is_err(), "another person's positions are refused");
         server.abort();
     }
 

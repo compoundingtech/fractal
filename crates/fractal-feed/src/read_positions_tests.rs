@@ -85,7 +85,7 @@ impl Fixture {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let (tx, updates) = mpsc::channel();
         let (commands, rx) = channel::unbounded_channel();
-        let feed = tokio::spawn(run_members_with_sidebar(vec![client], false, false, true, Some("person/reader".into()), tx, rx));
+        let feed = tokio::spawn(run_members_with_sidebar(vec![client], false, false, true, Some("person/robin".into()), tx, rx));
         Self { frames, subscriptions, updates, commands, feed, server, http_reads }
     }
 

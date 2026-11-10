@@ -358,9 +358,9 @@ mod tests {
             dir.path().join(scoped.file_name().unwrap())
         };
         let ada = scoped("/gateway/one", "person/ada");
-        let bob = scoped("/gateway/one", "person/bob");
+        let robin = scoped("/gateway/one", "person/robin");
         let other = scoped("/gateway/two", "person/ada");
-        assert_ne!(ada, bob);
+        assert_ne!(ada, robin);
         assert_ne!(ada, other);
         assert_eq!(path(None), None);
         let mut unscoped = ReadPositions::load(Some(dir.path().join("read.json")));

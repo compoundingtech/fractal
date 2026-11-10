@@ -3,7 +3,7 @@ use crate::store::glasses_tests_shared_delivery::sync;
 
 const ADA: &str = "person/ada";
 const SUBJECT: &str = "read-position/person/ada";
-const SEAT: &str = "agent/fleet/seat";
+const SEAT: &str = "agent/fleet/fixture-seat";
 const SESSION: &str = "session/019a0000-0000-7000-8000-000000000001";
 
 fn advance(conversation: &str, at: u64) -> ClaimInput {
@@ -102,10 +102,10 @@ fn only_winning_advances_move_the_change_index() {
 fn admission_refuses_other_owners_and_malformed_positions() {
     let store = Store::open_memory("read-admission").unwrap();
     let mut other_actor = advance(SEAT, 1);
-    other_actor.actor = Some("person/bob".into());
+    other_actor.actor = Some("person/robin".into());
     assert_eq!(store.append_claim(&other_actor).unwrap_err().code, "read-position-owner-forbidden");
     let mut other_owner = advance(SEAT, 1);
-    other_owner.fields.insert("owner".into(), json!("person/bob"));
+    other_owner.fields.insert("owner".into(), json!("person/robin"));
     assert_eq!(store.append_claim(&other_owner).unwrap_err().code, "read-position-owner-forbidden");
     let mut bad_conversation = advance("no-family", 1);
     bad_conversation.fields.insert("conversation".into(), json!("has space/x y"));
@@ -115,7 +115,7 @@ fn admission_refuses_other_owners_and_malformed_positions() {
     assert!(store.append_claim(&wrong_kind).is_err());
     // A trusted fleet agent may advance for the person, as for arrangements.
     let mut agent = advance(SEAT, 7);
-    agent.actor = Some("agent/fleet/helper".into());
+    agent.actor = Some("agent/fleet/fixture-helper".into());
     store.append_claim(&agent).unwrap();
     assert_eq!(at_of(&store, SEAT), Some(7));
     assert!(positions(&store).iter().all(|row| row["owner"] == ADA));
@@ -125,7 +125,7 @@ fn admission_refuses_other_owners_and_malformed_positions() {
 fn replicated_admission_refuses_another_person_advancing_the_owner() {
     let store = Store::open_memory("read-replica-admission").unwrap();
     let mut claim = store.append_claim(&advance(SEAT, 1)).unwrap();
-    claim.actor = Some("person/bob".into());
+    claim.actor = Some("person/robin".into());
     let error = classify_replicated_claim_with_registry(&claim, fractal_schema::registry())
         .err().expect("another person cannot advance the owner's position");
     assert_eq!(error.code, "read-position-owner-forbidden");

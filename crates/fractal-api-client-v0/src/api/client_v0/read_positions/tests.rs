@@ -5,7 +5,7 @@ use axum::http::Request;
 use tower::ServiceExt;
 
 const ADA: &str = "person/ada";
-const SEAT: &str = "agent/fleet/seat";
+const SEAT: &str = "agent/fleet/fixture-seat";
 const T1: &str = "2026-11-08T10:00:01.000Z";
 const T2: &str = "2026-11-08T10:00:02.000Z";
 const T3: &str = "2026-11-08T10:00:03.000Z";
@@ -86,14 +86,14 @@ async fn other_people_can_neither_read_nor_advance_a_persons_positions() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state_named(root.path(), "read-position-cross-person");
     let ada = ClientSession::local(Some(ADA)).unwrap();
-    let bob = ClientSession::local(Some("person/bob")).unwrap();
+    let robin = ClientSession::local(Some("person/robin")).unwrap();
     invoke(&state, &ada, request(&state, "ada-own", ADA, SEAT, T1)).await.unwrap();
-    let refused = invoke(&state, &bob, request(&state, "bob-for-ada", ADA, SEAT, T3)).await.unwrap_err();
+    let refused = invoke(&state, &robin, request(&state, "robin-for-ada", ADA, SEAT, T3)).await.unwrap_err();
     assert_eq!(refused.code, "forbidden");
     assert_eq!(claims(&state), 1);
     let response = crate::api::router(state.clone()).oneshot(Request::builder()
         .uri("/v1/client/read-positions?person=person%2Fada")
-        .header(LOCAL_PERSON_HEADER, "person/bob").body(Body::empty()).unwrap()).await.unwrap();
+        .header(LOCAL_PERSON_HEADER, "person/robin").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let read_slots = Arc::new(tokio::sync::Semaphore::new(1));
     let subscription: CollectionSubscribe = serde_json::from_value(json!({
@@ -107,7 +107,7 @@ async fn other_people_can_neither_read_nor_advance_a_persons_positions() {
     omitted.person = None;
     assert!(collection_items(&state, &ada, &omitted, read_slots.acquire_owned().await.unwrap()).await.is_err());
     // A trusted local fleet agent acts for the person, as for arrangements.
-    let agent = ClientSession::local(Some("agent/fleet/helper")).unwrap();
+    let agent = ClientSession::local(Some("agent/fleet/fixture-helper")).unwrap();
     let advanced = invoke(&state, &agent, request(&state, "agent-for-ada", ADA, SEAT, T2)).await.unwrap();
     assert_eq!(advanced["read_position_at"], T2);
 }
@@ -117,7 +117,7 @@ async fn list_pages_keep_their_snapshot_across_later_advances() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state_named(root.path(), "read-position-pages");
     let session = ClientSession::local(Some(ADA)).unwrap();
-    for (key, conversation) in [("one", "agent/fleet/one"), ("two", "agent/fleet/two"), ("three", "session/three")] {
+    for (key, conversation) in [("one", "agent/fleet/fixture-one"), ("two", "agent/fleet/fixture-two"), ("three", "session/three")] {
         invoke(&state, &session, request(&state, key, ADA, conversation, T1)).await.unwrap();
     }
     let app = crate::api::router(state.clone());
@@ -132,7 +132,7 @@ async fn list_pages_keep_their_snapshot_across_later_advances() {
     };
     let first = get_page("/v1/client/read-positions?person=person%2Fada&limit=1".into()).await;
     assert_eq!(first["value"]["collection"], "read-positions");
-    invoke(&state, &session, request(&state, "during-pages", ADA, "agent/fleet/one", T3)).await.unwrap();
+    invoke(&state, &session, request(&state, "during-pages", ADA, "agent/fleet/fixture-one", T3)).await.unwrap();
     let mut page = first.clone();
     let mut seen = vec![];
     loop {
@@ -145,8 +145,8 @@ async fn list_pages_keep_their_snapshot_across_later_advances() {
         page = get_page(format!("/v1/client/read-positions?person=person%2Fada&limit=1&cursor={cursor}")).await;
     }
     assert_eq!(seen, [
-        ("agent/fleet/one".to_owned(), T1.to_owned()),
-        ("agent/fleet/two".to_owned(), T1.to_owned()),
+        ("agent/fleet/fixture-one".to_owned(), T1.to_owned()),
+        ("agent/fleet/fixture-two".to_owned(), T1.to_owned()),
         ("session/three".to_owned(), T1.to_owned()),
     ]);
     let fresh = get_page("/v1/client/read-positions?person=person%2Fada".into()).await;
@@ -166,7 +166,7 @@ async fn streams_are_invalidated_by_any_change_to_the_persons_positions() {
     for collection in ["missions", "attention", "agents", "work", "glasses", "arrangements"] {
         assert!(collection_ignores(collection, schema::KIND), "{collection}");
     }
-    invoke(&state, &session, request(&state, "first-row", ADA, "agent/fleet/a", T1)).await.unwrap();
+    invoke(&state, &session, request(&state, "first-row", ADA, "agent/fleet/fixture-a", T1)).await.unwrap();
     let read_slots = Arc::new(tokio::sync::Semaphore::new(1));
     // A one-row window: an advance outside its rows still changes what it pins.
     let subscription: CollectionSubscribe = serde_json::from_value(json!({
@@ -177,7 +177,7 @@ async fn streams_are_invalidated_by_any_change_to_the_persons_positions() {
     invoke(&state, &session, request(&state, "second-row", ADA, "session/z", T1)).await.unwrap();
     let (_, rows, has_more, pinned) = collection_items(&state, &session, &subscription, read_slots.clone().acquire_owned().await.unwrap()).await.unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["conversation"], "agent/fleet/a");
+    assert_eq!(rows[0]["conversation"], "agent/fleet/fixture-a");
     assert!(has_more);
     let after = windows.changes(&state.store).unwrap();
     assert!(collection_windows::Windows::changed("read-positions", &before, &after));
