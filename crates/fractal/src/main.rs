@@ -3388,6 +3388,13 @@ struct ApplyArgs {
     /// set) or `lifecycle` (also delivery holds on members). Omitted keeps the selected policy.
     #[arg(long, value_parser = ["definitions", "lifecycle"], requires = "set")]
     enforce: Option<String>,
+    /// Claim new top-level subjects matching this glob (`*` any run) for the set; plain apply
+    /// creating one is refused. Repeatable; omitted keeps the selected policy's namespaces.
+    #[arg(long = "namespace", requires = "set")]
+    namespace: Vec<String>,
+    /// Exempt subjects matching this glob from the set's namespaces. Repeatable.
+    #[arg(long = "unmanaged-allow", requires = "set")]
+    unmanaged_allow: Vec<String>,
     /// Accept an ad hoc change to an owned-set member and record it as source debt; the next
     /// set publication reverts it. Needs --reason.
     #[arg(long, requires = "reason", conflicts_with = "set")]
@@ -3493,7 +3500,7 @@ async fn run_owned_set_apply(
     args: ApplyArgs,
     json_output: bool,
 ) -> Result<()> {
-    use fractal_daemon::store::owned_sets::{Options, Preview, Request, Source};
+    use fractal_daemon::store::owned_sets::{Options, Preview, Request, Source, SourcePolicy};
     let options = Options {
         set: args.set.context("owned publication needs --set")?,
         source: Source {
@@ -3516,7 +3523,12 @@ async fn run_owned_set_apply(
         adopt: args.adopt.into_iter().collect(),
         allow_empty: args.allow_empty,
         confirm_retire: args.confirm_retire,
-        enforce: args.enforce,
+        enforce: (args.enforce.is_some() || !args.namespace.is_empty() || !args.unmanaged_allow.is_empty())
+            .then(|| SourcePolicy {
+                level: args.enforce,
+                namespaces: args.namespace,
+                unmanaged_allow: args.unmanaged_allow,
+            }),
         expected_subjects: Default::default(),
     };
     let mut request = Request {

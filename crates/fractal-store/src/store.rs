@@ -3415,6 +3415,18 @@ impl Store {
                             one_shot_sets.insert(subject.clone(), set);
                             continue;
                         }
+                        // A namespace claimed by a set refuses ad hoc creation of new subjects.
+                        if intent.subjects.contains_key(subject)
+                            && owned_sets::owner(transaction, subject, None)?.is_none()
+                            && intent_leaves_tx(transaction, subject).map_err(internal)?.is_empty()
+                            && let Some(view) = owned_sets::namespace_claimant(transaction, subject)?
+                        {
+                            if force.is_none() {
+                                return Err(owned_sets::namespace_refusal(&view, subject));
+                            }
+                            forced.insert(subject.clone(), view);
+                            continue;
+                        }
                         if force.is_some() {
                             if let Some(view) = owned_sets::forceable_member(transaction, subject)? {
                                 forced.insert(subject.clone(), view);
@@ -4251,7 +4263,8 @@ impl Store {
                 let mut source_debts_recorded = Vec::new();
                 for (subject, claim_id, revision, kind) in &forced_claims {
                     let debt = owned_sets::record_debt_tx(transaction, &self.origin, &forced[subject], subject,
-                        if kind == "stop" { "stop" } else { "apply" }, Some((claim_id, revision)),
+                        if !forced[subject].receipt.members.contains_key(subject) { "create" }
+                        else if kind == "stop" { "stop" } else { "apply" }, Some((claim_id, revision)),
                         forced_diffs.get(subject), actor, force.unwrap_or_default(), Some(&batch_id))?;
                     claim_ids.push(debt.id.clone());
                     source_debts_recorded.push(debt);

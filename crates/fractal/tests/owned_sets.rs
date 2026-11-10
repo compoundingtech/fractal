@@ -1,6 +1,7 @@
 //! Each fixture serves an isolated daemon over its own Unix socket and durable graph.
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::OwnedSetsStore;
+use fractal_daemon::RetirementsStore;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
@@ -11,7 +12,7 @@ use fractal_daemon::{
     model::{ClaimInput, IntentInput},
     store::{
         Store,
-        owned_sets::{Options, Preview, Request, Source},
+        owned_sets::{Options, Preview, Request, Source, SourcePolicy},
     },
 };
 use tokio::sync::{Notify, watch};
@@ -1673,11 +1674,11 @@ async fn forced_ad_hoc_changes_record_source_debt_until_the_next_publication_rev
     let key = Arc::new(MemberKey::generate().unwrap().0);
     let amber = daemon(root.path(), "amber", key.clone(), &key).await;
     let subject = "agent/garden/orchard";
-    let publish = |sequence: u64, kdl: String, enforce: Option<&'static str>| {
+    let publish = |sequence: u64, kdl: String, enforce: Option<SourcePolicy>| {
         let amber = &amber;
         async move {
             let mut publication = request(amber, sequence, kdl).await;
-            publication.options.enforce = enforce.map(str::to_owned);
+            publication.options.enforce = enforce;
             let preview = preview(amber, &mut publication).await;
             let result: Value = amber.client.post("/v1/sets/apply", &publication).await.unwrap();
             assert_eq!(result["publication"]["changed"], true);
@@ -1749,7 +1750,8 @@ async fn forced_ad_hoc_changes_record_source_debt_until_the_next_publication_rev
     // S2: a `lifecycle` set refuses an ad hoc delivery hold unless forced, and releases it.
     let mut lifecycle = bundle("source", false);
     lifecycle.push_str("agent \"garden/rose\" {\n workspace \".\"\n harness \"codex\" {}\n}\n");
-    publish(12, lifecycle.clone(), Some("lifecycle")).await;
+    let level = |level: &str| SourcePolicy { level: Some(level.into()), ..Default::default() };
+    publish(12, lifecycle.clone(), Some(level("lifecycle"))).await;
     let until = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap() + 900_000;
     let hold = |force: bool| {
         json!({"subject": "agent/garden/rose", "actor": "person/operator", "held": true,
@@ -1768,9 +1770,61 @@ async fn forced_ad_hoc_changes_record_source_debt_until_the_next_publication_rev
     assert_eq!(held["active"], true);
     let status: Value = amber.client.get("/v1/source/status").await.unwrap();
     assert_eq!(status["open"][0]["verb"], "hold", "{status}");
-    let (_, published) = publish(13, lifecycle, None).await;
+    let (_, published) = publish(13, lifecycle.clone(), None).await;
     assert_eq!(published["publication"]["source_debts_reverted"][0]["outcome"], "closed");
-    assert_eq!(published["set"]["receipt"]["enforce"], "lifecycle");
+    assert_eq!(published["set"]["receipt"]["enforce"]["level"], "lifecycle");
     let held: Value = amber.client.get("/v1/delivery/hold?subject=agent%2Fgarden%2Frose").await.unwrap();
     assert_eq!(held["active"], false, "{held}");
+
+    // Retirement is terminal: a live member is refused and no force exists.
+    let token = amber.store.selected_desired_token(subject).unwrap().unwrap();
+    let refused = amber
+        .store
+        .retire_agent(subject, "person/operator", "done", &token, None, "retire-live", &[])
+        .unwrap_err();
+    assert_eq!(refused.code, "set-managed-subject");
+    assert!(refused.message.contains("omit agent/garden/orchard from the set publication"), "{}", refused.message);
+
+    // Namespace claim: new subjects under agent/garden/* need the source, except scratch-*.
+    let claim = SourcePolicy {
+        namespaces: vec!["agent/garden/*".into()],
+        unmanaged_allow: vec!["agent/garden/scratch-*".into()],
+        ..Default::default()
+    };
+    publish(14, lifecycle.clone(), Some(claim)).await;
+    let plain = |name: &'static str, force: Option<&'static str>| {
+        let amber = &amber;
+        async move {
+            let kdl = format!("version 2\nagent \"garden/{name}\" {{\n workspace \".\"\n command \"true\"\n}}\n");
+            let planned: Value = amber
+                .client
+                .post("/v1/intent/mission", &json!({"intent": {"kdl": kdl}, "at_index": null}))
+                .await
+                .unwrap();
+            amber.client.post::<_, Value>("/v1/intent/apply", &json!({"intent": {"kdl": kdl},
+                "expected_subjects": planned["subject_tokens"], "actor": "person/operator",
+                "idempotency_key": format!("{name}-{}", force.is_some()), "force_reason": force})).await
+        }
+    };
+    let refused = plain("tulip", None).await.unwrap_err().to_string();
+    assert!(refused.contains("set-managed-subject") && refused.contains("namespace claimed by owned-set/garden"), "{refused}");
+    plain("scratch-1", None).await.unwrap();
+    let forced = plain("tulip", Some("try a tulip")).await.unwrap();
+    assert_eq!(forced["source_debts_recorded"][0]["verb"], "create");
+    let status: Value = amber.client.get("/v1/source/status").await.unwrap();
+    assert_eq!(status["sets"][0]["namespaces"][0], "agent/garden/*");
+    assert_eq!(status["open"][0]["subject"], "agent/garden/tulip", "{status}");
+    // The source does not declare it: the publication takes it over and stops it.
+    let (preview, published) = publish(15, lifecycle, None).await;
+    assert_eq!(preview.changes["agent/garden/tulip"], "retiring");
+    let reverted = &published["publication"]["source_debts_reverted"][0];
+    assert_eq!((reverted["verb"].as_str(), reverted["outcome"].as_str()), (Some("create"), Some("reverted")));
+    assert!(published["set"]["receipt"]["retired"]["agent/garden/tulip"].is_object(), "{published}");
+    assert_eq!(amber.store.desired_subject_with_writer("agent/garden/tulip").unwrap().unwrap().0.kind, "stop");
+    // A member the set already retired may be retired.
+    let token = amber.store.selected_desired_token("agent/garden/tulip").unwrap().unwrap();
+    amber
+        .store
+        .retire_agent("agent/garden/tulip", "person/operator", "done", &token, None, "retire-omitted", &[])
+        .unwrap();
 }

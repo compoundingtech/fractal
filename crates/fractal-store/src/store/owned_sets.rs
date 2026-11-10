@@ -78,7 +78,7 @@ pub struct Revision {
     /// Source enforcement declared by the publisher: `definitions` (absent: members change
     /// only through this set, `--force --reason` records debt) or `lifecycle` (also holds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforce: Option<String>,
+    pub enforce: Option<SourcePolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -99,7 +99,7 @@ pub struct Options {
     pub expected_subjects: BTreeMap<String, Vec<String>>,
     /// `definitions` or `lifecycle`; omitted keeps the selected revision's policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforce: Option<String>,
+    pub enforce: Option<SourcePolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -130,7 +130,7 @@ pub struct Preview {
     pub blockers: Vec<String>,
     pub noop: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enforce: Option<String>,
+    pub enforce: Option<SourcePolicy>,
     /// Open source debt against the previous revision that this publication closes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reverted_debts: Vec<crate::model::SourceDebt>,
@@ -578,9 +578,87 @@ pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), Fra
 /// The graph record of one accepted ad hoc change to an owned-set member.
 pub const DEBT_KIND: &str = "source.debt.recorded";
 
+/// A set's source enforcement, declared by its publisher. `level` is absent for `definitions`
+/// (inherent to owned sets) or `lifecycle`. `namespaces` claim new top-level agent/schedule
+/// subjects for the set; `unmanaged_allow` exempts subjects inside them.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourcePolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmanaged_allow: Vec<String>,
+}
+
 /// The set's declared enforcement; every owned set enforces at least its definitions.
 pub fn enforcement(view: &View) -> &str {
-    view.receipt.enforce.as_deref().unwrap_or("definitions")
+    view.receipt.enforce.as_ref().and_then(|p| p.level.as_deref()).unwrap_or("definitions")
+}
+
+/// `*` matches any run of characters, including `/`.
+fn glob(pattern: &str, subject: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == subject,
+        Some((head, rest)) => {
+            let Some(tail) = subject.strip_prefix(head) else { return false };
+            (0..=tail.len()).filter(|i| tail.is_char_boundary(*i)).any(|i| glob(rest, &tail[i..]))
+        }
+    }
+}
+
+/// The set claiming a new top-level subject through its namespaces, unless an allow glob exempts it.
+pub fn namespace_claimant(connection: &Connection, subject: &str) -> Result<Option<View>, FractalError> {
+    if !subject.starts_with("agent/") && !subject.starts_with("schedule/") {
+        return Ok(None);
+    }
+    Ok(selected(connection, None)?.into_iter().find(|view| {
+        view.blockers.is_empty()
+            && view.receipt.enforce.as_ref().is_some_and(|p| {
+                p.namespaces.iter().any(|g| glob(g, subject))
+                    && !p.unmanaged_allow.iter().any(|g| glob(g, subject))
+            })
+    }))
+}
+
+pub fn namespace_refusal(view: &View, subject: &str) -> FractalError {
+    let source = &view.receipt.source;
+    FractalError::new(
+        "set-managed-subject",
+        format!(
+            "{subject} is in a namespace claimed by {} from {} {} at {} (source sequence {}); \
+             declare it in that set's source, or accept this ad hoc creation as source debt with \
+             --force --reason TEXT",
+            view.id, source.repository, source.r#ref, source.sha, source.sequence,
+        ),
+    )
+    .with_detail("subject", subject)
+    .with_detail("set", view.id.clone())
+    .with_detail("source", json!(source))
+    .with_detail("escape", "--force --reason TEXT")
+}
+
+/// Retirement is terminal and cannot converge to source, so a live member is never retired ad
+/// hoc, not even forced. A member the set already retired by omission may be retired.
+pub fn refuse_live_member_retire(connection: &Connection, member: &str) -> Result<(), FractalError> {
+    let Some(view) = live_owner(connection, member)? else {
+        return Ok(());
+    };
+    if !effective_members(connection, &view, None)?.get(member).is_some_and(|(_, retired, _)| !retired) {
+        return Ok(());
+    }
+    let source = &view.receipt.source;
+    Err(FractalError::new(
+        "set-managed-subject",
+        format!(
+            "{member} is a live member of {} from {} {} at {} (source sequence {}); retirement is \
+             terminal and cannot be forced: omit {member} from the set publication, then retire it",
+            view.id, source.repository, source.r#ref, source.sha, source.sequence,
+        ),
+    )
+    .with_detail("subject", member)
+    .with_detail("set", view.id.clone())
+    .with_detail("source", json!(source)))
 }
 
 fn live_owner(connection: &Connection, member: &str) -> Result<Option<View>, FractalError> {
@@ -786,7 +864,9 @@ pub fn source_status(connection: &Connection) -> Result<Value, FractalError> {
     let sets = selected(connection, None)?
         .iter()
         .map(|view| {
+            let policy = view.receipt.enforce.clone().unwrap_or_default();
             json!({"set": view.id, "revision": view.revision, "enforce": enforcement(view),
+                "namespaces": policy.namespaces, "unmanaged_allow": policy.unmanaged_allow,
                 "source": view.receipt.source, "members": view.receipt.members.len(),
                 "blockers": view.blockers})
         })
@@ -933,16 +1013,39 @@ pub fn plan_tx(
         })
     };
     let bundle_digest = canonical_hash(&(&input.subjects, &input.missions)).map_err(internal)?;
-    let enforce = match options.enforce.as_deref() {
-        None => old.as_ref().and_then(|v| v.receipt.enforce.clone()),
-        Some("definitions") => None,
-        Some("lifecycle") => Some("lifecycle".to_owned()),
-        Some(other) => {
-            return Err(FractalError::new(
-                "invalid-source-enforcement",
-                format!("enforce must be definitions or lifecycle, not {other}"),
-            ));
+    let prior = old.as_ref().and_then(|v| v.receipt.enforce.clone());
+    let enforce = match &options.enforce {
+        None => prior,
+        Some(requested) => {
+            let prior = prior.unwrap_or_default();
+            let level = match requested.level.as_deref() {
+                None => prior.level,
+                Some("definitions") => None,
+                Some("lifecycle") => Some("lifecycle".to_owned()),
+                Some(other) => {
+                    return Err(FractalError::new(
+                        "invalid-source-enforcement",
+                        format!("enforce must be definitions or lifecycle, not {other}"),
+                    ));
+                }
+            };
+            let keep = |given: &Vec<String>, prior: Vec<String>| if given.is_empty() { prior } else { given.clone() };
+            let policy = SourcePolicy {
+                level,
+                namespaces: keep(&requested.namespaces, prior.namespaces),
+                unmanaged_allow: keep(&requested.unmanaged_allow, prior.unmanaged_allow),
+            };
+            (policy != SourcePolicy::default()).then_some(policy)
         }
+    };
+    // An ad hoc creation forced into a claimed namespace is adopted when the source declares it.
+    let created: BTreeSet<String> = match &old {
+        Some(old) => debt_records(transaction, Some(&reference(old)), None)?
+            .into_iter()
+            .filter(|r| r.body["fields"]["verb"] == "create")
+            .map(|r| r.subject)
+            .collect(),
+        None => BTreeSet::new(),
     };
     let noop = old.as_ref().is_some_and(|v| {
         v.receipt.source == options.source
@@ -1059,7 +1162,7 @@ pub fn plan_tx(
             intent_leaves_tx(transaction, s).map_err(internal)?
         };
         if own.is_none() && !tokens.is_empty() {
-            if !options.adopt.contains(s) {
+            if !options.adopt.contains(s) && !created.contains(s) {
                 blockers.push(format!("explicit adoption required: {s}"));
             } else {
                 adoptions.insert(s.clone(), tokens.clone());
@@ -1233,9 +1336,24 @@ pub fn plan_tx(
             retired.insert(s.clone(), retiring_member);
         }
     }
+    // A forced creation the source still does not declare is taken over and stopped by the set.
+    if !noop {
+        let orphaned: Vec<String> = created
+            .iter()
+            .filter(|s| !live.contains_key(*s) && !changes.contains_key(*s))
+            .cloned()
+            .collect();
+        for s in &orphaned {
+            intent.subjects.insert(s.clone(), stop_declaration(s)?);
+            heads.insert(s.clone(), intent_leaves_tx(transaction, s).map_err(internal)?);
+            changes.insert(s.clone(), "retiring".into());
+            effects.insert(s.clone(), "stop ad hoc creation the source does not declare".into());
+        }
+    }
+    // Stopping a forced ad hoc creation is not a retirement of source-declared membership.
     let retiring = changes
-        .values()
-        .filter(|v| v.as_str() == "retiring")
+        .iter()
+        .filter(|(s, v)| v.as_str() == "retiring" && !created.contains(*s))
         .count();
     let old_count = old.as_ref().map_or(0, |v| v.receipt.members.len());
     let mass = retiring > 0 && (retiring >= 10 || retiring.saturating_mul(2) >= old_count);

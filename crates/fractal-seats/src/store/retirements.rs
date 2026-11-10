@@ -133,6 +133,7 @@ impl RetirementsStore for Store {
                 "retirement needs a reason",
             ));
         }
+        fractal_store::store::owned_sets::refuse_live_member_retire(&self.readers.get(), subject)?;
         let mut fields = BTreeMap::from([
             ("reason".into(), json!(reason)),
             ("retired_by".into(), json!(actor)),

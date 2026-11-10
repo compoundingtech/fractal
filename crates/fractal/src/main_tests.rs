@@ -8598,6 +8598,8 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             allow_empty: false,
             confirm_retire: None,
             enforce: None,
+            namespace: vec![],
+            unmanaged_allow: vec![],
             force: false,
             reason: None,
             dry_run: false,
