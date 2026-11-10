@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep one native-read admission permit through timeline header projection and page preparation, and preserve single-clipped header previews.",
+  "replay": {"status": "none", "detail": "Transcript folding is unchanged."},
+  "schema": {"status": "none", "detail": "No durable or wire schema changes."},
+  "rules": {"status": "none", "detail": "The existing four-read admission bound is preserved across projection and preparation, without a second try-acquire decision."},
+  "compatibility": {"status": "changed", "detail": "Clipped header values preserve the display preview's original byte-count marker instead of clipping that marker again. Ordinary first-page and continuation behavior is compared with the retained legacy display path, including managed graph overlays."},
+  "downtime": {"status": "none", "detail": "No coordinated downtime is required."},
+  "manual": {"status": "none", "detail": "No manual upgrade steps."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; normal binary rollback applies."}
+}
