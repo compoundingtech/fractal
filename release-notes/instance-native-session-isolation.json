@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Isolate native session discovery and harness HOME in named instances",
+  "summary": "Isolate named-instance native discovery and pi/omp profiles without changing HOME",
   "replay": {
     "status": "none",
     "detail": "No replay or projection changes."
@@ -11,11 +11,11 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Native session readers use the selected instance home; native drivers and hooks use the same home."
+    "detail": "Named-instance native readers use a discovery-only root under the instance state directory, with aliases only to the instance Claude, Codex and shared pi/omp stores."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The default instance keeps its existing HOME and native discovery. Named instances use their existing home directory, with checked aliases to existing provider accounts and XDG data."
+    "detail": "HOME remains the login HOME for drivers, hooks and shell tools. Named instances set PI_CODING_AGENT_DIR to their own pi/ directory, overriding an inherited profile path. The shared pi/omp native profile is exposed once as omp; distinct pi and omp saved-session labels within a named instance are out of scope. The default instance keeps its existing environment and discovery behavior."
   },
   "downtime": {
     "status": "changed",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Named-instance pi/omp profiles are separate from the login profile; sign in or configure the instance profile as needed. Existing provider account directories are unchanged."
+    "detail": "Before upgrading a named instance with omp agents, stop its agents and sign in to the instance pi/ profile, or explicitly migrate the required existing pi/omp login credentials and configuration to that directory before restarting. The upgrade does not copy the login-home profile, credentials or sessions. Existing Claude and Codex account directories are unchanged."
   },
   "recovery": {
     "status": "changed",

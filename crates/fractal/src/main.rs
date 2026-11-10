@@ -5255,13 +5255,6 @@ fn cli_main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if native_driver_requested(arguments.iter().skip(1).cloned()) {
-        // SAFETY: native harness HOME is selected before any runtime or worker thread starts.
-        if let Err(error) = unsafe { fractal_daemon::instance::activate_native_session_home() } {
-            stderr_message("st", format_args!("native session home: {error:#}"));
-            return ExitCode::from(2);
-        }
-    }
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
     clap_complete::env::CompleteEnv::with_factory(cli_command).complete();

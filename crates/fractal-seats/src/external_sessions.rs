@@ -2832,6 +2832,13 @@ mod tests {
                 ).unwrap();
             };
             write_session(&login_home, "login-only");
+            let write_omp = |profile: &Path, id: &str| {
+                let directory = profile.join("sessions/project");
+                fs::create_dir_all(&directory).unwrap();
+                fs::write(directory.join(format!("{id}.jsonl")),
+                    format!("{}\n", json!({"type":"session", "id":id, "cwd":login_home}))).unwrap();
+            };
+            write_omp(&login_home.join(".omp/agent"), "login-omp");
             if case == "instance" {
                 // SAFETY: isolated single-test subprocess; no runtime or other readers exist.
                 let selected = unsafe { instance::activate("trial") }.unwrap();
@@ -2840,15 +2847,17 @@ mod tests {
                 fs::create_dir_all(selected.codex_home()).unwrap();
                 write_session(&native, "instance-only");
                 let home = Some(native.as_path());
-                unsafe { instance::activate_native_session_home() }.unwrap();
-                assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(native.clone()));
-                assert!(std::env::var_os("PI_CODING_AGENT_DIR").is_none());
+                assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(login_home.clone()));
+                let profile = PathBuf::from(std::env::var_os("PI_CODING_AGENT_DIR").unwrap());
+                assert_eq!(profile, selected.pi_agent_dir());
+                write_omp(&profile, "instance-omp");
                 assert_eq!(instance::current(), Some(selected.clone()));
                 assert_eq!(PathBuf::from(std::env::var_os("CODEX_HOME").unwrap()), selected.codex_home());
                 assert_eq!(fs::canonicalize(native.join(".codex")).unwrap(), fs::canonicalize(selected.codex_home()).unwrap());
                 assert_eq!(fs::read_link(native.join(".claude")).unwrap(), selected.claude_config_dir());
-                assert_eq!(fs::read_link(native.join(".local/share")).unwrap(), selected.data_home());
-                // Re-exec and nested CLI selection must not nest instances beneath the synthetic HOME.
+                assert_eq!(fs::read_link(native.join(".omp/agent")).unwrap(), selected.pi_agent_dir());
+                assert!(!native.join(".local/share").exists());
+                // Repeated activation leaves shell-tool HOME and profile selection unchanged.
                 unsafe { instance::activate("trial") }.unwrap();
                 assert_eq!(instance::current(), Some(selected));
                 assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(login_home));
@@ -2857,8 +2866,10 @@ mod tests {
                     crate::external_sessions::discover_fresh(home, true).unwrap(),
                     crate::external_sessions::discover(home, true).unwrap(),
                 ] {
-                    assert_eq!(discovery.sessions.len(), 1);
-                    assert_eq!(discovery.sessions[0].native_id, "instance-only");
+                    assert_eq!(discovery.sessions.len(), 2);
+                    assert!(discovery.sessions.iter().any(|session| session.native_id == "instance-only"));
+                    assert!(discovery.sessions.iter().any(|session| session.native_id == "instance-omp"
+                        && session.driver == ExternalDriver::Omp));
                 }
                 let login_id = crate::external_sessions::external_session_id(
                     crate::external_sessions::ExternalDriver::Codex, "login-only",
@@ -2868,12 +2879,12 @@ mod tests {
                 assert!(instance::current().is_none());
                 let native = instance::native_session_home().unwrap().unwrap();
                 assert_eq!(native, login_home);
-                let before: Vec<_> = std::env::vars_os().collect();
-                unsafe { instance::activate_native_session_home() }.unwrap();
-                assert_eq!(std::env::vars_os().collect::<Vec<_>>(), before);
+                assert_eq!(std::env::var_os("PI_CODING_AGENT_DIR"),
+                    Some(login_home.join("ambient-profile").into_os_string()));
                 let discovery = crate::external_sessions::discover_fresh(Some(&native), true).unwrap();
-                assert_eq!(discovery.sessions.len(), 1);
-                assert_eq!(discovery.sessions[0].native_id, "login-only");
+                assert_eq!(discovery.sessions.len(), 2);
+                assert!(discovery.sessions.iter().any(|session| session.native_id == "login-only"));
+                assert!(discovery.sessions.iter().any(|session| session.native_id == "login-omp"));
             }
             return;
         }
@@ -2886,10 +2897,19 @@ mod tests {
                 .env("PI_CODING_AGENT_DIR", home.path().join("ambient-profile"))
                 .env_remove("ST_INSTANCE")
                 .env_remove("FRACTAL_INSTANCE")
-                .env_remove("ST_INSTANCE_HOST_HOME")
                 .output().unwrap();
             assert!(output.status.success(), "{case}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
+    }
+
+    #[test]
+    fn instance_native_discovery_rejects_conflicting_alias() {
+        let home = tempfile::tempdir().unwrap();
+        let instance = fractal_kernel::instance::Instance::new(home.path(), "trial").unwrap();
+        let conflicting = instance.native_session_home().join(".claude");
+        fs::create_dir_all(&conflicting).unwrap();
+        let error = instance.prepare_native_session_home().unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("read native session alias {}", conflicting.display())));
     }
 
     #[cfg(target_os = "linux")]

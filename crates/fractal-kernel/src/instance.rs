@@ -16,7 +16,7 @@
 //!   bin/     the st3, st and pty the installer puts there
 //!   claude/  the instance's Claude account     (CLAUDE_CONFIG_DIR)
 //!   codex/   the instance's Codex account      (CODEX_HOME)
-//!   home/    native harness HOME and pi/omp profiles; aliases existing provider and data dirs
+//!   pi/      the instance's shared pi/omp profile (PI_CODING_AGENT_DIR)
 //!   work/    the default work root: workspaces of new agents, in work/agents/NAME
 //!   app/     where a macOS app bundle for the instance goes
 //! ```
@@ -141,27 +141,33 @@ impl Instance {
         self.root.join("codex")
     }
 
-    /// HOME-shaped session view, shared by discovery and native harness processes.
-    /// Keep installed generic harness skills in the same home.
-    pub fn native_session_home(&self) -> PathBuf {
-        self.root.join("home")
+    /// The shared pi/omp profile; HOME remains the login home for ordinary shell tools.
+    pub fn pi_agent_dir(&self) -> PathBuf {
+        self.root.join("pi")
     }
 
-    /// Preserve the existing provider account and XDG data locations without copying sessions.
+    /// HOME-shaped view for discovery only, never exported as a process HOME.
+    pub fn native_session_home(&self) -> PathBuf {
+        self.state_home().join("native-sessions")
+    }
+
+    /// Keep readers on the same provider directories as launched harnesses without copying data.
     pub fn prepare_native_session_home(&self) -> Result<PathBuf> {
         let home = self.native_session_home();
-        std::fs::create_dir_all(home.join(".local"))?;
+        std::fs::create_dir_all(home.join(".omp"))?;
         for (alias, target) in [
             (home.join(".claude"), self.claude_config_dir()),
             (home.join(".codex"), self.codex_home()),
-            (home.join(".local/share"), self.data_home()),
+            // Both tools share PI_CODING_AGENT_DIR. Expose this profile once, as omp.
+            (home.join(".omp/agent"), self.pi_agent_dir()),
         ] {
             if let Err(error) = std::os::unix::fs::symlink(&target, &alias) {
                 if error.kind() != std::io::ErrorKind::AlreadyExists {
                     return Err(error).with_context(|| format!("create native session alias {}", alias.display()));
                 }
                 anyhow::ensure!(
-                    std::fs::read_link(&alias)? == target,
+                    std::fs::read_link(&alias)
+                        .with_context(|| format!("read native session alias {}", alias.display()))? == target,
                     "native session alias {} does not point to its selected instance directory",
                     alias.display()
                 );
@@ -213,6 +219,7 @@ impl Instance {
             ("XDG_RUNTIME_DIR", self.run_dir()),
             ("CLAUDE_CONFIG_DIR", self.claude_config_dir()),
             ("CODEX_HOME", self.codex_home()),
+            ("PI_CODING_AGENT_DIR", self.pi_agent_dir()),
         ]
     }
 }
@@ -221,7 +228,7 @@ impl Instance {
 /// process: guessing would run the default install when a person asked for a separate one.
 pub fn current() -> Option<Instance> {
     let name = environment_name()?;
-    let home = match instance_host_home() {
+    let home = match env::var_os("HOME").map(PathBuf::from) {
         Some(home) => home,
         None => fail("HOME is not set, so the instance directory cannot be found"),
     };
@@ -231,40 +238,12 @@ pub fn current() -> Option<Instance> {
     }
 }
 
-/// A native driver changes HOME, but nested CLI invocations still resolve the same instance.
-fn instance_host_home() -> Option<PathBuf> {
-    environment_name()
-        .and_then(|_| env::var_os("ST_INSTANCE_HOST_HOME"))
-        .or_else(|| env::var_os("HOME"))
-        .map(PathBuf::from)
-}
-
 /// Select the discovery root without ever falling back to the login home inside an instance.
 pub fn native_session_home() -> Result<Option<PathBuf>> {
     match current() {
         Some(instance) => instance.prepare_native_session_home().map(Some),
         None => Ok(env::var_os("HOME").map(PathBuf::from)),
     }
-}
-
-/// Apply only at the native driver boundary; the CLI and service manager retain the login HOME.
-///
-/// # Safety
-///
-/// Changes the process environment, so no other thread may be running.
-pub unsafe fn activate_native_session_home() -> Result<()> {
-    let Some(instance) = current() else {
-        return Ok(());
-    };
-    let home = instance.prepare_native_session_home()?;
-    let host = instance_host_home().context("HOME is not set")?;
-    unsafe {
-        env::set_var("ST_INSTANCE_HOST_HOME", host);
-        env::set_var("HOME", home);
-        // An ambient profile override must not send pi/omp back to the login session store.
-        env::remove_var("PI_CODING_AGENT_DIR");
-    }
-    Ok(())
 }
 
 fn fail(message: &str) -> ! {
@@ -306,11 +285,10 @@ pub unsafe fn activate(name: &str) -> Result<Instance> {
     {
         anyhow::bail!("this process already runs in instance `{active}`, not `{name}`");
     }
-    let home = instance_host_home()
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
         .context("HOME is not set, so the instance directory cannot be found")?;
     let instance = Instance::new(&home, name)?;
-    // A nested non-driver CLI restores the login HOME before resolving service-manager paths.
-    unsafe { env::set_var("HOME", &home) };
     let already_inside = active.as_deref() == Some(name);
     for (variable, remembered) in XDG {
         // The host's own value is kept once, on the way in; a child started from inside the
@@ -445,6 +423,7 @@ mod tests {
             one.bin_dir(),
             one.claude_config_dir(),
             one.codex_home(),
+            one.pi_agent_dir(),
             one.work_dir(),
             one.app_dir(),
         ] {
@@ -454,6 +433,8 @@ mod tests {
         for (variable, value) in one.environment() {
             assert!(value.starts_with(one.root()), "{variable}");
         }
+        assert!(one.native_session_home().starts_with(one.state_home()));
+        assert!(!one.environment().iter().any(|(variable, _)| *variable == "HOME"));
     }
 
     #[test]
