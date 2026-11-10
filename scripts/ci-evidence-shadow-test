@@ -97,6 +97,23 @@ with tempfile.TemporaryDirectory() as directory:
     assert '1 of 4 lanes ok' in table and '`linux-tests` | ok' in table and '**would-reject**' in table, table
     print('passed: a lane with a trusted signed note on the remote is ok; a failing note, a refused signer and an unsigned lane are would-reject by name')
 
+    comparison = tmp / 'comparison'
+    done = shadow('--compare-shadow', str(SHADOW), '--comparison-out', str(comparison))
+    assert done.returncode == 0, done.stderr
+    lanes = json.loads((comparison / 'lane-summary.json').read_text())['lanes']
+    assert len(lanes) == 4 and all(row['unexplained_diff_count'] == 0 for row in lanes), lanes
+    assert lanes[0]['old']['satisfied'] == 1 and lanes[2]['old']['rejected'] == 1, lanes
+    external = tmp / 'external'
+    external.mkdir()
+    (external / 'ci-evidence-shadow').write_bytes(SHADOW.read_bytes())
+    (external / 'evidence-verify').write_text('import json\nprint(json.dumps({"satisfied": False, "reason": "too_old"}))\nraise SystemExit(1)\n')
+    done = shadow('--compare-shadow', str(external / 'ci-evidence-shadow'), '--comparison-out', str(comparison))
+    assert done.returncode == 0, 'decision differences must never fail: ' + done.stderr
+    lanes = json.loads((comparison / 'lane-summary.json').read_text())['lanes']
+    assert lanes[0]['raw_diff_count'] == lanes[0]['unexplained_diff_count'] == lanes[0]['new']['expired'] == 1, lanes
+    decisions = [json.loads(line) for line in (comparison / 'decisions.jsonl').read_text().splitlines()]
+    assert decisions[0]['old']['exit_status'] == 0 and decisions[0]['new']['exit_status'] == 1, decisions
+
     # A lane that only runs when its paths changed reads n/a without a record, and a missing required lane still rejects.
     done = shadow('--optional', 'genie-freshness,linux-fleet-compat')
     assert 'check=genie-freshness result=n/a reason=not_run' in done.stdout and 'check=linux-fleet-compat result=n/a' in done.stdout, done.stdout
@@ -144,6 +161,13 @@ with tempfile.TemporaryDirectory() as directory:
     stub.write_text(stub.read_text().replace(repr(moved), repr(tagged)))
     done = shadow('--verifier', str(stub), checks='linux-tests')
     assert 'check=linux-tests' in done.stdout and 'reason=verifier_exit_1' not in done.stdout and 'ok=1 ' in done.stdout, done.stdout
+    done = subprocess.run([sys.executable, str(SHADOW), '--snapshot-tree', tree, '--keys', str(keys),
+                           '--checks', 'linux-tests,absent-lane', '--remote', 'sink', '--compare-shadow', str(SHADOW),
+                           '--comparison-out', str(comparison)], cwd=publisher, capture_output=True, text=True, env=ENV)
+    assert done.returncode == 0, done.stderr
+    snapshot = json.loads((comparison / 'lane-summary.json').read_text())
+    assert snapshot['population']['names'] == ['linux-tests', 'absent-lane'] and 'other runs' in snapshot['population']['source'], snapshot
+    assert len(snapshot['lanes']) == 2 and all(row['cases'] == 1 and row['unexplained_diff_count'] == 0 for row in snapshot['lanes']), snapshot
     for name in ('tag', 'ref'):
         for bad in ('refs/heads/main', 'refs/tags/v1.0', f'refs/tags/evidence/{record}', f'refs/tags/evidence/input/unit/{tree}/{record}'):
             published['accepted'][0][name] = bad

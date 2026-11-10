@@ -21,8 +21,15 @@ One grep-able line per lane, then one total:
 The same lines go to $GITHUB_STEP_SUMMARY as a table. The exit status is 0 whatever the lanes say;
 only a usage error is 2. Take this script and the verifier from the accepted base, not from the
 tree under test.
+
+With --compare-shadow PATH, both real lane evaluators share a frozen snapshot and retain raw outputs
+and normalized counts. --snapshot-tree discovers remote tree-prefixed records, including other runs.
+Only raw formatting/stderr differences are explained; all semantic differences remain unexplained.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 import json
 import os
 from pathlib import Path
@@ -79,15 +86,94 @@ def lane_lines(lanes, published, fetched, scratch, tree, verifier, keys, optiona
     return results
 
 
+def compare_shadow(args, lanes, published, fetched, scratch, tree, optional):
+    """Compare both unmodified lane evaluators against one frozen remote snapshot."""
+    def load(name, path):
+        spec = spec_from_loader(name, SourceFileLoader(name, path))
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def evaluator(name, path):
+        module, captured = load(name, path), {}
+        original = module.run
+        def capture(*argv, **kwargs):
+            done = original(*argv, **kwargs)
+            captured[argv[argv.index('--check') + 1]] = done
+            return done
+        module.run = capture
+        return module, captured
+
+    local, old_captures = evaluator('fractal_shadow', __file__)
+    external, captures = evaluator('mergemaster_shadow', args.compare_shadow)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        old = workers.submit(local.lane_lines, lanes, published, fetched, scratch, tree, args.verifier, args.keys, optional)
+        new = workers.submit(external.lane_lines, lanes, published, fetched, scratch, tree,
+                             str(Path(args.compare_shadow).with_name('evidence-verify')), args.keys, optional)
+        old_results, new_results = old.result(), new.result()
+        if [row[0] for row in old_results] != lanes or [row[0] for row in new_results] != lanes:
+            raise ValueError('shadow evaluators must complete every requested lane in order')
+        pairs = zip(old_results, new_results)
+    summaries, decisions = [], []
+
+    def normalize(row, captured):
+        check, good, reason, result, _ = row
+        done = captured.get(check)
+        valid = done is None or isinstance(result, dict) and bool(result)
+        outcome = ('not_run' if good is None else 'error' if not valid or reason in ('error', 'not_on_remote')
+                   or done is not None and done.returncode not in (0, 1)
+                   else 'satisfied' if good else 'expired' if reason == 'too_old' else 'rejected')
+        return {'exit_status': done.returncode if done else None, 'verdict': outcome,
+                'satisfied_checks': [check] if good else [],
+                'selected_record_oids': sorted(set(filter(None, [result.get('record'), *result.get('crates', {}).values()]))),
+                'reject_reason_class': reason if good is False else None, 'decision_output': result}
+
+    for old, new in pairs:
+        check = old[0]
+        before, after = normalize(old, old_captures), normalize(new, captures)
+        raw = lambda captured: None if check not in captured else {
+            'exit_status': captured[check].returncode, 'stdout': captured[check].stdout.decode(errors='replace'),
+            'stderr': captured[check].stderr.decode(errors='replace')}
+        old_raw, new_raw = raw(old_captures), raw(captures)
+        raw_diff = int(old_raw != new_raw or old[:4] != new[:4])
+        semantic_diff = int(before != after)
+        row = {'lane': check, 'mode': 'live-shadow', 'planned': 1, 'completed': 1,
+               'cases': int(before['verdict'] != 'not_run' or after['verdict'] != 'not_run'),
+               'old': {name: int(before['verdict'] == name) for name in ('satisfied', 'rejected', 'expired', 'error')},
+               'new': {name: int(after['verdict'] == name) for name in ('satisfied', 'rejected', 'expired', 'error')},
+               'raw_diff_count': raw_diff, 'semantic_diff_count': semantic_diff,
+               'explained': raw_diff - semantic_diff, 'unexplained_diff_count': semantic_diff}
+        summaries.append(row)
+        decisions.append({'lane': check, 'old': before, 'new': after, 'old_raw': old_raw, 'new_raw': new_raw})
+        print('evidence-shadow-compare v1 ' + json.dumps(row, sort_keys=True))
+    destination = Path(args.comparison_out)
+    destination.mkdir(parents=True, exist_ok=True)
+    population = {'names': lanes, 'source': 'all remote tree-prefixed records at fetch time, including other runs; not the producer same-run set' if args.snapshot_tree else 'same-run publish set',
+                  'out_of_scope': 'rust-tests/member and full gate contexts: step D; not gate coverage',
+                  'interpretation': 'missing comparison is missing coverage; equal errors are not parity; no_note is not record-verification proof; only raw formatting/stderr diffs explained, all semantic diffs unexplained'}
+    (destination / 'lane-summary.json').write_text(json.dumps({'schema_version': 1, 'tree': tree, 'population': population, 'lanes': summaries}, indent=2) + '\n')
+    (destination / 'decisions.jsonl').write_text(''.join(json.dumps(row, sort_keys=True) + '\n' for row in decisions))
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write('### Mergemaster shadow (report only)\n\n| lane | cases | raw diffs | unexplained diffs |\n| --- | ---: | ---: | ---: |\n')
+            for row in summaries:
+                stream.write(f"| {row['lane']} | {row['cases']} | {row['raw_diff_count']} | {row['unexplained_diff_count']} |\n")
+    return old_results
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--publish-result', required=True, help="the JSON evidence-publish printed")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument('--publish-result', help="the JSON evidence-publish printed")
+    source.add_argument('--snapshot-tree', help='snapshot every remote tree-prefixed record for this tree')
     parser.add_argument('--keys', required=True, help='allowed-signers file from the base commit')
     parser.add_argument('--checks', required=True, help='comma-separated lanes to report')
     parser.add_argument('--verifier', default=str(HERE / 'evidence-verify'))
     parser.add_argument('--optional', default='', help='lanes that only run when their paths changed: no record reads n/a')
     parser.add_argument('--remote', default='origin')
     parser.add_argument('--repo', default='.')
+    parser.add_argument('--compare-shadow', help='pinned mergemaster ci-evidence-shadow to compare, never gate')
+    parser.add_argument('--comparison-out', default='evidence-shadow-comparison')
     args = parser.parse_args(argv)
     lanes = [c for c in args.checks.split(',') if c]
     if not lanes or not all(CHECK.match(c) for c in lanes):
@@ -95,7 +181,20 @@ def main(argv):
         return 2
     started = time.monotonic()
     try:
-        data = json.loads(Path(args.publish_result).read_text())
+        snapshot_targets = {}
+        if args.snapshot_tree:
+            if not OID.match(args.snapshot_tree):
+                raise ValueError('bad snapshot tree')
+            listed = run('git', '-C', args.repo, 'ls-remote', '--refs', args.remote,
+                         f'refs/notes/evidence/{args.snapshot_tree}/*', f'refs/tags/evidence/{args.snapshot_tree}/*')
+            if listed.returncode:
+                raise RuntimeError('cannot snapshot remote evidence refs')
+            snapshot_targets = {ref: oid for oid, ref in (line.split() for line in listed.stdout.decode().splitlines()) if REF.match(ref) and OID.match(oid)}
+            accepted = [{'record': ref.rsplit('/', 1)[1], 'ref': ref, 'check': lanes[0]} for ref in snapshot_targets]
+            accepted += [dict(accepted[0], check=check) for check in lanes] if accepted else []
+            data = {'tree': args.snapshot_tree, 'accepted': accepted}
+        else:
+            data = json.loads(Path(args.publish_result).read_text())
         tree = data['tree']
         accepted = data.get('accepted') or []
         # An entry may name its tag and its ref (the tree-prefixed layouts); without either it is refs/notes/evidence/<record>.
@@ -118,13 +217,19 @@ def main(argv):
         run('git', 'init', '-q', '--bare', str(scratch))
         # A scratch repository holding only what a gate would fetch: the records, nothing local from this job.
         remote = run('git', '-C', args.repo, 'remote', 'get-url', args.remote).stdout.decode().strip() or args.remote
-        for record in sorted(set(published.values())):
+        for record in sorted(refs if args.snapshot_tree else set(published.values())):
+            ref = refs[record]
             done = run('git', '-C', str(scratch), 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', remote,
-                       f'{refs[record]}:{refs[record]}')
+                       f'{snapshot_targets.get(ref, ref)}:{ref}')
+            if args.snapshot_tree and done.returncode:
+                raise RuntimeError('incomplete remote snapshot; no comparison coverage')
             if done.returncode == 0:
                 fetched.add(record)
         optional = set(filter(None, args.optional.split(',')))
-        results = lane_lines(lanes, published, fetched, scratch, tree, args.verifier, args.keys, optional)
+        if args.compare_shadow:
+            results = compare_shadow(args, lanes, published, fetched, scratch, tree, optional)
+        else:
+            results = lane_lines(lanes, published, fetched, scratch, tree, args.verifier, args.keys, optional)
     ok = sum(1 for r in results if r[1] is True)
     not_run = sum(1 for r in results if r[1] is None)
     rows = []
