@@ -1,7 +1,7 @@
 import * as React from 'react'
 import type { TranscriptTurn } from './Transcript'
 
-/** The Find shortcut exposes rendered history; message links additionally navigate to their target. `rowIds` are the viewport's source rows; `startIndex` is the first mounted one. */
+/** A Find shortcut that reaches the browser exposes rendered history; message links additionally navigate to their target. `rowIds` are the viewport's source rows; `startIndex` is the first mounted one. */
 export function TranscriptSearch({ turns, rowIds, startIndex, revealRow, children, ...props }: React.HTMLAttributes<HTMLDivElement> & { readonly turns: readonly TranscriptTurn[]; readonly rowIds: readonly string[]; readonly startIndex: number; readonly revealRow: (id: string, preservePosition?: boolean) => void }) {
   const root = React.useRef<HTMLDivElement>(null)
   const appliedHash = React.useRef<string | undefined>(undefined)
@@ -49,6 +49,8 @@ export function TranscriptSearch({ turns, rowIds, startIndex, revealRow, childre
       scrollPendingHash()
     }
     const find = (event: KeyboardEvent) => {
+      // Transcript search took this press; every other one is browser Find, which only sees mounted rows.
+      if (event.defaultPrevented) return
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && startIndex > 0 && element.closest('[aria-hidden="true"], [hidden]') === null) {
         // Do not navigate or detach following merely because the reader opens (or cancels) Find.
         revealRow(rowIds[0]!, true)
