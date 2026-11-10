@@ -87,18 +87,23 @@ from claims those processes write. Each subject under `subject-prefix` is one sa
 |---|---|
 | `subject-prefix "P"` | The sample subjects: every subject that starts with `P`. Custom claims (`custom/NS/...`) need no registration and replicate to every member. |
 | `start KIND at=FIELD` | The sample starts at the earliest such claim. |
-| `expect KIND set=FIELD` | The members a sample must stop on, a list of strings in the newest such claim. An empty list stops the sample at the expect claim's time. Without `expect`, one stop claim ends the sample. |
+| `expect KIND set=FIELD` | The members a sample must stop on, a list of strings in the newest such claim (by its time, then its claim id, so every member picks the same one). An empty list stops the sample at the expect claim's time. Without `expect`, one stop claim ends the sample. |
 | `stop KIND member=FIELD` | One member has stopped: the earliest such claim per value of `FIELD`. The sample stops when every expected member has, at the latest of their times. |
-| `cancel KIND` | An open sample with such a claim is cancelled. A sample that stopped first keeps its value. |
-| `pause KIND resume=KIND` | The clock stops from each pause to the next resume, and a sample still paused is not aging. |
-| `label "FIELD"` | Also one row per value of `FIELD` on the start or expect claim: `ops/change-rollout/p95{class=routine}`. `label "member"` splits by stop member, each sample's value being that member's stop. |
+| `cancel KIND` | An open sample with such a claim is cancelled. A sample that stopped before the cancel was accepted keeps its value. |
+| `pause KIND resume=KIND` | The clock stops from each pause to the next resume, and a sample still paused is not aging. Pauses and resumes are timed when they were accepted. |
+| `label "FIELD"` | Also one row per value of `FIELD` on the start or expect claim: `ops/change-rollout/p95{class=routine}`. A sample without the field is only in the unlabelled row. `label "member"` splits by member, each sample's value being that member's stop: the expected members, or without `expect` the members that stopped. |
 | `exclude "FIELD" "A" "B"` | A sample whose start or expect claim has one of these values is excluded. |
 
-`at=FIELD` reads a time from the claim's fields: an RFC 3339 string or Unix milliseconds. Without
-`at`, the time is when the claim's origin accepted it, which every member sees the same.
+`at=FIELD` reads a time from the claim's fields: an RFC 3339 string or Unix milliseconds, either
+also as a JSON-encoded string. Without `at`, the time is when the claim's origin accepted it, which
+every member sees the same: a replicated claim keeps its origin's acceptance time. A list field may
+also be a JSON-encoded string. A claim whose time, list or member cannot be read is counted as
+unreadable and changes no sample.
 
 A sample is **closed** when it stopped, **open** while it has started and not stopped or been
-cancelled, **cancelled**, or **excluded**. A closed sample belongs to the window by its stop time.
+cancelled, **cancelled**, or **excluded**. A closed sample belongs to the window by its stop time, a
+cancelled one by its cancel and an excluded one by its newest claim; an open sample is always
+current. A subject with claims but no start yet is counted apart and in no class.
 
 **Open samples are censored, not dropped.** For each target, an open sample older than the target's
 `within` enters that target's percentile at its current age: it is certain to be over, so a stuck
@@ -110,7 +115,11 @@ ops/change-rollout/p95  missed  p95 ≤ 5 min  p95 41 min over 23 samples (1 ope
 ```
 
 The value is the nearest-rank percentile. The budget is the share over `within` against the share
-the percentile allows: p95 allows 5 in 100.
+the percentile allows: p95 allows 5 in 100. With fewer than `min-samples` in the percentile the row
+is `no-data` and spends no budget; with none it reads `no samples`.
+
+Each evaluation reads only the claims newer than the last it read, keeping each objective's samples
+in memory; a sample closed, cancelled or excluded before the window is dropped from memory.
 
 ### Ratio over Prometheus metrics
 
@@ -155,6 +164,8 @@ objective only after every member runs a build that knows it.
 ID` adds, for a declared objective, its subject and revision, the sample counts by class, each open
 sample over target with its age, and its response. `fractal slo chart ID` draws the budget left a
 minute at a time from the local seven-day history, which records declared rows like any other.
+A declaration this build cannot read, as one replicated from a newer build, is the one row `NAME`,
+`no-data`, whose explanation names its revision and why.
 
 ## Listing claims by kind or subject prefix
 
