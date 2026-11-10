@@ -13,6 +13,9 @@ const EMPTY_DESIRED_AUTHORITY_QUERY: &str =
         AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='agent.retired'
                        AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))";
 
+/// Effective members of one set revision, by member key.
+pub type EffectiveMembers = BTreeMap<String, (Member, bool, bool)>;
+
 /// Owned-set reads memoized for one fixed read snapshot. Status reads ask for the selection of
 /// every member; without this each of them re-validates every member of every set.
 #[derive(Default)]
@@ -21,7 +24,7 @@ struct SnapshotRows {
     rows: BTreeMap<Option<u64>, Vec<View>>,
     selected: BTreeMap<Option<u64>, Vec<View>>,
     /// Keyed by the set revision's claim and the bound.
-    effective: BTreeMap<(String, Option<u64>), BTreeMap<String, (Member, bool, bool)>>,
+    effective: BTreeMap<(String, Option<u64>), EffectiveMembers>,
 }
 
 /// Read from the snapshot cache, when `connection` holds the snapshot it was made for.
@@ -304,7 +307,7 @@ pub fn effective_members(
     connection: &Connection,
     view: &View,
     at: Option<u64>,
-) -> Result<BTreeMap<String, (Member, bool, bool)>, FractalError> {
+) -> Result<EffectiveMembers, FractalError> {
     let key = (view.claim.clone(), at);
     if let Some(members) = snapshot_cached(connection, |snapshot| snapshot.effective.get(&key).cloned()) {
         smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
@@ -321,7 +324,7 @@ fn effective_members_uncached(
     connection: &Connection,
     view: &View,
     at: Option<u64>,
-) -> Result<BTreeMap<String, (Member, bool, bool)>, FractalError> {
+) -> Result<EffectiveMembers, FractalError> {
     let mut members = BTreeMap::new();
     for (subject, member) in known_members(connection, &view.id, at)? {
         if view.receipt.members.contains_key(&subject)
