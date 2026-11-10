@@ -12284,8 +12284,15 @@ mission "differential" state="ready" {
             "runtime_id":"fresh-roster", "incarnation_id":"one"}));
         let mut published = state.store.subscribe_agent_roster();
         crate::api::start_agent_roster(&state);
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(|revision| *revision > 0))
-            .await.unwrap().unwrap();
+        let complete = {
+            let store = state.store.clone();
+            move |_: &u64| store.published_agent_roster(store.index().unwrap(), false).is_some()
+        };
+        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete))
+            .await.expect("the refresher publishes a complete initial roster").unwrap();
+        // Freeze the refresher before advancing the graph so the unchanged-through read
+        // must use the old publication, not an identical one published at a newer cut.
+        let _admission = state.store.admit_agent_resources("other").await;
         let revision = *published.borrow_and_update();
         let (_, Json(before)) = client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default())).await.unwrap();
@@ -12313,7 +12320,6 @@ mission "differential" state="ready" {
 
         // A claim about the agent changes its card. Start a healthy attempt and hold it:
         // the fresh read must wait for this attempt's publication, not answer early.
-        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
