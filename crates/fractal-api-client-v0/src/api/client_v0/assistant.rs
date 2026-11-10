@@ -60,11 +60,16 @@ fn validate_policy(version: &str, scopes: &[String], seconds: u64, consent: bool
     Ok(())
 }
 
+fn admitted_principal(id: &str) -> bool {
+    matches!(id, PRINCIPAL | MCP_PRINCIPAL)
+}
+
 pub async fn begin(state: AppState, session: ClientSession,
                          request: AssistantPairingBegin) -> Result<Json<Value>, ApiError> {
+    let requested_principal = admitted_principal(&request.assistant_id).then(|| request.assistant_id.clone());
     let result = begin_inner(state.clone(), session.clone(), request).await;
     let id = result.as_ref().ok().and_then(|Json(value)| value["grant_id"].as_str());
-    audit(&state, "create", &session.actor, session.transport, id, &result)?;
+    audit(&state, "create", &session.actor, session.transport, id, requested_principal.as_deref(), &result)?;
     result
 }
 
@@ -74,7 +79,7 @@ pub async fn complete(state: &AppState, id: &str, request: &PairingComplete,
     if !matches!(&result, Ok(None)) {
         let actor = result.as_ref().ok().and_then(Option::as_ref)
             .and_then(|Json(value)| value["session_actor"].as_str()).unwrap_or("custom/client/pairing-completion");
-        audit(state, "complete", actor, transport, Some(id), &result)?;
+        audit(state, "complete", actor, transport, Some(id), None, &result)?;
     }
     result
 }
@@ -82,7 +87,7 @@ pub async fn complete(state: &AppState, id: &str, request: &PairingComplete,
 pub async fn revoke(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                           AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     let result = revoke_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone())).await;
-    audit(&state, "revoke", &session.actor, session.transport, Some(&id), &result)?;
+    audit(&state, "revoke", &session.actor, session.transport, Some(&id), None, &result)?;
     result
 }
 
@@ -90,7 +95,7 @@ pub async fn update_policy(State(state): State<AppState>, Extension(session): Ex
                                  AxumPath(id): AxumPath<String>, Json(request): Json<AssistantGrantPolicy>)
     -> Result<Json<Value>, ApiError> {
     let result = update_policy_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone()), Json(request)).await;
-    audit(&state, "renew-policy", &session.actor, session.transport, Some(&id), &result)?;
+    audit(&state, "renew-policy", &session.actor, session.transport, Some(&id), None, &result)?;
     result
 }
 
@@ -102,7 +107,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
         return Err(forbidden("unsupported assistant read mode"));
     }
-    if !matches!(request.assistant_id.as_str(), PRINCIPAL | MCP_PRINCIPAL) || request.device_name.trim().is_empty()
+    if !admitted_principal(&request.assistant_id) || request.device_name.trim().is_empty()
         || request.device_name.len() > 120 {
         return Err(validation("invalid assistant principal or device name"));
     }
@@ -114,20 +119,22 @@ async fn begin_inner(state: AppState, session: ClientSession,
         .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char).collect();
     let now = client_now_ms();
     let grant_id = format!("assistant-grant/{id}");
+    let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let expires = now + u128::from(request.expires_in_seconds) * 1000;
     let scopes: BTreeSet<_> = request.scopes.into_iter().collect();
     append(&state, subject(&id)?, BEGUN, issuer, json!({
         "version":1,"grant_id":grant_id,"principal":request.assistant_id,"sender_class":"external-assistant",
         "issuer":issuer,"device_name":request.device_name,"scopes":scopes,
-        "expires_at_unix_ms":expires,"challenge_expires_at_unix_ms":now + 300_000,
-        "code_hash":credential_digest(&code),"policy_revision":1,
+        "expires_at_unix_ms":expires,"challenge_expires_at_unix_ms":now + pairing_verifier::CHALLENGE_TTL_MS,
+        "verifier":pairing_verifier::MARKER,"verifier_key_id":pairing_verifier::key_id(&verifier_key),
+        "code_hash":pairing_verifier::digest(&verifier_key, &grant_id, &code),"policy_revision":1,
         "minimal_read_mode":request.minimal_read_mode,"recipient_allowlist":[],
         "disclosure_consent":true,"consent_evidence":request.consent_evidence,
         "transport":session.transport,"timestamp":client_timestamp(now),"outcome":"created"
     }), None)?;
     signal_changed(&state);
     Ok(Json(json!({"kind":"pairing-challenge","pairing_id":format!("pairing/{id}"),
-        "code":code,"expires_at":client_timestamp(now + 300_000),"grant_kind":"assistant",
+        "code":code,"expires_at":client_timestamp(now + pairing_verifier::CHALLENGE_TTL_MS),"grant_kind":"assistant",
         "grant_id":grant_id,"principal":request.assistant_id,"grant_expires_at":client_timestamp(expires),
         "policy_revision":1,"minimal_read_mode":request.minimal_read_mode})))
 }
@@ -143,9 +150,27 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
     }
     let source = fields(&begun)?;
     let now = client_now_ms();
+    let grant_id = source["grant_id"].as_str().ok_or_else(|| forbidden("invalid assistant grant"))?;
+    let challenge_expires = source["challenge_expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0);
+    let expected = source["code_hash"].as_str().unwrap_or_default();
+    let valid_code = match source.get("verifier") {
+        Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
+            let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
+            if source["verifier_key_id"].as_str() != Some(pairing_verifier::key_id(&key).as_str()) {
+                return Err(pairing_verifier::restart());
+            }
+            pairing_verifier::verify(&key, grant_id, &request.code, expected)
+        }
+        Some(_) => return Err(pairing_verifier::restart()),
+        None => {
+            if !pairing_verifier::legacy_window_open(challenge_expires, begun.accepted_at_unix_ms, now) {
+                return Err(pairing_verifier::restart());
+            }
+            expected == credential_digest(&request.code)
+        }
+    };
     if latest(state, &subject, GRANTED)?.is_some() || latest(state, &subject, REVOKED)?.is_some()
-        || source["code_hash"].as_str() != Some(credential_digest(&request.code).as_str())
-        || source["challenge_expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= now
+        || !valid_code || challenge_expires <= now
         || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= now {
         return Err(forbidden("assistant pairing code is invalid, expired, or already used"));
     }
@@ -154,7 +179,6 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
         .ok_or_else(|| validation("assistant completion requires a valid public key"))?;
     let hash = credential_digest(key);
     let device_id = format!("device/{}", &hash[..24]);
-    let grant_id = source["grant_id"].as_str().ok_or_else(|| forbidden("invalid assistant grant"))?;
     let principal = principal(source)?;
     let actor = format!("{principal}/session/{grant_id}");
     let mut random = [0_u8; 32];
@@ -163,6 +187,8 @@ async fn complete_inner(state: &AppState, id: &str, request: &PairingComplete,
     let mut grant = source.clone();
     let object = grant.as_object_mut().ok_or_else(|| forbidden("invalid assistant grant"))?;
     object.remove("code_hash");
+    object.remove("verifier");
+    object.remove("verifier_key_id");
     object.remove("challenge_expires_at_unix_ms");
     object.insert("principal".into(), json!(principal));
     object.insert("credential_hash".into(), json!(credential_digest(&credential)));
@@ -278,6 +304,161 @@ mod tests {
             "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
+    }
+
+    async fn begin_assistant(state: &AppState) -> Value {
+        begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request()).await.unwrap().0
+    }
+
+    fn begun_assistant(state: &AppState, challenge: &Value) -> ClaimRecord {
+        let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        latest(state, &subject(id).unwrap(), BEGUN).unwrap().unwrap()
+    }
+
+    async fn finish_assistant(state: &AppState, challenge: &Value, code: &str) -> Result<Option<Json<Value>>, ApiError> {
+        let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
+            "code":code,"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
+        complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
+            &request, "fabric-loopback").await
+    }
+
+    async fn assistant_restart_without_completion(state: &AppState, challenge: &Value, code: &str) {
+        let begun = begun_assistant(state, challenge);
+        let before = state.store.claims_for_kind_at("custom.client.assistant.v1.audit", None, true, 100).unwrap().claims;
+        let error = finish_assistant(state, challenge, code).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "pairing-restart-required");
+        assert_eq!(error.message, "start pairing again");
+        let audits = state.store.claims_for_kind_at("custom.client.assistant.v1.audit", None, true, 100).unwrap().claims;
+        assert_eq!(audits.len(), before.len() + 1);
+        let added = audits.iter().filter(|claim| !before.iter().any(|previous| previous.id == claim.id)).collect::<Vec<_>>();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].body["fields"]["operation"], "complete");
+        assert_eq!(added[0].body["fields"]["outcome"], "denied");
+        assert_eq!(added[0].body["fields"]["denial_code"], "pairing-restart-required");
+        assert_eq!(begun_assistant(state, challenge).id, begun.id);
+        assert!(latest(state, &begun.subject, GRANTED).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn keyed_assistant_pairing_is_private_and_wrong_code_does_not_consume_it() {
+        let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+        let challenge = begin_assistant(&state).await;
+        let begun = begun_assistant(&state, &challenge);
+        let source = fields(&begun).unwrap();
+        let key = pairing_verifier::load_key(&state.state_dir).unwrap();
+        assert_eq!(source["verifier"], "hmac-sha256-v1");
+        assert_eq!(source["verifier_key_id"], pairing_verifier::key_id(&key));
+        assert_ne!(source["code_hash"], credential_digest(challenge["code"].as_str().unwrap()));
+        assert_eq!(source["code_hash"], pairing_verifier::digest(&key,
+            source["grant_id"].as_str().unwrap(), challenge["code"].as_str().unwrap()));
+        let error = finish_assistant(&state, &challenge, "wrong-code").await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "forbidden");
+        assert!(latest(&state, &begun.subject, GRANTED).unwrap().is_none());
+        let paired = finish_assistant(&state, &challenge, challenge["code"].as_str().unwrap()).await.unwrap().unwrap().0;
+        assert_eq!(paired["kind"], "assistant-paired-session");
+        let granted = latest(&state, &begun.subject, GRANTED).unwrap().unwrap();
+        for name in ["verifier", "verifier_key_id", "code_hash", "challenge_expires_at_unix_ms"] {
+            assert!(fields(&granted).unwrap().get(name).is_none(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_assistant_pairing_requires_an_unexpired_bounded_lifetime() {
+        for (lifetime, accepted) in [(299_000_i64,true),(300_000,true),(300_001,false),(600_000,false),(-1,false)] {
+            let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+            let now = client_now_ms();
+            state.store.set_write_clock_at(now).unwrap();
+            let challenge = json!({"pairing_id":"pairing/0123456789abcdef01234567"});
+            let begun = append(&state, subject("0123456789abcdef01234567").unwrap(), BEGUN, ISSUER, json!({
+                "version":1,"grant_id":"assistant-grant/0123456789abcdef01234567",
+                "principal":PRINCIPAL,"sender_class":"external-assistant","issuer":ISSUER,
+                "device_name":"assistant","scopes":SCOPES[..4],"expires_at_unix_ms":now + 3_600_000,
+                "challenge_expires_at_unix_ms":now as i64 + lifetime,"code_hash":credential_digest("ABCDEFGH"),
+                "policy_revision":1,"minimal_read_mode":"approval-once","recipient_allowlist":[],
+                "disclosure_consent":true,"consent_evidence":"recorded owner consent",
+                "transport":"unix","timestamp":client_timestamp(now),"outcome":"created"
+            }), None).unwrap();
+            assert_eq!(begun.accepted_at_unix_ms, now);
+            assert_eq!(fields(&begun).unwrap()["challenge_expires_at_unix_ms"].as_i64().unwrap()
+                - begun.accepted_at_unix_ms as i64, lifetime);
+            if accepted {
+                assert_eq!(finish_assistant(&state, &challenge, "ABCDEFGH").await.unwrap().unwrap().0["kind"],
+                    "assistant-paired-session");
+            } else {
+                assistant_restart_without_completion(&state, &challenge, "ABCDEFGH").await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_or_malformed_assistant_verifier_marker_never_uses_the_legacy_digest() {
+        for marker in [json!("hmac-sha256-v99"),Value::Null,json!(7),json!({"algorithm":"hmac-sha256-v1"})] {
+            let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+            let challenge = begin_assistant(&state).await;
+            let begun = begun_assistant(&state, &challenge);
+            let mut value = fields(&begun).unwrap().clone();
+            value["verifier"] = marker;
+            // A legacy digest would succeed if a malformed marker fell back to legacy verification.
+            value["code_hash"] = json!(credential_digest(challenge["code"].as_str().unwrap()));
+            append(&state, begun.subject.clone(), BEGUN, ISSUER, value, Some(&begun)).unwrap();
+            assistant_restart_without_completion(&state, &challenge, challenge["code"].as_str().unwrap()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_or_losing_the_assistant_pairing_secret_requires_restart() {
+        for replacement in [Some([91_u8;32]), None] {
+            let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+            let challenge = begin_assistant(&state).await;
+            let key = state.state_dir.join("pairing-verifier/key");
+            match replacement {
+                Some(bytes) => std::fs::write(key, bytes).unwrap(),
+                None => std::fs::remove_file(key).unwrap(),
+            }
+            assistant_restart_without_completion(&state, &challenge, challenge["code"].as_str().unwrap()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn keyed_assistant_pairing_binds_the_stored_grant_id_not_the_request_path() {
+        let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+        let challenge = begin_assistant(&state).await;
+        let begun = begun_assistant(&state, &challenge);
+        let key = pairing_verifier::load_key(&state.state_dir).unwrap();
+        let code = challenge["code"].as_str().unwrap();
+        let original_id = fields(&begun).unwrap()["grant_id"].as_str().unwrap();
+        let other_id = if original_id == "assistant-grant/0123456789abcdef01234567" {
+            "assistant-grant/89abcdef0123456701234567"
+        } else { "assistant-grant/0123456789abcdef01234567" };
+        let mut value = fields(&begun).unwrap().clone();
+        value["code_hash"] = json!(pairing_verifier::digest(&key, other_id, code));
+        let foreign_digest = append(&state, begun.subject.clone(), BEGUN, ISSUER, value.clone(), Some(&begun)).unwrap();
+        let error = finish_assistant(&state, &challenge, code).await.unwrap_err();
+        assert_eq!(error.code, "forbidden");
+        assert!(latest(&state, &begun.subject, GRANTED).unwrap().is_none());
+        // Keep the request path and digest unchanged: only the stored identity now matches.
+        value["grant_id"] = json!(other_id);
+        append(&state, begun.subject.clone(), BEGUN, ISSUER, value, Some(&foreign_digest)).unwrap();
+        let paired = finish_assistant(&state, &challenge, code).await.unwrap().unwrap().0;
+        assert_eq!(paired["grant"]["id"], other_id);
+        assert_eq!(paired["session_actor"], format!("{PRINCIPAL}/session/{other_id}"));
+    }
+
+    #[tokio::test]
+    async fn keyed_assistant_pairing_survives_reopening_the_same_daemon_state() {
+        let root = tempfile::tempdir().unwrap(); let state = state(root.path());
+        let challenge = begin_assistant(&state).await;
+        let begun = begun_assistant(&state, &challenge);
+        let key = pairing_verifier::load_key(&state.state_dir).unwrap();
+        drop(state);
+        let reopened = self::state(root.path());
+        assert_eq!(begun_assistant(&reopened, &challenge).id, begun.id);
+        assert_eq!(pairing_verifier::load_key(&reopened.state_dir).unwrap(), key);
+        let paired = finish_assistant(&reopened, &challenge, challenge["code"].as_str().unwrap()).await.unwrap().unwrap().0;
+        assert_eq!(paired["kind"], "assistant-paired-session");
+        assert_eq!(paired["grant"]["id"], challenge["grant_id"]);
     }
 
     #[tokio::test]
@@ -440,7 +621,7 @@ mod tests {
         let state = state(root.path());
         let grant = paired(&state).await;
         let credential = "paired-owner-test-credential";
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/paired-owner".into(),
             kind: "custom.client.pairing-completed".into(), actor: Some(ISSUER.into()),
             fields: serde_json::from_value(json!({
@@ -582,6 +763,29 @@ mod tests {
                     assert_eq!(response.status(),StatusCode::FORBIDDEN,"{principal}: {action_type}");
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_begin_audits_the_admitted_requested_principal() {
+        for (requested, expected) in [
+            (MCP_PRINCIPAL, MCP_PRINCIPAL),
+            (PRINCIPAL, PRINCIPAL),
+            ("assistant/unknown", PRINCIPAL),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let mut request = request();
+            request.assistant_id = requested.into();
+            request.disclosure_consent = false;
+            assert!(begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request).await.is_err());
+            let audits = state.store.claims_for_kind_at("custom.client.assistant.v1.audit", None, true, 100).unwrap().claims;
+            assert_eq!(audits.len(), 1);
+            let fields = &audits[0].body["fields"];
+            assert_eq!(fields["operation"], "create");
+            assert_eq!(fields["outcome"], "denied");
+            assert_eq!(fields["principal"], expected);
+            assert!(fields["grant_id"].is_null());
         }
     }
 

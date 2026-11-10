@@ -10,6 +10,8 @@ Use these documents for implementation details:
 - [Architecture](design.md) defines the stable system shape.
 - [Native runtime invariants](invariants.md) names the current delivery, harness and lifecycle proof obligations.
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
+- [Program engine](program-engine.md) is the accepted design for missions whose body is a program: where
+  it runs, its journal, versioning by bundle hash, authority, child runs and visibility.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Native driver contracts](native-driver-contracts.md) retains launch, scope, helper, harness-state and context obligations after catalog-runner retirement.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
@@ -53,6 +55,7 @@ Use these documents for implementation details:
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
 - [Conversation search](conversation-search.md) describes searching normalized conversations and opening a match.
+- [Topic thread contract](thread-contract.md) proposes one durable discussion across Inbox and clients.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
   allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and

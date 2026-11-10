@@ -2,6 +2,8 @@
 
 Use [`@fractal/declarations`](../../clients/typescript/fractal-declarations/README.md) when declarations share references or defaults. Keep the typed source in Git, render ordinary KDL, and review both before publication. This package encodes declarations; it is not the daemon HTTP client and does not compute mission revisions or publish anything.
 
+To keep each agent, mission and schedule in its own module (`<id>/agent.ts`, `<id>/mission.ts`, `<id>/schedule.ts`) with IDs derived from the file path, use the in-repo [`fractal` authoring package](../../packages/fractal/README.md) instead. It renders the same native KDL; the TS samples in the [user guide](../site/concepts/missions.md) use it.
+
 ## Keep intent separate from execution
 
 ```text

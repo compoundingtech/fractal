@@ -513,6 +513,7 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let dir = crate::slo_history::dir(&state.state_dir);
     let rows = blocking_store(move || {
         let mut rows = slo_rows(&store)?;
+        rows.extend(crate::readiness_slo::current(&store));
         add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
         add_tones(&mut rows);
         Ok(rows)
@@ -684,6 +685,27 @@ pub async fn get_desired(
         .next()
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("`{subject}` has no desired record")))
+}
+
+/// Bulk comparison read: no status reduction or cold actual-state folds.
+pub async fn desired_batch(
+    State(state): State<AppState>,
+    Query(parameters): Query<Vec<(String, String)>>,
+) -> Result<Json<crate::store::desired_batch::DesiredBatchPage>, ApiError> {
+    let mut request = crate::store::desired_batch::DesiredBatchRequest::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "subject" => request.subjects.push(value),
+            "kind" => request.kind = Some(value),
+            "cursor" => request.cursor = Some(value),
+            "limit" => request.limit = Some(value.parse().map_err(|_| ApiError::bad(
+                FractalError::new("desired-page-limit", "limit must be an integer between 1 and 1000"),
+            ))?),
+            _ => {}
+        }
+    }
+    let store = state.store.clone();
+    blocking_store(move || store.desired_batch(&request)).await.map(Json)
 }
 
 pub async fn status(

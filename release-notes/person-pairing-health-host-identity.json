@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pairing gateway discovery uses the shared client host identity conversion, so member names containing whitespace are recognized correctly.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet coordination changes." },
+  "compatibility": { "status": "changed", "detail": "The gateway health node is converted with the same client_host_id function as the local capabilities snapshot before comparison, including whitespace normalization." },
+  "downtime": { "status": "none", "detail": "No downtime or restart-time work." },
+  "manual": { "status": "none", "detail": "No additional manual steps." },
+  "recovery": { "status": "none", "detail": "No persisted state is changed by gateway identity discovery." }
+}

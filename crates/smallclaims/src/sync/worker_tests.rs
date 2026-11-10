@@ -5297,6 +5297,95 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
     );
 }
 
+#[tokio::test]
+async fn responder_failed_export_emits_failure_answer_diagnostic() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let auth = FleetAuth::test("invented-fleet", &[7; 32]);
+    let store = Arc::new(plain_memory("cedar").unwrap());
+    store.bind_fleet(auth.fleet_id()).unwrap();
+    let mut exchange = store.export_replication_summary(auth.fleet_id()).unwrap();
+    exchange.peer = "birch".into();
+    let body = Bytes::from(serde_json::to_vec(&exchange).unwrap());
+    let backend = SlowExport {
+        local: Local(store),
+        slow: Arc::new(AtomicBool::new(false)),
+        fail_next: Arc::new(AtomicBool::new(true)),
+        receives: Arc::new(AtomicUsize::new(0)),
+    };
+    let state = PeerState::new(backend, "cedar".into(), auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["birch".into()])));
+    let id = uuid::Uuid::now_v7().to_string();
+    let mut headers = auth.request_headers("birch", &body).unwrap();
+    headers.insert(EXCHANGE_CORRELATION_HEADER, id.parse().unwrap());
+    let timing = Arc::new(ExchangeTiming::server(&headers));
+    let mut output = Vec::new();
+    let response = receive_exchange_inner_to(
+        State(state), headers, body, &timing, &FailureDiagnostics::default(), &mut output,
+    ).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let line = String::from_utf8(output).unwrap();
+    assert_eq!(line.lines().count(), 1);
+    for field in [
+        format!("correlation_id={id}"), "peer=birch".into(), "outcome=failed".into(),
+        "phase=follow-up-export".into(), "permit_wait_ms=".into(),
+        "local_receive_ms=".into(), "follow_up_export_ms=".into(), "suppressed=0".into(),
+    ] {
+        assert!(line.contains(&field), "{line}");
+    }
+}
+
+struct JobsUnlockedWriter {
+    fleet: FleetContext,
+    bytes: Vec<u8>,
+}
+
+impl std::io::Write for JobsUnlockedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        assert!(self.fleet.exchange_jobs.peers.try_lock().is_ok(),
+            "diagnostic sink must not run under the exchange-jobs lock");
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+#[tokio::test]
+async fn responder_overload_diagnostics_write_after_releasing_jobs_lock() {
+    for busy_peer in [false, true] {
+        let auth = FleetAuth::test("invented-fleet", &[7; 32]);
+        let store = Arc::new(plain_memory("cedar").unwrap());
+        store.bind_fleet(auth.fleet_id()).unwrap();
+        let mut exchange = store.export_replication_summary(auth.fleet_id()).unwrap();
+        exchange.peer = "birch".into();
+        let body = Bytes::from(serde_json::to_vec(&exchange).unwrap());
+        let fleet = FleetContext::legacy(BTreeSet::from(["birch".into()]));
+        let state = PeerState::new(Local(store), "cedar".into(), auth.clone(), fleet.clone());
+        let headers = auth.request_headers("birch", &body).unwrap();
+        let timing = Arc::new(ExchangeTiming::server(&headers));
+        let (_sender, answer) = watch::channel(None);
+        let _permits = if busy_peer {
+            fleet.exchange_jobs.peers.lock().unwrap().insert("birch".into(), ExchangeJob {
+                digest: "another-request-digest".into(), answer, timing: Arc::clone(&timing),
+            });
+            None
+        } else {
+            Some(fleet.exchange_jobs.permits.clone()
+                .acquire_many_owned(u32::try_from(MAX_EXCHANGE_JOBS).unwrap()).await.unwrap())
+        };
+        let mut output = JobsUnlockedWriter { fleet, bytes: Vec::new() };
+        let response = receive_exchange_inner_to(
+            State(state), headers, body, &timing, &FailureDiagnostics::default(), &mut output,
+        ).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let lines = String::from_utf8(output.bytes).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        assert!(lines.contains("peer=birch"));
+        assert!(lines.contains("outcome=overload"));
+        assert!(lines.contains("code=replication-overloaded"));
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_always_failing_http_peer_cannot_refresh_its_own_probe_window() {
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -161,10 +161,54 @@ pub async fn basis(
     ))
 }
 
+#[derive(Deserialize)]
+pub struct DecisionInputsQuery {
+    subject: String,
+}
+
+fn decision_inputs_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<FractalError>().is_some() {
+        error
+    } else {
+        crate::store::custom::fail(error.to_string()).into()
+    }
+}
+
+pub async fn decision_inputs(
+    State(state): State<AppState>,
+    Query(query): Query<DecisionInputsQuery>,
+) -> Result<Json<crate::store::custom::DecisionInputs>, ApiError> {
+    fractal_schema::registry().validate_subject(&query.subject)
+        .map_err(|error| client_v0::validation(error.message))?;
+    let result = blocking_store(move || {
+        state.store.decision_inputs(&query.subject).map_err(decision_inputs_error)
+    }).await?;
+    Ok(Json(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::tests_shared_client_v0_tests::get_request as client_json;
+
+    #[test]
+    fn decision_inputs_preserves_typed_refusals() {
+        let error = ApiError::internal(decision_inputs_error(
+            FractalError::new("decision-inputs-too-large", "history exceeds limits").into(),
+        ));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "decision-inputs-too-large");
+        assert_eq!(error.message, "history exceeds limits");
+    }
+
+    #[test]
+    fn decision_inputs_retains_invalid_claim_error_for_untyped_refusals() {
+        let error = ApiError::internal(decision_inputs_error(
+            anyhow::anyhow!("decision registration is unavailable"),
+        ));
+        assert_eq!(error.code, "invalid-custom-claim");
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     fn test_state(root: &std::path::Path) -> AppState {
         let mut state = crate::api::tests_shared::state(root);
@@ -273,9 +317,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let credential = "notice-history-paired-credential";
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/notice-history-pair".into(),
-            kind: "custom.client.pairing-completed".into(), actor: None,
+            kind: "custom.client.pairing-completed".into(), actor: Some("person/example".into()),
             fields: BTreeMap::from([
                 ("credential_hash".into(), json!(client_v0::credential_digest(credential))),
                 ("session_actor".into(), json!("client/notice-history")),
@@ -392,7 +436,7 @@ mod tests {
         assert!(!second.page.has_more);
         assert!(second.page.next_cursor.is_none());
         assert!(second.page.cursor_expires_at.is_none());
-        let tail = records::generic_claims_page(&state.store, None, None, 0, Some(oldest.store_index + 1), true, 1).unwrap();
+        let tail = records::generic_claims_page(&state.store, Default::default(), None, 0, Some(oldest.store_index + 1), true, 1, None).unwrap();
         assert_eq!(tail.claims[0].id, oldest.id);
         assert!(tail.next_cursor.is_none(), "hidden tail must not create another page");
     }

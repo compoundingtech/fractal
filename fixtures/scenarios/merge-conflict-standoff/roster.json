@@ -50,6 +50,7 @@
         "reachability": "local",
         "revision": "ag13",
         "runtime_ids": [
+          "runtime/example-harbor-builder-shell",
           "runtime/example-harbor-builder"
         ],
         "since": "2030-01-01T11:57:00.000Z",
@@ -278,6 +279,7 @@
           "reachability": "local",
           "revision": "ag9",
           "runtime_ids": [
+            "runtime/example-harbor-builder-shell",
             "runtime/example-harbor-builder"
           ],
           "since": "2030-01-01T11:57:00.000Z",

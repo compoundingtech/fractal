@@ -1063,8 +1063,11 @@ with its own `/tmp`, and nothing the job started outlives it. The runner names a
 cache, use that Cargo home, and Cargo keeps its intermediate build files in a per-runner build
 directory, while sccache shares compiled crates between all runners and the Nix store is the
 machine's own. The machine's configuration lives in the private network repository.
-In GitHub Actions, both Rust dev shells use `scripts/ci-rustc-wrapper`: sccache's response-I/O
-fallback is enabled. A separate read-only `sccache --dist-status` preflight is bounded
+In GitHub Actions, both Rust dev shells default to `scripts/ci-rustc-wrapper`
+when `RUSTC_WRAPPER` is unset and neither `SCCACHE_CLIENT_SIDE` nor
+`SCCACHE_SERVER_UDS` names a host cache setup. Inherited wrappers (including an
+empty cache opt-out) and host cache settings are preserved. The CI wrapper enables
+sccache's response-I/O fallback. A separate read-only `sccache --dist-status` preflight is bounded
 to 15 seconds (five seconds to finish terminating it). A recognized preflight startup
 error or timeout disables caching for the rest of that job with a warning, before any
 compiler request is submitted. Signal statuses are preserved. Once compilation starts,
@@ -1471,14 +1474,14 @@ durable snapshots and successful-main-only baselines.
 
 Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
-Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
+Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with expired
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
 current offer's receipt sequence; and delivered-but-unread retention across native channel
 restart. Claude's missing-channel cases also require automatic recovery, attachment during
 recheck without replacing the seat, and durable parking after three failed replacements.
 Its MCP bootstrap cases answer initialization with the daemon offline or binding pending,
 attach and reconnect in the same child, preserve native receipts, and cancel attachment on EOF.
-The mailbox cases seed hour-old sent mail and recent staged and delivered-but-unread
+The mailbox cases seed sent mail older than the stream's seven-day cutoff and recent staged and delivered-but-unread
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 
@@ -1516,6 +1519,7 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
+| `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
 The content guard still rejects real machine/home identities and private fleet configuration
 references. Release workflows remain separate from the required gate; neither package
@@ -1541,7 +1545,7 @@ queue it again. The merge train (`st lanes join smalltalk`) is retired.
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
 by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
-merge method `MERGE`, grouping strategy `HEADGREEN`, three entries building at once,
+merge method `MERGE`, grouping strategy `HEADGREEN`, five entries building at once,
 one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
 timeout. These are the generated configuration, not a live-settings observation.
 See [capacity tuning](#merge-overflow-and-daily-namespace-minutes).
@@ -1571,6 +1575,47 @@ See Namespace's [resource limits](https://namespace.so/docs/architecture/compute
 and [profile concurrency controls](https://namespace.so/docs/solutions/github-actions/runner-controls/concurrent-runners)
 for the scheduler's limits, and GitHub's [merge queue settings](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
 for the distinction between build concurrency and merge batch size.
+
+## Burst runs
+
+`burst.yml` (generated from `burst.yml.genie.ts`) runs one allowlisted suite on one exact commit,
+on demand, in place of a long local build-host queue. It is not a required check and changes
+no evidence or merge-queue rule.
+
+```sh
+gh workflow run burst.yml --ref main -f sha=FULL_SHA -f suite=cargo-test \
+  -f args='-p fractal-runtime --lib' -f request=REQUEST_ID
+```
+
+| Suite | Command at the requested commit |
+| --- | --- |
+| `cargo-test` | `nix develop -c cargo test --locked ARGS` |
+| `nextest` | `nix develop -c cargo nextest run --locked ARGS` |
+| `st-test-all` | Every whole-run check in `scripts/st-test`'s local table, in its order and unsigned: today `typescript-client`, `genie-freshness`, `ci-script-tests` and `linux-gate` (`scripts/ci-local tests clippy fleet-compat`). The report readers sign nothing here, and the path-filtered `fractal-web` stays with Workspace CI. Takes no `args`. |
+
+`sha` must be 40 lowercase hex characters, `request` must match `^[A-Za-z0-9._-]{1,64}$`, and `args`
+must match `^[A-Za-z0-9_:./=@ ,+-]*$`. `args` reaches the command only through the environment and
+is split on spaces. Only a dispatch of main's workflow runs. The suite commands come from that
+workflow; the scripts they call come from the requested commit, which the `burst` job checks out
+with its credentials dropped and refuses unless `HEAD` is exactly `sha`. Give every dispatch its own
+`request`: runs are grouped by it and never cancelled, but a newer dispatch with the same id
+replaces one that is still waiting in the group.
+
+The `burst` job's token can only read the repository. Two small jobs that never check out `sha`
+post the `burst/SUITE` commit status on it: `pending` validates the inputs and posts pending with
+the run's URL; `report` posts success exactly when the suite exited 0, failure for another exit,
+and error when the suite never finished (setup failure, cancellation, timeout), with the
+description `exit=CODE request=REQUEST`. The suite log is the `burst-log-REQUEST` artifact. The
+last line of the suite step and the job summary is
+`burst suite=SUITE sha=SHA request=REQUEST exit=CODE seconds=N`, and the `burst` job fails exactly
+when `CODE` is not 0.
+
+The job runs on the 8x16 Namespace shape at priority 3, the same class as Performance, so it
+never outranks merge groups or required pull request work. The repository variable
+`BURST_RUNS_ON` (a JSON label array) replaces that runner without a workflow change. Builds use the
+fleet's dev/test settings. The job restores, but never saves, main upkeep's `perf-cost` Nix and
+Cargo entries: the dev shell's tools and the crate registry are warm, and build units the two
+builds share (such as build scripts) are reused; `perf-cost`'s own optimized units are not.
 
 ## Superseded merge groups
 

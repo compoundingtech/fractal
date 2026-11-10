@@ -20,6 +20,7 @@ pub mod retention;
 pub mod slo_breaches;
 pub mod review;
 pub mod task_grants;
+pub mod usage_limits;
 pub use task_grants::{
     TaskManifestError, TaskManifestV1, canonicalize_task_manifest_v1,
     digest_task_manifest_v1, parse_task_manifest_v1,
@@ -33,6 +34,49 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 pub const SCHEMA_NAME: &str = "st3.v1";
+
+/// Canonicalize an actor used for agent work without changing an explicit actor kind.
+/// Bare names need a host before admission; legacy slash-qualified names need `agent/`.
+pub fn canonical_agent_actor(id: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (kind, name) = id.split_once('/')?;
+    if kind.is_empty() || name.is_empty() {
+        return None;
+    }
+    if matches!(kind, "agent" | "person" | "daemon" | "host" | "plugin") {
+        Some(std::borrow::Cow::Borrowed(id))
+    } else {
+        Some(std::borrow::Cow::Owned(format!("agent/{id}")))
+    }
+}
+
+#[cfg(test)]
+mod canonical_agent_actor_tests {
+    use super::canonical_agent_actor;
+
+    #[test]
+    fn preserves_actor_kinds_and_prefixes_legacy_agent_ids() {
+        for id in ["agent/example/worker", "person/reviewer", "daemon/scheduler"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+        assert_eq!(
+            canonical_agent_actor("example/worker").as_deref(),
+            Some("agent/example/worker")
+        );
+        for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
+            assert!(canonical_agent_actor(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_host_and_plugin_principals() {
+        for id in ["host/example", "plugin/example"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+    }
+}
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
@@ -536,6 +580,7 @@ impl Registry {
         }
         output.push_str("\n`resource.observed` validates facts against the resource kind. Custom resource facts remain open.\n");
         output.push_str("\nA `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.\n");
+        output.push_str(usage_limits::DOCUMENTATION);
         output.push_str("\n## Agent principal grammar\n\nAn agent may declare one optional `principal \"person/operator\"` child. It takes\nexactly one canonical person ID string, with no properties or body; agent IDs,\nmalformed person IDs and duplicate principal children are rejected. `principal`\nis not an agent property. The canonical `intent.desired.desired` tree retains\nthe child without adding a separate claim field. Omitting it remains valid.\nThis grammar declaration is distinct from the accountable-root contract below.\n\nPending harness observations with `ask=\"question\"` route to the declared\nprincipal, otherwise to the daemon's configured `person`. Account ownership,\nhelper bindings, mission requesters and declaration authors are not question\nauthority. If neither principal exists, global attention retains the prompt\nwith an empty person and a configuration diagnostic instead of dropping it.\nOnly a live declaration and its running incarnation can produce the item;\nrepublishing its principal invalidates attention. `under` remains non-owning.\nPermission and review prompts retain their existing ownership and answer\nauthorization. This routing does not enable answering unsupported harnesses.\nSupported native question answers require the effective principal as answerer.\nUpgrade readers before publishing the child: older readers reject it.\n");
         output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
         output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
@@ -742,6 +787,7 @@ impl Registry {
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
+        usage_limits::validate(subject, kind, fields)?;
         if kind == "terminal.launch-geometry" {
             for name in ["rows", "columns"] {
                 if fields.get(name).and_then(terminal_dimension).is_none() {
@@ -866,15 +912,20 @@ impl Registry {
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
         if kind.starts_with("custom.client.assistant.")
-            || subject.starts_with("custom/client/assistant-v1-") {
+            || subject.starts_with("custom/client/assistant-v1-")
+            || kind.starts_with("custom.client.pairing")
+            || subject.starts_with("custom/client/pairing")
+            || kind.starts_with("custom.client.terminal")
+            || subject.starts_with("custom/client/terminal-") {
             return Err(error(
                 "claim-write-forbidden",
-                "assistant authority claims require a dedicated trusted-local operation",
+                "client authority claims require a dedicated trusted-local operation",
             ));
         }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
+        usage_limits::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
             || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject));
         if !allowed {
@@ -2154,6 +2205,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append, None, true, &[],
         ),
         (
+            "client.operation-authorized", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
             "agent.retired",
             &["agent"],
             WritePolicy::SystemOnly,
@@ -2293,6 +2348,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
             Some("harnesses"),
+            false,
+            &[],
+        ),
+        (
+            "usage.limits.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
             false,
             &[],
         ),
@@ -2493,6 +2557,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["message"],
             WritePolicy::AuthorizedParticipant,
             Cardinality::OncePerActor,
+            Some("messages"),
+            true,
+            &[],
+        ),
+        (
+            "message.expired",
+            &["message"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
             Some("messages"),
             true,
             &[],
@@ -3549,6 +3622,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
+        "client.operation-authorized" => &[
+            ("record_id", required_string()),
+            ("record_hash", required_string()),
+            ("completion_id", string()),
+        ],
         "custom.client.action-result" | "client.action-result" => &[
             ("authority_actor", string()),
             ("request_digest", required_string()),
@@ -3979,6 +4057,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("weekly_resets_at_unix_ms", integer()),
             ("measured_at_unix_ms", required_integer()),
         ],
+        "usage.limits.observed" => &[
+            ("readings", FieldSpec { required: true, ..array() }),
+            ("credit_readings", FieldSpec { required: true, ..array() }),
+        ],
         // The harness's own subagent ID names the subagent within its parent seat. The prompt and
         // transcript stay on the host.
         "subagent.appeared" => &[
@@ -4176,6 +4258,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
         "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
+        "message.expired" => &[
+            ("status", required_enum(&["expired"])),
+            ("reason", required_enum(&["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"])),
+        ],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -4855,7 +4941,11 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        let current = registry();
+        // Reconstruct the principal-transition registry, excluding subsequently added kinds.
+        let mut current = registry().clone();
+        current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove("message.expired").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

@@ -119,12 +119,84 @@ and absent-principal legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 
+Service read admission uses a closed GET/scope registry on both the credential
+gateway and bearer-authenticated native router. `read.claims` admits
+`/v1/client/claims` and `/v1/client/claims/by-id/{id}` with the native readers'
+1–500 bounds and numeric `after`/`before` cursors. `read.work` admits exact
+`/v1/client/work-items/{subject}` reads without acknowledging wakes. Service work
+responses are a separate typed DTO: subject, run/generation/step identifiers,
+attempt, status, claimant, claim/submission incarnations, claim expiry, readiness
+epoch, worker-reported flag, creation/update timestamps and typed execution clock
+timestamps/counters only. Goals, constraints, titles, person answers, summaries,
+blocked reasons and other native free-text subviews are excluded on both aliases.
+`read.documents` remains a closed scope and its routes remain registered, but its
+document namespace allowlist is empty: every service list/content/history request
+is refused until a consumer namespace is declared. Native aliases use the same
+service decision; the gateway continues to refuse raw routes.
+
+Service claim bodies are deny-by-default, not field-name redaction. Only
+`gate.result` and `work.claimed`, `work.renewed`, `work.progress`,
+`work.submitted`, `work.failed`, `work.released`, `work.extended` disclose
+schema-listed scalar receipt/state fields. Gate bodies expose `verdict`,
+`operation`, `request`, `baseline`, `token_usage`, `stage`; the literal gate name
+is excluded. Work bodies
+expose `attempt`, `status`, `worker_reported`, `claimant`, `claim_incarnation`,
+`claim_expires_at_unix_ms`, `readiness_epoch`, `extend_ms`, `clock`,
+`wait_until_unix_ms`, `submitted_incarnation`, with the receipt/state claim's actor.
+These support independent gate receipt and work-state validation without arbitrary
+payload, summary, reason or handoff objects.
+Every other kind returns only `store_index` and the fixed `withheld: true`
+marker in pages, with no subject, id, actor, origin, kind, timestamp or body digest.
+This includes declarations, grants and pending device/assistant pairings: even
+the deterministic pairing subject can be a verifier and is not disclosed.
+Nonallowlisted by-id requests return the same not-found response as nonexistent
+ids. Service by-id admission first reads only the kind through the id index;
+hidden and absent rows return before loading or parsing a body, avoiding a
+body-size/JSON-parse existence oracle. Withheld rows retain page positions without gaps.
+Service claim selectors (`subject`, `subject_prefix`, `kind` and `owner_run`, the
+complete selector set) never match withheld rows: filtered store queries intersect
+every selector with the disclosure kind allowlist in SQL before paging. Filtered pages contain only allowlisted claims,
+never withheld markers or indexes; empty filtered pages retain the ordinary empty
+page/cursor shape. Unfiltered paging still includes withheld positions.
+Service `subject` selectors match literal canonical subjects only; services must
+supply the stored canonical subject, not an alias. No identity-reference or
+lifecycle resolution runs for service selectors. `owner_run` remains a literal
+ownership comparison. Non-service reference resolution is unchanged.
+The new client claim/work aliases admit only services; device, assistant and
+browser clients gain no new routes. Existing native routes retain non-service
+semantics. No declaration, assistant, action, upgrade, HEAD or unknown route is admitted.
+
+The daemon writes only `custom.client.service.v1.read-window` as
+`daemon/{origin}`, at most once per grant per 60-second wall-clock window.
+Admission-refused requests write no audit claim. Service identity is never an acting party,
+and browser ingress refuses a browser cookie or launch token combined with
+Authorization. Browser admission requires a single credential source. Service-grant fixtures
+are inside `#[cfg(test)]` modules; production
+grant append still rejects service issuance. This is not an OS sandbox:
+same-UID callers dropping the credential on an unrestricted socket remain
+outside credential enforcement (R18).
+
+Production issuance remains disabled pending owner CLI/rotation, admission
+atomicity with concurrent-admission proof, bounded/indexed profile admission,
+fleet-wide mixed-profile exclusion, mixed-version/downgrade safety, and auth-path
+p95 under concurrent completions. No claim is made that M1 lifecycle or the
+real merge consumer acceptance is complete.
+
+New assistant BEGUN claims bind their keyed `code_hash` to the stored full
+`assistant-grant/<hex>` grant ID, with `verifier: "hmac-sha256-v1"` and
+`verifier_key_id` identifying the member-local secret. The secret is excluded
+from replicated claims and logical claim backups; bearer credential digests are
+unchanged. Unmarked legacy challenges remain usable only while unexpired and
+with a lifetime no longer than 300,000 ms from BEGUN acceptance. Unknown/malformed
+markers or a lost or replaced verifier key require fresh pairing, not legacy
+fallback. See [assistant verifier recovery](external-assistants.md#pairing-verifier-and-recovery).
+
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
 | R27 | A host user service outside a harness authenticates as a stable non-person subject provisioned by a person or a node, not as its invoking agent. | M1 | NOT STARTED: #5019/#3268; plugin/assistant primitives do not prove this consumer contract. | Restart unattended service and invoke from two agents; every read retains the same service subject. |
 | R28 | Its credential file rotates and revokes without changing the stable subject; retired/revoked credentials cease to authenticate. | M1 | NOT STARTED: #5019; general device pairing is insufficient. | Rotate, use old/new credentials, revoke, retry after daemon restart; audit subject continuity. |
-| R29 | Scoped native routes allow claims by id and paged claims, work-item reads and document reads at admission, queue proof and final merge. | M1 | NOT STARTED: #5019; client-v0/scoped raw route acceptance UNKNOWN. | Real merge consumer reads all four families, traverses pages without gaps and validates exact receipts at all three stages. |
-| R30 | Every write is refused under the service credential, including free mode, raw routes, client actions, claims, documents and runtime/admin operations. | M1 | NOT STARTED: #5019; unauthenticated local reads do not prove denial. | Enumerate mutation routes/aliases; negative-write suite asserts structured refusal and zero store/runtime effects. |
+| R29 | Scoped native routes allow claims by id and paged claims, work-item reads and document reads at admission, queue proof and final merge. | M1 | PARTIAL: closed receipt/state claim bodies and exact work reads implemented; document reads: allowlist empty until a consumer namespace is declared. Issuance remains disabled and real merge-consumer acceptance is UNKNOWN (#5019). | Real merge consumer reads all four families, traverses pages without gaps and validates exact receipts at all three stages. |
+| R30 | Every write is refused under the service credential, including free mode, raw routes, client actions, claims, documents and runtime/admin operations. | M1 | PARTIAL: central GET/scope admission and both-router refusal fixtures implemented; production lifecycle acceptance remains UNKNOWN (#5019). | Enumerate mutation routes/aliases; negative-write suite asserts structured refusal and zero store/runtime effects. |
 
 ## Shared box and messaging
 

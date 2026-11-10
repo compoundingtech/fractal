@@ -4,6 +4,7 @@ use crate::MissionsStoreCore;
 use crate::PersonWorkStore;
 use crate::SeatsStoreCore;
 use super::*;
+use super::client_v0::{ClientSession, require_scope};
 
 /// Only a locally bound harness may recover a missing work fence from its own runtime.
 /// Explicit fences are retained so the action's validation can refuse stale callers.
@@ -177,10 +178,72 @@ pub async fn list_work(
     Ok(Json(work))
 }
 
+/// Deliberately independent of the rich native work view: adding a native field
+/// cannot grant service disclosure rights.
+#[derive(serde::Serialize)]
+struct ServiceWork<'a> {
+    subject: &'a str,
+    run: &'a str,
+    generation: &'a str,
+    step: &'a str,
+    attempt: u32,
+    status: &'a str,
+    claimant: &'a Option<String>,
+    claim_incarnation: &'a Option<String>,
+    submitted_incarnation: &'a Option<String>,
+    claim_expires_at_unix_ms: Option<u128>,
+    readiness_epoch: u32,
+    worker_reported: bool,
+    created_at_unix_ms: u128,
+    updated_at_unix_ms: u128,
+    clock: ServiceWorkClock,
+}
+
+#[derive(serde::Serialize)]
+struct ServiceWorkClock {
+    started_at_unix_ms: Option<u128>,
+    paused_until_unix_ms: Option<u128>,
+    waited_ms: u128,
+    elapsed_ms: u128,
+}
+
+impl<'a> From<&'a StepRunView> for ServiceWork<'a> {
+    fn from(step: &'a StepRunView) -> Self {
+        Self {
+            subject: &step.subject,
+            run: &step.run,
+            generation: &step.generation,
+            step: &step.step,
+            attempt: step.attempt,
+            status: &step.status,
+            claimant: &step.claimant,
+            claim_incarnation: &step.claim_incarnation,
+            submitted_incarnation: &step.submitted_incarnation,
+            claim_expires_at_unix_ms: step.claim_expires_at_unix_ms,
+            readiness_epoch: step.readiness_epoch,
+            worker_reported: step.worker_reported,
+            created_at_unix_ms: step.created_at_unix_ms,
+            updated_at_unix_ms: step.updated_at_unix_ms,
+            clock: ServiceWorkClock {
+                started_at_unix_ms: step.execution_started_at_unix_ms,
+                paused_until_unix_ms: step.execution_paused_until_unix_ms,
+                waited_ms: step.execution_waited_ms,
+                elapsed_ms: step.execution_elapsed_ms,
+            },
+        }
+    }
+}
+
 pub async fn get_work(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
-) -> Result<Json<StepRunView>, ApiError> {
+    session: Option<Extension<ClientSession>>,
+) -> Result<Response, ApiError> {
+    let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
+    if let Some(session) = &session
+        && service {
+        require_scope(&session.0, "read.work")?;
+    }
     let subject = if subject.starts_with("step-run/") {
         subject
     } else {
@@ -191,11 +254,28 @@ pub async fn get_work(
         .step_run(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
-    // A seat whose host keeps its receipts acknowledges a wake on that host.
-    super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
-        .await
-        .map_err(ApiError::internal)?;
-    Ok(Json(step))
+    // Services observe work without acknowledging wakes or changing delivery state.
+    if !service {
+        super::message_reads::read_work_wakes(&state, std::iter::once(&mut step))
+            .await
+            .map_err(ApiError::internal)?;
+    }
+    Ok(if service {
+        Json(ServiceWork::from(&step)).into_response()
+    } else {
+        Json(step).into_response()
+    })
+}
+
+pub async fn client_get_work(
+    state: State<AppState>,
+    subject: AxumPath<String>,
+    session: Extension<ClientSession>,
+) -> Result<Response, ApiError> {
+    if !client_v0::external_grants::is_service(&session.0) {
+        return Err(client_v0::forbidden("client work reads require a service principal"));
+    }
+    get_work(state, subject, Some(session)).await
 }
 
 pub async fn wake_work(

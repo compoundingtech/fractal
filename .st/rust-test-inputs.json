@@ -43,6 +43,9 @@
     "examples/demos",
     "examples/fractal",
     "fixtures",
+    "packages/fractal/fixtures/daily-review.kdl",
+    "packages/fractal/fixtures/pr-landing.kdl",
+    "packages/fractal/fixtures/upstream-repin.kdl",
     "scripts",
     "slo"
    ]
@@ -63,6 +66,7 @@
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
+    "claude-channel",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -139,7 +143,7 @@
     "fixtures/clients/transcripts/native-omp-run.json",
     "fixtures/clients/transcripts/noise.json",
     "fixtures/clients/transcripts/omp-parity.expected.json",
-    "fixtures/clients/transcripts/omp-parity.json"
+    "fixtures/clients/transcripts/omp-parity.json", "fixtures/clients/transcripts/wakes.expected.json", "fixtures/clients/transcripts/wakes.json"
    ]
   },
   "fractal-daemon": {
@@ -297,6 +301,7 @@
    "extra": [
     "docs/st3/schema.md",
     "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree-v2.json",
     "examples/fractal/decision-tree.json"
    ]
   },
@@ -347,6 +352,7 @@
     "crates/fractal-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
+    "crates/fractal-missions/src/store/tests/huge_part_digest.rs",
     "crates/fractal-store/src/store/notice_authority.rs",
     "crates/fractal-store/src/store/notice_authority_tests.rs",
     "crates/fractal-store/src/store/transaction_work.rs",

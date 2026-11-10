@@ -9436,6 +9436,31 @@
     "projection": "transport",
     "wakes_reconciler": true
   },
+  "usage.limits.observed": {
+    "kind": "usage.limits.observed",
+    "subjects": [
+      "agent"
+    ],
+    "fields": {
+      "credit_readings": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "readings": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "same-subject-actor",
+    "cardinality": "append",
+    "projection": null,
+    "wakes_reconciler": false
+  },
   "vcs.item.state": {
     "kind": "vcs.item.state",
     "subjects": [

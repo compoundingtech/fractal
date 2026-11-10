@@ -7,6 +7,13 @@ have their own logical authority digests; local physical fields and caches are o
 
 The claim log and immutable blobs are the durable graph authority.
 
+Run-part rebuilds reuse prepared statements with bound claim values. They clear
+`projection:runs:<claim-id>` health rows only for the claims selected for replay,
+then retain a savepoint per claim: a handler failure rolls back only that claim
+and quarantines it. Terminalization still follows replay order; repeated terminal
+claims can change cancellation reasons and timestamps, so they cannot simply be
+deduplicated by run or generation.
+
 The `local_completion_health_v1_*` tables are member-local, rebuildable projections
 of retained claims and their ordering/repair metadata. Their candidate rows, pending
 work and hydration progress are not shared logical rows. They add no registry
@@ -306,6 +313,7 @@ order from the same admitted claims.
 | `local_coordination_backfill` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
 | `local_custom_dirty` | Local | Custom projection subjects requiring maintenance in the current transaction. |
 | `local_directive_note_dirty` | Local | Person directive-note subjects whose published read needs refresh. |
+| `local_desired_write_witness` | Local | Single-row desired-page invalidation generation, maintained by desired-row write triggers, like `local_client_message_cut_epoch`. Never replicated, included in shared digests or exported in claim backups. Restore initializes a fresh witness and rebuilds selected rows from admitted claims; its new writer identity invalidates every pre-restore desired cursor even if the generation resets or collides. |
 | `local_directive_note_pending` | Local | Person directive-note projection work queue. |
 | `local_event_payloads` | Temporary local | Present only while duplicate local event payloads drain in bounded migration transactions. |
 | `local_git_change_latest` | Local | Current workspace Git observations on this node. |

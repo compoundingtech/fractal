@@ -12,6 +12,7 @@ overrides:
   '@overeng/effect-rpc-explorer-react': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-explorer-react
   '@overeng/effect-rpc-observer': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rpc-observer
   '@overeng/effect-rust': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust
+  '@overeng/kdl': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl
   '@overeng/meters': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters
   '@overeng/otel-browser': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-browser
   '@overeng/otel-contract': file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/otel-contract
@@ -34,6 +35,9 @@ importers:
       '@effect/opentelemetry':
         specifier: 4.1.0
         version: 4.1.0(@opentelemetry/api@1.9.1)(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)
+      '@effect/platform-browser':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)
       '@effect/platform-node':
         specifier: 4.1.0
         version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
@@ -273,6 +277,37 @@ importers:
       typescript:
         specifier: 6.0.3
         version: 6.0.3
+
+  packages/fractal:
+    dependencies:
+      '@noble/hashes':
+        specifier: 2.4.0
+        version: 2.4.0
+      '@overeng/kdl':
+        specifier: file:../../.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl
+        version: file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl(effect@4.1.0)
+      effect:
+        specifier: 4.1.0
+        version: 4.1.0
+    devDependencies:
+      '@effect/platform-node':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.9.1))
+      '@effect/vitest':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+      '@fractal/declarations':
+        specifier: workspace:^
+        version: link:../../clients/typescript/fractal-declarations
+      '@types/node':
+        specifier: 24.10.0
+        version: 24.10.0
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))
 
   packages/fractal-sdk:
     dependencies:
@@ -863,6 +898,11 @@ packages:
       '@opentelemetry/sdk-trace-web':
         optional: true
 
+  '@effect/platform-browser@4.1.0':
+    resolution: {integrity: sha512-IEyaPzejKozHDupOUSjQIgQYGv2C0I828up8z7/nvQTHzmQHUS2/tGMEwXX/FwAvnrWZ0H9MhlhTl18ZgCHQiQ==}
+    peerDependencies:
+      effect: ^4.1.0
+
   '@effect/platform-node-shared@4.1.0':
     resolution: {integrity: sha512-uYQfFRoxWLo8fIhiSeBcmz/R1ooOfE3HF3cWHFgxz82tZMk2Wn02BGABcdLmaAch9VpDLbtWnuhSxNyBsGMUFg==}
     engines: {node: '>=22.19.0'}
@@ -1336,6 +1376,11 @@ packages:
 
   '@overeng/effect-rust@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust, type: directory}
+
+  '@overeng/kdl@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl':
+    resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl, type: directory}
+    peerDependencies:
+      effect: ^4.1.0
 
   '@overeng/meters@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters':
     resolution: {directory: .devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/meters, type: directory}
@@ -6343,6 +6388,10 @@ snapshots:
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
 
+  '@effect/platform-browser@4.1.0(effect@4.1.0)':
+    dependencies:
+      effect: 4.1.0
+
   '@effect/platform-node-shared@4.1.0(effect@4.1.0)':
     dependencies:
       '@types/ws': 8.18.2
@@ -6988,6 +7037,10 @@ snapshots:
       effect: 4.1.0
 
   '@overeng/effect-rust@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/effect-rust':
+    dependencies:
+      effect: 4.1.0
+
+  '@overeng/kdl@file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/kdl(effect@4.1.0)':
     dependencies:
       effect: 4.1.0
 

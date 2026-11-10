@@ -441,6 +441,15 @@ fn render_object_fields(
         {
             continue;
         }
+        if key == "declared_admission" && let Value::Object(nested) = value {
+            if !nested.is_empty() {
+                let padding = " ".repeat(indent);
+                let _ = writeln!(output, "{padding}{}", style.heading("Declared admission — declared, not enforced."));
+                let _ = writeln!(output, "{padding}st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+                render_object_fields(output, nested, indent + 2, style, None);
+            }
+            continue;
+        }
         let padding = " ".repeat(indent);
         let label = field_label(key);
         match value {
@@ -1632,10 +1641,13 @@ mod tests {
             assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
             ask: "step-run/demo/ask".into(),
             status: "completed".into(),
-            summary: "Proceed".into(),
+            summary: "Proceed\nNote on hold (not selected): Revisit after launch.".into(),
             respondent: "assistant/chatgpt".into(),
             answered_at_unix_ms: 2_000,
-            answer: None,
+            answer: Some(serde_json::json!({
+                "type": "decision", "outcome": "accept", "id": "proceed", "label": "Proceed",
+                "option_notes": [{"id": "hold", "text": "Revisit after launch."}]
+            })),
             resolved_by: None,
             evidence: vec![],
         });
@@ -1645,6 +1657,7 @@ mod tests {
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
         assert!(rendered.contains("Assistant owner: person/avery"));
         assert!(rendered.contains("Assistant session actor: assistant/chatgpt/session/test"));
+        assert!(rendered.contains("Note on hold (not selected): Revisit after launch."));
     }
 
     fn run(subject: &str, parent: Option<&str>, steps: Vec<StepRunView>) -> MissionRunView {
@@ -1739,6 +1752,19 @@ mod tests {
             render_pty_list(&[], OutputStyle::plain()),
             "TERMINALS\nNo terminal sessions are declared.\n"
         );
+    }
+
+    #[test]
+    fn declared_admission_group_uses_the_non_enforcement_contract() {
+        let rendered = render_human_value(&serde_json::json!({
+            "mission": {"declared_admission": {"lane": "check"}}
+        }), OutputStyle::plain());
+        assert!(rendered.contains("Declared admission — declared, not enforced."));
+        assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
+        assert!(rendered.contains("check"));
+        assert!(!render_human_value(&serde_json::json!({
+            "declared_admission": {}
+        }), OutputStyle::plain()).contains("Declared admission"));
     }
 
     #[test]
