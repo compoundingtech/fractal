@@ -24,7 +24,12 @@ def bindings_for(home):
         profile.mkdir(parents=True)
         (profile / 'synthetic-safe-export.json').write_text(json.dumps({'identity': {'value': 'synthetic-redacted'}}))
         source = inventory[client]
-        row = {'profile': str(profile), 'raw_omit': [], 'bindings': [
+        substitutions = {key: {'value': 'synthetic-' + key,
+                               'record_id': 'synthetic-fixture-record', 'field': key,
+                               'capture_provenance': 'synthetic-only'}
+                         for key in ('gw', 'deployment', 'node', 'service-hex')}
+        source = policy.resolve_names(source, substitutions)
+        row = {'profile': str(profile), 'raw_omit': [], 'substitutions': substitutions, 'bindings': [
             {'class': 'identity', 'name': source['identity'][0],
              'selector': 'synthetic-safe-export.json#/identity', 'capture_provenance': 'synthetic-test-only'}],
             'unobserved': [{'name': name, 'reason': 'synthetic-test-only absence',
@@ -77,6 +82,37 @@ class PolicyTests(unittest.TestCase):
                     bindings['clients']['ios']['unobserved'] = []
                 with self.subTest(change=change), self.assertRaises(ValueError):
                     policy.compile_policy(bindings, home)
+
+    def test_placeholders_resolve_from_named_record_provenance_and_freeze(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+            home = Path(directory)
+            bindings = bindings_for(home)
+            result = policy.compile_policy(bindings, home)
+            names = result['web']['resolved_names']['expected_churn']
+            self.assertIn('localStorage/wf.c/gw:synthetic-gw/sidebar.filters', names)
+            self.assertNotIn('<', json.dumps(result))
+            self.assertEqual(result['ios']['substitutions']['node']['record_id'],
+                             'synthetic-fixture-record')
+            del bindings['clients']['web']['substitutions']['gw']
+            with self.assertRaisesRegex(ValueError, 'unresolved'):
+                policy.compile_policy(bindings, home)
+
+    def test_opaque_churn_requires_read_only_json_export(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
+            home = Path(directory)
+            bindings = bindings_for(home)
+            row = bindings['clients']['ios']
+            path = Path(row['profile']) / 'asyncstorage-export'
+            path.write_bytes(b'\xffopaque-store')
+            row['bindings'].append({
+                'class': 'expected_churn', 'name': 'AsyncStorage/st3.projection.v1',
+                'selector': path.name, 'capture_provenance': 'synthetic-readonly-export'})
+            with self.assertRaisesRegex(ValueError, 'read-only JSON export'):
+                policy.compile_policy(bindings, home)
+            path.write_text(json.dumps({'st3.projection.v1': {'items': []}}))
+            row['bindings'][-1]['selector'] = path.name + '#/st3.projection.v1'
+            self.assertEqual(policy.compile_policy(bindings, home)['ios']['expected_churn'],
+                             [path.name + '#/st3.projection.v1'])
 
 
 if __name__ == '__main__':

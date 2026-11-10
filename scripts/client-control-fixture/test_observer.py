@@ -121,6 +121,20 @@ class ObserverTests(unittest.TestCase):
         self.assertFalse(diff['identity_preserved'])
         self.assertEqual(diff['identity_changes'], ['identity.json#/session'])
 
+    def test_unresolved_policy_is_refused_before_baseline(self):
+        self.policy['web'] = {'resolved_names': ['gateway/<gw>']}
+        with self.assertRaisesRegex(ValueError, 'unresolved placeholder'):
+            self.capture()
+
+    def test_expected_churn_must_be_json_at_capture(self):
+        self.policy['tui']['expected_churn'] = ['readonly-store.json']
+        path = self.profile / 'readonly-store.json'
+        path.write_bytes(b'\xffopaque')
+        with self.assertRaisesRegex(ValueError, 'read-only JSON export'):
+            self.capture()
+        path.write_text(json.dumps({'item': 'attention/fixture', 'seen': True}))
+        self.assertEqual(observer.difference(self.capture(), self.capture())['status'], 'FINDING')
+
 
 if __name__ == '__main__':
     unittest.main()

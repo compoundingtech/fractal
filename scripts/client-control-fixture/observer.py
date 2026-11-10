@@ -55,6 +55,8 @@ def flatten(value, pointer=''):
 
 def snapshot(profile, client, item_id, policy, identity, home):
     isolated_profile(profile, client, home)
+    if re.search(r'<[^<>]*>', json.dumps(policy)):
+        raise ValueError('fixture-observer-policy-refused: unresolved placeholder before baseline')
     classes = policy.get(client, {})
     exclusions = classes.get('identity', []) if isinstance(classes, dict) else []
     churn = classes.get('expected_churn', []) if isinstance(classes, dict) else []
@@ -83,6 +85,8 @@ def snapshot(profile, client, item_id, policy, identity, home):
         try:
             value = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
+            if any(name.split('#', 1)[0] == relative for name in churn):
+                raise ValueError('fixture-observer-policy-refused: opaque churn needs a read-only JSON export')
             entries[relative] = hashlib.sha256(raw).hexdigest()
             opaque.append(relative)
             continue

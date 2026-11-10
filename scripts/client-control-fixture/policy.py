@@ -2,6 +2,7 @@
 """Bind source-inventoried names to actual captured selectors; never collect client secrets."""
 import argparse
 import json
+import re
 from pathlib import Path
 
 import observer
@@ -9,6 +10,22 @@ import packet
 
 
 INVENTORY = Path(__file__).with_name('storage-inventory.json')
+
+def resolve_names(source, substitutions):
+    resolved = {}
+    for classification in ('identity', 'expected_churn'):
+        resolved[classification] = []
+        for template in source[classification]:
+            def replace(match):
+                row = substitutions.get(match.group(1), {})
+                value = row.get('value')
+                if (not isinstance(value, str) or not value or '<' in value or '>' in value
+                        or not row.get('record_id') or not row.get('field')
+                        or not row.get('capture_provenance')):
+                    raise ValueError('fixture-policy-refused: unresolved name needs actual fixture/enrollment record provenance')
+                return value
+            resolved[classification].append(re.sub(r'<([^<>]+)>', replace, template))
+    return resolved
 
 
 def compile_policy(bindings, home):
@@ -18,6 +35,7 @@ def compile_policy(bindings, home):
     output = {}
     for client in packet.CLIENTS:
         source, row = inventory[client], bindings['clients'][client]
+        resolved = resolve_names(source, row.get('substitutions', {}))
         profile = Path(row['profile'])
         observer.isolated_profile(profile, client, home)
         omitted = row.get('raw_omit', [])
@@ -31,7 +49,7 @@ def compile_policy(bindings, home):
                     or path.is_symlink() or path.resolve() != path or not path.is_file()):
                 raise ValueError('fixture-policy-refused: raw omission must name actual isolated private profile')
         # Enumerate only safe captured data. Never open an omitted private profile.
-        present = set()
+        present, opaque = set(), set()
         for path in sorted(profile.rglob('*')):
             if path.is_symlink():
                 raise ValueError('fixture-policy-refused: profile symlink')
@@ -44,6 +62,7 @@ def compile_policy(bindings, home):
                 parsed = json.loads(path.read_bytes())
             except (ValueError, UnicodeDecodeError):
                 present.add(relative)
+                opaque.add(relative)
             else:
                 present.update(f'{relative}#{pointer}' for pointer, _ in observer.flatten(parsed))
         classes = {'identity': [], 'expected_churn': [], 'raw_omit': omitted}
@@ -51,8 +70,9 @@ def compile_policy(bindings, home):
         for binding in row['bindings']:
             classification, name, selector = binding['class'], binding['name'], binding['selector']
             if (classification not in ('identity', 'expected_churn')
-                    or name not in source[classification] or not binding['capture_provenance']
+                    or name not in resolved[classification] or not binding['capture_provenance']
                     or not isinstance(selector, str) or not selector or '*' in selector
+                    or '<' in selector or '>' in selector
                     or '..' in Path(selector.split('#', 1)[0]).parts
                     or Path(selector.split('#', 1)[0]).is_absolute()):
                 raise ValueError('fixture-policy-refused: unowned name or unsafe/unproven selector')
@@ -60,19 +80,23 @@ def compile_policy(bindings, home):
                 raise ValueError('fixture-policy-refused: identity must name a captured JSON field, not a whole file')
             if not any(key == selector or key.startswith(selector + '/') for key in present):
                 raise ValueError('fixture-policy-refused: selector absent from actual safe capture')
+            if classification == 'expected_churn' and selector.split('#', 1)[0] in opaque:
+                raise ValueError('fixture-policy-refused: expected churn requires a read-only JSON export, not opaque storage')
             classes[classification].append(selector)
             accounted.add(name)
         for limitation in row.get('unobserved', []):
-            if (limitation['name'] not in source['identity'] or not limitation['reason']
+            if (limitation['name'] not in resolved['identity'] or not limitation['reason']
                     or not limitation['capture_provenance'] or not limitation['source_evidence']):
                 raise ValueError('fixture-policy-refused: absent identity key needs explicit source/capture limitation')
             accounted.add(limitation['name'])
-        if not set(source['identity']).issubset(accounted) or not classes['identity']:
+        if not set(resolved['identity']).issubset(accounted) or not classes['identity']:
             raise ValueError('fixture-policy-refused: every named identity key needs actual binding or declared limitation')
         for classification in classes:
             classes[classification] = sorted(set(classes[classification]))
         if set(classes['identity']) & set(classes['expected_churn']):
             raise ValueError('fixture-policy-refused: selector has conflicting classes')
+        classes['resolved_names'] = resolved
+        classes['substitutions'] = row.get('substitutions', {})
         output[client] = classes
     return output
 

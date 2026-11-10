@@ -263,8 +263,17 @@ python3 scripts/client-control-fixture/policy.py --bindings policy-bindings.json
 
 Save its stdout as `observer-policy.json` before `capture`. The bindings wrapper
 contains `inventory_sha256` (exact source inventory byte digest) and
-`clients.CLIENT` with actual `profile`, `bindings`, `raw_omit`, and `unobserved`.
-Each binding contains a source-inventoried `name`, `class` (`identity` or
+`clients.CLIENT` with actual `profile`, `bindings`, `raw_omit`, `unobserved`,
+and `substitutions`. For each source placeholder (`gw`, `deployment`, `node`,
+`service-hex`), substitutions names the actual `value`, fixture/enrollment
+`record_id`, source `field`, and `capture_provenance`. Read these values from the
+fixture run and its enrollment records, not the normal client. Every descriptor
+is resolved before baseline capture, including descriptors for unavailable keys.
+Each binding and limitation names the **resolved** source name, never `<gw>` or
+another template. The compiled policy freezes resolved names and provenance;
+the run record freezes that full policy under `observer_policy_sha256`.
+Snapshots refuse any remaining `<…>` anywhere in their policy.
+Each binding contains a resolved source-inventoried `name`, `class` (`identity` or
 `expected_churn`), an exact observed `selector`, and nonempty
 `capture_provenance`. Selectors are relative captured filenames plus `#` and a
 JSON pointer, or an explicitly named churn file. JSON pointer escaping is `~0`
@@ -277,6 +286,18 @@ Every inventoried identity name must be bound, or appear under `unobserved` with
 `name`, `reason`, `capture_provenance`, and `source_evidence`. This includes absent
 pending cookies and inaccessible iOS Keychain records: do not manufacture their
 contents or selectors. Missing concrete identity policy hard-refuses capture.
+
+Expected-churn stores must be **read-only JSON exports**, not raw binary
+AsyncStorage/IndexedDB databases. Export through the client's existing read-only
+path (web storageState plus read-only IndexedDB/sessionStorage exports; iOS
+read-only test-app export) and retain capture provenance. Never call a
+get-or-create API or alter a profile to obtain a snapshot. If no supported
+read-only JSON export is available, that client's baseline remains OPEN:
+compilation and capture refuse opaque churn rather than guaranteeing a FINDING
+on every journey or silently approving unscanned state. Other changed opaque
+files remain unscanned FINDINGs. TUI's named feed cache model snapshot, drafts,
+glasses and prefs are expected churn only at their actual concrete JSON paths;
+no whole cache subtree is exempted.
 
 For TUI, capture the **whole isolated config/state/cache trees**, including
 feed cache, prefs, glasses and drafts. The private profile's actual relative

@@ -77,7 +77,7 @@
   "tui": {
     "source": "TUI a4107410; SDK 62adcce8; owner e3-tui-inventory; safe helper export owned by TUI",
     "identity": ["Profile/devices/signing_key", "Profile/devices/session"],
-    "expected_churn": [],
+    "expected_churn": ["feed cache model snapshot", "drafts", "glasses", "prefs"],
     "raw_omit": "Exact actual private profile relative path; never read it in Python. Use TUI helper safe export with pkcs8 and credential sentinels plus SHA-256.",
     "source_evidence": [
       "device.rs:165-177",
@@ -89,7 +89,7 @@
       "No packet-side private-key parsing. Use Profile::load public identity helper and sanitized export; never devices complete.",
       "Pairing and enrollment IDs come only from authoritative fixture-store records.",
       "Transient in-memory updates_read, acted, pending_answers and closed are a declared limitation, not a blanket claim of no local state.",
-      "Cache, drafts, glasses and preferences are never excluded; any unexplained changes are findings."
+      "Cache, drafts, glasses and preferences are diffed and scanned as named expected churn; concrete filenames come from actual capture, never guessed hashes."
     ]
   }
 }
