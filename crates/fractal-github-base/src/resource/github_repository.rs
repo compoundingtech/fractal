@@ -1829,7 +1829,7 @@ async fn observe_poll(
     })
 }
 
-/// Neither installation has statuses:read. An app-only rollup is not complete.
+/// An installation without statuses:read sees an app-only rollup, which is not complete.
 fn merge_legacy_statuses(node: &mut Value, combined: &Value) -> Result<()> {
     let statuses = combined.get("statuses").and_then(Value::as_array)
         .context("the GitHub combined status response has no statuses")?;
@@ -2036,7 +2036,8 @@ async fn open_pull_requests(
             .min(PULL_REQUEST_PAGE_SIZE)
             .min(failed_size_ceiling - 1);
     }
-    if matches!(read_token, GithubAuth::Read { .. }) {
+    // With statuses:read the GraphQL rollup already carries StatusContext entries.
+    if matches!(&read_token, GithubAuth::Read { source, .. } if !source.grants("statuses")) {
         let mut statuses = BTreeMap::new();
         for node in &mut nodes {
             let Some(head) = node.get("headRefOid").and_then(Value::as_str).map(str::to_owned) else { continue; };
