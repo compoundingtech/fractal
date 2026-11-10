@@ -411,3 +411,63 @@ fn first_local_base_without_opposite_history_is_immediately_usable_without_attac
     drop(connection);
     assert_reference_and_rebuild(&store);
 }
+
+#[test]
+fn completed_subject_cleanup_lifts_fence_despite_unrelated_continuous_attachment_arrivals() {
+    let store = node("attachment-cleanup-fairness", None);
+    let grant = append(&store, SUBJECT, GRANTED, fields());
+    drain_authority(&store);
+    attachment_install_counter(&store.connection.write());
+    let mut policy = fields();
+    policy["expires_at_unix_ms"] = json!(20000);
+    append(&store, SUBJECT, POLICY, policy);
+    for attempt in 0..32 {
+        if attachment_tasks(&store.readers.get())==0 { break; }
+        attachment_slice(&store, Duration::ZERO);
+        assert!(attempt<31, "subject A's attachment task did not finish");
+    }
+    // Stop precisely after task completion, before the separately charged
+    // witness cleanup. A is still fenced and has one eligible witness.
+    assert!(authority::subject_ready(&store.readers.get(), SUBJECT).is_err());
+    let witnesses: usize = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM assistant_grant_attachment_witnesses WHERE grant_subject=?1",
+        [SUBJECT], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(witnesses, 1);
+
+    let other = "custom/client/assistant-v1-fedcba9876543210fedcba98";
+    let other_fields = || {
+        let mut value = fields();
+        value["grant_id"] = json!("assistant-grant/fedcba9876543210fedcba98");
+        value["session_actor"] = json!("assistant/chatgpt/session/assistant-grant/fedcba9876543210fedcba98");
+        value
+    };
+    for index in 0..40 {
+        let mut value = other_fields();
+        value["expires_at_unix_ms"] = json!(30000+index);
+        append(&store, other, GRANTED, value);
+    }
+    for index in 0..40 {
+        let mut value = other_fields();
+        value["expires_at_unix_ms"] = json!(40000+index);
+        append(&store, other, POLICY, value);
+    }
+    let mut lifted = false;
+    for index in 0..4 {
+        // Keep growing B's 40-by-40 backlog while A waits for cleanup.
+        let mut value = other_fields();
+        value["expires_at_unix_ms"] = json!(50000+index);
+        append(&store, other, POLICY, value);
+        let (_, work) = attachment_slice(&store, Duration::ZERO);
+        assert!(work.candidates+work.completions+work.witness_cleanups<=1);
+        assert!(attachment_tasks(&store.readers.get())>0,
+            "regression requires B's unrelated backlog to remain");
+        assert!(authority::subject_ready(&store.readers.get(), other).is_err());
+        if authority::subject_ready(&store.readers.get(), SUBJECT).is_ok() {
+            assert!(authority::contains(&store.readers.get(), &grant.id).unwrap());
+            lifted = true;
+            break;
+        }
+    }
+    assert!(lifted, "unrelated continuous arrivals starved completed-subject cleanup");
+}

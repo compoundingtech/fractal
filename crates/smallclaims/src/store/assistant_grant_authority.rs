@@ -633,12 +633,28 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
 }
 
 fn attachment_witness_one(connection: &Connection) -> Result<bool> {
-    let base: Option<String> = connection.query_row(
-        "SELECT base_claim_id FROM assistant_grant_attachment_witnesses ORDER BY base_claim_id LIMIT 1",
-        [], |row| row.get(0),
-    ).optional()?;
+    let after = fleet_meta(connection,"assistant_grant_attachment_witness_cursor")?.unwrap_or_default();
+    let seek = |after: &str| -> Result<Option<String>> {
+        Ok(connection.query_row(
+            "SELECT witness.base_claim_id FROM assistant_grant_attachment_witnesses witness
+             WHERE witness.base_claim_id>?1 AND NOT EXISTS(
+               SELECT 1 FROM assistant_grant_attachments tasks
+               WHERE tasks.grant_subject=witness.grant_subject)
+             ORDER BY witness.base_claim_id LIMIT 1",
+            [after], |row| row.get(0),
+        ).optional()?)
+    };
+    let base = match seek(&after)? {
+        Some(base) => Some(base),
+        None if !after.is_empty() => seek("")?,
+        None => None,
+    };
     let Some(base) = base else { return Ok(false); };
-    connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [base])?;
+    connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [&base])?;
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_attachment_witness_cursor',?1)",
+        [&base],
+    )?;
     Ok(true)
 }
 fn local_origin(connection: &Connection) -> Result<String> {
@@ -1187,6 +1203,11 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
     let dirty_limit = remaining.div_ceil(2);
     let mut dirty_visits = 0;
     let mut dirty_done = false;
+    // Completed subjects get a reserved cleanup share, independent of unrelated
+    // attachment backlogs. The persistent witness cursor survives one-unit slices.
+    let cleanup_limit = remaining.div_ceil(2);
+    let mut cleanup_visits = 0;
+    let mut cleanup_done = false;
     let mut dirty_after = fleet_meta(connection,"assistant_grant_dirty_cursor")?.unwrap_or_default();
     // Include membership-driven retries in the same fixed item budget. Each
     // empty writer task also consumes a unit, bounding sparse writer queues.
@@ -1197,6 +1218,15 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             remaining -= 1;
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
+        }
+        if membership_current && !cleanup_done && cleanup_visits<cleanup_limit {
+            if attachment_witness_one(connection)? {
+                cleanup_visits += 1;
+                remaining -= 1;
+                if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+                continue;
+            }
+            cleanup_done = true;
         }
         if !dirty_done && dirty_visits<dirty_limit {
             let dirty: Option<String> = connection.query_row(
@@ -1291,7 +1321,7 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
         }
-        if membership_current && (attachment_one(connection)? || attachment_witness_one(connection)?) {
+        if membership_current && attachment_one(connection)? {
             remaining -= 1;
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;

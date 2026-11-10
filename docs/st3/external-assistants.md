@@ -283,6 +283,11 @@ usable. Late opposite claims create their own tasks, including pairs beyond an
 older task's high-water mark.
 
 The subject remains fenced until its attachment tasks and witness cleanup finish.
+Witness cleanup receives a reserved half-slice share after demotion, including
+one-unit zero-duration slices. An indexed subject-task probe makes a witness
+eligible as soon as its own subject has no attachment tasks; unrelated attachment
+backlogs do not delay it. A persistent round-robin witness cursor prevents newly
+eligible lower-ID arrivals from repeatedly overtaking a waiting subject.
 Before changing an effective base, maintenance retains its previous effective
 record as a conflict witness, so partially attached restrictive transitions cannot
 hide an established cross-subject conflict. Demotion cancels the demoted claim's
