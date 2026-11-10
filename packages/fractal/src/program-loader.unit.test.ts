@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -167,15 +167,27 @@ describe('program missions', () => {
       Effect.gen(function* () {
         const bundleDir = scratch()
         const { kdl, sha256 } = yield* renderLanding(bundleDir)
-        const file = join(programs, 'factory/land-program/mission.ts')
+        // Reached through a symlink, the tree still names its subjects by their real directories.
+        const root = join(scratch(), 'tree')
+        symlinkSync(programs, root)
+        const file = join(root, 'factory/land-program/mission.ts')
         const module = yield* Effect.promise(
           (): Promise<{ readonly default: unknown }> => import(pathToFileURL(file).href),
         )
-        const options = { root: programs, file, id: 'factory/land-program', bundleDir }
-        const rendered = yield* programMission({ ...options, definition: module.default })
+        const rendered = yield* programMission({ root, file, bundleDir, definition: module.default })
         expect(rendered).toEqual({ kdl, bundle: join(bundleDir, `${sha256}.mjs`), sha256 })
-        const refused = yield* programMission({ ...options, definition: {} }).pipe(Effect.flip)
+        const refused = yield* programMission({ root, file, bundleDir, definition: {} }).pipe(
+          Effect.flip,
+        )
         expect(refused.message).toBe('The default export is not a program mission')
+        const elsewhere = join(fixtures, 'program-refusals/id-mismatch/factory/land/mission.ts')
+        const foreign = yield* programMission({
+          root,
+          file: elsewhere,
+          bundleDir,
+          definition: module.default,
+        }).pipe(Effect.flip)
+        expect(foreign.message).toContain('Module must export its own mission definition')
       }).pipe(Effect.provide(NodeFileSystem.layer)),
     120_000,
   )

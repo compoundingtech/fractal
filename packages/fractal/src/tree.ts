@@ -480,57 +480,70 @@ const loadModule = Effect.fnUntraced(function* <C>({
 /**
  * Bundles one program mission (`Fractal.mission(intent, program)` from `fractal/effect`) and
  * renders its native declaration exactly as `loadSubjectTree` loads that subject, for a loader
- * that walks its own tree. `definition` is the default export of `file`, a module below `root`;
- * `id` is its subject ID. The bundle is built from `root` and written to `bundleDir` as
- * `<sha256>.mjs`.
+ * that walks its own tree. `file` is a `mission.ts` below the tree `root` and `definition` its
+ * default export; the subject ID is the file's directory below `root`. The bundle is built from
+ * `root` and written to `bundleDir` as `<sha256>.mjs`.
  */
 export const programMission = Effect.fn('fractal.programMission')(function* ({
   root,
   file,
-  id,
   definition,
   bundleDir,
   bun = 'bun',
 }: {
   readonly root: string
   readonly file: string
-  readonly id: string
   readonly definition: unknown
   readonly bundleDir: string
   readonly bun?: string
 }) {
-  const path = relative(root, file).split(sep).join('/')
   if (isAbsolute(bundleDir) === false) {
     return yield* new SubjectTreeError({
       path: bundleDir,
       message: 'bundleDir must be an absolute directory',
     })
   }
+  const fs = yield* FileSystem.FileSystem
+  const real = (target: string, message: string) =>
+    fs
+      .realPath(target)
+      .pipe(Effect.mapError((cause) => new SubjectTreeError({ path: target, message, cause })))
+  const tree = yield* real(root, 'Cannot read subject tree')
+  const module = yield* real(file, 'Cannot resolve declaration')
+  const path = relative(tree, module).split(sep).join('/')
+  if (basename(module) !== 'mission.ts') {
+    return yield* new SubjectTreeError({ path, message: 'A program mission is a mission.ts' })
+  }
   if (
     typeof definition !== 'object' ||
     definition === null ||
     ProgramEntry in definition === false ||
-    'intent' in definition === false
+    'intent' in definition === false ||
+    'url' in definition === false ||
+    typeof definition.url !== 'string'
   ) {
     return yield* new SubjectTreeError({
       path,
       message: 'The default export is not a program mission',
     })
   }
-  const subject = yield* Schema.decodeUnknownEffect(SubjectId)(id).pipe(
-    Effect.mapError(
-      (cause) => new SubjectTreeError({ path, message: `${id} is not a subject ID`, cause }),
-    ),
-  )
+  const defined = yield* real(fileURLToPath(definition.url), 'Cannot resolve declaration')
+  if (defined !== module) {
+    return yield* new SubjectTreeError({
+      path,
+      message: `Module must export its own mission definition, got one from ${definition.url}`,
+    })
+  }
+  const id = yield* subjectId({ root: tree, file: module, path })
   const { declaration, bundle, sha256 } = yield* programDeclaration({
-    root,
-    file,
+    root: tree,
+    file: module,
     path,
-    id: subject,
+    id,
     intent: definition.intent as ProgramIntent<InputSchema, Schema.Codec<unknown>, undefined>,
     programs: { bundleDir, bun },
   })
-  const intent = yield* decodeMission({ root, path, kind: 'mission', intent: declaration })
+  const intent = yield* decodeMission({ root: tree, path, kind: 'mission', intent: declaration })
   return { kdl: emit([missionNode(intent as MissionInput<string>)]), bundle, sha256 }
 })
 
