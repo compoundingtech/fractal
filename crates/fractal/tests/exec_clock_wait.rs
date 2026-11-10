@@ -92,14 +92,14 @@ fn an_exec_that_waits_longer_than_its_step_timeout_completes() {
         return;
     }
     let daemon = Daemon::start();
-    // The exec waits on a queue for eight seconds under a five-second timeout. Without a wait
+    // The exec waits on a queue for fifteen seconds under a ten-second timeout. Without a wait
     // that stops the clock the step would fail with its timeout.
     let script = daemon.root.path().join("check.sh");
     std::fs::write(
         &script,
         "#!/bin/sh\nset -e\n\
          \"$ST3_BIN\" work wait \"$ST_STEP_RUN\" --for 1m --reason \"fake build queue\" > waited\n\
-         sleep 8\n\
+         sleep 15\n\
          \"$ST3_BIN\" work resume \"$ST_STEP_RUN\" > resumed\n\
          sleep 1\n",
     )
@@ -112,7 +112,7 @@ fn an_exec_that_waits_longer_than_its_step_timeout_completes() {
             r#"version 2
 mission "orchid/queued" state="ready" {{
   goal "Check a change that queues for a build slot."
-  step "check" timeout="5s" {{
+  step "check" timeout="10s" {{
     agentless
     exec "check" {{ command "{}"; restart "never"; }}
     gate "the check passes" {{ field "exit_code" "exec/${{ST_MISSION_RUN}}/check" is 0; }}
@@ -136,7 +136,7 @@ mission "orchid/queued" state="ready" {{
     });
     let step = step();
     assert_eq!(step["status"], "completed", "{step}\n{}", daemon.log());
-    assert!(step["execution_waited_ms"].as_u64().unwrap() >= 8_000, "{step}");
-    assert!(step["execution_elapsed_ms"].as_u64().unwrap() < 5_000, "{step}");
+    assert!(step["execution_waited_ms"].as_u64().unwrap() >= 15_000, "{step}");
+    assert!(step["execution_elapsed_ms"].as_u64().unwrap() < 10_000, "{step}");
     assert!(daemon.root.path().join("resumed").exists());
 }

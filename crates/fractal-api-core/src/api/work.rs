@@ -606,9 +606,10 @@ pub async fn post_work_action(
 }
 
 /// `work wait` and `work resume` from a step's own exec, which holds no claim. The exec's launch
-/// is its fence: it names the start operation its runtime put in its environment
-/// (`ST3_START_OPERATION`), and only the exec's generation running on this host from that launch
-/// may act. A process from an earlier launch, another exec or another host is refused.
+/// is its fence, as an incarnation is a seat's: the request names the start operation its runtime
+/// put in its environment (`ST3_START_OPERATION`) or its generation, and is refused unless that is
+/// the exec's live generation on this host. The fence refuses earlier launches, other attempts and
+/// other hosts; like a seat's incarnation it is not a secret that authenticates the caller.
 async fn exec_clock_response(
     state: AppState,
     action: String,
