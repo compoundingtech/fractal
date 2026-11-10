@@ -15,6 +15,38 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn opted_in_pairing_advertisement_matches_the_canonical_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests_shared::state(root.path());
+    let app = Router::new()
+        .fallback(|| async { StatusCode::IM_A_TEAPOT })
+        .layer(axum::middleware::from_fn_with_state(
+            (state, ClientTransportBoundary::FabricLoopback), response_envelope,
+        ));
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    )).unwrap();
+    let schema = json!({"$ref":"#/$defs/PairingAdvertisement","$defs":contract["$defs"]});
+    let validator = jsonschema::options().should_validate_formats(true).build(&schema).unwrap();
+    for query in [
+        "?accepts=pairing-key-binding",
+        "?accepts=pairing-key-binding&accepts=fabric-gateway-grant",
+    ] {
+        let response = app.clone().oneshot(Request::builder()
+            .uri(format!("/v1/client/capabilities{query}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        ).unwrap();
+        assert!(body["capabilities"].as_array().unwrap().iter().any(|capability| {
+            capability["id"] == "pairing-key-binding" && capability["version"] == 2
+        }));
+        assert!(validator.is_valid(&body), "{body}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn incomplete_linux_environment_is_unavailable() {
