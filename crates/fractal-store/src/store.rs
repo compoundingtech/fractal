@@ -261,6 +261,8 @@ pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 pub mod revision_seats;
 pub mod delegation;
+pub mod claim_pages;
+pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
@@ -4299,8 +4301,25 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        let filter = ClaimsFilter { subject, ..ClaimsFilter::default() };
+        self.claims_page_matching(filter, owner_run, after_index, before_index, descending, limit)
+    }
+
+    /// Claims after `after_index` (and before `before_index`) matching `filter`, at most `limit`
+    /// in store-index order; `next_cursor` is set when more remain. Each filter reads through a
+    /// claims index (see [`claims_page_query`]).
+    pub fn claims_page_matching(
+        &self,
+        filter: ClaimsFilter<'_>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+    ) -> Result<ClaimsPage> {
+        let (subject, lower, upper) = claim_pages::subject_match(filter)?;
         let connection = self.readers.get();
-        let query = claims_page_query(subject.is_some(), descending);
+        let query = claims_page_query(subject, filter.kind.is_some(), descending);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4309,8 +4328,12 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
+        let values: [&dyn rusqlite::ToSql; 6] =
+            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper];
+        // Each query names its highest parameter; the unused ones below it stay NULL.
+        let bound = statement.parameter_count();
         let rows = statement.query_map(
-            params![after_index, before_index, subject, scan_limit],
+            rusqlite::params_from_iter(&values[..bound]),
             claim_from_row,
         )?;
         let mut claims = Vec::new();
@@ -11521,6 +11544,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    human_review_reassignment::admit_reassignment(transaction, kind, &fields)
+        .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
@@ -22782,6 +22807,41 @@ pub struct ClaimCommitContext<'a> {
     pub as_older_build: bool,
 }
 
+fn claim_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    operation: Option<&(String, String)>,
+) -> Result<Option<ClaimRecord>, FractalError> {
+    if let Some((operation_id, request_digest)) = operation {
+        if let Some((stored_digest, canonical_claim, state)) =
+            operation_tx(transaction, operation_id).map_err(internal)?
+        {
+            if state == "conflict" {
+                return Err(FractalError::new(
+                    "idempotency-conflict",
+                    "the replicated operation has conflicting requests",
+                )
+                .with_detail("operation_id", operation_id.clone()));
+            }
+            if stored_digest != *request_digest {
+                return Err(FractalError::new(
+                    "idempotency-mismatch",
+                    "the idempotency key already identifies a different request",
+                )
+                .with_detail("operation_id", operation_id.clone())
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest.clone()));
+            }
+            let claim = claim_by_id_tx(transaction, &canonical_claim)
+                .map_err(internal)?
+                .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
+            identities::check_receipt(transaction, &claim)?;
+            return Ok(Some(claim));
+        }
+        checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+    }
+    Ok(None)
+}
+
 pub fn append_claim_with_commit_context(
     graph: &GraphStore,
     input: &ClaimInput,
@@ -22911,33 +22971,8 @@ pub fn append_claim_with_commit_context(
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
             } else { false };
-            if let Some((operation_id, request_digest)) = &operation
-                && let Some((stored_digest, canonical_claim, state)) =
-                    operation_tx(transaction, operation_id).map_err(internal)?
-            {
-                if state == "conflict" {
-                    return Err(FractalError::new(
-                        "idempotency-conflict",
-                        "the replicated operation has conflicting requests",
-                    )
-                    .with_detail("operation_id", operation_id.clone()));
-                }
-                if stored_digest != *request_digest {
-                    return Err(FractalError::new(
-                        "idempotency-mismatch",
-                        "the idempotency key already identifies a different request",
-                    )
-                    .with_detail("operation_id", operation_id.clone())
-                    .with_detail("stored_digest", stored_digest)
-                    .with_detail("request_digest", request_digest.clone()));
-                }
-                let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
-                    .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
-                identities::check_receipt(transaction, &claim)?;
-                return Ok((claim,false));
-            }
-            if let Some((operation_id, request_digest)) = &operation {
-                checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+            if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+                return Ok((claim, false));
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.

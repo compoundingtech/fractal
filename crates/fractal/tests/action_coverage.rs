@@ -2782,6 +2782,7 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["subject", "desired", "--all"],
         vec!["subject", "desired", "--kind", "mission"],
         vec!["subject", "history", WORKER],
+        vec!["claims", "ls", "--subject-prefix", &run.subject],
         vec!["documents", "ls"],
         vec!["activity"],
         vec!["import", "ls"],
