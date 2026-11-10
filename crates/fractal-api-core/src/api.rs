@@ -29,6 +29,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -563,7 +564,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
-        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier") {
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier" | "agent-charter-feature-barrier") {
             body["applied"] = json!("none");
         }
         if let Some(applied) = body["details"].get("applied").cloned() {
@@ -722,6 +723,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/custom/reply", post(custom::reply))
         .route("/v1/custom/basis", get(custom::basis))
+        .route("/v1/custom/decision-inputs", get(custom::decision_inputs))
         .route("/v1/client/custom-subjects", get(custom::list))
         .route("/v1/client/custom-subjects/{*id}", get(custom::read))
         .route("/v1/intent/mission", post(launches::mission))
@@ -831,6 +833,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
@@ -2104,6 +2107,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-document-reference"
         | "invalid-declared-admission"
         | "declared-admission-feature-barrier"
+        | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
@@ -3435,7 +3439,7 @@ fn overlay_agent_resources_at(
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
-                Some(age) if age > 90_000 => "stale",
+                Some(age) if u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis() => "stale",
                 Some(_) => "current",
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
@@ -3516,9 +3520,9 @@ fn overlay_declaration_restart(item: &mut Value, now: u128) {
 /// How long a declared seat may take to show a running session before it is called down.
 pub const LAUNCH_WINDOW_MS: u64 = 120_000;
 
-/// How old a harness report may be and still show that the seat's driver is alive. A driver at an
-/// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
-/// for most of every interval; two intervals and a minute of slack never call such a seat down.
+/// How old a harness report may be and still show that the seat's driver is alive. This is a
+/// liveness grace period, not observation freshness: two five-minute refresh intervals and
+/// a minute of slack avoid calling a seat down after one missed report.
 pub const HEARTBEAT_MS: u64 = 661_000;
 
 /// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
@@ -3544,7 +3548,7 @@ pub fn overlay_down(
     if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
         && !matches!(reported, None | Some("starting" | "ended" | "failed"))
     {
-        let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
+        let lapsed = report_age_ms.is_some_and(|age| u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis());
         item["state"] = json!(match reported {
             Some("working") => "running",
             Some("ready" | "idle") if !lapsed => "running",
@@ -8186,7 +8190,7 @@ pub async fn guard_bound_request(
 
 async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
     let refuse = || ApiError::bad(FractalError::new(
-        "foreign-agent-actor", "local caller ancestry could not be verified",
+        "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
     ));
     let path = request.uri().path();
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")

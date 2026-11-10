@@ -16,6 +16,7 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod message_expiry;
 pub mod deploy;
 mod device_renewal;
 pub mod evidence;
@@ -34,6 +35,11 @@ pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod declarations;
+pub mod desired_batch;
+mod desired_actual;
+mod desired_progress;
+#[cfg(test)]
+mod desired_batch_index_tests;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
@@ -42,6 +48,8 @@ pub mod identities;
 pub(crate) mod agent_review_answer;
 #[allow(dead_code)]
 pub(crate) mod agent_review_decode;
+#[doc(hidden)]
+pub mod agent_review_transaction;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
@@ -49,6 +57,7 @@ mod rename_proof_tests;
 mod observation_trim_tests;
 pub mod directive_notes;
 mod declared_admission;
+mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
@@ -253,6 +262,8 @@ pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 pub mod revision_seats;
 pub mod delegation;
+pub mod claim_pages;
+pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
@@ -791,7 +802,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6e39e16546c7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1051,6 +1062,23 @@ CREATE TABLE IF NOT EXISTS desired (
     owner_generation TEXT,
     owner_step TEXT
 );
+-- A repair may rewrite a selected row without moving either the claim cut or graph
+-- health. Capture every row write, including raw corrections, in its own transaction.
+CREATE TABLE IF NOT EXISTS local_desired_write_witness (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=0)
+);
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_insert AFTER INSERT ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_update AFTER UPDATE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_delete AFTER DELETE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+-- Sparse kind-filtered desired pages seek one kind's subject range, not the whole graph.
+CREATE INDEX IF NOT EXISTS desired_kind_subject_index ON desired(kind, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_step_index ON desired(owner_step, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_run_index ON desired(owner_run, subject);
 -- Deleting a claim checks these references (foreign keys are on); see
@@ -3326,6 +3354,7 @@ impl Store {
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
                 declared_admission::validate_publication(transaction, &self.origin, intent)?;
+                agent_charter::validate_publication(transaction, &self.origin, intent)?;
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
                 let intent = normalized_intent.as_ref();
                 let mut normalized_expected = std::borrow::Cow::Borrowed(expected);
@@ -4273,8 +4302,25 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        let filter = ClaimsFilter { subject, ..ClaimsFilter::default() };
+        self.claims_page_matching(filter, owner_run, after_index, before_index, descending, limit)
+    }
+
+    /// Claims after `after_index` (and before `before_index`) matching `filter`, at most `limit`
+    /// in store-index order; `next_cursor` is set when more remain. Each filter reads through a
+    /// claims index (see [`claims_page_query`]).
+    pub fn claims_page_matching(
+        &self,
+        filter: ClaimsFilter<'_>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+    ) -> Result<ClaimsPage> {
+        let (subject, lower, upper) = claim_pages::subject_match(filter)?;
         let connection = self.readers.get();
-        let query = claims_page_query(subject.is_some(), descending);
+        let query = claims_page_query(subject, filter.kind.is_some(), descending);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4283,8 +4329,12 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
+        let values: [&dyn rusqlite::ToSql; 6] =
+            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper];
+        // Each query names its highest parameter; the unused ones below it stay NULL.
+        let bound = statement.parameter_count();
         let rows = statement.query_map(
-            params![after_index, before_index, subject, scan_limit],
+            rusqlite::params_from_iter(&values[..bound]),
             claim_from_row,
         )?;
         let mut claims = Vec::new();
@@ -11198,6 +11248,10 @@ fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
 ) -> Result<bool, FractalError> {
+    if input.kind == message_expiry::KIND {
+        message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
+        return message_expiry::validate_transition(transaction, &input.subject);
+    }
     let requested = match input.kind.as_str() {
         "message.sent" => "sent",
         "message.staged" => "staged",
@@ -11264,6 +11318,8 @@ fn validate_message_transition(
             .filter(|kind| *kind == "message")
             .map(|_| "sent")
     };
+    let late_consumption = matches!(requested, "delivered" | "read")
+        && message_expiry::exists(transaction, &input.subject).map_err(internal)?;
     if requested != "sent" && current == Some(requested)
         && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
@@ -11279,7 +11335,7 @@ fn validate_message_transition(
         (Some("delivered" | "read" | "closed"), "staged")
             | (Some("read" | "closed"), "delivered")
             | (Some("closed"), "read")
-    ) && input.actor.is_some()
+    ) && input.actor.is_some() && !late_consumption
     {
         let index: Option<u64> = transaction
             .query_row("SELECT created_index FROM message_index WHERE subject=?1", [&input.subject], |row| row.get(0))
@@ -11302,7 +11358,7 @@ fn validate_message_transition(
             | (Some("sent"), "delivered")
             | (Some("delivered"), "read")
             | (Some("read"), "closed")
-    );
+    ) || (late_consumption && matches!(current, Some("sent" | "staged" | "read" | "closed")));
     let custody_read = requested == "read"
         && input.fields.contains_key("acting_for")
         && matches!(current, Some("sent" | "staged" | "read"));
@@ -11432,6 +11488,10 @@ pub fn append_claim_tx_with_assistant_answer(
     }
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
+    if kind == message_expiry::KIND {
+        return Err(anyhow::Error::new(FractalError::new(
+            "invalid-message-expiry", "expiry requires runtime receipt admission")));
+    }
     if kind == retirements::KIND {
         return Err(anyhow::Error::new(retirements::writer_required()));
     }
@@ -11477,6 +11537,7 @@ pub fn append_claim_tx_with_assistant_answer(
 ) -> Result<ClaimRecord> {
     fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
+    agent_charter::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
@@ -11494,6 +11555,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    human_review_reassignment::admit_reassignment(transaction, kind, &fields)
+        .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
@@ -15742,6 +15805,59 @@ pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
 
 #[cfg(any(test, feature = "test-support"))]
 #[test]
+pub fn catch_up_projection_distinguishes_inline_local_writes_from_new_admission_between_chunks() {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    for replicated in [false, true] {
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        target.bind_fleet(FLEET).unwrap();
+        let append = |store: &Store, index: usize| {
+            store.put_document(
+                &format!("doc/projection-watermark/{index}"),
+                b"An invented local write.",
+                &None,
+                &format!("projection-watermark-{index}"),
+            ).unwrap();
+        };
+        let admit = || {
+            let mut inventory = target.replication_inventory().unwrap();
+            inventory.accepts = None;
+            let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+            target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+            assert!(target.validate_replication_backlog().unwrap().changed);
+        };
+        for index in 0..=smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append(&source, index);
+        }
+        admit();
+        let admitted = target.index().unwrap();
+        let mut yielded = false;
+        assert!(target.project_replication_backlog_with_yield(|| {
+            if !yielded {
+                yielded = true;
+                let next = smallclaims::store::PROJECTION_CHUNK_CLAIMS + 1;
+                if replicated {
+                    append(&source, next);
+                    admit();
+                } else {
+                    append(&target, next);
+                }
+            }
+        }).unwrap());
+        assert!(yielded, "the test must write between bounded chunks");
+        assert!(target.index().unwrap() > admitted);
+        assert!(target.projected_through() >= admitted);
+        assert_eq!(target.replication_projection_deferred(), replicated);
+        if replicated {
+            assert!(target.project_replication_backlog().unwrap());
+            assert!(!target.replication_projection_deferred());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[test]
 pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
     pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
@@ -15866,8 +15982,8 @@ pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert_eq!(target.projected_through(), admitted);
     assert!(
-        target.replication_projection_deferred(),
-        "later claims still need a pass"
+        !target.replication_projection_deferred(),
+        "inline local writes leave no admitted claim behind the pass"
     );
     assert!(target.project_replication_backlog().unwrap());
     assert!(!target.replication_projection_deferred());
@@ -16033,6 +16149,7 @@ pub fn classify_replicated_claim_with_registry(
             ),
         ));
     }
+    message_expiry::validate_actor(&claim.kind, claim.actor.as_deref())?;
     identities::validate_replicated(claim)?;
     if claim.kind == retirements::KIND
         && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
@@ -22691,6 +22808,8 @@ pub struct ClaimCommitContext<'a> {
     pub retirement_writer: bool,
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
+    /// Runtime append owns cross-file expiry/receipt serialization.
+    pub expiry_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
@@ -22700,6 +22819,41 @@ pub struct ClaimCommitContext<'a> {
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
     pub as_older_build: bool,
+}
+
+fn claim_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    operation: Option<&(String, String)>,
+) -> Result<Option<ClaimRecord>, FractalError> {
+    if let Some((operation_id, request_digest)) = operation {
+        if let Some((stored_digest, canonical_claim, state)) =
+            operation_tx(transaction, operation_id).map_err(internal)?
+        {
+            if state == "conflict" {
+                return Err(FractalError::new(
+                    "idempotency-conflict",
+                    "the replicated operation has conflicting requests",
+                )
+                .with_detail("operation_id", operation_id.clone()));
+            }
+            if stored_digest != *request_digest {
+                return Err(FractalError::new(
+                    "idempotency-mismatch",
+                    "the idempotency key already identifies a different request",
+                )
+                .with_detail("operation_id", operation_id.clone())
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest.clone()));
+            }
+            let claim = claim_by_id_tx(transaction, &canonical_claim)
+                .map_err(internal)?
+                .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
+            identities::check_receipt(transaction, &claim)?;
+            return Ok(Some(claim));
+        }
+        checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+    }
+    Ok(None)
 }
 
 pub fn append_claim_with_commit_context(
@@ -22712,6 +22866,10 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND && !context.expiry_writer {
+            return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
+        }
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());
         }
@@ -22830,34 +22988,11 @@ pub fn append_claim_with_commit_context(
                 }
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
+                    && !(matches!(input.kind.as_str(), "message.delivered" | "message.read")
+                        && message_expiry::exists(transaction, &input.subject).map_err(internal)?)
             } else { false };
-            if let Some((operation_id, request_digest)) = &operation
-                && let Some((stored_digest, canonical_claim, state)) =
-                    operation_tx(transaction, operation_id).map_err(internal)?
-            {
-                if state == "conflict" {
-                    return Err(FractalError::new(
-                        "idempotency-conflict",
-                        "the replicated operation has conflicting requests",
-                    )
-                    .with_detail("operation_id", operation_id.clone()));
-                }
-                if stored_digest != *request_digest {
-                    return Err(FractalError::new(
-                        "idempotency-mismatch",
-                        "the idempotency key already identifies a different request",
-                    )
-                    .with_detail("operation_id", operation_id.clone())
-                    .with_detail("stored_digest", stored_digest)
-                    .with_detail("request_digest", request_digest.clone()));
-                }
-                let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
-                    .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
-                identities::check_receipt(transaction, &claim)?;
-                return Ok((claim,false));
-            }
-            if let Some((operation_id, request_digest)) = &operation {
-                checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
+            if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+                return Ok((claim, false));
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.

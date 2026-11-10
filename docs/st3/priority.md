@@ -10,20 +10,26 @@ are work: its compiles, its tests, its tools.
 
 ## Seat priority
 
-Every seat's harness, and every exec task such as a gate, starts below the daemon by default, and
-everything either starts inherits that. One setting changes it for the install, and one line
-changes it for a seat.
+A standing agent seat's harness starts below the daemon by default, and everything it starts
+inherits that. Finite work starts at normal priority: every exec task, such as a gate's tests or a
+mission step's command, and every seat a mission run owns (`agent/RUN/...`). Someone waits on
+finite work, and on macOS `taskpolicy -b` throttles CPU and disk IO hard enough to slow it several
+times under load. One setting changes the standing-seat default for the install, and one line
+changes it for any seat or exec task.
 
 | Setting | Linux | macOS |
 | --- | --- | --- |
 | `background` (default) | `nice -n 10` and IO class best-effort, level 7 | `taskpolicy -b` |
 | `normal` | the daemon's own priority | the daemon's own priority |
 
-Only agent seats and what they start go to background: their harnesses, helpers, shells an agent
-opens, and gates. A terminal a person owns (`pty/person/NAME/ID`, such as a shell opened from the
+Only standing agent seats and what they start go to background by default: their harnesses,
+helpers and shells an agent opens. An exec task or run-owned seat goes to background only when it
+declares `ST_SEAT_PRIORITY "background"` itself; the install's `seat_priority` does not apply to
+it. A terminal a person owns (`pty/person/NAME/ID`, such as a shell opened from the
 TUI or the phone) and anything else a person drives interactively always run at normal priority,
 whatever `seat_priority` and `ST_SEAT_PRIORITY` say. The daemon, the PTY servers and the `fractal` CLI
-keep normal priority.
+keep normal priority. The split is the same on Linux and macOS; on Linux the daemon and PTY servers
+also keep their scope weights, so normal-priority work still cannot crowd out the live path there.
 
 The prefix changes priority only. It does not change a seat's parent or lifetime: a seat's parent
 is its PTY server, not the daemon, so restarting the daemon leaves every seat and its children
@@ -90,6 +96,7 @@ Declared priority accepts the complete set `background < normal`; declared lane 
 **Budget window.** A mission's `token-budget` is the total cost-weighted tokens for
 one mission run, including all attempts and retries; retrying does not start a new window.
 `cpu-seconds` is accumulated CPU seconds over that same mission-run window.
+See the [CPU reservation ledger contract](#cpu-reservation-ledger-contract) for the intended accounting.
 A step-run window is a future extension, not an accepted declaration location.
 
 Cost-weighted tokens are `sum(tokens * (class price / base input price))` across
@@ -121,8 +128,7 @@ Typed entries are strict objects `{"person":"person/reviewer","asks":3}` in the
 `declared_budgets.attention` array. Authored order is preserved; an empty array is
 omitted. Semantic errors identify `declared_budgets.attention` or
 `declared_budgets.attention[<person>].asks`. A missing person entry is undeclared,
-never zero or unlimited. These declarations do not implement counting, comparison,
-admission or enforcement; the existing local report above is unchanged.
+never zero or unlimited. These declarations do not implement admission or enforcement.
 
 **Agents.** New agent declarations accept only `memory-max` and `disk-max` in
 `declared-budgets`; `cpu-seconds`, `token-budget` and `attention` refuse publication
@@ -185,6 +191,149 @@ members or fence old peers before publishing attention. Remove attention using
 supporting readers before a mixed-version rollback. Old KDL and typed authoring
 already reject unknown budget members rather than silently dropping attention.
 There is no database, replay or enforcement change.
+
+### Attention report
+
+The client-v0 operation
+`GET /v1/client/attention-budget?mission=M[&person=P][&at=UNIX_MS]`
+reads the [attention window and declaration](#declared-admission) for one mission and person.
+Embedded-web recipient sessions may read their own report. Local agents and ordinary
+paired clients with `read.projections` may also read reports, including over
+Fabric. External assistant grants cannot read the report.
+Missing scope and expired sessions are refused; a raw Unix person header
+does not establish recipient authority. Existing `person_filter` restrictions
+limit person sessions to their own report: omitted person defaults to the session
+person, and another person is refused. Agents without a session person must specify
+`person`; omission never reads all people.
+
+The CLI uses the same client operation:
+`fractal budgets attention MISSION [--as ACTOR] [--person PERSON] [--at UNIX_MS] [--json]`.
+For Unix calls, `--as` names the acting person or agent (default: `ST_AGENT`, including
+the existing `FRACTAL_AGENT` alias, then the configured person); `--person` selects
+the budget recipient and never establishes acting identity. A harness cannot name
+another agent as its actor. Fabric calls use their paired credential instead.
+
+The report distinguishes declared asks from undeclared, charged from inclusive usage,
+not-charged requests, and unattributed requests for the person. It identifies the canonical
+mission and person, exclusive window start, inclusive end, and local claim index.
+The window is `(at - 7 days, at]`. `declared` reads the current revision; charging
+uses each originating or ancestor run's initial revision, so adding a limit later
+does not charge older runs. Every declaring ancestor is charged independently.
+`fleet_complete` is always false. At most 128 newest request references expose only claim
+IDs and subjects, never request text; `request_refs_complete` states whether all fit.
+This is data only: no limit enforcement, delivery decision, write, or fleet-complete promise.
+
+Reads examine at most 10,001 retained lifetime native ask claim rows for the
+recipient through the existing recipient index, newest local admission first;
+more than 10,000 refuses the whole report before applying the weekly window.
+This includes updates and expired asks, not just distinct current-window requests.
+Retained history therefore grows toward refusal even when weekly usage is low;
+the report does not silently discard older history. Unrelated recipients and other
+claim kinds are not scanned. A valid ancestry continuation beyond 64 vertices also
+refuses the whole report, even if the mission was already found; missing provenance
+remains distinct and may be reported as unattributed.
+
+### CPU reservation ledger (contract)
+
+Status: contract only, data only. No code implements it yet. Owner of the semantics:
+st-budgets. Implementer: the gate-slot retirement program (job reserve/settle hooks
+and the cgroup v2 `cpu.stat` collector), after its durable-job work. Decision: Johannes,
+`step-run/ask-139e87e814cd8ef4cc9b64262722413d/ask` (R5), with inclusive charging from
+`step-run/ask-ba7954f15024216f4209fa4f421b3f2a/ask` (R2).
+
+**Purpose.** A mission's `cpu-seconds` becomes a total cap on the CPU seconds that its
+jobs use in one mission run. One authoritative ledger per mission run records
+reservations and settlements.
+
+**Order of delivery.**
+
+1. Report: a per-run CPU report (settled, reserved, unknown) ships and is observed on real runs.
+2. Admission: then the ledger can refuse to start a job whose reservation does not fit.
+
+The first stage, reporting, changes no behavior. Turning admission on for real missions
+needs Johannes's explicit approval, because budget declarations are data only until then.
+
+**Unit and measurement.**
+
+- One CPU second is 10^6 `usage_usec` from cgroup v2 `cpu.stat` of the job attempt's own scope.
+- The collector reads the scope at start and at end, and records the delta, the physical
+  host and the observation timestamps. `usage_usec` includes descendant cgroups.
+- A transient scope's cgroup disappears at exit. The collector reads it before removal,
+  or uses the unit's `CPUUsageNSec` with `CPUAccounting=yes`.
+- A job attempt without its own cgroup v2 scope has unknown usage. This includes macOS
+  hosts, remote builders and a lost host. Unknown is never zero.
+
+**Ledger records** (append-only, one ledger per mission run, fields named for the contract):
+
+- `reservation`: ledger run, job id, attempt, host, `reserved_cpu_seconds`, the list of
+  charged mission runs, and the time.
+- `settlement`: the reservation id, then `measured_cpu_seconds` or `unknown` with a reason,
+  coverage, and the time.
+
+**Reservation size.**
+
+- The reservation is the job attempt's provable CPU upper bound, in CPU seconds: the
+  wall-clock deadline × min(the `cpu.max` rate of the attempt's scope and of every ancestor
+  cgroup, the CPU count of the scope's `cpuset.cpus.effective`).
+- The cgroup hierarchy enforces that minimum. The implementer records which cgroup
+  supplied the bound.
+- A job attempt without a deadline, or on a host without cgroup v2 (macOS, remote
+  builders), has no provable bound. It can run in report mode only; in admission mode
+  it is refused for a capped mission.
+- The bound is conservative: an uncapped attempt reserves all of its effective CPUs for
+  its whole deadline, so a capped mission can wait for a long time in admission mode.
+  Settlement corrects the charge when the attempt ends. A per-job `cpu.max` or a shorter
+  deadline gives a tighter bound.
+
+**Reserve before each job attempt.**
+
+- Before the attempt starts, the ledger adds one reservation for that attempt.
+- The ledger charges the reservation to every mission run that declares `cpu-seconds`
+  on the job's ancestry: the job's own run and every declaring ancestor (R2). A job is
+  counted at most once in each ledger.
+- In admission mode, the attempt starts only if, for every charged run:
+  settled + open reservations + this reservation ≤ that run's `cpu-seconds`. Otherwise:
+  - If the attempt could fit after open reservations settle, it waits in its queue.
+    It is not killed and not failed.
+  - If the attempt's reservation alone exceeds a charged run's `cpu-seconds` minus that
+    run's settled usage, the attempt can never fit. The ledger refuses it with the typed
+    reason `budget-cannot-fit`, which names the run and the numbers, and the report shows it.
+
+**Settle after each job attempt.**
+
+- When the attempt ends, the settlement replaces the reservation with the measured value.
+- If the measurement is unknown, the reservation stays charged in full (R5).
+- If the measured value exceeds the reservation, the measured value is charged, and the
+  report marks a bound violation: the bound was wrong.
+
+**Retries and delegation.**
+
+- Each retry attempt is reserved and settled separately in the same mission-run window
+  (the #6092 budget window); a retry does not start a new window.
+- A delegated child run charges its own ledger and every declaring ancestor's ledger.
+
+**Limits pin and scope.** The limit comes from each run's initial revision. Only runs
+that start after the feature activates are charged (new runs only).
+
+**Running work.** No missing, late or unknown usage stops or kills running work. Only the
+admission of new attempts is affected.
+
+**Authority and failure.**
+
+- Each mission run has one authoritative ledger writer: the replica that admits the run's jobs.
+- If the ledger is unreachable in admission mode, new attempts of a capped mission wait,
+  and running attempts continue.
+- A replica never admits against a copy that it cannot prove current.
+
+**Report fields** (per mission run):
+
+- `cpu_seconds` declared, or tagged `undeclared`;
+- `charged_settled`;
+- `charged_reserved_open`;
+- `charged_unknown_retained`;
+- `inclusive_measured` (all usage in the subtree, separate from charged);
+- `unknown_attempts`;
+- `refused_cannot_fit` (attempts refused with `budget-cannot-fit`).
 
 ## Linux
 

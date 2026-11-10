@@ -239,6 +239,12 @@ success-output = "immediate"
 filter = 'package(=smallclaims) and binary(=ivm_admitted_applied_slice) and test(/^canonical_metadata_inventory_growth_reports_actual_page_work$/)'
 success-output = "immediate"
 
+# Retain the one-time desired index upgrade's normal startup measurement in hosted logs.
+# Output visibility only: no selection, retry, thread or budget changes.
+[[profile.ci.overrides]]
+filter = 'package(=fractal-store) and test(=store::desired_batch_index_tests::existing_store_startup_installs_desired_kind_index_without_offline_work)'
+success-output = "immediate"
+
 # Keep the operation helper's actual SQL/VM/scan tuples on successful hosted controls.
 # Output visibility only: selection, retries, threads and work assertions are unchanged.
 [[profile.ci.overrides]]

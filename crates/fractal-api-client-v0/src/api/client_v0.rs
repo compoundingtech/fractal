@@ -36,6 +36,7 @@ pub use fractal_api_core::api::client_v0::{ClientSession, CollectionSubscribe, E
 pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
+pub mod attention_budget;
 pub mod assistant;
 pub mod browser_pairing;
 #[cfg(test)]
@@ -118,6 +119,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
@@ -8034,7 +8036,6 @@ async fn create_agent(
         ("model", &parameters.model),
         ("effort", &parameters.effort),
         ("host", &parameters.host),
-        ("description", &parameters.description),
         ("repo", &parameters.repo),
         ("base", &parameters.base),
         ("branch", &parameters.branch),
@@ -8042,6 +8043,13 @@ async fn create_agent(
         if let Some(value) = value {
             creation_string(value, field, 4096)?;
         }
+    }
+    if let Some(description) = &parameters.description {
+        creation_string(
+            description,
+            "description",
+            fractal_drivers::spec::AGENT_DESCRIPTION_MAX_BYTES,
+        )?;
     }
     if let Some(message) = &parameters.message {
         creation_string(message, "message", 65536)?;
@@ -14518,6 +14526,32 @@ subscription "watch/source" {
                 .unwrap(),
             ids
         );
+    }
+
+    #[tokio::test]
+    async fn agent_create_refuses_a_charter_over_eight_kib_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "example");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        let description = "x".repeat(fractal_drivers::spec::AGENT_DESCRIPTION_MAX_BYTES + 1);
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/charter".into(),
+            action_type: "agent.create".into(),
+            idempotency_key: "agent-charter-too-long".into(),
+            fence: Fence::default(),
+            parameters: json!({"name":"parser", "harness":"codex", "description":description}),
+        };
+        let index = state.store.index().unwrap();
+        let error = create_agent(&state, &new_client_snapshot(&state), &session, &request)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.contains("description must be nonempty, without NUL, and at most 8192 bytes"),
+            "{}",
+            error.message
+        );
+        assert_eq!(state.store.index().unwrap(), index);
     }
 
     #[tokio::test]
@@ -24693,14 +24727,14 @@ mission "example/zero-run" state="ready" {
 
     #[test]
     fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
-        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
-        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
-        // freshness window nearly all the time, never older than a heartbeat.
+        // An idle report remains current through the shared freshness window; after that it
+        // still proves liveness until the separate heartbeat grace period expires.
         let started = 1_790_000_000_000_u64;
         for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
             let mut card = sessionless_card(json!("indeterminate"));
             overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
-            assert_eq!(card["state"], "waiting", "{age}");
+            let current = u128::from(age) <= fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+            assert_eq!(card["state"], if current { "running" } else { "waiting" }, "{age}");
             assert!(card.get("down_since").is_none(), "{age}");
             assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
         }
@@ -24898,6 +24932,7 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "status-cache");
         let subject = "agent/cedar";
+        let stale_age = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis() + 1_000;
         let append = |kind: &str, fields: Value| {
             state.store.append_claim(&ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
@@ -24906,7 +24941,7 @@ mission "example/zero-run" state="ready" {
             }).unwrap()
         };
         append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
-        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - 91_000) as u64}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - stale_age) as u64}));
         let index = state.store.index().unwrap();
         let before = client_agent_resources(&state.store, false, "", index).unwrap();
         let before = before.iter().find(|item| item["id"] == subject).unwrap();
@@ -24921,7 +24956,7 @@ mission "example/zero-run" state="ready" {
         peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
-        cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
+        cached_harness.observed_at_unix_ms = client_now_ms() - stale_age;
         aged[0]["_status_source"] = json!(cached_harness);
         let mut on_host = aged.clone();
         overlay_agent_resources(&peer.store, &mut aged, "").unwrap();

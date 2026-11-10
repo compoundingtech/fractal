@@ -2417,6 +2417,24 @@ impl Client {
         self.list_internal("attention", cursor, limit, history)
             .await
     }
+    pub async fn attention_budget(
+        &self,
+        mission: &str,
+        person: Option<&str>,
+        at: Option<u128>,
+    ) -> Result<Envelope<AttentionBudgetReport>, ClientError> {
+        let mut path = format!(
+            "/v1/client/attention-budget?mission={}",
+            percent_encode(mission)
+        );
+        if let Some(person) = person {
+            path.push_str(&format!("&person={}", percent_encode(person)));
+        }
+        if let Some(at) = at {
+            path.push_str(&format!("&at={at}"));
+        }
+        self.get(&path).await
+    }
     pub async fn attention_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("attention", id).await
     }

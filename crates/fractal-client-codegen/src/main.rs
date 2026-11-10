@@ -244,6 +244,10 @@ fn rust_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
+        if id == "attention-budget" {
+            writeln!(out, "    pub async fn attention_budget(&self, mission: &str, person: Option<&str>, at: Option<u128>) -> Result<Envelope<AttentionBudgetReport>, ClientError> {{ let mut path = format!(\"/v1/client/attention-budget?mission={{}}\", percent_encode(mission)); if let Some(person) = person {{ path.push_str(&format!(\"&person={{}}\", percent_encode(person))); }} if let Some(at) = at {{ path.push_str(&format!(\"&at={{at}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    pub async fn arrangements_memberships(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements/{{}}/{{}}/memberships?person={{}}\", percent_encode(person_name), percent_encode(uuid), percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
@@ -574,6 +578,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+        } else if id == "attention-budget" {
+            writeln!(out, "    public func attentionBudget(mission: String, person: String? = nil, at: UInt64? = nil) async throws -> Envelope<AttentionBudgetReport> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; if let at {{ query.append(.init(name: \"at\", value: String(at))) }}; return try await get(\"v1/client/attention-budget\", query: query) }}")?;
         } else if id == "mission-declaration.get" {
             writeln!(out, "    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/mission-declaration\", query: query) }}")?;
         } else if id == "subject.definition" {
@@ -853,6 +859,8 @@ fn validate_surfaces(
         "CanonicalNode",
         "SubjectDefinition",
         "PublicationDefinition",
+        "AttentionBudgetReport",
+        "AttentionBudgetRequestRef",
         "MissionDeclaration",
         "AgentsStatusWatermark",
         "Snapshot",
@@ -950,6 +958,7 @@ fn validate_surfaces(
         "PersonUpdate",
         "RequestSubject",
         "RequestAnswerOption",
+        "PersonOptionNote",
         "PersonAnswerInput",
         "PersonAnswer",
         "PersonAnswerRecord",
@@ -1757,6 +1766,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
+        } else if id == "attention-budget" {
+            writeln!(out, "    async attentionBudget(mission: string, person?: string, at?: number, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AttentionBudgetReport>> {{ return this.get('{route}' + query({{ mission, person, at }}), undefined, requestOptions); }}")?;
         } else if id == "mission-declaration.get" {
             writeln!(out, "    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MissionDeclaration>> {{ return this.get('{route}' + query({{ mission, revision }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {

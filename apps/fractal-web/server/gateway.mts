@@ -8,6 +8,7 @@ import type { Tracer } from 'effect'
 import { BoundaryError, reject } from './boundary.mts'
 import { spanOptions, traceHeaders } from './tracing.mts'
 import { encodingQualities } from './static.mts'
+import { browserAuthorization } from './browserCookie.mts'
 
 const responseCodings = ['br', 'gzip', 'identity'] as const
 
@@ -35,13 +36,22 @@ export const withClientFeatures = (requested: string | readonly string[] | undef
   const features = list.split(',').map(feature => feature.trim()).filter(feature => feature !== '')
   return (features.includes(participantsFeature) ? features : [...features, participantsFeature]).join(', ')
 }
-export const clientRoute = (url: string): boolean => {
-  const path = url.split('?')[0] ?? ''
-  if (path !== '/v1/client' && !path.startsWith('/v1/client/')) return false
+/** Decode once; reject paths whose interpretation could change in another router. */
+export const browserPath = (url: string): string | undefined => {
   try {
-    const decoded = decodeURIComponent(path)
-    return !decoded.includes('\\') && !decoded.includes('\0') && !decoded.split('/').includes('..')
-  } catch { return false }
+    const decoded = decodeURIComponent(url.split('?')[0] ?? '')
+    if (!decoded.startsWith('/') || decoded.includes('//') || /[\\%\x00-\x1f\x7f?#]/.test(decoded)) return undefined
+    const segments = decoded.split('/')
+    if (segments.some(segment => segment === '.' || segment === '..')) return undefined
+    const normalized = `/${segments.filter(segment => segment !== '').join('/')}`
+    return decoded === normalized || decoded === `${normalized}/` ? normalized : undefined
+  } catch { return undefined }
+}
+export const clientRoute = (url: string): boolean => {
+  const path = browserPath(url)
+  if (path === undefined || (path !== '/v1/client' && !path.startsWith('/v1/client/'))) return false
+  // Only the publisher's cookie-only wrapper may begin or complete browser/device pairing.
+  return !/^\/v1\/client\/pairings?(?:\/|$)/i.test(path)
 }
 /** Remove propagation-only query fields without rewriting application query bytes. */
 export const withoutTraceQuery = (url: string | undefined): string | undefined => {
@@ -91,7 +101,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
         settled = true; cleanup(); resume(Effect.succeed(reply?.statusCode ?? 502))
       }
       const upstream = request({ socketPath, path: req.url, method: req.method, headers: {
-        ...cleanHeaders(req.headers), host, authorization, ...traceHeaders(span),
+        ...cleanHeaders(req.headers), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
         'x-st3-features': withClientFeatures(req.headers['x-st3-features']),
       }, agent: false }, (incoming) => {
         reply = incoming
@@ -153,7 +163,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       const clientClosed = () => fail()
       const cleanup = () => { socket.off('error', error); socket.off('close', clientClosed) }
       const upstream = request({ socketPath, path: withoutTraceQuery(req.url), method: req.method, headers: {
-        ...cleanHeaders(req.headers, true), host, authorization, ...traceHeaders(span),
+        ...cleanHeaders(req.headers, true), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
         ...upgradeClientHeaders(req),
         // Browser WebSocket cannot send SDK headers, including on the early socket.
         // Old daemons ignore this additive feature; readers still detect optional blocks.

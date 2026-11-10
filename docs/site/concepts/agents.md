@@ -53,6 +53,26 @@ The graph keeps the agent's declaration, messages, work, and decisions. A runtim
 
 Each agent holds one claimed step at a time and has an ordered queue of runs. Independent steps assigned to the same agent still execute serially. Use separate agents and workspaces when work should truly run in parallel.
 
+## Charter
+
+An agent's `description` is its **charter**: the lasting responsibility it carries across missions, such as what it owns, what it watches, and when it acts without being asked. Mission goals, steps, and messages carry finite tasks; the charter says what the agent is for between them, so keep it a summary rather than a task brief.
+
+```kdl
+version 2
+agent "example/release-keeper" {
+  description """
+    Keep main releasable and own its release notes.
+    Watch CI on main; fix or report a red build before other work.
+    """
+  workspace "/work/example"
+  harness "claude" {}
+}
+```
+
+A charter is UTF-8 text of at most 8 KiB (8,192 bytes) and may span several lines. Publishing a charter over 1,000 bytes requires every active fleet member to support it; see [agent charter publication](https://github.com/compoundingtech/fractal/blob/main/docs/st3/compatibility.md#agent-charter-publication).
+
+`fractal agents show ID` prints the charter of the agent's current declaration under **Charter**. A running agent reads its own with `fractal agents show "$ST_AGENT"`. When a restarted seat is told where its previous session was, that message opens with the charter. The charter is never a launch input: editing it publishes the declaration without restarting the agent.
+
 ## Access and readiness
 
 Agents use the daemon user's filesystem and provider accounts. Provider permission modes are not an isolation boundary. Install and authenticate the harness before expecting it to become ready. Put instructions in mission goals, constraints, linked documents, or messages, not a harness prompt field.
