@@ -474,8 +474,8 @@ mod mission_binding_tests {
 }
 
 /// Real persisted fixture shared with the signed-result integration tests.
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
     use base64::Engine as _;
     use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};

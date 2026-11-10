@@ -36,6 +36,9 @@ pub use fractal_api_core::api::client_v0::{ClientSession, CollectionSubscribe, E
 pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
+#[cfg(test)]
+#[path = "client_v0/client_control_tests.rs"]
+mod client_control_tests;
 pub mod attention_budget;
 pub mod assistant;
 pub mod browser_pairing;
@@ -98,6 +101,11 @@ mod stream_timeline_tests;
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
     app
+        .route("/v1/client/device-commands", post(fractal_api_core::api::client_commands::issue_route)
+            .layer(axum::extract::DefaultBodyLimit::max(fractal_api_core::api::client_commands::MAX_BODY_BYTES)))
+        .route("/v1/client/device-commands/{*id}", get(fractal_api_core::api::client_commands::read_route))
+        .route("/v1/client/device-results", post(fractal_api_core::api::client_commands::result_route)
+            .layer(axum::extract::DefaultBodyLimit::max(fractal_api_core::api::client_commands::MAX_BODY_BYTES)))
         .route("/v1/client/test-clients/enroll", post(fractal_api_core::api::client_control_enrollment::enroll_http))
         .route("/v1/client/test-clients/revoke", post(fractal_api_core::api::client_control_enrollment::revoke_http))
         .route("/v1/client/control-grants", post(fractal_api_core::api::client_control_grants::issue_grant_route))
@@ -550,6 +558,14 @@ async fn collection_items_with_windows(
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
+    if request.collection == "commands" {
+        let state = state.clone();
+        let session = session.clone();
+        return blocking_store(move || {
+            let items = fractal_api_core::api::client_commands::collection_items(&state, &session)?;
+            Ok((new_client_snapshot(&state), items, false, None))
+        }).await;
+    }
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
@@ -2115,6 +2131,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let mut views = state.store.subscribe_collection_views();
     let mut presence_changes = super::client_presence::subscribe();
     let mut push_changes = super::client_push::subscribe();
+    let mut command_changes = fractal_api_core::api::client_commands::subscribe();
     let mut native_watch: Option<inventory::NativeWatch> = None;
     let mut native_watch_pending: Option<tokio::task::JoinHandle<Result<inventory::NativeWatch, ApiError>>> = None;
     let windows = collection_windows::Windows::attach(&state.store);
@@ -2435,8 +2452,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 }
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_some()).map(|(id, _)| id.clone()));
             }
+            _ = command_changes.recv(), if !command_waiting => {
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "commands").map(|(id, _)| id.clone()));
+            }
             result = changed.changed(), if !command_waiting => {
                 if result.is_err() { return; }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "commands").map(|(id, _)| id.clone()));
                 // Weigh only the commits since the last look: a window is due for a reread when
                 // one of them can change it. A published view rereads when it publishes instead;
                 // a commit that can change the agents roster asks its refresher to publish.

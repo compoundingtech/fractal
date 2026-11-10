@@ -623,6 +623,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         })
         .collect::<Vec<_>>();
     capabilities.push(json!({"id":"summary", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"phone-commands", "version":1, "state":if super::client_commands::capable(session) {"granted"} else {"unavailable"}}));
     // Attention rows say whether each is an alert and name its agent conversation; `alerts` names
     // the attention collection and routes, and the summary counts alerts.
     capabilities.push(json!({"id":"alerts", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));

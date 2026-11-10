@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Verify narrow-purpose client results and persist terminal and bounded rejected-attempt receipts",
+  "replay": {"status":"none","detail":"Command rows remain ephemeral; separate trusted receipt claims preserve completed, expired, not-foreground and refused outcomes."},
+  "schema": {"status":"changed","detail":"Commands carry grant/run metadata and signed results bind the generated visible-state model. Receipt claims contain command, issuer, device, run/grant and verified signature/binding, with null signatures for unsigned outcomes."},
+  "rules": {"status":"changed","detail":"Daemon clock and live grant/claim checks gate enrolled P-256 results. Wrong key, purpose, kind, session, grant, run, command and replay are refused; message.send remains unauthorized with the same key/grant. Authenticated fixture-agent admission refusals receive durable receipt IDs; malformed, unauthenticated and non-fixture attempts do not. The 2048-row five-minute window returns receipt-capacity at saturation."},
+  "compatibility": {"status":"changed","detail":"Restores device.command/device.result routes and session-scoped commands collection integration in the split API, including grant lifecycle resources and paired Unix fixture clients. Existing ordinary person-operated command shapes remain supported."},
+  "downtime": {"status":"none","detail":"No live setup, enrollment, daemon restart, deployment or journey is performed."},
+  "manual": {"status":"none","detail":"Source verification uses local temporary fixtures only; human setup/apply/enrollment gates remain separate."},
+  "recovery": {"status":"none","detail":"Receipt writes are idempotent per command and survive correlation eviction; missing persistence never silently drops an unsigned terminal receipt."}
+}
