@@ -318,7 +318,7 @@ async fn desired_pages_require_the_same_paired_device_scope_as_single_desired() 
         ("desired-no-projections", vec!["read.declarations"]),
         ("desired-projections", vec!["read.projections"]),
     ] {
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject: format!("custom/client/{credential}"),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),
