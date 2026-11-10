@@ -1265,6 +1265,21 @@ export type Capability = {
   version: number;
 };
 
+export type ClientCommandReceipt = {
+  commandId: string;
+  commandKind: string;
+  device: string;
+  grantId?: string;
+  issuer: string;
+  reason?: ClientControlRefusal;
+  runId?: string;
+  screen?: string;
+  session?: string;
+  signedResult: (ClientResultBinding | null);
+  terminalState: DeviceCommandOutcome;
+  verifiedResultSignature: (DeviceSignature | null);
+};
+
 export type ClientConnection = {
   actor: string;
   client?: string | null;
@@ -1285,6 +1300,22 @@ export type ClientConnections = {
   kind: "client-connections";
   member: string;
 };
+
+export type ClientControlGrant = {
+  actor_agent: string;
+  device: string;
+  expires_at: Timestamp;
+  grant_id: string;
+  item_id?: string;
+  max_commands: number;
+  run_id: string;
+  screens: Array<string>;
+  session: string;
+  state: string;
+  verbs: Array<string>;
+};
+
+export type ClientControlRefusal = "device-not-test-client" | "grant-missing" | "grant-expired" | "screen-not-granted" | "verb-not-granted" | "budget-exhausted" | "actor-not-granted";
 
 export type ClientDiagnosticBreadcrumb = "native-start" | "js-start" | "root-mounted" | "foreground" | "background" | "previous-launch-unclean";
 
@@ -1365,6 +1396,51 @@ export type ClientDiagnosticsAck = {
 export type ClientDiagnosticsBatch = {
   events: Array<ClientDiagnosticEvent>;
   version: 1;
+};
+
+export type ClientResultBinding = {
+  command_id: string;
+  command_kind: "phone.inspect" | "phone.navigate";
+  device: string;
+  error_code: string | null;
+  grant_id: string;
+  outcome: DeviceCommandOutcome;
+  purpose: "client.device-result.v1";
+  run_id: string;
+  session: string;
+  visible_state: ClientVisibleState;
+};
+
+export type ClientTestEnrollment = {
+  consentRef: string;
+  device: string;
+  enrolledBy: string;
+  host: string;
+  instance: string;
+  kind: "ios" | "web" | "tui";
+  packetDigest: string;
+  pairingSubject: string;
+  publicKey: string;
+  session: string;
+};
+
+export type ClientTestRevocation = {
+  device: string;
+  enrollmentId: string;
+  revokedBy: string;
+};
+
+export type ClientVisibleItem = {
+  body: string;
+  id: string;
+  title: string;
+};
+
+export type ClientVisibleState = {
+  opened_item: (ClientVisibleItem | null);
+  route: string;
+  screen: string;
+  visible_item_ids: Array<string>;
 };
 
 export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
@@ -1706,14 +1782,18 @@ export type Device = ResourceHeader & {
 export type DeviceCommand = {
   args: (PhoneInspectArgs | PhoneNavigateArgs | PhoneMessageReadArgs);
   command_kind: "phone.inspect" | "phone.navigate" | "phone.message.read";
+  control_grant?: ClientControlGrant;
   device_id: string;
   error_code?: string;
   expires_at: Timestamp;
+  grant_id?: string;
   id: string;
   issued_at: Timestamp;
   issued_by: Id;
   kind: "device-command";
+  receipt_claim_id?: string;
   result?: unknown;
+  run_id?: string;
   session_actor: Id;
   state: DeviceCommandState;
 } & ResourceHeader & ({
@@ -1733,18 +1813,21 @@ export type DeviceCommandRequest = ({
   api_version: "st3.client.v0" | "fractal.client.v0";
   args: PhoneInspectArgs;
   device: string;
+  grant_id?: string;
   kind: "phone.inspect";
   ttl_ms?: number;
 } | {
   api_version: "st3.client.v0" | "fractal.client.v0";
   args: PhoneNavigateArgs;
   device: string;
+  grant_id?: string;
   kind: "phone.navigate";
   ttl_ms?: number;
 } | {
   api_version: "st3.client.v0" | "fractal.client.v0";
   args: PhoneMessageReadArgs;
   device: string;
+  grant_id?: string;
   kind: "phone.message.read";
   ttl_ms?: number;
 });
@@ -1752,10 +1835,12 @@ export type DeviceCommandRequest = ({
 export type DeviceCommandState = "pending" | "delivered" | "completed" | "not-foreground" | "expired" | "refused" | "failed";
 
 export type DeviceResult = {
+  binding?: ClientResultBinding;
   command_id: string;
   error_code?: string;
   outcome: DeviceCommandOutcome;
   result?: unknown;
+  signature?: DeviceSignature;
 };
 
 export type DeviceSignature = {
