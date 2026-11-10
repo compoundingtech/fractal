@@ -453,7 +453,7 @@ fn completed_subject_cleanup_lifts_fence_despite_unrelated_continuous_attachment
         append(&store, other, POLICY, value);
     }
     let mut lifted = false;
-    for index in 0..4 {
+    for index in 0..8 {
         // Keep growing B's 40-by-40 backlog while A waits for cleanup.
         let mut value = other_fields();
         value["expires_at_unix_ms"] = json!(50000+index);
@@ -470,4 +470,94 @@ fn completed_subject_cleanup_lifts_fence_despite_unrelated_continuous_attachment
         }
     }
     assert!(lifted, "unrelated continuous arrivals starved completed-subject cleanup");
+}
+
+#[test]
+fn ineligible_witness_prefix_consumes_bounded_visits_in_zero_and_full_slices() {
+    const PREFIX: usize = authority::CLAIMS_PER_SLICE * 3 + 1;
+    for budget in [Duration::ZERO, Duration::from_secs(60)] {
+        let store = node("attachment-witness-prefix", None);
+        let grant = append(&store, SUBJECT, GRANTED, fields());
+        drain_authority(&store);
+        let mut connection = store.connection.write();
+        let expected = snapshot(&connection);
+        // Clone a real witness payload only to exercise durable cleanup seeks.
+        // Synthetic IDs never enter authenticated pending/authority rows, and
+        // the unfinished subject's tasks intentionally have missing owners.
+        for index in 0..PREFIX {
+            connection.execute(
+                "INSERT INTO assistant_grant_attachment_witnesses
+                 SELECT ?1,'prefix/unfinished',principal,owner,profile,expires_at,revoked,grant_record
+                 FROM assistant_grant_effective WHERE claim_id=?2",
+                params![format!("prefix/{index:08}"),grant.id],
+            ).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO assistant_grant_attachment_witnesses
+             SELECT 'tail/eligible','tail/finished',principal,owner,profile,expires_at,revoked,grant_record
+             FROM assistant_grant_effective WHERE claim_id=?1", [&grant.id],
+        ).unwrap();
+        // More tasks than all visits needed below: attachment turns cannot
+        // accidentally make the prefix eligible before the tail is reached.
+        for index in 0..(PREFIX * 4) {
+            connection.execute(
+                "INSERT INTO assistant_grant_attachments
+                 VALUES(?1,?2,'prefix/unfinished','missing','missing','','')",
+                params![format!("prefix-task/{index:08}"),GRANTED],
+            ).unwrap();
+        }
+        connection.execute_batch(
+            "DELETE FROM meta WHERE key='assistant_grant_attachment_witness_cursor';
+             CREATE TEMP TABLE witness_visits (id INTEGER PRIMARY KEY, base_claim_id TEXT NOT NULL);
+             CREATE TEMP TRIGGER witness_visit_counter AFTER INSERT ON main.meta
+             WHEN NEW.key='assistant_grant_attachment_witness_cursor' BEGIN
+                 INSERT INTO witness_visits(base_claim_id) VALUES(NEW.value);
+             END;",
+        ).unwrap();
+        let limit = if budget.is_zero() { 1 } else { authority::CLAIMS_PER_SLICE };
+        let mut visited = 0;
+        let mut finished = false;
+        for _ in 0..(8 * (PREFIX + 1)) {
+            connection.execute("DELETE FROM witness_visits", []).unwrap();
+            let transaction = connection.transaction().unwrap();
+            assert!(!authority::backfill_slice(&transaction, budget).unwrap());
+            let visits: Vec<String> = transaction.prepare(
+                "SELECT base_claim_id FROM witness_visits ORDER BY id",
+            ).unwrap().query_map([], |row| row.get(0)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap();
+            assert!(visits.len()<=limit,
+                "ineligible prefix escaped the {limit}-visit slice budget: {visits:?}");
+            for base in visits {
+                if visited<PREFIX {
+                    assert_eq!(base, format!("prefix/{visited:08}"),
+                        "cleanup searched past an uncharged ineligible witness");
+                } else if visited==PREFIX {
+                    assert_eq!(base, "tail/eligible");
+                } else {
+                    // A full slice can wrap after retiring the eligible tail.
+                    assert_eq!(base, format!("prefix/{:08}", (visited-PREFIX-1)%PREFIX));
+                }
+                visited += 1;
+            }
+            let prefix_left: usize = transaction.query_row(
+                "SELECT COUNT(*) FROM assistant_grant_attachment_witnesses
+                 WHERE grant_subject='prefix/unfinished'", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(prefix_left, PREFIX, "unfinished witnesses were retired");
+            assert!(attachment_tasks(&transaction)>0, "ineligible-prefix fixture ran out of tasks");
+            let tail_left: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_attachment_witnesses
+                 WHERE base_claim_id='tail/eligible')", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(tail_left, visited<=PREFIX,
+                "eligible tail was reached without charging every preceding witness");
+            assert_eq!(snapshot(&transaction), expected, "cleanup fixtures changed authority");
+            transaction.commit().unwrap();
+            if !tail_left {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "bounded cleanup never reached the eligible tail");
+    }
 }

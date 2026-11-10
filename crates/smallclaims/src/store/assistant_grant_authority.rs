@@ -634,23 +634,26 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
 
 fn attachment_witness_one(connection: &Connection) -> Result<bool> {
     let after = fleet_meta(connection,"assistant_grant_attachment_witness_cursor")?.unwrap_or_default();
-    let seek = |after: &str| -> Result<Option<String>> {
+    let seek = |after: &str| -> Result<Option<(String,String)>> {
         Ok(connection.query_row(
-            "SELECT witness.base_claim_id FROM assistant_grant_attachment_witnesses witness
-             WHERE witness.base_claim_id>?1 AND NOT EXISTS(
-               SELECT 1 FROM assistant_grant_attachments tasks
-               WHERE tasks.grant_subject=witness.grant_subject)
-             ORDER BY witness.base_claim_id LIMIT 1",
-            [after], |row| row.get(0),
+            "SELECT base_claim_id,grant_subject FROM assistant_grant_attachment_witnesses
+             WHERE base_claim_id>?1 ORDER BY base_claim_id LIMIT 1",
+            [after], |row| Ok((row.get(0)?,row.get(1)?)),
         ).optional()?)
     };
-    let base = match seek(&after)? {
-        Some(base) => Some(base),
+    let candidate = match seek(&after)? {
+        Some(candidate) => Some(candidate),
         None if !after.is_empty() => seek("")?,
         None => None,
     };
-    let Some(base) = base else { return Ok(false); };
-    connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [&base])?;
+    let Some((base,subject)) = candidate else { return Ok(false); };
+    let pending: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=?1)",
+        [&subject], |row| row.get(0),
+    )?;
+    if !pending {
+        connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [&base])?;
+    }
     connection.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_attachment_witness_cursor',?1)",
         [&base],
@@ -1194,163 +1197,146 @@ fn refresh_recheck(connection: &Connection, claim: &str) -> Result<bool> {
     Ok(!unfinished)
 }
 
+fn dirty_one(connection: &Connection, membership_current: bool) -> Result<bool> {
+    let after = fleet_meta(connection,"assistant_grant_dirty_cursor")?.unwrap_or_default();
+    let seek = |after: &str| -> Result<Option<String>> {
+        Ok(connection.query_row(
+            "SELECT claim_id FROM assistant_grant_dirty WHERE claim_id>?1 ORDER BY claim_id LIMIT 1",
+            [after], |row| row.get(0),
+        ).optional()?)
+    };
+    let claim = match seek(&after)? {
+        Some(claim) => Some(claim),
+        None if !after.is_empty() => seek("")?,
+        None => None,
+    };
+    let Some(claim) = claim else { return Ok(false); };
+    let recheck_owned: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+        [&claim], |row| row.get(0),
+    )?;
+    if recheck_owned {
+        if membership_current { refresh_recheck(connection,&claim)?; }
+    } else {
+        refresh_claim_inner(connection,&claim,membership_current)?;
+    }
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
+    )?;
+    Ok(true)
+}
+
+fn recheck_one(connection: &Connection) -> Result<bool> {
+    let claim: Option<String> = connection.query_row(
+        "SELECT claim_id FROM assistant_grant_proof_rechecks ORDER BY claim_id LIMIT 1",
+        [], |row| row.get(0),
+    ).optional()?;
+    let Some(claim) = claim else { return Ok(false); };
+    refresh_recheck(connection,&claim)?;
+    Ok(true)
+}
+
+fn retraction_one(connection: &Connection) -> Result<bool> {
+    let task: Option<(i64,String,String,u64,u64,i64,String)> = connection.query_row(
+        "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,claim_id
+         FROM assistant_grant_retractions ORDER BY id LIMIT 1", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+    ).optional()?;
+    let Some((task,writer,key,lower,upper,sequence,id)) = task else { return Ok(false); };
+    if trim_restored_retraction(connection,task,&writer,&key,lower,upper,sequence,&id)? {
+        return Ok(true);
+    }
+    let pending: Option<(u64,String)> = connection.query_row(
+        "SELECT auth_sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_evidence_index
+         WHERE origin=?1 AND auth_member_key=?2 AND auth_sequence BETWEEN ?3 AND ?4
+           AND (auth_sequence,claim_id)>(?5,?6)
+         ORDER BY auth_sequence,claim_id LIMIT 1",
+        params![writer,key,lower,upper,sequence,id], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    if let Some((sequence,id)) = pending {
+        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
+        connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
+        connection.execute(
+            "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
+            params![task,sequence,id],
+        )?;
+    } else {
+        connection.execute("DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
+    }
+    Ok(true)
+}
+
+fn history_one(connection: &Connection, membership_current: bool) -> Result<bool> {
+    // A completed version never reopens historical scanning.
+    if fleet_meta(connection,"assistant_grant_authority_version")?.as_deref()==Some(VERSION) {
+        return Ok(false);
+    }
+    for kind in KINDS {
+        let key = format!("assistant_grant_authority_cursor/{kind}");
+        let cursor: u64 = connection.query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1",
+            [&key], |row| row.get(0),
+        ).optional()?.unwrap_or(0);
+        let claim: Option<(String,u64)> = connection.query_row(
+            "SELECT id,store_index FROM claims INDEXED BY claims_kind_index
+             WHERE kind=?1 AND store_index>?2 ORDER BY store_index LIMIT 1",
+            params![kind,cursor], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?;
+        if let Some((id,index)) = claim {
+            refresh_claim_inner(connection,&id,membership_current)?;
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
+                "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                params![key,index.to_string()],
+            )?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+const MAINTENANCE_QUEUES: usize = 8;
+
+fn maintenance_one(connection: &Connection, turn: usize, membership_current: bool) -> Result<bool> {
+    match turn {
+        0 => dirty_one(connection,membership_current),
+        1 => if membership_current { recheck_one(connection) } else { Ok(false) },
+        2 => proof_invalidation_one(connection),
+        3 => retraction_one(connection),
+        4 => if membership_current { addition_one(connection) } else { Ok(false) },
+        5 => if membership_current { attachment_one(connection) } else { Ok(false) },
+        6 => if membership_current { attachment_witness_one(connection) } else { Ok(false) },
+        7 => history_one(connection,membership_current),
+        _ => unreachable!("maintenance turn is reduced modulo queue count"),
+    }
+}
+
 fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut remaining: usize, membership_current: bool) -> Result<bool> {
     let started = Instant::now();
     if remaining==0 { return Ok(false); }
-    // Give ordinary dirty authentication the first half of each transaction.
-    // Persist its round-robin position so a long key search cannot monopolize
-    // this share and an addition backlog cannot fence unrelated dirty subjects.
-    let dirty_limit = remaining.div_ceil(2);
-    let mut dirty_visits = 0;
-    let mut dirty_done = false;
-    // Completed subjects get a reserved cleanup share, independent of unrelated
-    // attachment backlogs. The persistent witness cursor survives one-unit slices.
-    let cleanup_limit = remaining.div_ceil(2);
-    let mut cleanup_visits = 0;
-    let mut cleanup_done = false;
-    let mut dirty_after = fleet_meta(connection,"assistant_grant_dirty_cursor")?.unwrap_or_default();
-    // Include membership-driven retries in the same fixed item budget. Each
-    // empty writer task also consumes a unit, bounding sparse writer queues.
+    let mut turn = fleet_meta(connection,"assistant_grant_maintenance_turn")?
+        .and_then(|value| value.parse::<usize>().ok()).unwrap_or(0)%MAINTENANCE_QUEUES;
     while remaining>0 {
-        // Finish demotion before a later authentication can restore the row.
-        // Each authority-pair deletion/effective recompute costs one unit.
-        if recompute_one(connection)? {
-            remaining -= 1;
-            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-            continue;
-        }
-        if membership_current && !cleanup_done && cleanup_visits<cleanup_limit {
-            if attachment_witness_one(connection)? {
-                cleanup_visits += 1;
-                remaining -= 1;
-                if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-                continue;
+        // Demotion only shrinks authority. Finish its bounded units before any
+        // positive work; all other queues share one persistent round-robin turn.
+        let mut visited = recompute_one(connection)?;
+        if !visited {
+            for _ in 0..MAINTENANCE_QUEUES {
+                visited = maintenance_one(connection,turn,membership_current)?;
+                turn = (turn+1)%MAINTENANCE_QUEUES;
+                if visited { break; }
             }
-            cleanup_done = true;
-        }
-        if !dirty_done && dirty_visits<dirty_limit {
-            let dirty: Option<String> = connection.query_row(
-                "SELECT claim_id FROM assistant_grant_dirty WHERE claim_id>?1 ORDER BY claim_id LIMIT 1",
-                [&dirty_after], |row| row.get(0),
-            ).optional()?;
-            if let Some(claim) = dirty {
-                let recheck_owned: bool = connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
-                    [&claim], |row| row.get(0),
-                )?;
-                // Dispatch to the owning verifier here, rather than spending a
-                // skip unit forever when every slice has only one unit/time.
-                let unfinished = if recheck_owned {
-                    if !membership_current { return Ok(false); }
-                    !refresh_recheck(connection,&claim)?
-                } else {
-                    refresh_claim_inner(connection,&claim,membership_current)?;
-                    false
-                };
+            if visited {
                 connection.execute(
-                    "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn',?1)",
+                    [turn as i64],
                 )?;
-                dirty_after = claim;
-                dirty_visits += 1;
-                remaining -= 1;
-                if unfinished || remaining==0 || started.elapsed()>=budget { return Ok(false); }
-                continue;
-            }
-            connection.execute("DELETE FROM meta WHERE key='assistant_grant_dirty_cursor'", [])?;
-            if dirty_visits==0 && !dirty_after.is_empty() {
-                // A late insert/evidence arrival may sort before the saved
-                // cursor. Wrap now, not in a later otherwise empty slice.
-                dirty_after.clear();
-                continue;
-            }
-            dirty_done = true;
-        }
-        let recheck: Option<String> = connection.query_row(
-            "SELECT claim_id FROM assistant_grant_proof_rechecks ORDER BY claim_id LIMIT 1",
-            [], |row| row.get(0),
-        ).optional()?;
-        if let Some(claim) = recheck {
-            if !membership_current { return Ok(false); }
-            // A single owning verifier advances and discharges this obligation,
-            // regardless of which dispatch queue selected the claim.
-            let complete = refresh_recheck(connection,&claim)?;
-            remaining -= 1;
-            if !complete { return Ok(false); }
-            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-            continue;
-        }
-        if proof_invalidation_one(connection)? {
-            remaining -= 1;
-            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-            continue;
-        }
-        let retraction: Option<(i64,String,String,u64,u64,i64,String)> = connection.query_row(
-            "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,claim_id
-             FROM assistant_grant_retractions ORDER BY id LIMIT 1", [],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
-        ).optional()?;
-        if let Some((task,writer,key,lower,upper,sequence,id)) = retraction {
-            if trim_restored_retraction(connection,task,&writer,&key,lower,upper,sequence,&id)? {
-                remaining -= 1;
-                if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-                continue;
-            }
-            let pending: Option<(u64,String)> = connection.query_row(
-                "SELECT auth_sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_evidence_index
-                 WHERE origin=?1 AND auth_member_key=?2 AND auth_sequence BETWEEN ?3 AND ?4
-                   AND (auth_sequence,claim_id)>(?5,?6)
-                 ORDER BY auth_sequence,claim_id LIMIT 1",
-                params![writer,key,lower,upper,sequence,id], |row| Ok((row.get(0)?,row.get(1)?)),
-            ).optional()?;
-            if let Some((sequence,id)) = pending {
-                connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
-                connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
-                connection.execute(
-                    "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
-                    params![task,sequence,id],
-                )?;
-            } else {
-                connection.execute("DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
-            }
-            remaining -= 1;
-            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-            continue;
-        }
-        if membership_current && addition_one(connection)? {
-            remaining -= 1;
-            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-            continue;
-        }
-        if membership_current && attachment_one(connection)? {
-            remaining -= 1;
-            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-            continue;
-        }
-        break;
-    }
-    // A completed version only drains the old-build dirty queue. Readiness also
-    // includes that queue, but must never cause a completed history rescan.
-    if fleet_meta(connection,"assistant_grant_authority_version")?.as_deref() != Some(VERSION) {
-        for kind in KINDS {
-            let key = format!("assistant_grant_authority_cursor/{kind}");
-            loop {
-                let cursor: u64 = connection.query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1",[&key],|row|row.get(0)).optional()?.unwrap_or(0);
-                let rows = {
-                    let mut statement = connection.prepare_cached("SELECT id,store_index FROM claims INDEXED BY claims_kind_index WHERE kind=?1 AND store_index>?2 ORDER BY store_index LIMIT 64")?;
-                    statement.query_map(params![kind,cursor],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
-                };
-                if rows.is_empty() { break; }
-                for (id,index) in rows {
-                    refresh_claim_inner(connection,&id,membership_current)?;
-                    remaining -= 1;
-                    connection.execute(/* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",params![key,index.to_string()])?;
-                    if connection.query_row("SELECT EXISTS(SELECT 1 FROM assistant_grant_recompute)", [], |row| row.get::<_,bool>(0))? {
-                        return Ok(false);
-                    }
-                    if remaining==0 || started.elapsed()>=budget { return Ok(false); }
-                }
             }
         }
+        if !visited { break; }
+        remaining -= 1;
+        // Persisted turn already points past this unit, even for ZERO slices.
+        if remaining==0 || started.elapsed()>=budget { return Ok(false); }
     }
     let dirty: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)

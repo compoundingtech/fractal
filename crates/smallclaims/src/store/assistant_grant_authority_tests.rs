@@ -716,7 +716,7 @@ fn committed_backfill_slice_resumes_after_reopen_and_is_idempotent() {
             transaction.commit().unwrap();
             slices += 1;
             if complete { break; }
-            assert!(slices < 200, "backfill failed to make durable forward progress");
+            assert!(slices < 8*(70*3+3), "backfill failed to make durable forward progress");
         }
         assert!(slices > 1);
         assert_eq!(snapshot(&connection), expected);
@@ -840,31 +840,75 @@ fn duplicate_verified_signature_does_not_refresh_or_dirty_claims() {
 }
 
 #[test]
-fn dirty_claim_flood_reserves_half_the_slice_for_other_maintenance() {
+fn every_nonempty_maintenance_queue_receives_a_unit_within_one_zero_slice_round() {
+    // History is the eighth turn, empty after a completed backfill. Exercise
+    // every starting turn, including that empty slot, with all seven durable
+    // maintenance queues continuously occupied.
+    const Q: usize = 8;
     let store = node("issuer", None);
-    for index in 0..(authority::CLAIMS_PER_SLICE * 3 + 7) {
-        let mut invalid = fields();
-        invalid["issuer"] = json!(format!("invalid/{index}"));
-        append(&store,SUBJECT,GRANTED,invalid);
-    }
+    let grant = append(&store, SUBJECT, GRANTED, fields());
     drain_authority(&store);
     let mut connection = store.connection.write();
     let markers = backfill_markers(&connection);
-    connection.execute("INSERT INTO assistant_grant_dirty SELECT id FROM claims WHERE kind=?1", [GRANTED]).unwrap();
-    let mut remaining = authority::CLAIMS_PER_SLICE * 3 + 7;
-    loop {
-        let transaction = connection.transaction().unwrap();
-        let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
-        let after: usize = transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get(0)).unwrap();
-        // Dirty authentication owns half the 64-unit slice; the other half
-        // remains available to proof withdrawals and membership additions.
-        assert_eq!(remaining-after, remaining.min(authority::CLAIMS_PER_SLICE.div_ceil(2)));
-        assert_eq!(backfill_markers(&transaction),markers,"completed history was rescanned");
-        transaction.commit().unwrap();
-        remaining = after;
-        if done { break; }
+    let expected = snapshot(&connection);
+    let queues = [
+        "assistant_grant_dirty", "assistant_grant_proof_rechecks",
+        "assistant_grant_proof_invalidations", "assistant_grant_retractions",
+        "assistant_grant_additions", "assistant_grant_attachments",
+        "assistant_grant_attachment_witnesses",
+    ];
+    for start in 0..Q {
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn',?1)",
+            [start.to_string()],
+        ).unwrap();
+        let mut visited = [false; 7];
+        for _ in 0..Q {
+            // Missing claims/proof identities are real stale-work retirement
+            // cases. None of these tasks supplies authentication or inserts a
+            // forged authenticated pending row.
+            connection.execute_batch(
+                "INSERT OR IGNORE INTO assistant_grant_dirty VALUES('fairness/dirty');
+                 INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES('fairness/recheck');
+                 INSERT OR IGNORE INTO assistant_grant_proof_invalidations
+                     (id,writer,sequence,envelope_hash,member_key)
+                     VALUES(1,'fairness/missing-writer',0,'missing','missing');
+                 INSERT OR IGNORE INTO assistant_grant_retractions
+                     (id,writer,member_key,lower_sequence,upper_sequence)
+                     VALUES(1,'fairness/missing-writer','missing',0,0);
+                 INSERT OR IGNORE INTO assistant_grant_additions
+                     (id,writer,member_key,lower_sequence,upper_sequence)
+                     VALUES(1,'fairness/missing-writer','missing',0,0);
+                 INSERT OR IGNORE INTO assistant_grant_attachments
+                     VALUES('fairness/attachment','custom.client.assistant.v1.granted',
+                            'fairness/unfinished','missing','missing','','');",
+            ).unwrap();
+            connection.execute(
+                "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
+                 SELECT claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record
+                 FROM assistant_grant_effective WHERE claim_id=?1", [&grant.id],
+            ).unwrap();
+            let transaction = connection.transaction().unwrap();
+            assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
+            let mut units = 0;
+            for (index, queue) in queues.iter().enumerate() {
+                let left: usize = transaction.query_row(
+                    &format!("SELECT COUNT(*) FROM {queue}"), [], |row| row.get(0),
+                ).unwrap();
+                assert!(left<=1, "unexpected work in {queue}");
+                if left==0 {
+                    visited[index] = true;
+                    units += 1;
+                }
+            }
+            assert_eq!(units, 1, "ZERO must perform exactly one occupied visit");
+            assert_eq!(backfill_markers(&transaction), markers, "completed history was rescanned");
+            assert_eq!(snapshot(&transaction), expected, "stale queue tasks changed authority");
+            transaction.commit().unwrap();
+        }
+        assert!(visited.iter().all(|seen| *seen),
+            "starting turn {start} starved a queue within {Q} ZERO slices: {visited:?}");
     }
-    assert_eq!(remaining,0);
 }
 
 fn authentication_key_cost(connection: &Connection, signature: &ReplicaEnvelopeSignature) -> (usize,i32,i32) {
@@ -947,8 +991,12 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
     assert_eq!(cost.2,0);
     let mut previous_key = String::new();
     for page in 0..4 {
+        // This test measures one authentication page, not a full fair round.
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+        ).unwrap();
         let transaction = connection.transaction().unwrap();
-        let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
+        let done = authority::backfill_slice(&transaction,Duration::ZERO).unwrap();
         assert_eq!(backfill_markers(&transaction),markers);
         if page<3 {
             assert!(!done,"invalid earlier evidence authenticated the claim");
@@ -964,11 +1012,14 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
                 "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1", [&grant.id], |row| row.get(0)).unwrap();
             assert!(!admitted);
         } else {
-            assert!(done);
+            assert!(!done, "the final occupied ZERO visit still consumes its slice");
             assert!(authority::contains(&transaction,&grant.id).unwrap());
         }
         transaction.commit().unwrap();
     }
+    let transaction = connection.transaction().unwrap();
+    assert!(authority::backfill_slice(&transaction, Duration::from_secs(60)).unwrap());
+    transaction.commit().unwrap();
 }
 
 #[test]
@@ -1039,8 +1090,11 @@ fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_
         "future-only windows entered the candidate seek");
     let mut previous = (-1,String::new());
     for page in 0..4 {
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+        ).unwrap();
         let transaction = connection.transaction().unwrap();
-        let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
+        let done = authority::backfill_slice(&transaction,Duration::ZERO).unwrap();
         if page<3 {
             assert!(!done,"expired candidates must consume their own page budget");
             let cursor: (i64,String) = transaction.query_row(
@@ -1050,11 +1104,14 @@ fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_
             previous = cursor;
             assert!(!authority::contains(&transaction,&grant.id).unwrap());
         } else {
-            assert!(done);
+            assert!(!done, "the final occupied ZERO visit still consumes its slice");
             assert!(authority::contains(&transaction,&grant.id).unwrap());
         }
         transaction.commit().unwrap();
     }
+    let transaction = connection.transaction().unwrap();
+    assert!(authority::backfill_slice(&transaction, Duration::from_secs(60)).unwrap());
+    transaction.commit().unwrap();
     // The signature remains cryptographically valid, but an expired window
     // must never authenticate it during a subsequent proof recheck.
     connection.execute(
@@ -1131,8 +1188,11 @@ fn late_signature_restarts_an_in_progress_key_cursor_before_its_old_position() {
             params![signature.writer,format!("~{index:08}"),member_start]).unwrap();
     }
     connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+    ).unwrap();
     let transaction = connection.transaction().unwrap();
-    assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    assert!(!authority::backfill_slice(&transaction,Duration::ZERO).unwrap());
     let cursor: String = transaction.query_row(
         "SELECT member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
         [&grant.id], |row| row.get(0)).unwrap();
@@ -1180,8 +1240,11 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
             params![signature.writer,format!("~{index:08}")]).unwrap();
     }
     connection.execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_maintenance_turn','0')", [],
+    ).unwrap();
     let transaction = connection.transaction().unwrap();
-    assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    assert!(!authority::backfill_slice(&transaction,Duration::ZERO).unwrap());
     let position: i64 = transaction.query_row(
         "SELECT position FROM assistant_grant_auth_cursor WHERE claim_id=?1",
         [&grant.id], |row| row.get(0)).unwrap();

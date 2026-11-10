@@ -253,9 +253,16 @@ work index, maintained atomically with unauthenticated rows and cursor/recheck
 obligations. Each task then seeks that claim's own receipts in the added range.
 One claim selection, receipt attempt or claim completion consumes a budget unit;
 unrelated history is never enumerated. Total work is proportional to needing
-grant rows and their own matching receipts, not all writer receipts. Ordinary
-dirty authentication receives the first half of each transaction with a durable
-round-robin cursor, so an addition backlog cannot keep dirty subjects fenced.
+grant rows and their own matching receipts, not all writer receipts.
+After demotion, maintenance uses one durable round-robin queue turn, in order:
+dirty authentication, proof rechecks, proof invalidation, membership retraction,
+coverage addition, positive attachment, conflict-witness cleanup, initial history
+backfill. Each nonempty turn performs one charged unit and advances the persisted
+turn before a slice can end, including `Duration::ZERO`. Empty queues cost a
+bounded indexed probe each; dispatch visits at most eight queues per unit.
+Thus, absent demotion work, each runnable queue receives a unit within eight
+one-unit slices even under continuous arrivals to other queues. There are no
+per-queue slice reservations. Dirty authentication retains its own durable cursor.
 Late dirty work sorting before the saved cursor wraps within the same slice,
 without waiting for a later maintenance wakeup. Repeated cursor or recheck writes
 retain one work-set entry even under an outer SQL upsert's conflict policy.
@@ -283,11 +290,13 @@ usable. Late opposite claims create their own tasks, including pairs beyond an
 older task's high-water mark.
 
 The subject remains fenced until its attachment tasks and witness cleanup finish.
-Witness cleanup receives a reserved half-slice share after demotion, including
-one-unit zero-duration slices. An indexed subject-task probe makes a witness
-eligible as soon as its own subject has no attachment tasks; unrelated attachment
-backlogs do not delay it. A persistent round-robin witness cursor prevents newly
-eligible lower-ID arrivals from repeatedly overtaking a waiting subject.
+Cleanup seeks exactly one witness by its persistent primary-key cursor before
+probing that subject's attachment index. It advances and charges the visit whether
+the witness is deleted or skipped because its own subject still has tasks.
+Unrelated attachment backlogs do not prevent eligible cleanup; a long ineligible
+prefix consumes separate bounded visits instead of an uncharged eligibility scan.
+The witness cursor wraps and prevents lower-ID arrivals repeatedly overtaking
+waiting witnesses.
 Before changing an effective base, maintenance retains its previous effective
 record as a conflict witness, so partially attached restrictive transitions cannot
 hide an established cross-subject conflict. Demotion cancels the demoted claim's
