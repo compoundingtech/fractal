@@ -68,6 +68,24 @@ pub async fn apply(
     ))
 }
 
+#[derive(serde::Deserialize)]
+pub struct SourceStatusQuery {
+    #[serde(default)]
+    audit: bool,
+}
+
+/// `fractal source status`: each set's policy, open source debt, the debt each set's current
+/// revision closed and, with `?audit=true`, the newest audit records.
+pub async fn source_status(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SourceStatusQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.source_status(query.audit).map_err(anyhow::Error::new))
+        .await
+        .map(Json)
+}
+
 pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     let mut value = serde_json::to_value(&view)?;
     let mut statuses = Vec::new();

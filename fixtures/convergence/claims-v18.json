@@ -8567,6 +8567,192 @@
     "projection": "slo-breaches",
     "wakes_reconciler": true
   },
+  "source.audited": {
+    "kind": "source.audited",
+    "subjects": [
+      "agent",
+      "schedule",
+      "subscription",
+      "mission",
+      "exec",
+      "pty"
+    ],
+    "fields": {
+      "refusal": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "set": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "set_revision": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "verb": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "owned-sets",
+    "wakes_reconciler": false
+  },
+  "source.debt.closed": {
+    "kind": "source.debt.closed",
+    "subjects": [
+      "agent",
+      "schedule",
+      "subscription",
+      "mission",
+      "exec",
+      "pty"
+    ],
+    "fields": {
+      "debt": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "outcome": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "publisher": {
+        "value_type": "any",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "set": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "set_revision": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "owned-sets",
+    "wakes_reconciler": false
+  },
+  "source.debt.recorded": {
+    "kind": "source.debt.recorded",
+    "subjects": [
+      "agent",
+      "schedule",
+      "subscription",
+      "mission",
+      "exec",
+      "pty"
+    ],
+    "fields": {
+      "after": {
+        "value_type": "any",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "before": {
+        "value_type": "any",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "claim": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "pointers": {
+        "value_type": "array",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "ref": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "repository": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "request": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "revision": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "set": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "set_revision": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "sha": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "verb": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "owned-sets",
+    "wakes_reconciler": false
+  },
   "step-run.carried": {
     "kind": "step-run.carried",
     "subjects": [
