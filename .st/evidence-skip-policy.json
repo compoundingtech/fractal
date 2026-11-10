@@ -2,14 +2,9 @@
   "version": 1,
   "checks": {
     "linux-gate": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": true,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "inputs": [
         ".cargo",
@@ -39,12 +34,7 @@
       ],
       "kinds": {
         "observed": {
-          "command": [
-            "github-actions",
-            "{repository}",
-            ".github/workflows/fleet.yml",
-            "{check}"
-          ],
+          "command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
           "runner_prefix": "github:{repository}/"
         },
         "wrapper": {
@@ -61,34 +51,14 @@
             "linux-tests-shard-4",
             "upgrade-impact"
           ],
-          "required_inputs": [
-            "flake_lock_sha256",
-            "toolchain_sha256",
-            "wrapper_sha256",
-            "system",
-            "attempt"
-          ],
+          "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
           },
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-local",
-                "tests",
-                "clippy",
-                "fleet-compat"
-              ],
+              "command": ["nix", "develop", "-c", "bash", "scripts/ci-local", "tests", "clippy", "fleet-compat"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -100,23 +70,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": "tree"
             },
             "agent": {
-              "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-local",
-                "tests",
-                "clippy",
-                "fleet-compat"
-              ],
+              "command": ["nix", "develop", "-c", "bash", "scripts/ci-local", "tests", "clippy", "fleet-compat"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -128,23 +86,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-local",
-                "tests",
-                "clippy",
-                "fleet-compat"
-              ],
+              "command": ["nix", "develop", "-c", "bash", "scripts/ci-local", "tests", "clippy", "fleet-compat"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -156,9 +102,7 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -166,14 +110,9 @@
       }
     },
     "linux-clippy": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": false,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "inputs": [
         ".cargo",
@@ -268,31 +207,15 @@
       ],
       "kinds": {
         "wrapper": {
-          "command": [
-            "bash",
-            "scripts/ci-linux",
-            "clippy"
-          ],
-          "required_inputs": [
-            "stage",
-            "job",
-            "event_name"
-          ],
+          "command": ["bash", "scripts/ci-linux", "clippy"],
+          "required_inputs": ["stage", "job", "event_name"],
           "base_inputs": {
             "clippy_base_baseline_sha256": ".github/clippy-baseline.json"
           },
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "python3",
-                "scripts/ci-clippy-result"
-              ],
+              "command": ["python3", "scripts/ci-clippy-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -304,17 +227,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": "tree"
             },
             "agent": {
-              "command": [
-                "python3",
-                "scripts/ci-clippy-result"
-              ],
+              "command": ["python3", "scripts/ci-clippy-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -326,17 +243,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "python3",
-                "scripts/ci-clippy-result"
-              ],
+              "command": ["python3", "scripts/ci-clippy-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -348,9 +259,7 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -358,14 +267,9 @@
       }
     },
     "linux-fleet-compat": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": false,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "inputs": [
         ".cargo",
@@ -503,28 +407,12 @@
       ],
       "kinds": {
         "wrapper": {
-          "command": [
-            "bash",
-            "scripts/ci-linux",
-            "fleet-compat"
-          ],
-          "required_inputs": [
-            "stage",
-            "job",
-            "event_name"
-          ],
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "command": ["bash", "scripts/ci-linux", "fleet-compat"],
+          "required_inputs": ["stage", "job", "event_name"],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "python3",
-                "scripts/ci-fleet-compat-result"
-              ],
+              "command": ["python3", "scripts/ci-fleet-compat-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -536,17 +424,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": "tree"
             },
             "agent": {
-              "command": [
-                "python3",
-                "scripts/ci-fleet-compat-result"
-              ],
+              "command": ["python3", "scripts/ci-fleet-compat-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -558,17 +440,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "python3",
-                "scripts/ci-fleet-compat-result"
-              ],
+              "command": ["python3", "scripts/ci-fleet-compat-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -580,9 +456,7 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -590,14 +464,9 @@
       }
     },
     "typescript-client": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": true,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "inputs": [
         "apps/fractal-web/package.json",
@@ -619,19 +488,11 @@
       ],
       "kinds": {
         "observed": {
-          "command": [
-            "github-actions",
-            "{repository}",
-            ".github/workflows/fleet.yml",
-            "{check}"
-          ],
+          "command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
           "runner_prefix": "github:{repository}/"
         },
         "wrapper": {
-          "command": [
-            "bash",
-            "scripts/ci-typescript-client"
-          ],
+          "command": ["bash", "scripts/ci-typescript-client"],
           "required_inputs": [
             "flake_lock_sha256",
             "toolchain_sha256",
@@ -645,12 +506,7 @@
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
           },
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
               "command": [
@@ -662,20 +518,11 @@
                 "-c",
                 "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
               ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ]
+              "events": ["pull_request", "merge_group"]
             },
             "agent": {
               "command": [
@@ -687,20 +534,11 @@
                 "-c",
                 "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
               ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
@@ -713,19 +551,11 @@
                 "-c",
                 "pnpm install --frozen-lockfile && bash scripts/ci-typescript-client"
               ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -734,30 +564,17 @@
       "require": "shadow"
     },
     "genie-freshness": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": true,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "kinds": {
         "observed": {
-          "command": [
-            "github-actions",
-            "{repository}",
-            ".github/workflows/fleet.yml",
-            "{check}"
-          ],
+          "command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
           "runner_prefix": "github:{repository}/"
         },
         "wrapper": {
-          "command": [
-            "bash",
-            "scripts/ci-genie-freshness"
-          ],
+          "command": ["bash", "scripts/ci-genie-freshness"],
           "required_inputs": [
             "flake_lock_sha256",
             "toolchain_sha256",
@@ -771,84 +588,32 @@
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
           },
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "nix",
-                "develop",
-                ".#genie",
-                "-c",
-                "bash",
-                "scripts/ci-genie-freshness"
-              ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "command": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-genie-freshness"],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ]
+              "events": ["pull_request", "merge_group"]
             },
             "agent": {
-              "command": [
-                "nix",
-                "develop",
-                ".#genie",
-                "-c",
-                "bash",
-                "scripts/ci-genie-freshness"
-              ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "command": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-genie-freshness"],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "nix",
-                "develop",
-                ".#genie",
-                "-c",
-                "bash",
-                "scripts/ci-genie-freshness"
-              ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "command": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-genie-freshness"],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -857,14 +622,9 @@
       "require": "shadow"
     },
     "ci-script-tests": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": true,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "inputs": [
         ".config/daily-only.filterset",
@@ -893,19 +653,11 @@
       ],
       "kinds": {
         "observed": {
-          "command": [
-            "github-actions",
-            "{repository}",
-            ".github/workflows/fleet.yml",
-            "{check}"
-          ],
+          "command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
           "runner_prefix": "github:{repository}/"
         },
         "wrapper": {
-          "command": [
-            "bash",
-            "scripts/ci-script-tests"
-          ],
+          "command": ["bash", "scripts/ci-script-tests"],
           "required_inputs": [
             "flake_lock_sha256",
             "toolchain_sha256",
@@ -919,84 +671,32 @@
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
           },
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "nix",
-                "develop",
-                ".#genie",
-                "-c",
-                "bash",
-                "scripts/ci-script-tests"
-              ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "command": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-script-tests"],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ]
+              "events": ["pull_request", "merge_group"]
             },
             "agent": {
-              "command": [
-                "nix",
-                "develop",
-                ".#genie",
-                "-c",
-                "bash",
-                "scripts/ci-script-tests"
-              ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "command": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-script-tests"],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "nix",
-                "develop",
-                ".#genie",
-                "-c",
-                "bash",
-                "scripts/ci-script-tests"
-              ],
-              "required_inputs": [
-                "flake_lock_sha256",
-                "toolchain_sha256",
-                "wrapper_sha256",
-                "system",
-                "attempt"
-              ],
+              "command": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-script-tests"],
+              "required_inputs": ["flake_lock_sha256", "toolchain_sha256", "wrapper_sha256", "system", "attempt"],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -1005,14 +705,9 @@
       "require": "shadow"
     },
     "fractal-web": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": true,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "inputs": [
         ".buckconfig",
@@ -1041,6 +736,7 @@
         "flake.nix",
         "megarepo.kdl",
         "megarepo.lock",
+        "nix/fractal-web-publisher.nix",
         "nix/fractal-web.nix",
         "nix/web-shell-inputs.json",
         "nix/web-shell.nix",
@@ -1069,13 +765,7 @@
       ],
       "kinds": {
         "wrapper": {
-          "command": [
-            "fractal-web",
-            "aggregate",
-            "fractal-web",
-            "fractal-web-changes",
-            "fractal-web-execution"
-          ],
+          "command": ["fractal-web", "aggregate", "fractal-web", "fractal-web-changes", "fractal-web-execution"],
           "required_inputs": [
             "flake_lock_sha256",
             "toolchain_sha256",
@@ -1098,27 +788,12 @@
             "index": "kit_shard"
           },
           "input_order": {
-            "kit_inputs": [
-              "true",
-              "false"
-            ]
+            "kit_inputs": ["true", "false"]
           },
-          "trust_levels": [
-            "fleet",
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["fleet", "host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "nix",
-                "develop",
-                ".#web",
-                "-c",
-                "bash",
-                "scripts/ci-local-web"
-              ],
+              "command": ["nix", "develop", ".#web", "-c", "bash", "scripts/ci-local-web"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -1135,21 +810,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": "tree"
             },
             "agent": {
-              "command": [
-                "nix",
-                "develop",
-                ".#web",
-                "-c",
-                "bash",
-                "scripts/ci-local-web"
-              ],
+              "command": ["nix", "develop", ".#web", "-c", "bash", "scripts/ci-local-web"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -1166,21 +831,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "nix",
-                "develop",
-                ".#web",
-                "-c",
-                "bash",
-                "scripts/ci-local-web"
-              ],
+              "command": ["nix", "develop", ".#web", "-c", "bash", "scripts/ci-local-web"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -1197,9 +852,7 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }
@@ -1207,21 +860,13 @@
       }
     },
     "rust-tests": {
-      "trust_levels": [
-        "fleet"
-      ],
+      "trust_levels": ["fleet"],
       "enforce": true,
-      "events": [
-        "pull_request",
-        "merge_group"
-      ],
+      "events": ["pull_request", "merge_group"],
       "sample_one_in": 1,
       "kinds": {
         "wrapper": {
-          "command": [
-            "python3",
-            "scripts/ci-rust-test-result"
-          ],
+          "command": ["python3", "scripts/ci-rust-test-result"],
           "required_inputs": [
             "flake_lock_sha256",
             "toolchain_sha256",
@@ -1240,17 +885,10 @@
           "bind_inputs": {
             "flake_lock_sha256": "flake.lock"
           },
-          "trust_levels": [
-            "host",
-            "agent",
-            "queue"
-          ],
+          "trust_levels": ["host", "agent", "queue"],
           "by_level": {
             "host": {
-              "command": [
-                "python3",
-                "scripts/ci-rust-test-result"
-              ],
+              "command": ["python3", "scripts/ci-rust-test-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -1269,17 +907,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": "tree"
             },
             "agent": {
-              "command": [
-                "python3",
-                "scripts/ci-rust-test-result"
-              ],
+              "command": ["python3", "scripts/ci-rust-test-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -1298,17 +930,11 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "pull_request",
-                "merge_group"
-              ],
+              "events": ["pull_request", "merge_group"],
               "lane": true
             },
             "queue": {
-              "command": [
-                "python3",
-                "scripts/ci-rust-test-result"
-              ],
+              "command": ["python3", "scripts/ci-rust-test-result"],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
@@ -1327,9 +953,7 @@
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
               },
-              "events": [
-                "merge_group"
-              ],
+              "events": ["merge_group"],
               "lane": true
             }
           }

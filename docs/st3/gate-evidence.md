@@ -50,7 +50,6 @@ The projection records the actual selected path, so equal bytes moved from
 `.st/` to `.fractal/` still change the key. Whole-file and directory projection
 paths remain literal; no path/hash normalization is introduced.
 
-
 The configuration remains in `.st/` in this expand stage. Both directories are
 protected equally and included in the script-test projection. The paired `.st`
 and `.fractal` entries in `.st/required-lanes.json` `ci-script-tests.tree_inputs`
@@ -66,7 +65,6 @@ The bridge is removed only after the accepted-base rollout and installed-reader
 observations specified in [the rollout plan](https://github.com/compoundingtech/fractal/issues/3032#issuecomment-6445632509);
 historical replay uses the tools from the historical accepted base.
 
-
 ## Record and transport
 
 The record is an in-toto v1 statement with one subject: `name` is the observed
@@ -81,16 +79,16 @@ The Rust observers and `scripts/evidence-sign` write
 `https://compounding.tech/fractal/evidence/gate/v1`. The dual-URI verifiers
 also accept records produced by older signers. Its fields are:
 
-| Field | Meaning |
-| --- | --- |
-| `schema_version` | Predicate schema version, initially `1`; unknown versions fail closed. |
-| `change_id` | Nonempty free label in the signed predicate; supplied by the workflow or the wrapper. Nothing matches or filters on it. |
-| `signer` | Exact SSH principal in the caller's allowed-signers file, or null for degraded records. |
-| `tier` | `full`, `degraded`, or `test`; a signature alone never promotes a tier. |
-| `re_attests` | Optional degraded record ID when a fresh full-trust test run re-attests the same keyed check. |
-| `producer_sha256` | Lowercase SHA-256 of the signing observer's running executable, measured inside the signing API. |
-| `observed_at` | RFC 3339 time recorded by the trusted observer. |
-| `observed` | A typed `tests` or `review` observation. |
+| Field             | Meaning                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `schema_version`  | Predicate schema version, initially `1`; unknown versions fail closed.                                                  |
+| `change_id`       | Nonempty free label in the signed predicate; supplied by the workflow or the wrapper. Nothing matches or filters on it. |
+| `signer`          | Exact SSH principal in the caller's allowed-signers file, or null for degraded records.                                 |
+| `tier`            | `full`, `degraded`, or `test`; a signature alone never promotes a tier.                                                 |
+| `re_attests`      | Optional degraded record ID when a fresh full-trust test run re-attests the same keyed check.                           |
+| `producer_sha256` | Lowercase SHA-256 of the signing observer's running executable, measured inside the signing API.                        |
+| `observed_at`     | RFC 3339 time recorded by the trusted observer.                                                                         |
+| `observed`        | A typed `tests` or `review` observation.                                                                                |
 
 A `tests` observation names its `runner` and maps check names to `command`
 (argument vector), `exit_code`, and `output_sha256` (exact captured output
@@ -415,6 +413,7 @@ GC migrates or removes them). A pull with 46 new records took 7.7 s, one with no
 **The verifier's view of the log (shadow).** With `--log-keys FILE` or `--log-keys-from COMMIT` (which reads
 `.st/evidence-log-key`; none there means no view), the verifier adds `log`, `log_head`, `log_age_s` and `log_missing`
 to its answer, and changes nothing else. `log` is the first of:
+
 - `absent`: no `refs/evidence-log/main` here;
 - `unsigned`: the head is not signed by that key (principal `log/...`);
 - `stale`: the head is more than 600 s old (five pulls), names no time, or is dated in the future;
@@ -1055,7 +1054,7 @@ writes the record id to the job summary. The wiring is deliberately conservative
   command, not of the earlier decision step. So `skip=true` cannot exist unless that marker step already ran: a gate
   job that dies between deciding and marking leaves no output and the check runs. The observer refuses to record a
   check whose gate job ran the marker (and should also refuse one whose own job ran `evidence covered by a trusted
-  note`, the step a wired job runs only when it skipped its work), and the in-job producers refuse to sign for a
+note`, the step a wired job runs only when it skipped its work), and the in-job producers refuse to sign for a
   stage that did not run, so a skip never produces a fresh note for itself.
 - Every signing step is told when its gate skipped: it gets `GATE_SKIP` (true when any gate that can cover that job
   said skip), and the signing helper then makes no note whatever the job's log or step outcomes say. The aggregate
@@ -1176,15 +1175,27 @@ fresh `linux-gate` note.
 group base), never from the change under test, and says per check what a note must be:
 
 ```json
-{"version": 1, "checks": {"linux-gate": {
-  "trust_levels": ["fleet"],
-  "enforce": false,
-  "max_age_s": null,
-  "kinds": {
-    "observed": {"command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
-                 "runner_prefix": "github:{repository}/"},
-    "wrapper": {"command": ["..."], "required_inputs": ["flake_lock_sha256", "toolchain_sha256"],
-                "bind_inputs": {"flake_lock_sha256": "flake.lock"}}}}}}
+{
+  "version": 1,
+  "checks": {
+    "linux-gate": {
+      "trust_levels": ["fleet"],
+      "enforce": false,
+      "max_age_s": null,
+      "kinds": {
+        "observed": {
+          "command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
+          "runner_prefix": "github:{repository}/"
+        },
+        "wrapper": {
+          "command": ["..."],
+          "required_inputs": ["flake_lock_sha256", "toolchain_sha256"],
+          "bind_inputs": { "flake_lock_sha256": "flake.lock" }
+        }
+      }
+    }
+  }
+}
 ```
 
 `enforce: true` means a covering signed note lets CI skip this job; it never fails or blocks a pull request that has no
@@ -1224,6 +1235,7 @@ hundred under load).
 So the failure is a defect first. File it, name its owner, and fix its cause, or record the owner's explicit
 disposition of why it is unrelated to the inputs. A passing rerun proves nothing about the defect. Once that is
 done, the pull requests still refused on the old key can be lifted in either of two ways:
+
 - **Re-sign.** Each affected pull request signs the check again (`scripts/st-test --check C --push origin`).
 - **Rerun.** One rerun of the whole merge-group run (`gh run rerun RUN`, all jobs) lifts them all at once. The
   rerun is a new attempt of the same run. The Evidence observe workflow fires on its completion with that attempt,
@@ -1332,6 +1344,7 @@ a typo cannot silently weaken a rule, and a check with no entry never skips. The
 name, the command, the exit code and the output hash are part of every record and are always
 checked. `observed` (the central observer's record of a finished job) and `wrapper` (a note the in-job producer signs
 as `fleet/ci`) are listed for **every** required check, each with the exact command that producer records:
+
 - `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`, without the gate jobs, `fractal-web-*`,
   `genie-freshness` and `typescript-client`;
 - `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `ci-script-tests`: `["bash", "scripts/ci-script-tests"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
@@ -1340,14 +1353,14 @@ as `fleet/ci`) are listed for **every** required check, each with the exact comm
   `kit_inputs`, `kit_play_set` and `app_test_set`. A shard's own note (`["bash", "scripts/ci-fractal-web"]`) does not match it.
   It lists no `observed` kind: the observer's record is of the always-emitted `fractal-web` job, which passes
   without running the lane when no web path changed against that run's base.
-Every wrapper rule requires `flake_lock_sha256`, `toolchain_sha256`, `wrapper_sha256`, `system` and `attempt`
-and binds `flake_lock_sha256` to `flake.lock` in the verified tree; the stage rule also requires `stage` and
-`job`, the step-outcome rules `job`, `steps` and `step_outcomes`, and `fractal-web` its shard and test-set inputs. No rule names a weaker signer level, so only
-`fleet/ci` counts. A producer signs a step-outcome note only when every listed step actually ran, and refuses
-when a gate in its run said skip, so a skipped run writes no note for itself. If a producer's note changes (a job
-added to the aggregate, a step renamed), the policy must change with it; until it does, the notes simply stop
-matching and the check runs.
-Write `scripts/evidence-verify --policy-from BASE
+  Every wrapper rule requires `flake_lock_sha256`, `toolchain_sha256`, `wrapper_sha256`, `system` and `attempt`
+  and binds `flake_lock_sha256` to `flake.lock` in the verified tree; the stage rule also requires `stage` and
+  `job`, the step-outcome rules `job`, `steps` and `step_outcomes`, and `fractal-web` its shard and test-set inputs. No rule names a weaker signer level, so only
+  `fleet/ci` counts. A producer signs a step-outcome note only when every listed step actually ran, and refuses
+  when a gate in its run said skip, so a skipped run writes no note for itself. If a producer's note changes (a job
+  added to the aggregate, a step renamed), the policy must change with it; until it does, the notes simply stop
+  matching and the check runs.
+  Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
 A kind's rule may also name `by_level`: for one signer level (the first part of the principal), its own `command`, `required_inputs`,
@@ -1382,6 +1395,7 @@ level.
 
 **`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
 when its value ranks at or above the run's own value.
+
 - The run's value comes from the gate: `evidence-verify --run-input KEY=VALUE`.
 - A run that did not say its value is never covered (`no_run_input`).
 - A note whose value is missing, unknown or weaker is refused (`wrong_input`).
@@ -1391,6 +1405,7 @@ paths; with `false` the lane skips every kit play. A note made without kit plays
 would run them.
 
 **`shard_inputs`** names a sharded job's inputs: `count` (1 to 16) and `results`.
+
 - `results` must read `0=success,1=success,...` for every shard.
 - `pull_request_count`, when given, is the only count a note from a `pull_request` run may carry.
 - `index`, when given, names the input only one shard's own note carries (fractal-web: `kit_shard`). Such a note is a part of a run, not
@@ -1403,6 +1418,7 @@ succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test`
 matrix's own condition and length.
 
 fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifier through the gate:
+
 - `evidence-gate-fractal-web` needs `fractal-web-changes` and sets `RUN_INPUTS` to `{"kit_inputs": "<its kit-inputs output>"}`.
 - The gate passes each value as `--run-input` once the base's verifier takes that flag.
 - A malformed `RUN_INPUTS` is dropped, so no note covers the run.
@@ -1413,6 +1429,7 @@ fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifie
 for example linux-clippy's `{"clippy_base_baseline_sha256": ".github/clippy-baseline.json"}` (its ratchet fails a tree whose baseline
 rose above the base's). A note covers a run only when it recorded the sha256 of that file at the run's accepted base, or `absent` when
 the base has none.
+
 - The verifier computes the run's value itself from `--policy-from`. A `--run-input` of the same name is ignored, so no caller can
   supply it.
 - `evidence-verify --project` prints the values (`base_inputs`) for a signer to record. `ci-evidence-signing` records them at
@@ -1425,13 +1442,13 @@ note covers.
 
 ### Which checks skip today
 
-| Check | `enforce` | `events` | `sample_one_in` | Since |
-| --- | --- | --- | --- | --- |
-| `typescript-client` | true | `pull_request` | 1 | this change |
-| `fractal-web` (whole-check note; one shard's note never counts) | true | `pull_request` | 1 | 2026-10-23 |
-| `linux-gate` | true | `pull_request` | 1 | 2026-10-23 |
-| `genie-freshness` | true | `pull_request` | 1 | 2026-10-23 |
-| `ci-script-tests` | true | `pull_request` | 1 | 2026-10-23 |
+| Check                                                           | `enforce` | `events`       | `sample_one_in` | Since       |
+| --------------------------------------------------------------- | --------- | -------------- | --------------- | ----------- |
+| `typescript-client`                                             | true      | `pull_request` | 1               | this change |
+| `fractal-web` (whole-check note; one shard's note never counts) | true      | `pull_request` | 1               | 2026-10-23  |
+| `linux-gate`                                                    | true      | `pull_request` | 1               | 2026-10-23  |
+| `genie-freshness`                                               | true      | `pull_request` | 1               | 2026-10-23  |
+| `ci-script-tests`                                               | true      | `pull_request` | 1               | 2026-10-23  |
 
 `typescript-client` was turned on after 48 hours of shadow decisions (2026-10-17 to 2026-10-19, 585 pull-request runs): 378 satisfied by a
 trusted note, 254 of which would have skipped (the rest were sampled or touched a protected file), and not one satisfied note sat beside a failing
@@ -1483,6 +1500,7 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
 **Lowered trigger for `rust-tests`** (Nathan via Factory, 2026-10-26, mission fleet/factory/no-whole-tree). The 30-line count is replaced by
 **5 agreeing** lines and **0 disagreeing** ones. Only lines whose note was signed at the `host` level count (`trust_level=host`: our
 seats' `st-test`); CI's `fleet` per-crate notes stay observe-only until the trusted-report hardening.
+
 - An agreeing line is satisfied, has `log=ok`, and its real result (the jobs the per-crate skip would skip) was success.
 - A disagreeing line is satisfied, and its real result was failure. The report lists those runs as `disagreeing`.
 
@@ -2111,7 +2129,6 @@ and with `PATH=/run/current-system/sw/bin:/usr/bin:/bin`; `fractal-test` starts 
 keep the caller's environment. Tests set these variables in the caller and require a signed note, and require the signer to still
 refuse when it is started with `LD_PRELOAD`.
 
-
 **The VM tests (`scripts/ci-local isolation-vm`).** `isolation-vm` runs daily, not per pull request (2026-10-23), so fractal-test does not
 run it and no policy accepts a local note for it; `nix develop -c bash scripts/ci-local isolation-vm` still runs it by hand, which runs `scripts/ci-local-isolation-vm` in the stages' own home: it probes `/dev/kvm` (read-write, and a VM can be
 created), builds in place what CI's isolation-vm job downloads from linux-test-build (the workspace test archive, `cargo nextest
@@ -2130,6 +2147,8 @@ host's Watchman service, named by its socket. The note records `kit_shard_count=
 as to CI's aggregate note; its host and agent levels admit it for `pull_request` (`by_level`, `lane: true`). fractal-test asks the base's own
 `scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
+The check's declared inputs and lane tree inputs include `nix/fractal-web-publisher.nix`; the existing `apps/fractal-web` input
+covers its server sources. Publisher packaging changes therefore invalidate web evidence just as the web detector requires.
 
 Locally, web runs in its own thread alongside the Rust build lane and the serial light-check lane. On a build host it holds one
 counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second
@@ -2296,6 +2315,7 @@ visible in review, is itself a protected path (so that very change runs in full)
 same-repo limit. Fork pull requests never skip.
 
 Limits, stated plainly:
+
 - The shipped `observed` rule has no `required_inputs` or `bind_inputs`. That is deliberate: a note is
   keyed to the exact tree, and the tree contains the workflow, so tree equality plus the pinned command
   and runner prefix is the binding. The central observer additionally records full tier only for a
