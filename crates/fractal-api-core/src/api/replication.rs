@@ -411,7 +411,7 @@ pub async fn replication_receive(
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
-    .await.map_err(|error| {
+    .await.inspect_err(|error| {
         smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
             smallclaims::replication_diagnostics::FailureKind::DaemonReceive,
             || format!(
@@ -420,7 +420,6 @@ pub async fn replication_receive(
                 error.code,
             ),
         );
-        error
     })?;
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
