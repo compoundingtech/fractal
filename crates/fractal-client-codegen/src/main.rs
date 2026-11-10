@@ -760,7 +760,10 @@ fn validate_model(
         let command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
             && rust_block.contains("pub command: DeviceCommandBody")
             && rust.contains("#[serde(tag = \"command_kind\", content = \"args\")]");
-        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline && !command_body {
+        let lifecycle_field = definition == "ClientControlGrantLifecycle"
+            && rust_block.contains("pub lifecycle: fractal_schema::client_control::ClientControlGrantLifecycleEvent")
+            && include_str!("../templates/client_control.rs.in").contains(&format!("pub {rust_field}:"));
+        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline && !command_body && !lifecycle_field {
             bail!("Rust `{rust_name}` does not model schema field `{property}`");
         }
         let swift_field = match property.as_str() {
