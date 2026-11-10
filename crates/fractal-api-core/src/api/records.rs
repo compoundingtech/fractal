@@ -13,7 +13,7 @@ pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
 /// Fill a serving page with visible claims, leaving raw replication/projector reads intact.
 pub(super) fn generic_claims_page(
     store: &Store,
-    subject: Option<&str>,
+    filter: fractal_store::store::ClaimsFilter<'_>,
     owner_run: Option<&str>,
     mut after: u64,
     mut before: Option<u64>,
@@ -22,7 +22,7 @@ pub(super) fn generic_claims_page(
 ) -> anyhow::Result<ClaimsPage> {
     let mut claims = Vec::with_capacity(limit.saturating_add(1));
     loop {
-        let page = store.claims_page(subject, owner_run, after, before, descending, limit.saturating_add(1))?;
+        let page = store.claims_page_matching(filter, owner_run, after, before, descending, limit.saturating_add(1))?;
         let next = page.next_cursor;
         for claim in page.claims.into_iter().filter(generic_claim_visible) {
             claims.push(claim);
@@ -300,6 +300,8 @@ pub async fn get_claim(
 #[derive(Deserialize)]
 pub struct ClaimsQuery {
     subject: Option<String>,
+    subject_prefix: Option<String>,
+    kind: Option<String>,
     owner_run: Option<String>,
     #[serde(default, alias = "after")]
     after_index: u64,
@@ -336,7 +338,11 @@ pub async fn list_claims(
         }).transpose()?;
         generic_claims_page(
             &store,
-            subject.as_deref(),
+            fractal_store::store::ClaimsFilter {
+                subject: subject.as_deref(),
+                subject_prefix: query.subject_prefix.as_deref(),
+                kind: query.kind.as_deref(),
+            },
             query.owner_run.as_deref(),
             query.after_index,
             query.before_index,
