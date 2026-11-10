@@ -183,3 +183,40 @@ fn agent_review_answer_transaction_retirement_is_blocked() {
         "reviewer-retired"
     );
 }
+
+#[test]
+fn agent_review_reassignment_admission_and_imported_fold_are_fenced() {
+    let (store, input, owner) = fixture_answer(&[]);
+    let repair: ClaimInput = serde_json::from_value(json!({
+        "subject":input.subject,"kind":"gate.reviewer-reassigned","actor":PERSON,
+        "fields":{"request":input.fields["request"],"owner":owner,
+            "previous_reviewer":FREE,"reviewer":CHILD}
+    }))
+    .unwrap();
+    let error = store.append_claim(&repair).unwrap_err();
+    assert_eq!(error.code, "agent-review-reassignment-forbidden");
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    // Imported history bypasses local admission; the assignment fold is still fenced.
+    smallclaims::store::append_claim_record_tx(
+        &tx,
+        store.origin(),
+        &repair.subject,
+        &repair.kind,
+        repair.actor.as_deref(),
+        &json!({"fields":repair.fields}),
+        &[],
+        None,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(connection);
+    let mut substitute = input.clone();
+    substitute.actor = Some(CHILD.into());
+    substitute.fields.insert("reviewer".into(), json!(CHILD));
+    let error = append(&store, &substitute, true).unwrap_err();
+    assert_eq!(error.code, REJECTED);
+    assert!(error.message.contains("Assignment"));
+    let accepted = append(&store, &input, true).unwrap();
+    assert_eq!(accepted.actor.as_deref(), Some(FREE));
+}
