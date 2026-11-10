@@ -27,6 +27,12 @@ try {
   const transitions = [];
   const unsubscribe = gate.subscribe(active => transitions.push(active));
   gate.update('active');
+  gate.update('inactive');
+  gate.update(null);
+  gate.update(undefined);
+  assert.equal(gate.active, true, 'transient inactive and unknown states preserve an active foreground');
+  gate.update('active');
+  assert.deepEqual(transitions, [], 'returning from a Share sheet is not a foreground restart');
   gate.update('background');
   gate.update('background');
   gate.update('active');

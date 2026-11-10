@@ -1235,6 +1235,39 @@ test('an ask resolved at its deadline decodes, and what the decoder from before 
     }));
 });
 
+test('person option notes round trip inside input and stored answer without changing legacy payloads', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const notes = [{ id: 'hold', text: 'Keep this as a fallback.' }];
+    for (const [model, legacy] of [
+        [Rich.PersonAnswerInput, { id: 'land', text: 'Ship it.' }],
+        [Rich.PersonAnswer, { type: 'decision', outcome: 'accept', id: 'land', text: 'Ship it.' }],
+    ]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const decode = Rich.decodeUnknownSync(model, mode);
+            for (const wire of [legacy, { ...legacy, option_notes: notes }]) {
+                assert.deepEqual(Schema.encodeSync(model)(decode(wire)), wire);
+            }
+        }
+        for (const option_notes of [null, {}, [{ id: 'hold' }], [{ text: 'fallback' }], [{ id: 'hold', text: '' }], [{ id: 'hold', text: ' \n\t ' }], [{ id: 'hold', text: 'x'.repeat(8001) }]]) {
+            assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...legacy, option_notes }));
+        }
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({
+            ...legacy, option_notes: [{ ...notes[0], label: 'Unexpected' }],
+        }));
+    }
+});
+
+test('pre-option-notes readers reject strictly or lose notes tolerantly, so summary must remain readable', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const { option_notes, ...before } = Rich.PersonAnswer.fields;
+    assert.ok(option_notes);
+    const previous = Schema.Struct(before);
+    const wire = { type: 'decision', outcome: 'accept', id: 'land',
+        option_notes: [{ id: 'hold', text: 'Fallback only.' }] };
+    assert.throws(() => Rich.decodeUnknownSync(previous, 'strict')(wire));
+    assert.equal('option_notes' in Rich.decodeUnknownSync(previous, 'tolerant')(wire), false);
+});
+
 test('a later daemon adding a tone word does not fail the objectives and budgets read', async () => {
     const [, Rich] = await modules;
     const row = { id: 'anthropic-weekly', kind: 'budget', about: 'a', target: '100% per week', current: '94% used', window: 'weekly',

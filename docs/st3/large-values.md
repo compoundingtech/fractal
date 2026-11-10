@@ -191,14 +191,26 @@ These accept existing inline representations, not a value-size or cost bound.
 | Inventory ID | Producer and reviewed value flow | Reason and next step |
 | --- | --- | --- |
 | `lv-h17335d660f3b` | `fractal_store::store::attention` prepares the effective-reviewer pending-request query and hydrates request bodies and canonical episode timestamps. | Preserve exact episode and canonical ordering; trace composed SQL and reference/chunk variable request values. |
-| `lv-hc89d14431aec` | `fractal_evidence::store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold; the typed assignment-cut refactor preserves its SQL bytes. | Trace composed query and reference representation while preserving exact request identity and historical authority. |
-| `lv-hdc87d88b5a4d` | `fractal_store::store::human_review_reassignment` reads the effective reviewer for one request, including canonical repair and receipt selection; only the builder call shape changes. | Trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
+| `lv-hc89d14431aec` | `fractal_evidence::store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold; agent-review requests ignore person repairs, while human results retain canonical ordering. | Trace composed query and reference representation while preserving exact request identity and historical authority. |
+| `lv-hdc87d88b5a4d` | `fractal_store::store::human_review_reassignment` reads the effective reviewer for one request, including canonical human repair and receipt selection. The fold excludes repairs only when the stored request's `gate_kind` is exactly `agent-review`; `IS NOT` keeps requests with no `gate_kind` unchanged. | Admission rejects agent-review repairs with `agent-review-reassignment-forbidden`; the read fence also covers imported history. Trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
 | `lv-h12810b4d74c0` | `fractal_store::store::person_rename` hydrates a receipt by idempotency key. | Preserve original report and actor/people validation; prepare a body/reference representation with identical replay semantics. |
 | `lv-h273f7a4b7c06` | `fractal_store::store::person_rename` reads the canonical receipt destination by old-person subject. | Both reducers must choose the same winner; reference variable person keys without changing canonical ordering. |
 | `lv-hfbb687ae03ed` | `fractal_store::store::person_work` evaluates receipt-winner SQL for a reassignment claim. | Trace composed SQL and variable claim/person keys toward a reference representation without changing winner selection. |
 | `lv-hf6f5b79d7be9` | `fractal_store::store::person_work` updates assignee and its index key, fenced by step and previous person. | Preserve atomic episode-fenced assignment; bound/reference values and account for old cell/index-key reclamation. |
 | `lv-h2c8b0107116f` | `fractal_store::store` hydrates the first authorized exact-request answer with effective-reviewer predicates. | Reference/chunk hydrated values while preserving answer authority at its canonical moment. |
 | `lv-h82624af80f95` | `fractal_store::store` schema adds request, answer, reassignment, reviewer-routing and exact episode indexes. | Existing variable inline keys enable indexed episode seeks but are not bounded-size proof; reference/chunk variable columns and index expressions without changing fold semantics. |
+
+The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
+
+### Agent answer atomicity inventory review
+
+The dormant answer writer shares generic append's operation-outcome admission and isolates its mutations in a savepoint. These reviewed exceptions preserve existing value representations; they do not establish size bounds.
+
+| Inventory IDs | Producer and reviewed value flow | Rationale and next step |
+| --- | --- | --- |
+| `lv-h9376410940d5`, `lv-h25f2de100e85`, `lv-hf3bdff08c789` | `fractal_store::store::agent_review_transaction` starts, releases or rolls back a fixed-name savepoint. | Fixed control SQL carries no request/body values; retain explicit rollback isolation while tracing the composed write path. |
+| `lv-hc04950ca3e3d`, `lv-h21a64752ecb4` | `fractal_missions::store::missions::run_review::answer_tests` lists tables and snapshots every stored cell in a real in-memory fixture. | Test-only equality proves claims, events, projections and operation rows do not survive refusal; this unbounded fixture read is not a production size/cost guarantee. Quote table names and trace cell representations if reused outside tests. |
+| `lv-hde1a4495a8b4` | The same test module stores a genuine consumed signature as the next writer's expected signature. | Exercises the real post-insert nonce-replay failure, not a mock. The public signature JSON remains inline fixture data; prepare/reference it before any production reuse. |
 
 ### Conversation-owner inventory review (PR #3116)
 
