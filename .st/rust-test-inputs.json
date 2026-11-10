@@ -245,6 +245,7 @@
   },
   "fractal-missions": {
    "extra": [
+    "crates/fractal-attention/src/store/attention.rs",
     "crates/fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz",
     "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"

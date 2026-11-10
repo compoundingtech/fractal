@@ -2177,6 +2177,11 @@ fn install_timing_log(path: PathBuf) {
                 "outcome": format!("{outcome:?}"), "status": status,
                 "took_ms": took.as_secs_f64() * 1000.0,
             }),
+            fractal_client::Observation::Mutation { method, route, attempts, took, retry_wait } => serde_json::json!({
+                "at_ms": at_ms, "type": "mutation", "method": method, "route": route,
+                "attempts": attempts, "took_ms": took.as_secs_f64() * 1000.0,
+                "retry_wait_ms": retry_wait.as_secs_f64() * 1000.0,
+            }),
             fractal_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
                 "at_ms": at_ms, "type": "frame", "id": id, "kind": kind, "bytes": bytes,
                 "since_subscribe_ms": since_subscribe.map(|d| d.as_secs_f64() * 1000.0),

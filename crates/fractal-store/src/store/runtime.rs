@@ -527,6 +527,27 @@ impl Runtime for FractalRuntime {
         try_project_simple_replication_tx(transaction, origin, through)
     }
 
+    fn project_incremental_chunk(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        through: u64,
+    ) -> Result<IncrementalProjection, FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
+        try_project_simple_replication_inner_tx(transaction, origin, through, true)
+    }
+
+    fn projection_work_pending(&self, connection: &Connection) -> Result<bool, FractalError> {
+        projection_work_pending_tx(connection)
+    }
+
+    fn finish_projection_work(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
+        finish_projection_work_tx(transaction)
+    }
+
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         replay_graph_from_nothing_tx(transaction)
     }

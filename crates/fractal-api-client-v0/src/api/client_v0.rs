@@ -7684,7 +7684,7 @@ fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<
     let target = client_detail_id("step-run", target);
     let work = state
         .store
-        .step_run(&target)
+        .step_run_fenced(&target)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("work `{target}` does not exist")))?;
     if fence.mission_generation.as_deref() != Some(work.generation.as_str())
@@ -8722,16 +8722,19 @@ async fn dispatch_action(
                 .ok_or_else(|| {
                     ApiError::not_found(format!("mission run `{target}` does not exist"))
                 })?;
-            if request.fence.mission_generation.as_deref() != Some(current.generation.as_str()) {
-                return Err(stale("the mission generation fence is stale"));
-            }
+            let expected_generation = request.fence.mission_generation.as_deref()
+                .ok_or_else(|| stale("the mission generation fence is stale"))?;
             let reason = p
                 .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("the mission was cancelled by its requester");
             state
                 .store
-                .request_mission_run_cancellation(&current.subject, reason)
+                .request_mission_run_cancellation_at_generation(
+                    &current.subject,
+                    reason,
+                    Some(expected_generation),
+                )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![current.subject])

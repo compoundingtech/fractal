@@ -423,6 +423,27 @@ pub fn daemon_unreachable(error: &anyhow::Error) -> Option<&DaemonUnreachable> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<DaemonUnreachable>())
 }
+/// One logical mutation, including refused projection-drain attempts. No body, key or
+/// identity is exposed; `route` omits the query string.
+#[derive(Clone, Copy, Debug)]
+pub struct MutationObservation<'a> {
+    pub method: &'a str,
+    pub route: &'a str,
+    pub attempts: u32,
+    pub took: Duration,
+    pub retry_wait: Duration,
+}
+
+type MutationObserver = Box<dyn Fn(&MutationObservation<'_>) + Send + Sync>;
+static MUTATION_OBSERVER: std::sync::OnceLock<MutationObserver> = std::sync::OnceLock::new();
+
+/// Install optional per-call diagnostics once, before starting calls. Observing sends nothing.
+pub fn set_mutation_observer(
+    observer: impl Fn(&MutationObservation<'_>) + Send + Sync + 'static,
+) {
+    let _ = MUTATION_OBSERVER.set(Box::new(observer));
+}
+
 
 #[derive(Clone, Copy)]
 pub struct ClientDeadlines {
@@ -667,21 +688,51 @@ impl Client {
             .transpose()?
             .unwrap_or_default();
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
+        let result = loop {
+            attempts += 1;
             let attempt_started = tokio::time::Instant::now();
             let error = match self.request_once(method, path, &bytes).await {
                 Ok(response) => {
                     if let Some(retry) = &self.follow_retry {
                         retry.lock().expect("follow retry lock").unreachable_since = None;
                     }
-                    return decode_api_response(&response);
+                    break decode_api_response(&response);
                 }
                 Err(error) => error,
             };
+            if mutation && api_error_parts(&error).is_some_and(|(status, code, _, details)| {
+                status == 503 && code == "database-busy"
+                    && details.get("reason").and_then(serde_json::Value::as_str)
+                        == Some("run-projection-drain")
+            }) {
+                // The completed refusal guarantees the action never ran. Reserve the entire
+                // next request deadline; never cancel a sent mutation and return this refusal.
+                let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let delay = jittered(pause);
+                if remaining < request_deadline(path, self.deadlines) + delay {
+                    break Err(error);
+                }
+                draining = true;
+                let slept = tokio::time::Instant::now();
+                tokio::time::sleep(delay).await;
+                retry_wait += slept.elapsed();
+                if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                    < request_deadline(path, self.deadlines)
+                {
+                    break Err(error);
+                }
+                pause = (pause * 2).min(Duration::from_secs(1));
+                continue;
+            }
             if daemon_unreachable(&error).is_some_and(DaemonUnreachable::local_connect_defect) {
-                return Err(error);
+                break Err(error);
             }
             if let Some(retry) = &self.follow_retry
                 && method == "GET"
@@ -696,18 +747,18 @@ impl Client {
                 continue;
             }
             let Some(outage) = daemon_unreachable(&error) else {
-                return Err(error);
+                break Err(error);
             };
             if outage.full_replay && self.announce_outage_wait {
-                return Err(error);
+                break Err(error);
             }
             let repeatable = outage.phase() == OutagePhase::Connect || method == "GET";
             let waited = started.elapsed();
             if !repeatable || self.outage_wait.is_zero() {
-                return Err(error);
+                break Err(error);
             }
             if waited >= self.outage_wait {
-                return Err(outage.clone().after(waited).into());
+                break Err(outage.clone().after(waited).into());
             }
             if self.announce_outage_wait && !announced {
                 eprintln!(
@@ -717,9 +768,31 @@ impl Client {
                 );
                 announced = true;
             }
-            tokio::time::sleep(jittered(pause).min(self.outage_wait - waited)).await;
+            let remaining = if draining {
+                (self.outage_wait - waited).min(drain_deadline.saturating_duration_since(tokio::time::Instant::now()))
+            } else {
+                self.outage_wait - waited
+            };
+            let slept = tokio::time::Instant::now();
+            tokio::time::sleep(jittered(pause).min(remaining)).await;
+            retry_wait += slept.elapsed();
+            if draining && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                < request_deadline(path, self.deadlines)
+            {
+                break Err(error);
+            }
             pause = (pause * 2).min(Duration::from_secs(1));
+        };
+        if mutation && let Some(observer) = MUTATION_OBSERVER.get() {
+            observer(&MutationObservation {
+                method,
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
 
     async fn request_once(&self, method: &str, path: &str, bytes: &[u8]) -> Result<Vec<u8>> {
