@@ -7478,6 +7478,9 @@ async fn serve_reserved_unix_with_lookup_ready(
                     if let Some(agent) = ancestry.agent() {
                         request.extensions_mut().insert(BoundAgent(agent.to_owned()));
                     }
+                    if let HarnessAncestry::Run(credential) = &ancestry {
+                        request.extensions_mut().insert(credential.clone());
+                    }
                     if matches!(ancestry, HarnessAncestry::Unavailable) {
                         request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
@@ -7521,10 +7524,41 @@ mod gateway_listener_tests;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HarnessAncestry {
     Bound(String),
+    /// A program effect: an ancestor carries the run credential its attempt was started with
+    /// (docs/st3/program-engine.md §3). The guard resolves it to `mission-run/RUN`.
+    Run(RunCredential),
     Person,
     #[default]
     Unavailable,
 }
+
+/// A run credential read from a caller's exec-time environment. Its `Debug` never shows the
+/// secret, so ancestry diagnostics cannot leak it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunCredential(String);
+
+impl RunCredential {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RunCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RunCredential(..)")
+    }
+}
+
+/// The run a request's credential binds, set by the serving guard and never by a client.
+#[derive(Clone, Debug)]
+pub struct BoundRun(pub crate::store::run_credentials::RunBinding);
+
+/// The environment variable a program attempt's effects carry their run credential in.
+pub const RUN_CREDENTIAL_ENV: &str = "ST_RUN_CREDENTIAL";
 
 impl HarnessAncestry {
     fn agent(&self) -> Option<&str> {
@@ -7548,6 +7582,15 @@ impl HarnessAncestry {
     fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
         let primary = lookup("ST_AGENT");
         let legacy = lookup("FRACTAL_AGENT");
+        // A program effect acts as its run, never as an agent too: one environment naming both
+        // cannot be bound to either.
+        if let Some(credential) = lookup(RUN_CREDENTIAL_ENV) {
+            return if credential.is_empty() || primary.is_some() || legacy.is_some() {
+                Self::Unavailable
+            } else {
+                Self::Run(RunCredential::new(credential))
+            };
+        }
         if primary.is_none() && legacy.is_none() {
             return Self::Person;
         }
@@ -8007,6 +8050,16 @@ async fn guard_bound_actor(
     request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
     let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    // A run credential binds only while its attempt runs; one that no longer binds leaves the
+    // caller unverifiable, so it writes nothing.
+    request.extensions_mut().remove::<BoundRun>();
+    if let Some(credential) = request.extensions().get::<RunCredential>().cloned() {
+        let lookup = store.clone();
+        match tokio::task::spawn_blocking(move || lookup.run_binding(credential.secret())).await {
+            Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
+            _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
+        }
+    }
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
     // independently of the ingress observe/enforce rollout.
@@ -8064,7 +8117,9 @@ pub async fn guard_bound_request(
     bound_agent: Option<&str>,
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
-    let Some(bound_agent) = bound_agent else {
+    // A bound run follows the rules of a bound agent, as the actor `mission-run/RUN`.
+    let bound_run = request.extensions().get::<BoundRun>().map(|run| run.0.run.clone());
+    let Some(bound_agent) = bound_agent.or(bound_run.as_deref()) else {
         return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
             guard_unverifiable_request(request).await
         } else {
@@ -8089,9 +8144,11 @@ pub async fn guard_bound_request(
         && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
-    let bound_identity = public_identity(
-        store, crate::store::identities::IdentityKind::Agent, bound_agent,
-    )?.identity;
+    let bound_identity = if bound_run.as_deref() == Some(bound_agent) {
+        bound_agent.to_owned()
+    } else {
+        public_identity(store, crate::store::identities::IdentityKind::Agent, bound_agent)?.identity
+    };
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
     for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
