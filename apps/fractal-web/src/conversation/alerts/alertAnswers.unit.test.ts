@@ -1,10 +1,14 @@
-import type * as Native from '@fractal/client/schema'
+import { Attention, decodeUnknownSync } from '@fractal/client/schema'
 import { describe, expect, it } from 'vitest'
 import { createAlertAnswers, type AnswerResult } from './alertAnswers.ts'
 
-const alert = (attention_kind: Native.Attention['attention_kind']) => ({
-  id: 'attention/decision', revision: 'r1', episode: 'episode/one', state: 'open', attention_kind,
-}) as Native.Attention
+const alert = (attention_kind: Attention['attention_kind'], fields: Record<string, unknown> = {}) => decodeUnknownSync(Attention)({
+  id: 'attention/decision', kind: 'attention', revision: 'r1', episode: 'episode/one', state: 'open', attention_kind,
+  title: 'Approve the change?', detail: 'A synthetic decision', priority: 'normal', actions: [],
+  person_id: 'person/operator', source_id: 'agent/example',
+  updated_at: '2026-11-01T12:00:00Z', requested_at: '2026-11-01T12:00:00Z',
+  ...fields,
+})
 
 describe('answer visibility across authoritative revisions', () => {
   it('keeps a sent non-prompt answer hidden only on the revision that was answered', async () => {
@@ -16,7 +20,7 @@ describe('answer visibility across authoritative revisions', () => {
     expect(answers.getSnapshot().pending.get(item.id)?.phase).toBe('sent')
     expect(answers.hidden(item)).toBe(true)
 
-    const raisedAgain = { ...item, revision: 'r2' }
+    const raisedAgain = alert(item.attention_kind, { revision: 'r2' })
     answers.observe([raisedAgain])
     expect(answers.hidden(raisedAgain)).toBe(false)
     expect(answers.hidden(item)).toBe(true)
@@ -28,8 +32,8 @@ describe('answer visibility across authoritative revisions', () => {
     answers.observe([item])
     answers.send(item, 'Allow', async () => ({ _tag: 'Sent' }))
     await Promise.resolve()
-    expect(answers.hidden({ ...item, revision: 'r2' })).toBe(true)
-    expect(answers.hidden({ ...item, revision: 'r2', episode: 'episode/two' })).toBe(false)
+    expect(answers.hidden(alert(item.attention_kind, { revision: 'r2' }))).toBe(true)
+    expect(answers.hidden(alert(item.attention_kind, { revision: 'r2', episode: 'episode/two' }))).toBe(false)
   })
 })
 
@@ -52,7 +56,7 @@ describe.each(['older-first', 'newer-first'] as const)('overlapping revision ans
     it.each(completions)(`ignores older ${olderResult} completion when the newer answer is %s`, async (newerResult) => {
       const answers = createAlertAnswers()
       const older = alert('person-step')
-      const newer = { ...older, revision: 'r2' }
+      const newer = alert(older.attention_kind, { revision: 'r2' })
       const first = inFlight()
       const second = inFlight()
       answers.observe([older])

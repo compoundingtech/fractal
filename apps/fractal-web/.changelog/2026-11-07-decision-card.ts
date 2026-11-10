@@ -2,6 +2,6 @@ import type { ChangelogEntrySource } from '../src/changelog/contract.ts'
 
 export default {
   title: 'Decide from one card',
-  summary: 'Alerts now show as one card: the question, its context, the options with what each does, and the recommended one chosen for you. Sending stays a separate step, and the next alert comes up right away. Enter sends only an answer you chose or wrote on that card, so holding or pressing Enter again never answers the next alert\'s recommendation unread; Send always sends. An alert that asks again with a newer question shows again after its earlier answer was accepted. A late result for the earlier question cannot change the newer answer or its error. Choosing an alert in the sidebar opens it in the main area, and what you wrote stays with it as you move around.',
+  summary: 'Alerts now show one card with the question, context, options and preselected recommendation; choosing an alert in the sidebar opens it in the main area, and your draft stays with it as you move around. Enter sends only an answer you chose or wrote on that card, never the next alert’s unread recommendation; Send always sends, then advances to the next alert. An alert asking a newer question reappears after its earlier answer was accepted, and a late result for the earlier question cannot change the newer answer or its error.',
   kind: 'improvement',
 } satisfies ChangelogEntrySource
