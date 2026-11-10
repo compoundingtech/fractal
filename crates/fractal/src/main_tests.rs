@@ -8030,6 +8030,52 @@ async fn a_closed_message_missing_from_the_active_page_archives_its_projected_fi
 }
 
 #[tokio::test]
+async fn expired_staged_native_mail_is_archived_without_receipts_and_delivery_supersedes_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("expiry").unwrap());
+    let seat = "agent/eval.worker";
+    let append = |status: &str, fields: BTreeMap<String, Value>| {
+        store.append_claim(&ClaimInput {
+            subject: "message/expiry".into(), kind: format!("message.{status}"),
+            actor: Some(if status == "expired" { "daemon/runtime" } else { seat }.into()), fields, evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("sent", BTreeMap::from([
+        ("from".into(), json!("person/eval")), ("to".into(), json!(seat)),
+        ("content".into(), json!("Brief")), ("status".into(), json!("sent")),
+    ]));
+    let (client, server) = serve_test_store(store.clone(), root.path(), "expiry").await;
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    let reconcile = || forward_projected_messages(
+        &client, seat, &inbox, &archive, "app-server",
+        NativeDeliveryReceipts::Codex {
+            state_dir: root.path(), identity: "eval.worker", runtime_id: "worker",
+        },
+    );
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.message("message/expiry").unwrap().unwrap().status, "staged");
+    let filename = fractal_drivers::message::list_dir(&inbox).unwrap()[0].filename.clone();
+    append("expired", BTreeMap::from([
+        ("status".into(), json!("expired")), ("reason".into(), json!("cutoff-uncertain-attempt")),
+    ]));
+    assert!(reconcile().await.unwrap().is_empty());
+    assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(&filename).is_file());
+    for kind in ["message.delivered", "message.read"] {
+        assert!(store.claims_for_subject_kind_at("message/expiry", kind, None, false, 1).unwrap().claims.is_empty());
+    }
+    append("delivered", BTreeMap::from([("status".into(), json!("delivered"))]));
+    assert_eq!(message_page(&client, Some(seat), false, None).await.unwrap().items[0].status, "delivered");
+    let index = store.index().unwrap();
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.index().unwrap(), index, "delivered-unread replay writes no receipt");
+    assert!(archive.join(filename).is_file());
+    server.abort();
+}
+
+#[tokio::test]
 async fn legacy_native_mailbox_replays_delivered_unread_once_and_keeps_read_closed_final() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_memory("replay").unwrap());

@@ -101,7 +101,8 @@ BEGIN
     DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
 END;
 CREATE TRIGGER IF NOT EXISTS local_stream_lifecycle_client_selector AFTER INSERT ON local_stream_lifecycle
-WHEN NEW.kind='message.closed'
+WHEN NEW.kind='message.closed' OR (NEW.kind IN ('message.delivered','message.read')
+ AND EXISTS(SELECT 1 FROM claims WHERE subject=NEW.subject AND kind='message.expired'))
 BEGIN
     INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
     VALUES(NEW.subject,-1,1,1)
