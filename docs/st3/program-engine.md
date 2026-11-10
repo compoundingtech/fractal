@@ -135,7 +135,7 @@ can run an effect to its end but can never journal it.
 
 | Direction | Message | Fields | Meaning |
 |---|---|---|---|
-| daemon → host | `start` | `step`, `attempt`, `module`, `sha256`, `payload`, `env`, `cwd`, `journal[]` | start or resume one program step |
+| daemon → host | `start` | `step`, `attempt`, `run`, `module`, `sha256`, `payload`, `env`, `cwd`, `journal[]` | start or resume one program step |
 | host → daemon | `journal` | `step`, `attempt`, `seq`, `key`, `status` (`started`/`completed`/`failed`), `value`/`error`, `ms` | an inner step began or ended |
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
@@ -154,9 +154,18 @@ the next host resumes each from its journal.
 A bundle is one self-contained ES module whose default export carries the entry
 `Symbol.for('fractal.program.v1')`. The program API (`Fractal.mission/step/command`) and Effect
 are inside the bundle, so the host is version-free and the bundle hash pins the runtime library
-too. The host verifies the hash before loading and runs each program attempt in its own worker. It
-starts each step effect in its own process group and kills those groups on `cancel` and when its
-stdin closes; groups that outlive a crashed host or daemon are ended by the next daemon (DQ2).
+too. The engine reads the module from the store's blob of the revision's hash into a verified,
+content-addressed file; the host verifies the hash again before loading and runs each program
+attempt in its own worker, while its main thread owns the pipe, the effect process groups and
+liveness. It starts each step effect in its own process group and kills those groups when the
+group's leader exits, on `cancel`, when it terminates the attempt's worker (an ended or
+unresponsive program) and when its stdin closes; groups that outlive a crashed host or daemon are
+ended by the next daemon (DQ2).
+
+The daemon starts the host with `FRACTAL_PROGRAM_RUNTIME`, or else `bun` on its `PATH`; a member
+without either cannot run program steps. Cancellation is eager: every evaluation of a run tells the
+engine which of the run's program attempts left their step (ended, failed, timed out, retried,
+cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once.
 
 ### 3. Declaration and authority
 
@@ -296,7 +305,8 @@ Choice: a child run. It needs no standing owner and reuses §6.
 - `missions waiting-on` names the innermost open key: a running effect, a child run or an ask.
 - Stalls: a program step whose journal shows no new entry within its `stalled-after` raises the
   run fault with scope `program/stalled`, naming the open key. A dead host that the engine cannot
-  restart raises `program/host` on every program step it held.
+  restart raises `program/host` on every program step it held, and so does a program worker the
+  host terminated for missing its liveness deadline (DQ8), on that worker's step.
 
 ### 9. One execution model
 

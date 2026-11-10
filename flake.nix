@@ -597,6 +597,8 @@
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             ptyPackage
             effect-utils.packages.${system}.otelite
             messagingCompat
@@ -2200,6 +2202,8 @@
             # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             # st3's completion tests drive the installed stub in each supported shell.
             pkgs.fish
             pkgs.zsh
