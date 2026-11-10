@@ -30,6 +30,7 @@ async fn opted_in_pairing_advertisement_matches_the_canonical_schema() {
     let schema = json!({"$ref":"#/$defs/PairingAdvertisement","$defs":contract["$defs"]});
     let validator = jsonschema::options().should_validate_formats(true).build(&schema).unwrap();
     for query in [
+        "",
         "?accepts=pairing-key-binding",
         "?accepts=pairing-key-binding&accepts=fabric-gateway-grant",
     ] {
@@ -40,10 +41,14 @@ async fn opted_in_pairing_advertisement_matches_the_canonical_schema() {
         let body: Value = serde_json::from_slice(
             &to_bytes(response.into_body(), usize::MAX).await.unwrap()
         ).unwrap();
-        assert!(body["capabilities"].as_array().unwrap().iter().any(|capability| {
+        assert_eq!(body["capabilities"].as_array().unwrap().iter().any(|capability| {
             capability["id"] == "pairing-key-binding" && capability["version"] == 2
-        }));
+        }), !query.is_empty());
         assert!(validator.is_valid(&body), "{body}");
+        let mut duplicated = body.clone();
+        let capabilities = duplicated["capabilities"].as_array_mut().unwrap();
+        capabilities.push(capabilities[0].clone());
+        assert!(!validator.is_valid(&duplicated), "duplicate capability IDs must be refused");
     }
 }
 

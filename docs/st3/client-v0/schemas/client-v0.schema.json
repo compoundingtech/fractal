@@ -495,7 +495,7 @@
       "required": ["api_version", "capabilities"],
       "properties": {
         "api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]},
-        "capabilities": {"type": "array", "minItems": 1, "maxItems": 3, "items": {
+        "capabilities": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "version", "state"],
           "properties": {"id": {"enum": ["device-key-proofs", "fabric-gateway-grant", "pairing-key-binding"]}, "version": {"enum": [1, 2]}, "state": {"const": "granted"}},
           "oneOf": [
