@@ -15,6 +15,7 @@ vi.mock('@stylexjs/stylex', () => ({
 
 import { AnswerAlert } from './AnswerAlert.tsx'
 import type { AlertAction } from './alert-action-port.ts'
+import { isFixturePlainText } from '../../client-control/fixtureText.ts'
 
 const alert = {
   id: 'attention/ask',
@@ -116,4 +117,33 @@ it('sends a request for changes only with the person\'s words', async () => {
   await act(async () => button(container, 'Change it')!.click())
   await act(async () => button(container, 'Send')!.click())
   expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Rename the flag.', answer: { id: 'change', text: 'Rename the flag.' } })
+})
+
+it.each([
+  ['A short native ask', 'client-control fixture 0001'],
+  ['Plain ASCII punctuation: yes?', 'Read this single paragraph.'],
+  ['T'.repeat(60), 'Q'.repeat(60)],
+])('preserves approved plain ask text as one unsplit element: %s', async (title, question) => {
+  expect(isFixturePlainText(title)).toBe(true)
+  expect(isFixturePlainText(question)).toBe(true)
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  cleanup = () => { act(() => root.unmount()); container.remove() }
+  let answers = 0
+  await act(async () => root.render(<AnswerAlert
+    alert={{ ...alert, title, request: { ...alert.request!, question } }}
+    onAct={async () => { answers += 1; return { _tag: 'Sent' } }}
+  />))
+  const titles = container.querySelectorAll('[data-ask-title]')
+  const questions = container.querySelectorAll('[data-ask-question] p')
+  expect(titles).toHaveLength(1)
+  expect(questions).toHaveLength(1)
+  expect(titles[0]!.childElementCount).toBe(0)
+  expect(questions[0]!.childElementCount).toBe(0)
+  expect(titles[0]!.textContent).toBe(title)
+  expect(questions[0]!.textContent).toBe(question)
+  // Observe only: answer buttons are deliberately never pressed.
+  expect(answers).toBe(0)
 })

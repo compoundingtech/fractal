@@ -171,7 +171,7 @@ const styles = stylex.create({
 /** A request's question: a JSON report as its telling fields, anything else as Markdown. */
 const Question = ({ text }: { readonly text: string }): React.ReactNode => {
   const shown = report(text)
-  if (shown === null) return <div {...stylex.props(styles.body)}><Markdown text={spaced(text)} /></div>
+  if (shown === null) return <div data-ask-question="" {...stylex.props(styles.body)}><Markdown text={spaced(text)} /></div>
   return (
     <div {...stylex.props(styles.body)}>
       {shown.before ? <Markdown text={shown.before} /> : null}
@@ -313,8 +313,8 @@ export const AnswerAlert = ({
     now,
   )
   return (
-    <section {...stylex.props(styles.alert)} aria-label={alert.title} data-alert-kind={alert.attention_kind}>
-      <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
+    <section {...stylex.props(styles.alert)} aria-label={alert.title} data-alert-kind={alert.attention_kind} data-item-id={alert.id}>
+      <div {...stylex.props(styles.title)}><span aria-hidden="true">◆ </span><span data-ask-title="">{alert.title}</span></div>
       <div {...stylex.props(styles.meta)}>
         {KIND_WORDS[alert.attention_kind] ?? 'Alert'} · from {from}
         {step ? ` · step ${step}` : ''} · waited {ago(DateTime.formatIso(alert.requested_at), now)}
