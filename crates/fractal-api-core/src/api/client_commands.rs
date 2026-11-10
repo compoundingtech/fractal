@@ -125,6 +125,10 @@ fn verify_result(state: &AppState, session: &ClientSession, row: &Command, reque
         || request.result.as_ref().is_some_and(|result| serde_json::to_value(&binding.visible_state).as_ref().ok() != Some(result))
     { return Err(forbidden("device result binding does not match its command")); }
     super::client_control_grants::check_screen(&grant, &binding.visible_state.screen)?;
+    if binding.visible_state.screen == "Attention" && grant.item_id.is_some() {
+        let item = binding.visible_state.opened_item.as_ref().ok_or_else(|| control_refusal("screen-not-granted"))?;
+        super::client_control_grants::check_item(&grant, &item.id)?;
+    }
     let bytes = client_result_canonical_bytes(binding).map_err(ApiError::internal)?;
     if !smallclaims::principal::verify_key_signature(&enrollment.public_key, &bytes, &signature.signature) {
         return Err(forbidden("invalid device result signature"));
@@ -266,8 +270,9 @@ fn issue_inner(state: &AppState, session: &ClientSession, request: &DeviceComman
     if request.grant_id.as_ref().is_some_and(|id| !id.starts_with("client-control-grant/")
         || id.len() <= "client-control-grant/".len() || id.len() > 4096 || id.chars().any(char::is_control))
     { return Err(validation("invalid client control grant selector")); }
-    validate_args(&request.kind, &request.args)?;
-    require_scope(&session, scope(&request.kind)?)?;
+    if request.kind.is_empty() || request.kind.len() > 128 || request.kind.chars().any(char::is_control)
+        || !request.args.is_object() || serde_json::to_vec(&request.args).map_or(true, |bytes| bytes.len() > 8192)
+    { return Err(validation("invalid command verb or args")); }
     if !acting_party(&session) { return Err(forbidden("device commands require a concrete person or local agent")); }
     let ttl = request.ttl_ms.unwrap_or(30_000);
     if !(1..=60_000).contains(&ttl) { return Err(validation("ttl_ms must be 1 through 60000")); }
@@ -276,6 +281,11 @@ fn issue_inner(state: &AppState, session: &ClientSession, request: &DeviceComman
     if controlled && request.grant_id.is_none() {
         return Err(control_refusal("grant-missing"));
     }
+    if controlled && !matches!(request.kind.as_str(), "phone.inspect" | "phone.navigate") {
+        return Err(control_refusal("verb-not-granted"));
+    }
+    validate_args(&request.kind, &request.args)?;
+    require_scope(session, scope(&request.kind)?)?;
     let mut before = None;
     let mut target: Option<ClaimRecord> = None;
     loop {

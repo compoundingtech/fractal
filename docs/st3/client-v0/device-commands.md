@@ -232,8 +232,11 @@ claimed step of a running mission run. The exact claim generation, attempt and
 incarnation remain authoritative: claim replacement, claim/run end, enrollment
 revocation and deadlines end the grant. The default budget is 50 commands, spent
 durably before admission; grants last at most two hours. Only `phone.inspect`
-and `phone.navigate` to `NowRoot` or `Conversation` can be granted. Neither
-`phone.message.read` nor `message.send` is grantable.
+and `phone.navigate` to `NowRoot` or `Attention` can be granted. The journey opens
+the seeded native ask using `Attention {params: {id}}`, then inspects it. Optional
+grant `item_id` binds that screen to the seed; another ask is `screen-not-granted`.
+`Conversation` is always `screen-not-granted`. Answer, close, read-state and
+`message.send` verbs are `verb-not-granted`; no grant authorizes a mutation.
 
 The existing session-scoped `commands` collection includes
 `kind: "client-control-grant"` lifecycle records, even before the first command.

@@ -169,11 +169,20 @@ async fn all_admission_refusals_have_durable_fixture_receipt_ids() {
     let other_actor = ClientSession::local(Some("agent/other")).unwrap();
     assert_rejected_receipt(&state, issue(&state, &other_actor, command_request(&grant)).unwrap_err(), "actor-not-granted");
     let mut request = command_request(&grant);
-    request.kind = "phone.navigate".into(); request.args = json!({"screen":"Agents"});
+    request.kind = "phone.navigate".into(); request.args = json!({"screen":"Conversation","params":{"target":"agent/client-control-fixture/producer"}});
     assert_rejected_receipt(&state, issue(&state, &issuer, request).unwrap_err(), "screen-not-granted");
-    let mut request = command_request(&grant);
-    request.kind = "phone.message.read".into(); request.args = json!({"message_id":"message/seed"});
-    assert_rejected_receipt(&state, issue(&state, &issuer, request).unwrap_err(), "verb-not-granted");
+    for verb in ["phone.message.read", "message.read", "message.close", "message.send", "work.answer", "attention.answer", "attention.close"] {
+        let mut request = command_request(&grant);
+        request.kind = verb.into(); request.args = json!({});
+        assert_rejected_receipt(&state, issue(&state, &issuer, request).unwrap_err(), "verb-not-granted");
+    }
+    let mut bound_request = test_support::request(&grant, 2);
+    bound_request.item_id = Some("step-run/ask-seeded/ask".into());
+    let item_bound = issue_grant(&state, &issuer, bound_request).unwrap();
+    let mut wrong_item = command_request(&item_bound);
+    wrong_item.kind = "phone.navigate".into();
+    wrong_item.args = json!({"screen":"Attention","params":{"id":"step-run/ask-other/ask"}});
+    assert_rejected_receipt(&state, issue(&state, &issuer, wrong_item).unwrap_err(), "screen-not-granted");
     let bounded = issue_grant(&state, &issuer, test_support::request(&grant, 1)).unwrap();
     issue(&state, &issuer, command_request(&bounded)).unwrap();
     assert_rejected_receipt(&state, issue(&state, &issuer, command_request(&bounded)).unwrap_err(), "budget-exhausted");
