@@ -1718,7 +1718,7 @@ async fn client_v0_read_routes_conform_to_the_manifest() {
     assert_eq!(response.status(), StatusCode::OK);
     let envelope: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(envelope["api_version"], "st3.client.v0");
+    assert_eq!(envelope["api_version"], "fractal.client.v0");
     assert_eq!(
         envelope["snapshot"]["projection_version"],
         "client-projection.v0"
@@ -3580,7 +3580,7 @@ async fn operational_lists_share_one_versioned_paginated_shape() {
             client_json(app.clone(), &format!("/v1/client/{collection}")).await;
         assert_eq!(status, StatusCode::OK, "{collection}: {envelope}");
         assert_conforms(&validator, collection, &envelope);
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["value"]["kind"], "page");
         assert_eq!(envelope["value"]["collection"], collection);
         assert!(envelope["value"]["items"].is_array());

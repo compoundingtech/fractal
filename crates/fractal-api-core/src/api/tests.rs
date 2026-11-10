@@ -13,6 +13,50 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[test]
+fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
+    assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
+    assert!(wire_names::api_version("st3.client.v0"));
+    assert!(wire_names::api_version(CLIENT_API_VERSION));
+    let error = client_error_envelope(StatusCode::BAD_REQUEST, &json!({}), "request/test");
+    assert_eq!(error["api_version"], "fractal.client.v0");
+    assert_eq!(error["error_version"], "fractal.client.error.v0");
+}
+
+#[test]
+fn launch_visualizations_emit_fractal_for_drafts_and_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let kdl = "version 2\nmission \"example/versions\" { title \"Versions\"; }";
+    let intent = crate::graph::parse_test_intent(kdl, &state.node).unwrap();
+    let mut session: PlanningSessionView = serde_json::from_value(json!({
+        "subject": "planning/versions", "id": "versions", "mission": "example/versions",
+        "request": "Check versions", "workspace": root.path(), "requester": "person/ada",
+        "planner": "agent/planner", "status": "draft", "created_at_unix_ms": 0,
+        "updated_at_unix_ms": 0, "variants": [{
+            "name": "default", "candidate": {
+                "variant": "default", "revision": 1, "markdown": "", "kdl": kdl,
+                "mission": "example/versions", "mission_revision": "", "submitted_at_unix_ms": 0
+            }
+        }]
+    })).unwrap();
+    let drafts = client_launch_variant_resources(&state, &session).unwrap();
+    assert_eq!(drafts[0]["visualization"]["version"], "fractal.visualization.v0");
+    let mission = state.store.mission(&intent, crate::model::IntentInput {
+        kdl: kdl.into(), source_name: None,
+    }).unwrap();
+    let preview = crate::model::PlanningPreviewView {
+        variant: "default".into(), hash: "preview".into(), candidate_revision: 1,
+        store_index: 0, graph: String::new(), diff: String::new(), mission,
+        created_at_unix_ms: 0,
+    };
+    session.variants[0].preview = Some(preview.clone());
+    let visualization = launch_visualization(
+        &intent.missions["example/versions"], &session, &preview, &[],
+    );
+    assert_eq!(visualization["version"], "fractal.visualization.v0");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn incomplete_linux_environment_is_unavailable() {

@@ -272,8 +272,7 @@ pub struct AppState {
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
-pub const CLIENT_API_VERSION: &str = "st3.client.v0";
+pub const CLIENT_API_VERSION: &str = "fractal.client.v0";
 pub const CLIENT_PROJECTION_VERSION: &str = "client-projection.v0";
 pub const CLIENT_DEFAULT_PAGE_ITEMS: usize = 50;
 pub const CLIENT_MAX_PAGE_ITEMS: usize = 200;
@@ -1941,7 +1940,7 @@ pub fn client_host_id(node: &str) -> String {
 pub fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
     let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": request_id,
         "code": client_error_code(raw.get("code").and_then(Value::as_str)),
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
@@ -5677,7 +5676,7 @@ fn launch_visualization(
             .push(format!("step/{}", step.path));
     }
     json!({
-        "version": "st3.visualization.v0",
+        "version": "fractal.visualization.v0",
         "views": ["graph", "timeline", "swimlane", "revision", "risk", "live-progress"],
         "mission": format!("mission/{}", mission.id),
         "nodes": nodes,
@@ -5843,7 +5842,7 @@ fn client_launch_variant_resources(
                 (
                     json!({}),
                     Vec::new(),
-                    json!({"version": "st3.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
+                    json!({"version": "fractal.visualization.v0", "views": [], "nodes": [], "edges": [], "groups": [], "timeline": {"entries": []}, "swimlanes": [], "goals": [], "constraints": [], "gates": [], "resources": [], "decisions": [], "revision": {}, "diffs": [], "risk": {}, "live_progress": {}}),
                     json!({"changes": [], "predicted_actions": []}),
                     None,
                 )

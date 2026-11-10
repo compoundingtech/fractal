@@ -352,11 +352,11 @@ fn record_subscription_page(value: &Value, bytes: usize) {
     span.record("span.label", format!("{collection} {rows}"));
 }
 
-const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
-const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
+const CONVERSATION_SUBPROTOCOL: &str = "fractal.client.conversation.v0";
 
-const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
+const COLLECTION_SUBPROTOCOL: &str = "fractal.client.collections.v0";
 
 pub async fn request_latency(
     Extension(session): Extension<ClientSession>,
@@ -3059,7 +3059,7 @@ fn mission_visualization(
         decisions.extend(super::client_launch_decision_resources(store, &session)?);
     }
     Ok(Some(json!({
-        "version":"st3.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
+        "version":"fractal.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
         "mission":mission_id, "nodes":nodes, "edges":edges, "groups":[],
         "timeline":{"entries":timeline}, "swimlanes":[], "goals":mission.goals,
         "constraints":mission.constraints, "gates":mission.gates, "resources":mission.products,
@@ -7217,7 +7217,7 @@ fn terminal_stream_envelope(state: &AppState, value: Value) -> Value {
 fn terminal_stream_error(error: &ApiError) -> Value {
     json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": format!("request/{}", new_request_id()),
         "code": client_error_code(Some(&error.code)),
         "message": error.message,
@@ -10211,6 +10211,39 @@ mod tests {
             "an unchanged store index does not rebuild the list");
     }
 
+    #[test]
+    fn server_subprotocols_use_fractal_and_negotiate_legacy_offers() {
+        for (canonical, expected, legacy) in [
+            (TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0", "st3.client.terminal.v0"),
+            (CONVERSATION_SUBPROTOCOL, "fractal.client.conversation.v0", "st3.client.conversation.v0"),
+            (COLLECTION_SUBPROTOCOL, "fractal.client.collections.v0", "st3.client.collections.v0"),
+        ] {
+            assert_eq!(canonical, expected);
+            assert_eq!(super::super::wire_names::selected_protocol(&[legacy], canonical), Some(legacy));
+            assert_eq!(super::super::wire_names::selected_protocol(&[canonical], canonical), Some(canonical));
+        }
+    }
+
+    #[tokio::test]
+    async fn server_pairing_accepts_legacy_requests_and_emits_fractal() {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let response = super::super::router(state).oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": version, "device_name": "Old client", "person_id": "person/ada"
+                }).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["api_version"], "fractal.client.v0");
+            assert_eq!(response["value"]["kind"], "pairing-challenge");
+        }
+    }
+
     #[tokio::test]
     async fn published_runtimes_readiness_errors_survive_http_encoding() {
         for ended in [false, true] {
@@ -10234,7 +10267,7 @@ mod tests {
             let envelope: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
             assert_eq!(envelope["retryable"], !ended);
-            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["error_version"], "fractal.client.error.v0");
             assert_eq!(envelope["details"], json!({}));
         }
     }
@@ -17500,6 +17533,7 @@ mission "example/zero-run" state="ready" {
         )
         .unwrap();
         assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["visualization"]["version"], "fractal.visualization.v0");
         assert_eq!(
             details[0]["visualization"]["mission"],
             "mission/example/zero-run"
