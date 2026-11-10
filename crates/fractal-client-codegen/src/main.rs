@@ -23,6 +23,14 @@ fn main() -> Result<()> {
         .skip(1)
         .any(|argument| argument == "--check");
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (path, template) in [
+        ("crates/fractal-schema/src/client_control.rs", include_str!("../templates/client_control.rs.in")),
+        ("clients/typescript/fractal-client/ClientControl.generated.ts", include_str!("../templates/ClientControl.ts.in")),
+        ("clients/swift/FractalClient/Sources/FractalClient/ClientControl.generated.swift", include_str!("../templates/ClientControl.swift.in")),
+        ("fixtures/clients/client-control-v1.golden.json", include_str!("../templates/client-control-v1.golden.json.in")),
+    ] {
+        output(&root.join(path), template, check)?;
+    }
     let operations_path = root.join("docs/st3/client-v0/schemas/operations.json");
     let schema_path = root.join("docs/st3/client-v0/schemas/client-v0.schema.json");
     let operations_bytes = std::fs::read(&operations_path).context("read operations manifest")?;
