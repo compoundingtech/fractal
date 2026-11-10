@@ -16,6 +16,7 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod message_expiry;
 pub mod deploy;
 mod device_renewal;
 pub mod evidence;
@@ -34,6 +35,11 @@ pub mod assistant_write;
 #[cfg(feature = "test-support")]
 pub mod assistant_write_gate;
 pub mod declarations;
+pub mod desired_batch;
+mod desired_actual;
+mod desired_progress;
+#[cfg(test)]
+mod desired_batch_index_tests;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
@@ -802,7 +808,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6e39e16546c7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1062,6 +1068,23 @@ CREATE TABLE IF NOT EXISTS desired (
     owner_generation TEXT,
     owner_step TEXT
 );
+-- A repair may rewrite a selected row without moving either the claim cut or graph
+-- health. Capture every row write, including raw corrections, in its own transaction.
+CREATE TABLE IF NOT EXISTS local_desired_write_witness (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=0)
+);
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_insert AFTER INSERT ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_update AFTER UPDATE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+CREATE TRIGGER IF NOT EXISTS desired_write_witness_delete AFTER DELETE ON desired BEGIN
+    UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
+END;
+-- Sparse kind-filtered desired pages seek one kind's subject range, not the whole graph.
+CREATE INDEX IF NOT EXISTS desired_kind_subject_index ON desired(kind, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_step_index ON desired(owner_step, subject);
 CREATE INDEX IF NOT EXISTS desired_owner_run_index ON desired(owner_run, subject);
 -- Deleting a claim checks these references (foreign keys are on); see
@@ -11235,6 +11258,10 @@ fn validate_message_transition(
     transaction: &Transaction<'_>,
     input: &ClaimInput,
 ) -> Result<bool, FractalError> {
+    if input.kind == message_expiry::KIND {
+        message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
+        return message_expiry::validate_transition(transaction, &input.subject);
+    }
     let requested = match input.kind.as_str() {
         "message.sent" => "sent",
         "message.staged" => "staged",
@@ -11301,6 +11328,8 @@ fn validate_message_transition(
             .filter(|kind| *kind == "message")
             .map(|_| "sent")
     };
+    let late_consumption = matches!(requested, "delivered" | "read")
+        && message_expiry::exists(transaction, &input.subject).map_err(internal)?;
     if requested != "sent" && current == Some(requested)
         && !(requested == "read" && input.fields.contains_key("acting_for")) {
         if input.fields.contains_key("delegation") {
@@ -11316,7 +11345,7 @@ fn validate_message_transition(
         (Some("delivered" | "read" | "closed"), "staged")
             | (Some("read" | "closed"), "delivered")
             | (Some("closed"), "read")
-    ) && input.actor.is_some()
+    ) && input.actor.is_some() && !late_consumption
     {
         let index: Option<u64> = transaction
             .query_row("SELECT created_index FROM message_index WHERE subject=?1", [&input.subject], |row| row.get(0))
@@ -11339,7 +11368,7 @@ fn validate_message_transition(
             | (Some("sent"), "delivered")
             | (Some("delivered"), "read")
             | (Some("read"), "closed")
-    );
+    ) || (late_consumption && matches!(current, Some("sent" | "staged" | "read" | "closed")));
     let custody_read = requested == "read"
         && input.fields.contains_key("acting_for")
         && matches!(current, Some("sent" | "staged" | "read"));
@@ -11469,6 +11498,10 @@ pub fn append_claim_tx_with_assistant_answer(
     }
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
+    if kind == message_expiry::KIND {
+        return Err(anyhow::Error::new(FractalError::new(
+            "invalid-message-expiry", "expiry requires runtime receipt admission")));
+    }
     if kind == retirements::KIND {
         return Err(anyhow::Error::new(retirements::writer_required()));
     }
@@ -16128,6 +16161,7 @@ pub fn classify_replicated_claim_with_registry(
             ),
         ));
     }
+    message_expiry::validate_actor(&claim.kind, claim.actor.as_deref())?;
     identities::validate_replicated(claim)?;
     if claim.kind == retirements::KIND
         && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
@@ -22786,6 +22820,8 @@ pub struct ClaimCommitContext<'a> {
     pub retirement_writer: bool,
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
+    /// Runtime append owns cross-file expiry/receipt serialization.
+    pub expiry_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
@@ -22842,6 +22878,10 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND && !context.expiry_writer {
+            return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
+        }
         if input.kind == retirements::KIND && !context.retirement_writer {
             return Err(retirements::writer_required());
         }
@@ -22960,6 +23000,8 @@ pub fn append_claim_with_commit_context(
                 }
                 matches!((input.kind.as_str(), message.status.as_str()),
                     ("message.staged", "delivered" | "read" | "closed") | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
+                    && !(matches!(input.kind.as_str(), "message.delivered" | "message.read")
+                        && message_expiry::exists(transaction, &input.subject).map_err(internal)?)
             } else { false };
             if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
                 return Ok((claim, false));
