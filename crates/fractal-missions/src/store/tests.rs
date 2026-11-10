@@ -22,6 +22,9 @@ use crate::ArrangementsStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
+
+mod coalesce_run_part_rebuild;
+mod huge_part_rebuild_bench;
 use fractal_delivery::store::shared_missions::*;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
@@ -566,7 +569,7 @@ mission "clock-parent" state="ready" {
 mission "clock-worker" state="ready" {
   goal "Start the loop clock when work is claimed."
   concurrent-runs max=20
-  step "work" { assigned-to "agent/worker" }
+  step "work" { assigned-to "agent/node.worker" }
   step "automatic" { agentless }
 }
 mission "clock-automatic" state="ready" {
@@ -655,7 +658,7 @@ mission "clock-automatic" state="ready" {
             .append_claim(&ClaimInput {
                 subject: step.subject.clone(),
                 kind: "work.claimed".into(),
-                actor: Some("agent/worker".into()),
+                actor: Some("agent/node.worker".into()),
                 fields: BTreeMap::from([("attempt".into(), Value::from(index + 1))]),
                 evidence: Vec::new(),
                 expected_subject: None,
@@ -1099,10 +1102,10 @@ version 2
   mission "held-work" state="ready" {
     goal "Hold some steps."
     concurrent-runs max=2
-    step "active" { assigned-to "agent/worker" }
-    step "expired" { assigned-to "agent/worker" }
-    step "ready" { assigned-to "agent/worker" }
-    step "pending" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/node.worker" }
+    step "expired" { assigned-to "agent/node.worker" }
+    step "ready" { assigned-to "agent/node.worker" }
+    step "pending" { assigned-to "agent/node.worker" }
     step "watch" { agentless }
   }
 
@@ -3885,6 +3888,107 @@ fn each_part_of_a_standing_tree_rebuilt_alone_matches_a_replay() {
 }
 
 #[test]
+fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
+    use crate::store::person_work::PersonWorkStore;
+
+    let (store, _worker, root, children) = replicated_run_tree(2);
+    // As in tree_shapes, asking from live work requires a declared claimant, not
+    // merely the assigned-to reference supplied by replicated_run_tree.
+    let agents_source = "version 2\nagent \"worker.one\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
+    let agents = crate::graph::parse_internal_intent(agents_source, "controller").unwrap();
+    let planned = store.mission(&agents, IntentInput {
+        kdl: agents_source.into(),
+        source_name: None,
+    }).unwrap();
+    store.apply(&agents, &planned.subject_tokens, "part-ask-agent").unwrap();
+    let child = &children[0];
+    let revised = publish_mission(
+        &store,
+        "version 2\nmission \"request\" state=\"ready\" { goal \"Answer the revised request.\"; concurrent-runs; step \"answer\" { assigned-to \"agent/worker.one\" } }",
+        "part-revision",
+    );
+    store
+        .adopt_mission_revision(&child.id, &revised, "person/test", "new generation", "part-adopt")
+        .unwrap();
+    let current = store.mission_run(&child.id).unwrap().unwrap();
+    assert_ne!(current.generation, child.generation, "fixture has two generations");
+    let step = &current.steps[0].subject;
+    store.set_step_state(step, "ready", None).unwrap();
+    store.work_action(step, "claim", &WorkRequest {
+        wait_ms: None,
+        actor: Some("agent/worker.one".into()),
+        incarnation: Some("part-incarnation".into()),
+        summary: None,
+        reason: None,
+        evidence: Vec::new(),
+        idempotency_key: "part-work-claim".into(),
+    }).unwrap();
+    let ask = store.ask_person(&crate::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
+        legacy_request: None,
+        person: "person/test".into(),
+        title: "Choose an answer".into(),
+        reason: "The requester must choose.".into(),
+        actor: "agent/worker.one".into(),
+        step: Some(step.clone()),
+        new_run: None,
+        incarnation: Some("part-incarnation".into()),
+        request: None,
+        idempotency_key: "part-person-ask".into(),
+    }).unwrap();
+    assert!(store.step_run(&ask.subject).unwrap().is_some());
+
+    let mut connection = store.connection.lock().unwrap();
+    let tx = connection.transaction().unwrap();
+    // Inject historical malformed creation claims below Fractal's schema admission.
+    // Unlike bare-row insert_raw_claims, this primitive also creates the batches that
+    // claims_in_replay_order_tx joins. Creation on a step fails before changing rows.
+    let mut failures = BTreeSet::new();
+    for subject in [step, &children[1].steps[0].subject] {
+        let claim = smallclaims::store::append_claim_record_tx(
+            &tx, &store.origin, subject, "mission-run.created", None,
+            &json!({"fields": {}}), &[], None,
+        ).unwrap();
+        project_claim_isolated_tx(&tx, "projection:runs", &claim, || {
+            project_mission_run_created(&tx, &claim)
+        }).unwrap();
+        failures.insert(format!("projection:runs:{}", claim.id));
+    }
+    // Quarantine timestamps use the projection wall clock, unlike claim-derived row times.
+    // Compare the failure identity/status/error rather than that replay timestamp.
+    let quarantine = || {
+        tx.prepare(
+            "SELECT aggregate, status, error_code, error_message FROM projection_health
+             WHERE aggregate LIKE 'projection:runs:%' ORDER BY aggregate",
+        ).unwrap().query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let quarantined = quarantine();
+    assert_eq!(quarantined.iter().map(|row| row.0.clone()).collect::<BTreeSet<_>>(), failures);
+    assert!(quarantined.iter().all(|row| row.1 == "stale" && row.2 == "invalid-mission-run-claim"));
+    let incremental = projection_digest::oracle(&tx).unwrap();
+    assert_eq!(
+        run_part_of_tx(&tx, step).unwrap(),
+        Some(Aggregate::RunPart(child.id.clone())),
+        "the receive path selects the child, not its standing root or sibling",
+    );
+    assert_ne!(root.id, child.id);
+    for _ in 0..2 {
+        rebuild_run_part_tx(&tx, &child.id).unwrap();
+        assert_eq!(projection_digest::oracle(&tx).unwrap(), incremental,
+            "part replay preserves all incrementally projected rows, including generations, steps and asks");
+        assert_eq!(projection_digest::tables(&tx).unwrap(), incremental,
+            "cached projection digests still describe the actual rows");
+        assert_eq!(quarantine(), quarantined,
+            "only the failing claims are quarantined; the unrelated child's quarantine is untouched");
+    }
+    tx.rollback().unwrap();
+}
+
+#[test]
 fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() {
     let store = Store::open_memory("node").unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -5096,7 +5200,7 @@ version 2
   mission "execution-timing" state="ready" {
     goal "Measure only active worker execution."
     step "work" timeout="1h" {
-      assigned-to "agent/worker"
+      assigned-to "agent/source.worker"
       retry { attempts 2 }
     }
   }
@@ -5210,7 +5314,7 @@ version 2
 
 mission "external-blocker" state="ready" {
   goal "Wait truthfully for the external host repair."
-  step "automated-proof" { assigned-to "agent/ios-owner" }
+  step "automated-proof" { assigned-to "agent/source.ios-owner" }
 }
 "#;
     let intent = crate::graph::parse_test_intent(source, "source").unwrap();
@@ -5589,11 +5693,11 @@ version 2
 
   mission "terminal-owner" state="ready" {
     goal "Make terminal ownership authoritative."
-    step "active" { assigned-to "agent/worker" }
-    step "expired" { assigned-to "agent/worker" }
-    step "ready" { assigned-to "agent/worker" }
-    step "blocked" { assigned-to "agent/worker" }
-    step "pending" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/source.worker" }
+    step "expired" { assigned-to "agent/source.worker" }
+    step "ready" { assigned-to "agent/source.worker" }
+    step "blocked" { assigned-to "agent/source.worker" }
+    step "pending" { assigned-to "agent/source.worker" }
   }
 
 "#;
@@ -5797,7 +5901,7 @@ fn terminal_roots_reap_nested_orphans_idempotently_across_restart_and_replicatio
         r#"version 2
  mission "tree-child" state="ready" {
    goal "Expose nested work."
-   step "work" { assigned-to "agent/worker" }
+   step "work" { assigned-to "agent/source.worker" }
  }"#,
         "terminal-tree-child",
     );
@@ -6331,7 +6435,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
   mission "bootstrap" state="ready" {
     goal "Complete mission bootstrap."
     step "compile" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       produces-mission "project/work"
       mission "work" { goal "Complete mission work."; step "publish" { } }
     }
@@ -6412,8 +6516,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
     assert_eq!(output.revision, mission.revision);
 }
 
-#[test]
-fn nested_work_renews_the_same_workers_ancestor_lease() {
+fn nested_work_ancestor_expiry_after_child_completion(holder: &str) -> (u128, u128) {
     let store = Store::open_memory("node").unwrap();
     let source = r#"version 2
 
@@ -6422,7 +6525,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "nested-work" state="ready" {
   goal "Complete nested work."
   step "outer" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node/worker"
     mission "work" {
       goal "Complete the child work."
       step "first" { }
@@ -6464,7 +6567,7 @@ mission "nested-work" state="ready" {
         .unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
-        actor: Some("agent/node.worker".into()),
+        actor: Some("agent/node/worker".into()),
         incarnation: Some("current".into()),
         summary: None,
         reason: None,
@@ -6484,13 +6587,14 @@ mission "nested-work" state="ready" {
     store
         .work_action(&child.subject, "claim", &request("claim-child"))
         .unwrap();
+    let anchored_expiry = now_ms() + 60_000;
     store
         .connection
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h96d7cb75d46b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
-            [&parent.subject],
+            /* sqlite-large-value: allow-for-now lv-h1c3e44d7086a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?3, lease_owner=?2 WHERE subject=?1",
+            params![parent.subject, holder, anchored_expiry.to_string()],
         )
         .unwrap();
 
@@ -6500,9 +6604,21 @@ mission "nested-work" state="ready" {
 
     let parent = store.step_run(&parent.subject).unwrap().unwrap();
     assert_eq!(parent.status, "working");
-    assert_eq!(parent.claimant.as_deref(), Some("agent/node.worker"));
+    assert_eq!(parent.claimant.as_deref(), Some(holder));
     assert_eq!(parent.claim_incarnation.as_deref(), Some("current"));
-    assert!(parent.claim_expires_at_unix_ms.unwrap() > now_ms());
+    (anchored_expiry, parent.claim_expires_at_unix_ms.unwrap())
+}
+
+#[test]
+fn nested_work_renews_the_literal_owners_ancestor_lease() {
+    let (before, after) = nested_work_ancestor_expiry_after_child_completion("agent/node/worker");
+    assert!(after > before);
+}
+
+#[test]
+fn nested_work_does_not_renew_an_alias_owned_ancestor_lease() {
+    let (before, after) = nested_work_ancestor_expiry_after_child_completion("node/worker");
+    assert_eq!(after, before);
 }
 
 #[test]
@@ -6997,6 +7113,56 @@ fn step_timing_reads_seek_the_runs_own_steps() {
     assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
 }
 
+#[test]
+fn step_history_input_window_bounds_materialization_and_keeps_sparse_boundary_state() {
+    use rusqlite::StatementStatus;
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(&store, "version 2\nmission \"history-window\" state=\"ready\" { goal \"Bound history.\"; step \"work\" { agentless; } }", "history-window");
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "history-window".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "history-window-run".into(),
+    }).unwrap();
+    let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "working", None).unwrap();
+    let read = || store.mission_step_histories_for_runs(std::slice::from_ref(&run.subject), u128::MAX).unwrap();
+    let before = read();
+    let started_at = before[subject].attempts[0].started_at;
+    assert!(started_at.is_some());
+    let insert = |from: usize, to: usize| {
+        let connection = store.connection.write();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hdeb3f26f345c owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (SELECT ?2 UNION ALL SELECT x+1 FROM n WHERE x<?3)
+             INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT 'history-note-'||x,(SELECT batch_id FROM claims WHERE subject=?1 LIMIT 1),
+                 ?1,'work.progress','node',CASE WHEN x%2=0 THEN '{\"fields\":{\"clock\":\"running\"}}' ELSE '{\"fields\":{\"summary\":\"ordinary note\"}}' END,'[]',CAST(1000000000000000+x AS TEXT) FROM n",
+            rusqlite::params![subject, from, to],
+        ).unwrap();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h0e67d9bae7b1 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+             SELECT id,store_index FROM claims WHERE subject=?1",
+            [subject],
+        ).unwrap();
+    };
+    let measure = || {
+        let connection = store.readers.get();
+        let sql = format!("SELECT COUNT(*) FROM ({})", crate::store::missions::mission_step_history_sql());
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7e4c2618a702 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+        let rows: usize = statement.query_row(/* sqlite-large-value: allow-for-now lv-hd3351dff2a3a owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ [serde_json::to_string(&[&run.id]).unwrap()], |row| row.get(0)).unwrap();
+        (rows, statement.get_status(StatementStatus::VmStep))
+    };
+    insert(1, 1_000);
+    let small = measure();
+    insert(1_001, 10_000);
+    let large = measure();
+    assert_eq!(small.0, large.0, "read/materialized rows must not grow with old progress notes");
+    assert!(large.0 <= 1_548, "at most 129 claims for each of 12 lifecycle kinds");
+    assert!(large.1 <= small.1 + 100, "indexed input seeks must stay bounded: {small:?} -> {large:?}");
+    let after = read();
+    assert!(!after[subject].complete, "omitted input must be reported");
+    assert_eq!(after[subject].attempts[0].started_at, started_at, "sparse state before the note window is boundary context");
+}
+
 /// The run-driven timing read returns the rows the claims-driven read of #5108 returned, in the same
 /// order: across two runs, a retried step, a step never started and a subject filter.
 #[test]
@@ -7060,7 +7226,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "retry" state="ready" {
   goal "Retry failed work."
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     retry { attempts 3 }
     gate "the result is ready" { exists "resource/result" }
   }
@@ -8465,7 +8631,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "summaries" state="ready" {
   goal "Show what the worker reported."
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     retry { attempts 2 }
     gate "the result is ready" { exists "resource/result" }
   }
@@ -8589,7 +8755,7 @@ version 2
   mission "revision" state="ready" {
     goal "Complete mission revision."
     agent "worker" { workspace "."; command "true" }
-    step "owned" { assigned-to "agent/worker"; goal "First goal." }
+    step "owned" { assigned-to "agent/${ST_MISSION_RUN}/worker"; goal "First goal." }
     step "unrelated" { }
     step "join" { depends-on { step "owned" completed; step "unrelated" completed } }
   }
@@ -8622,7 +8788,7 @@ version 2
     goal "Complete mission revision."
     agent "worker" { workspace "."; command "true" }
     step "owned" {
-      assigned-to "agent/worker"
+      assigned-to "agent/${ST_MISSION_RUN}/worker"
       goal "First goal."
       constraint "Do not push."
     }
@@ -9043,7 +9209,7 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
     let store = Store::open_memory("node").unwrap();
     let source = CARRY_SOURCE.replace(
         "step \"other\"",
-        "step \"done\" { assigned-to \"agent/worker\"; goal \"Finish the work.\" }\n    step \"other\"",
+        "step \"done\" { assigned-to \"agent/node.worker\"; goal \"Finish the work.\" }\n    step \"other\"",
     );
     publish_carry(&store, &source, "notes-one");
     let run = store
@@ -9359,7 +9525,7 @@ version 2
   mission "carry" state="ready" {{
     goal "Keep submitted work across a gate revision."
     step "work" {{
-      assigned-to "agent/worker"
+      assigned-to "agent/node.worker"
       goal {goal:?}
       gate "checked" {{ exec {gate:?}; host "node"; workspace "/tmp" }}
     }}
@@ -9559,6 +9725,74 @@ fn a_revision_keeps_the_claim_on_a_carried_step() {
 }
 
 #[test]
+fn carried_claim_successor_requires_literal_ownership() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for holder in ["node/worker", "agent/node/worker"] {
+            let store = Store::open_memory("node").unwrap();
+            publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/requester".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "alias-carry-run".into(),
+            }).unwrap();
+            let old = &run.steps.iter().find(|step| step.step == "work").unwrap().subject;
+            store.set_step_state(old, "ready", None).unwrap();
+            store.work_action(old, "claim", &carry_request("one", "alias-carry-claim")).unwrap();
+            let revised = publish_carry(
+                &store,
+                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+                "alias-carry-two",
+            );
+            let adopted = store.adopt_mission_revision(
+                &run.id, &revised, "person/requester", "revise other work", "alias-carry-revision",
+            ).unwrap();
+            let carried = &adopted.steps.iter().find(|step| step.step == "work").unwrap().subject;
+            assert_ne!(carried, old);
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h76038fa53ef8 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker', lease_owner=?2 WHERE subject=?1",
+                params![carried, holder],
+            ).unwrap();
+            let mut renew = carry_request("one", "alias-carry-renew");
+            renew.actor = Some(actor.into());
+            if !actor.starts_with("agent/") {
+                let error = store.work_action(old, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "invalid-work-actor");
+                assert_eq!(
+                    store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
+                    Some(holder),
+                );
+                continue;
+            }
+            // Literal c72ede13 physical_actor rule, independent of the implementation
+            // under test: normalize_actor(actor, "agent"), then resolve_reference_conn.
+            let main_actor = fractal_store::store::identities::resolve_reference_conn(
+                &store.readers.get(),
+                &smallclaims::store::normalize_actor(actor, "agent"),
+            ).unwrap();
+            if main_actor != holder {
+                let error = store.work_action(old, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "stale-run-generation");
+                assert_eq!(
+                    store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
+                    Some(holder),
+                );
+                continue;
+            }
+            let renewed = store.work_action(old, "renew", &renew).unwrap();
+            assert_eq!(&renewed.subject, carried);
+            // The carried subject has no replicated lease anchor. Main publishes this
+            // renewal and writes the request actor, unlike a quiet in-generation renewal.
+            assert_eq!(renewed.claimant.as_deref(), Some(main_actor.as_str()));
+            let anchors = store.claims_for(carried, Some("work.renewed")).unwrap();
+            assert_eq!(anchors.len(), 1);
+            assert_eq!(anchors[0].actor.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(anchors[0].body["fields"]["claimant"], json!(main_actor));
+            assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
+        }
+    }
+}
+
+#[test]
 fn all_affected_human_reviewers_approve_the_exact_revision_preview() {
     let store = Store::open_memory("node").unwrap();
     let publish = |goal: &str, key: &str| {
@@ -9570,7 +9804,7 @@ version 2
     goal "Test protected revision."
      agent "worker" {{ workspace "."; command "true" }}
     step "work" revisions="human-only" revision-reviewer="person/step-reviewer" {{
-      assigned-to "agent/worker"
+      assigned-to "agent/${{ST_MISSION_RUN}}/worker"
       goal {goal:?}
     }}
   }}
@@ -9883,7 +10117,7 @@ version 2
   agent "worker" { workspace "."; command "true" }
   mission "drain-child" state="ready" {
     goal "Keep descendant work in the idle boundary."
-    step "active" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/node.worker" }
   }
 
 "#;

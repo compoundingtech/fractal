@@ -5,6 +5,7 @@
 use crate::MissionsStore;
 use crate::SeatsStore;
 use crate::EvidenceStore;
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 use super::*;
 use crate::api::published_attention::{
     published_assistant_attention_rows, published_view_not_ready,
@@ -193,7 +194,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                     // The scalar state rules of overlay_agent_resources/overlay_down, followed
                     // by the same local delivery assessment; no card is built just to count it.
                     let mut runtime = agent["state"].as_str();
-                    if age.is_some_and(|age| age > 90_000)
+                    if age.is_some_and(|age| u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis())
                         && matches!(reported, Some("ready" | "idle")) && runtime == Some("running")
                     {
                         runtime = Some("waiting");
@@ -204,7 +205,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                         {
                             runtime = Some(match reported {
                                 Some("working") => "running",
-                                Some("ready" | "idle") if age.is_some_and(|age| age <= 90_000) => "running",
+                                Some("ready" | "idle") if age.is_some_and(|age| u128::from(age) <= HARNESS_OBSERVATION_FRESHNESS.as_millis()) => "running",
                                 _ => "waiting",
                             });
                         } else if agent["_launch_since_ms"].as_u64()

@@ -3,7 +3,7 @@
 
   scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... [--why | --json]   print each lane's definition
   scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --check            exit 1 if a lane's file misses one
-  scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --write            set definition_paths to it
+  scripts/lane-definition-closure [--root DIR] [--lanes FILE] [--lane NAME]... --write            set definition_paths and required proof selectors
 
 `required-lanes.json` (.fractal first, .st only if absent) gives each lane an `argv` and the `definition_paths` whose bytes decide what that argv does: a tree that
 changes one is a lane edit, which is never signed locally (scripts/evidence-wrap refuses it; CI runs the check). A lane's definition is
@@ -49,7 +49,8 @@ What ends the walk, on purpose:
 
 --check prints, per lane, the executed paths and verdict-data files its definition_paths do not cover (exit 1 if any). --write sets
 each lane's definition_paths to what it executes plus its verdict data (run it in a full checkout, then review the diff); KEPT lanes
-are kept by hand and left alone. Exit 2 for a usage error. Needs Python and git.
+are kept by hand and left alone. CI_PROOFS adds aggregate prerequisite selectors to ci_inputs on --write; --check requires them.
+Exit 2 for a usage error. Needs Python and git.
 """
 import argparse
 import ast
@@ -84,6 +85,7 @@ VERDICT_DATA = {
         '.github/clippy-splits.json': 'how the clippy stage splits the workspace (scripts/clippy_ratchet.py)',
         '.github/fleet-compat-baseline.json': 'the release the fleet-compat stage runs against (scripts/compat-baseline)',
         '.github/messaging-compat-baseline.json': 'the release the messaging compatibility tests run against (scripts/ci-local)',
+        'nix/hm-module.nix': 'the executable ownership/rollback activation proved by the hm-module-eval job required by linux-gate',
     },
     'linux-clippy': {
         '.github/clippy-baseline.json': 'the warnings clippy may still report (scripts/clippy_ratchet.py)',
@@ -101,6 +103,12 @@ VERDICT_DATA = {
         'nix/web-shell-inputs.json': 'the web dev shell\'s input spec: scripts/ci-web-shell reads it with jq --slurpfile to build the '
                                      'environment the lane tests in',
     },
+}
+
+# Separate prerequisite jobs whose proof contributes to an aggregate lane's
+# verdict. Keep their selectors in the generated lane declaration as well.
+CI_PROOFS = {
+    'linux-gate': ['.github/workflows/fleet.yml::jobs.hm-module-eval'],
 }
 
 # Lanes whose definition_paths are kept by hand, wider than what they execute; --write leaves them alone and --check still holds what
@@ -127,7 +135,7 @@ EXTRA = {
 # kit-play-shards.mjs to test it). A package.json whose script a lane's pnpm call runs is in the closure (its `scripts` entry is the
 # command). Nothing outside SUBJECT is assumed to be the subject.
 SUBJECT = ('Cargo.toml', 'Cargo.lock', 'src', 'tests', 'crates', 'components', 'examples', 'wit', 'vendor',
-           'apps/fractal-web', 'apps/ios', 'clients/typescript', 'packages/fractal-sdk', 'packages/fractal-ui')
+           'apps/fractal-web', 'apps/ios', 'clients/typescript', 'packages/fractal', 'packages/fractal-sdk', 'packages/fractal-ui')
 HARNESS = ('apps/fractal-web/scripts/ci', 'packages/fractal-ui/scripts')
 HARNESS_LANES = {'fractal-web'}
 # Where the lanes' own code lives. A file elsewhere that the code names (a workflow, a doc, a fixture, a baseline) is read as data:
@@ -937,6 +945,11 @@ def main(argv):
             ci_inputs = lanes[name].get('ci_inputs')
             ci_missing = undeclared_ci(closure, verdict, ci_inputs, protected_files(repo)) if ci_inputs is not None else []
             ci_unresolved = unresolved_ci(repo, ci_inputs) if ci_inputs is not None else []
+            missing_proofs = [item for item in CI_PROOFS.get(name, []) if item not in (ci_inputs or [])]
+            if missing_proofs:
+                failed = True
+                for item in missing_proofs:
+                    print(f'{name}: ci_inputs misses required proof {item}; regenerate with --write')
             if missing or missing_verdict or absent or config or ci_missing or ci_unresolved:
                 failed = True
             for item, why in ci_unresolved:
@@ -958,12 +971,15 @@ def main(argv):
                 print(f'{name}: {len(missing_verdict)} verdict-data file(s) are not in its definition_paths:')
                 for path in missing_verdict:
                     print(f'  {path}   ({verdict[path]})')
-            if not missing and not missing_verdict and not absent and not config and not ci_missing and not ci_unresolved:
+            if not missing and not missing_verdict and not absent and not config and not ci_missing and not ci_unresolved and not missing_proofs:
                 print(f'{name}: the {len(closure.paths())} path(s) it executes and its {len(verdict)} verdict-data file(s) '
                       'are covered by its definition_paths')
         elif args.write:
             if name not in KEPT:
                 lanes[name]['definition_paths'] = result[name]
+                if name in CI_PROOFS:
+                    lanes[name]['ci_inputs'] = list(dict.fromkeys(
+                        lanes[name].get('ci_inputs', []) + CI_PROOFS[name]))
                 written.append(name)
         elif not args.json:
             print(f'{name}:')

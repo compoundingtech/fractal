@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
 fn state(root: &Path, name: &str) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), name).unwrap()),
@@ -1133,7 +1134,8 @@ mission "example/definition" state="ready" {
         ));
     }
 
-    // Descriptions are capped at 1,000 bytes; a command is not, so it can outgrow a response.
+    // A description, the agent's charter, is capped at 8 KiB; a command is not, so it can
+    // outgrow a response.
     let oversized = format!(
         "version 2\nagent \"example/large-definition\" {{ command \"true {}\" }}",
         "x".repeat(1_100_000),

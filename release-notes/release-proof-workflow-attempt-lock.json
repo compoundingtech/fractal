@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bind stable publication proof to the canonical release workflow's numeric ID and path and the exact successful build attempt, not a display name. Serialize edge and embed release mutations with stable release operations, and restrict write-permission release jobs to main.",
+  "replay": {"status": "none", "detail": "No runtime replay changes."},
+  "schema": {"status": "none", "detail": "No product database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet coordination changes."},
+  "compatibility": {"status": "none", "detail": "No binary, client or wire protocol changes; this hardens release publication proof and workflow boundaries."},
+  "downtime": {"status": "none", "detail": "Release workflow changes do not restart installed services."},
+  "manual": {"status": "changed", "detail": "Dispatch release operations on main. Publication requires proof from the numeric workflow ID resolved through the GitHub API for .github/workflows/release-fractal.yml and the exact recorded successful build attempt. A rerun requires a fresh candidate; missing or expired artifacts fail closed. Publish within the seven-day artifact retention or build a fresh candidate. The Compounding Manager is accountable for ensuring go_ref references the Product Lead's actual GO for the exact full source SHA; automation records this dispatcher attestation but does not verify the referenced content. See docs/st3/binary-releases.md."},
+  "recovery": {"status": "changed", "detail": "Edge and embed share fractal-release-mutation with stable release operations. Edge waits for embed publication so one run never queues two publishers against the single pending slot. An ungrouped read-only observer fails visibly on cancellation and prints exact gh run rerun --job JOB_DATABASE_ID --repo REPOSITORY commands using the cancelled publisher IDs from GitHub. Run those commands after checking release state; they preserve successful upstream artifacts. Do not rerun the whole workflow because rebuilding a successful immutable embed can violate its pin. Stable-operation cancellation still requires original-input re-dispatch. All writers require main. Invalid workflow/attempt proof requires a fresh candidate; never move a published tag."}
+}

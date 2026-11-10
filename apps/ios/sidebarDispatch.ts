@@ -1,4 +1,5 @@
 import { ClientError, type ActionRequest, type ActionResult, type FractalClient } from '../../clients/typescript/fractal-client';
+import type { WriteDelivery } from './sidebarJournal';
 import type { WriteEvent, WriteRequest } from './sidebarWriteState';
 
 /** Call only for a journal Send effect, with the actor of its authenticated connection. */
@@ -12,7 +13,7 @@ export const sidebarWriteRequest = (request: WriteRequest): ActionRequest => {
     : { ...common, type: 'arrangement.membership.edit', parameters: { ...target, operations: structuredClone(operations.Memberships) } };
 };
 /** A receipt acknowledges delivery, never authoritative observation. Unknown means replay exactly. */
-export const sidebarWriteResult = (request: WriteRequest, result: { value: ActionResult } | { error: unknown }): WriteEvent => {
+export const sidebarWriteResult = (request: WriteRequest, delivery: WriteDelivery, result: { value: ActionResult } | { error: unknown }): WriteEvent => {
   const identity = structuredClone(request.identity);
   if ('value' in result) {
     if (result.value.action_id !== identity.action_id) return { type: 'Unknown', identity };
@@ -22,6 +23,8 @@ export const sidebarWriteResult = (request: WriteRequest, result: { value: Actio
       default: return { type: 'Unknown', identity };
     }
   }
+  // Admission may reject a replay before looking up an earlier committed receipt.
+  if (delivery === 'Replay') return { type: 'Unknown', identity };
   if (!(result.error instanceof ClientError)) return { type: 'Unknown', identity };
   const response = result.error.response, applied = response.applied ?? response.details.applied;
   if (applied === 'unknown') return { type: 'Unknown', identity };
@@ -36,8 +39,8 @@ export const sidebarWriteResult = (request: WriteRequest, result: { value: Actio
   }
   return reason ? { type: 'Refused', identity, reason } : { type: 'Unknown', identity };
 };
-export const sendSidebarWrite = async (client: Pick<FractalClient, 'submitAction'>, request: WriteRequest, actor: string, signal: AbortSignal): Promise<WriteEvent> => {
-  if (actor !== request.identity.actor) return { type: 'Refused', identity: structuredClone(request.identity), reason: 'Unauthorized' };
-  try { return sidebarWriteResult(request, await client.submitAction(sidebarWriteRequest(request), { signal })); }
-  catch (error) { return sidebarWriteResult(request, { error }); }
+export const sendSidebarWrite = async (client: Pick<FractalClient, 'submitAction'>, request: WriteRequest, delivery: WriteDelivery, actor: string, signal: AbortSignal): Promise<WriteEvent> => {
+  if (actor !== request.identity.actor) return delivery === 'Replay' ? { type: 'Unknown', identity: structuredClone(request.identity) } : { type: 'Refused', identity: structuredClone(request.identity), reason: 'Unauthorized' };
+  try { return sidebarWriteResult(request, delivery, await client.submitAction(sidebarWriteRequest(request), { signal })); }
+  catch (error) { return sidebarWriteResult(request, delivery, { error }); }
 };

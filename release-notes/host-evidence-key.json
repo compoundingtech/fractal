@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "List one more host evidence signing key for a trusted machine",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rules changes; the skip policy that admits the host level is unchanged." },
+  "compatibility": { "status": "none", "detail": "No runtime, wire or client changes." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Removing the line stops every record that key signed from counting." }
+}

@@ -170,6 +170,9 @@ exclusive_lanes() {
       lane "UI kit gate set, a11y and budget controls" node --test packages/fractal-ui/scripts/kit-play-gate.browser-test.mjs
     fi
     lane "UI kit Storybook and module graph" kit_storybook
+    if first_shard; then
+      lane "UI kit deterministic lifecycle controls" node --test --test-timeout=120000 packages/fractal-ui/scripts/details-determinism.browser-test.mjs
+    fi
   fi
   if first_shard; then
     # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.

@@ -14,6 +14,19 @@ import time
 
 BUNDLE_ID = "com.compoundingtech.fractal"
 
+
+def bundle_id(variant):
+    return BUNDLE_ID + (".test" if variant == "test" else "")
+
+
+def variant_state(state, variant):
+    """The normal lane retains its exact path; test never shares mutable state."""
+    return state / "ios-test-variant" if variant == "test" else state
+
+
+def build_environment(variant):
+    return {**DAILY_BUILD_ENV, "APP_VARIANT": "test" if variant == "test" else "daily"}
+
 # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 def ios_env(suffix, default=None, environment=os.environ):
     """Prefer Fractal; an explicitly empty value masks the legacy spelling."""
@@ -120,12 +133,44 @@ NOTIFICATION_FIELDS = ("at", "outcome", "commit", "build_version", "exit", "retr
 # build: FractalFabric.podspec reads the carrier/proof flags (Rust fabric module
 # versus the disabled stub), metro.config.js reads the offline Debug flag, and
 # app config selects the daily bundle from APP_VARIANT. Pin both naming families.
-DAILY_BUILD_ENV = {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "0", "ST3_FABRIC": "0",
+DAILY_BUILD_ENV = {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "1", "ST3_FABRIC": "1",
                    "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
                    "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"}
 
 
-def build_identity(args):
+FABRIC_FRAMEWORK = Path("apps/ios/modules/fractal-fabric/ios/build/FractalFabricRust.xcframework")
+
+
+def framework_hash(repo, *, required=True):
+    """Hash sorted relative file names and contents, never mtimes or host paths."""
+    framework = repo / FABRIC_FRAMEWORK
+    files = sorted(path for path in framework.rglob("*") if path.is_file())
+    if not framework.is_dir() or not files:
+        if required:
+            raise ValueError("Missing FractalFabricRust.xcframework; refusing to link")
+        return None
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(framework).as_posix().encode() + b"\0")
+        content = hashlib.sha256()
+        with path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                content.update(chunk)
+        digest.update(content.digest())
+    return digest.hexdigest()
+
+
+def verify_fabric_linkage(app, info, env):
+    # The disabled stub has the same Swift class name. Require defined Rust
+    # bridge exports in the executable, not merely FractalFabricModule metadata.
+    symbols = run(["nm", "-g", "-U", str(app / info["CFBundleExecutable"])],
+                  capture=True, env=env)
+    defined = {line.split()[-1] for line in symbols.splitlines() if line.split()}
+    if not {"_st_fabric_identity", "_st_fabric_dial"}.issubset(defined):
+        raise ValueError("Built app lacks the real Fabric bridge; refusing the disabled stub")
+
+
+def build_identity(args, *, fabric_hash=None):
     """Inputs outside the Git revision that determine the signed app.
 
     The worker derives finer cache keys from these; the reconciler compares
@@ -140,8 +185,12 @@ def build_identity(args):
         "env": {key: value for key, value in sorted(os.environ.items())
                 if key.startswith("EXPO_PUBLIC_")
                 and key not in ("EXPO_PUBLIC_FRACTAL_BUILD", "EXPO_PUBLIC_ST3_BUILD")},
-        "pinned": DAILY_BUILD_ENV,
+        "pinned": build_environment(args.variant),
+        "fabric_framework": (fabric_hash if fabric_hash is not None else
+                             framework_hash(args.state / "checkout", required=False)),
     }
+    if args.variant == "test":
+        identity["test_profiles"] = [args.test_app_profile, args.test_runner_profile]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -153,7 +202,7 @@ def build_release(args):
     inputs_file = cache / "inputs.json"
     inputs = json.loads(inputs_file.read_text()) if inputs_file.exists() else {}
     env = os.environ.copy()
-    env.update(DAILY_BUILD_ENV, DEVELOPER_DIR=args.developer_dir,
+    env.update(build_environment(args.variant), DEVELOPER_DIR=args.developer_dir,
                EXPO_PUBLIC_FRACTAL_BUILD=args.commit[:12],
                EXPO_PUBLIC_ST3_BUILD=args.commit[:12], CI="1",
                LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8")
@@ -195,8 +244,11 @@ def build_release(args):
         print("Reusing locked pnpm workspace dependencies", flush=True)
     config = json.loads(run(["pnpm", "exec", "expo", "config", "--type", "public", "--json"],
                             cwd=app, env=env, capture=True))
-    if config["ios"]["bundleIdentifier"] != BUNDLE_ID:
-        raise ValueError("Tracked ref lacks the daily app variant; refusing to replace Debug")
+    if config["ios"]["bundleIdentifier"] != bundle_id(args.variant):
+        raise ValueError("Tracked ref lacks the selected app variant; refusing another identity")
+    # Reuse the documented builder inside the same gated worker as Xcode.
+    run(["sh", "modules/fractal-fabric/build.sh"], cwd=app, env=env)
+    fabric_hash = framework_hash(repo)
     native_paths = ["apps/ios/app.json", "apps/ios/plugins", "apps/ios/modules",
                     "apps/ios/assets", "apps/ios/react-native.config.js"]
     native_paths.extend(str(path.relative_to(repo)) for path in app.glob("app.config.*"))
@@ -204,7 +256,8 @@ def build_release(args):
         "packages": identities, "config": config,
         "source": git(repo, "ls-tree", "-r", args.commit, "--", *native_paths),
         "developer_dir": args.developer_dir, "team": args.team,
-        "pod": shutil.which("pod"), "env": DAILY_BUILD_ENV,
+        "pod": shutil.which("pod"), "env": build_environment(args.variant),
+        "fabric_framework": fabric_hash,
     }, sort_keys=True).encode()).hexdigest()
     regenerate = (inputs.get("native") != native_identity
                   or not list((app / "ios").glob("*.xcworkspace"))
@@ -238,13 +291,20 @@ def build_release(args):
         print("Resetting JS transform cache: build identity changed", flush=True)
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
+    if framework_hash(repo) != fabric_hash:
+        raise ValueError("FractalFabricRust.xcframework changed before linking")
     derived = cache / "derived"
     run(["pnpm", "run", "export:ios"], cwd=app, env=env)
+    signing = (["CODE_SIGN_STYLE=Manual", f"DEVELOPMENT_TEAM={args.team}",
+                "CODE_SIGN_IDENTITY=Apple Development",
+                f"FRACTAL_IOS_TEST_APP_PROFILE={args.test_app_profile}",
+                f"FRACTAL_IOS_TEST_RUNNER_PROFILE={args.test_runner_profile}"]
+               if args.variant == "test" else
+               ["CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
+                "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates"])
     run(["xcodebuild", "-workspace", str(workspace), "-scheme", workspace.stem,
          "-configuration", "Release", "-sdk", "iphoneos", "-destination", "generic/platform=iOS",
-         "-derivedDataPath", str(derived), "-jobs", "4",
-         "CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
-         "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates", "build"],
+         "-derivedDataPath", str(derived), "-jobs", "4", *signing, "build"],
         cwd=app, env=env)
     # DerivedData survives native identity changes. Select only the current Expo
     # product; unrelated products from earlier generated workspaces may remain.
@@ -254,12 +314,13 @@ def build_release(args):
         raise ValueError("Expected one successful Release app")
     with (apps[0] / "Info.plist").open("rb") as file:
         info = plistlib.load(file)
-    if info.get("CFBundleIdentifier") != BUNDLE_ID:
-        raise ValueError("Built app is not the daily bundle")
+    if info.get("CFBundleIdentifier") != bundle_id(args.variant):
+        raise ValueError("Built app is not the selected bundle")
     if any(info.get(key) != value for key, value in stamp.items()):
         raise ValueError("Built app has stale source identity")
     if args.commit[:12].encode() not in (apps[0] / "main.jsbundle").read_bytes():
         raise ValueError("Built app embeds a stale build stamp")
+    verify_fabric_linkage(apps[0], info, env)
     run(["codesign", "--verify", "--deep", "--strict", str(apps[0])])
     # Pending installation owns an immutable snapshot, never the next build's
     # mutable Xcode product. A failure cannot publish or replace this snapshot.
@@ -269,8 +330,12 @@ def build_release(args):
     shutil.copytree(apps[0], snapshot, symlinks=True)
     inputs["js_env"] = js_env
     save(inputs_file, inputs)
-    save(output / "success.json", {"commit": args.commit, "key": args.content_key, "app": str(snapshot),
+    final_identity = build_identity(args, fabric_hash=fabric_hash)
+    save(output / "success.json", {"commit": args.commit,
+        "key": content_key(repo, args.commit, final_identity), "app": str(snapshot),
         "build_version": build_version,
+        "fabric_framework_hash": fabric_hash,
+        "build_inputs": final_identity,
         "build_seconds": round(time.monotonic() - started, 3),
         "native_regenerated": regenerate})
 
@@ -325,8 +390,8 @@ class Delivery:
     def device(self, *argv):
         return run(["xcrun", "devicectl", *argv], env=self.env)
 
-    def recover_install(self, pending):
-        """Read back an interrupted install; never infer success from an attempt."""
+    def read_installed(self, pending=None):
+        """Read the device and reconcile only the authoritative version floor."""
         receipt = self.state / "installed-apps.json"
         try:
             receipt.unlink(missing_ok=True)
@@ -339,38 +404,80 @@ class Delivery:
             if any(not isinstance(app, dict) or not isinstance(app.get("bundleIdentifier"), str)
                    for app in apps):
                 raise ValueError("Invalid installed-app entry")
-            matches = [app for app in apps if app["bundleIdentifier"] == BUNDLE_ID]
-            if len(matches) > 1:
-                raise ValueError("Ambiguous installed daily app")
-            version = matches[0].get("bundleVersion") if matches else None
+            matches = [app for app in apps if app["bundleIdentifier"] == bundle_id(self.args.variant)]
+            if len(matches) != 1 and not (self.args.variant == "test" and not matches):
+                raise ValueError("Expected one installed selected app")
+            # A new isolated test app has no previous install. The normal lane
+            # still requires its authoritative readback exactly as before.
+            version = matches[0].get("bundleVersion") if matches else "0"
             if matches and (not isinstance(version, str) or not version.isascii() or not version.isdigit()):
                 raise ValueError("Invalid installed daily build version")
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-            self.record("install_deferred", commit=pending["commit"], reason="install_readback_unavailable")
-            return False
+            self.record("install_deferred", **({"commit": pending["commit"]} if pending else {}),
+                        reason="install_readback_unavailable")
+            return None
         finally:
             receipt.unlink(missing_ok=True)
         known_version = self.data.get("installed_version")
-        if version is None or known_version is None or int(version) != int(known_version):
+        if known_version is None or int(version) != int(known_version):
             # A contradictory device observation invalidates cached content,
             # not the authoritative monotonic version floor.
             self.data.pop("installed", None)
             self.data.pop("installed_key", None)
-        self.data.pop("install_attempt", None)
-        if version is not None:
-            floor = max(int(known_version or 0), int(version))
-            self.data["installed_version"] = str(floor)
-            if int(pending["build_version"]) < floor:
-                self.persist()
-                self.record("install_refused", commit=pending["commit"], reason="downgrade",
-                            build_version=pending["build_version"])
+        self.data["installed_version"] = str(max(int(known_version or 0), int(version)))
+        current = self.data.get("pending")
+        if (current and current["installed"]
+                and int(current["build_version"]) != int(version)):
+            # A successful install followed by a failed launch is only a claim
+            # about that version, not about a later external installation.
+            current["installed"] = False
+        self.persist()
+        return version
+
+    def verify_install_artifact(self, artifact):
+        app = Path(artifact["app"])
+        try:
+            with (app / "Info.plist").open("rb") as file:
+                info = plistlib.load(file)
+            if info.get("CFBundleIdentifier") != bundle_id(self.args.variant):
+                self.record("install_refused", commit=artifact["commit"], reason="bundle_mismatch",
+                            build_version=artifact["build_version"])
                 return False
-            if int(version) == int(pending["build_version"]):
-                self.mark_installed(pending)
-                current = self.data.get("pending")
-                if (current and all(current[field] == pending[field]
-                                    for field in ("commit", "key", "build_version", "app"))):
-                    current["installed"] = True
+            verify_fabric_linkage(app, info, self.env)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            # Invalidate retention and delivery intent, even if it already reached the phone.
+            (app.parent / "success.json").unlink(missing_ok=True)
+            for field in ("pending", "install_attempt"):
+                if self.data.get(field, {}).get("app") == artifact["app"]:
+                    del self.data[field]
+            if self.data.get("installed_key") == artifact["key"]:
+                self.data.pop("installed_key", None)
+            self.persist()
+            self.record("install_refused", commit=artifact["commit"], reason="fabric_missing",
+                        build_version=artifact["build_version"])
+            return False
+        return True
+
+    def recover_install(self, pending):
+        """Confirm an interrupted attempt using the same installed-build readback."""
+        if not self.verify_install_artifact(pending):
+            return False
+        version = self.read_installed(pending)
+        if version is None:
+            return False
+        self.data.pop("install_attempt", None)
+        floor = int(self.data["installed_version"])
+        if int(pending["build_version"]) < floor:
+            self.persist()
+            self.record("install_refused", commit=pending["commit"], reason="downgrade",
+                        build_version=pending["build_version"])
+            return False
+        if int(version) == int(pending["build_version"]):
+            self.mark_installed(pending)
+            current = self.data.get("pending")
+            if (current and all(current[field] == pending[field]
+                                for field in ("commit", "key", "build_version", "app"))):
+                current["installed"] = True
         self.persist()
         return True
 
@@ -383,6 +490,16 @@ class Delivery:
                              "with an explicitly reviewed --trusted-commit and --expected-origin")
         if self.data.get("config", config) != config:
             raise ValueError("Device/team or trust configuration changed: use a separate state directory")
+        if self.args.reconcile_installed:
+            # Readback-only reconciliation cannot install or launch an artifact.
+            if not self.data.get("trusted_head"):
+                raise ValueError("--reconcile-installed requires initialized delivery state")
+            version = self.read_installed()
+            if version is None:
+                raise ValueError("Installed-build readback unavailable")
+            self.record("installed_reconciled", observed_version=version,
+                        build_version=self.data["installed_version"])
+            return
         if git(self.args.repo, "remote", "get-url", "origin") != self.args.expected_origin:
             raise ValueError("Source origin does not match --expected-origin")
         repo = self.state / "checkout"
@@ -466,7 +583,16 @@ class Delivery:
         if self.env.get("AGENT_ACTION_APPROVAL") != "deploy":
             self.record("install_held", commit=pending["commit"], reason="deploy_approval_required")
             return
+        if not self.verify_install_artifact(pending):
+            return
         if not pending["installed"]:
+            version = self.read_installed(pending)
+            if version is None:
+                return
+            if int(pending["build_version"]) <= int(self.data["installed_version"]):
+                self.record("install_refused", commit=pending["commit"], reason="downgrade",
+                            build_version=pending["build_version"])
+                return
             process_json = self.state / "processes.json"
             try:
                 self.device("device", "info", "processes", "--device", self.args.device,
@@ -504,7 +630,7 @@ class Delivery:
             self.record("installed", commit=pending["commit"])
         try:
             run(["xcrun", "devicectl", "device", "process", "launch", "--device", self.args.device,
-                 BUNDLE_ID, "--timeout", "30"],
+                 bundle_id(self.args.variant), "--timeout", "30"],
                 env=self.env)
         except (OSError, subprocess.SubprocessError) as error:
             self.record("launch_failed", commit=pending["commit"], reason=str(error))
@@ -517,11 +643,12 @@ class Delivery:
     def mark_installed(self, artifact):
         self.data["installed"] = artifact["commit"]
         self.data["installed_key"] = artifact["key"]
-        self.data["installed_version"] = artifact["build_version"]
+        self.data["installed_version"] = str(max(int(self.data.get("installed_version") or 0),
+                                                int(artifact["build_version"])))
 
     def downgrades(self, artifact):
         installed = self.data.get("installed_version")
-        return installed is not None and int(artifact["build_version"]) < int(installed)
+        return installed is not None and int(artifact["build_version"]) <= int(installed)
 
     def retained_artifact(self, key):
         """A successful snapshot of the same content, e.g. before a revert.
@@ -577,11 +704,19 @@ class Delivery:
                    "taskpolicy", "-c", "utility", "nice", "-n", "19", sys.executable,
                    str(Path(__file__).resolve()), "--build-worker",
                    "--repo", str(repo), "--output", str(output),
-                   "--team", self.args.team, "--commit", commit, "--content-key", key,
-                   "--build-version", version, "--developer-dir", self.args.developer_dir]
+                   "--team", self.args.team, "--commit", commit,
+                   "--build-version", version, "--developer-dir", self.args.developer_dir,
+                   "--variant", self.args.variant,
+                   "--test-app-profile", self.args.test_app_profile or "",
+                   "--test-runner-profile", self.args.test_runner_profile or ""]
         with (output / "build.log").open("a") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode or not (output / "success.json").exists():
+            # A later failure may still have produced a new framework. Back off
+            # against those actual inputs rather than the pre-worker identity.
+            identity = build_identity(self.args)
+            key = content_key(repo, commit, identity)
+            self.data["observed"].update(key=key, inputs=identity)
             self.data["failed_build"] = {"key": key, "attempts": attempts, "at": time.time()}
             self.persist()
             failure = output / "failure.json"
@@ -591,9 +726,13 @@ class Delivery:
             return None
         self.data["last_build_version"] = version
         self.data.pop("failed_build", None)
+        success = json.loads((output / "success.json").read_text())
+        # The worker produces the framework after admission. Publish the final
+        # identity, not the pre-build hash (which may have been absent or stale).
+        self.data["observed"].update(key=success["key"], inputs=success["build_inputs"])
         self.persist()
         self.record("built", commit=commit, log=str(output / "build.log"))
-        return json.loads((output / "success.json").read_text())
+        return success
 
 
 def main():
@@ -601,6 +740,10 @@ def main():
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--ref", default=ios_env("REF", "origin/main"))
     parser.add_argument("--state", type=Path)
+    parser.add_argument("--variant", choices=("normal", "test"),
+                        default=ios_env("VARIANT", "normal"))
+    parser.add_argument("--test-app-profile", default=ios_env("TEST_APP_PROFILE"))
+    parser.add_argument("--test-runner-profile", default=ios_env("TEST_RUNNER_PROFILE"))
     parser.add_argument("--expected-origin", default=ios_env("EXPECTED_ORIGIN"),
                         help="Exact trusted origin URL, supplied by the operator")
     parser.add_argument("--trusted-commit", default=ios_env("TRUSTED_COMMIT"),
@@ -618,15 +761,20 @@ def main():
     parser.add_argument("--build-only", action="store_true",
                         default=ios_env("BUILD_ONLY") == "1",
                         help="Retain a signed artifact without touching the phone")
+    parser.add_argument("--reconcile-installed", action="store_true",
+                        help="Read the installed daily build and raise its version floor; never build or deploy")
     parser.add_argument("--build-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--commit", help=argparse.SUPPRESS)
-    parser.add_argument("--content-key", help=argparse.SUPPRESS)
     parser.add_argument("--build-version", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.repo = args.repo.expanduser().resolve()
     if not args.team or not args.developer_dir:
         parser.error("--team/FRACTAL_IOS_TEAM and --developer-dir/DEVELOPER_DIR are required")
+    if args.variant not in ("normal", "test"):
+        parser.error("FRACTAL_IOS_VARIANT must be normal or test")
+    if args.variant == "test" and not args.test_app_profile:
+        parser.error("test variant requires --test-app-profile/FRACTAL_IOS_TEST_APP_PROFILE")
     if args.build_worker:
         build_release(args)
         return
@@ -643,7 +791,7 @@ def main():
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if validation.returncode or ref.startswith("-"):
             parser.error("--ref must be a valid branch name or full commit SHA")
-    args.state = args.state.expanduser().resolve()
+    args.state = variant_state(args.state.expanduser().resolve(), args.variant)
     delivery = Delivery(args)
     with (args.state / "delivery.lock").open("a") as lock:
         try:

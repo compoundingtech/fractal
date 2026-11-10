@@ -1234,7 +1234,7 @@ Other slices retain their full marker contract. World-switch contrast selection 
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
-Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
+Fractal-ui exports `transcriptMountedWindow` from its transcript-window module, derived from
 Transcript's initial source-row count. Stories can use this shared value instead of copying
 the count; a consumer-side test guards it.
 
@@ -1330,6 +1330,8 @@ breaks a scenario fails in the same pull request.
 
 ## Consumer contracts (D2, D8)
 
+Fractal Web 2 maintains the kit, its committed fixtures and its CI gates (freshness, decode, privacy, tests); consumer adapters stay with their consumer owners.
+
 | Consumer | Owner | Contract |
 | --- | --- | --- |
 | fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. The inventory expands nested brace alternatives before deriving static story roots, rejects patterns whose roots cannot be determined or that mention `node_modules` until the check is extended, walks supported roots with `lstat` without following symlinks, and reports any directory or file symlink outside excluded dependencies (including literal file entries). Traversal skips directories named `node_modules`; discovery filters exact `node_modules` path segments independently of glob matching, including patterns with leading `../` prefixes and brace alternatives. Similarly named directories remain included. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons; each CSF exports its reviewed `scenarioExemptions` (sorted `export:mode` ids, excluded from stories), and the collected exemptions must equal their union, with no stale or duplicate id. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
@@ -1339,7 +1341,7 @@ breaks a scenario fails in the same pull request.
 | iOS app | native-client maintainers | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
 | Rust `fractal-client` | native-client maintainers | Provides the rebase reader and passes the shared vectors. |
 | Swift `FractalClient` | native-client maintainers | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
-| fractalite (dotfiles flakes/fractal) | none | No adoption planned; revisit when it needs scenario data. |
+| fractalite (dotfiles flakes/fractal) | Fractal Product Lead | Excluded from the shared scenario data by Johannes's decision `step-run/ask-ab9b5934aae4d45ab96e13da847ef4c1/ask`. Revisit when fractalite gains a client-v0 data path or converges onto Fractal TUI through sidebar-v2. In the latter case, it inherits Fractal TUI adoption. |
 
 ## Non-goals
 

@@ -52,6 +52,11 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
+Runs selecting heavy checks take exactly one `gate-slot --class heavy` admission when gate-slot is
+on PATH. All checks share its capped scope until the run ends; host wait/refusal reasons reach the terminal.
+Without gate-slot (standalone use), the existing per-check caller/seat/builds.slice cap is used when available, otherwise checks
+run without a host cap. ST_EVIDENCE_GOVERN=off explicitly disables this wrapping.
+
 A run's TMPDIR (and TMP and TEMP), for itself and every check, is a directory of its own on disk, /var/tmp/st-test.XXXXXXXX (in
 ST_TEST_TMP when set), removed when the run ends; --keep keeps it and says where. Each `nix develop` leaves a nix-shell.* directory
 there, with whatever its check's tests wrote. A run that was killed leaves its directory behind, and the next run removes it.
@@ -166,7 +171,7 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 # The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
 FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
-# (a builds.slice scope, the kept target below), which nobody has to ask for.
+# (gate-slot heavy admission when installed, otherwise a builds.slice scope, and the kept target below).
 BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web', RUST_TESTS})
 # rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
@@ -355,6 +360,38 @@ def git(*args, cwd=None, env=None, check=True, stdin=None):
     if check and done.returncode != 0:
         raise Failure(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-400:]}')
     return done
+
+
+def hydrate_commit(directory, commit):
+    """Unprivileged preparation: local upload-pack cannot lazy-fetch historical blobs."""
+    def missing_objects():
+        return [line[1:] for line in
+                git('rev-list', '--objects', '--missing=print', commit, cwd=directory,
+                    env={'GIT_NO_LAZY_FETCH': '1'}).stdout.decode().splitlines()
+                if line.startswith('?')]
+
+    missing = missing_objects()
+    if not missing:
+        return
+    remotes = [match.group(1) for line in git('config', '--list', cwd=directory).stdout.decode().splitlines()
+               if (match := re.fullmatch(r'remote\.(.+)\.promisor=true', line))]
+    if not remotes:
+        raise Failure(f'cannot hydrate {len(missing)} missing objects before signing: no promisor remote')
+    while missing:
+        before = set(missing)
+        for offset in range(0, len(missing), 200):
+            batch = missing[offset:offset + 200]
+            try:
+                git('-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+                    '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--quiet',
+                    '--no-tags', '--no-write-fetch-head', '--no-auto-maintenance',
+                    '--no-recurse-submodules', '--filter=blob:none', '--stdin', remotes[0],
+                    cwd=directory, stdin=(''.join(oid + '\n' for oid in batch)).encode())
+            except Failure as error:
+                raise Failure(f'cannot hydrate missing objects before signing: {error}') from error
+        missing = missing_objects()
+        if missing and set(missing) >= before:
+            raise Failure(f'cannot hydrate {len(missing)} missing objects before signing: fetch made no progress')
 
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for base runners copied alone.
@@ -624,7 +661,7 @@ def run_base_copy(argv):
     changes are still tested by ci-script-tests (fractal-test-test runs from the tree), and that is what is signed. There is no opt-out.
     This copy runs only when the base's st-test is absent, empty or this file, or this already is the base's copy (ST_TEST_REEXEC).
     The human-facing fractal-test shim cannot be copied alone; retain st-test until every supported base permits contraction."""
-    if os.environ.get(REEXEC):
+    if os.environ.get(REEXEC) or os.environ.get(RUN_ADMITTED):
         return
     scrub_git_environment()
     parser = argparse.ArgumentParser(add_help=False)
@@ -992,16 +1029,38 @@ def oom_note(caps, before):
                    for cgroup in sorted(inner))
 
 
-def governed(argv, name, output=None):
-    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
-    everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
-    memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
+def heavy_admission(argv, gate_slot):
+    """The host owns the capped scope; never duplicate its capacity probes here."""
+    return [gate_slot, '--class', 'heavy', '--'] + argv
 
-    No heavy-slot ticket is held for a whole Rust check (`cargo --stage-slot`): those tests run under the test guardian
-    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
-    stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
-    stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+
+RUN_ADMITTED = 'ST_EVIDENCE_RUN_ADMITTED'
+
+
+def admit_run(argv, checks, environment):
+    """Re-enter this runner once inside the host scope, before it takes a pool tree or starts any check.
+
+    The continuation marker prevents recursion, including accepted-runner handovers. It is not proof of a cap: governed()
+    still checks the kernel before marking cargo as already capped. The existing explicit off switch remains the opt-out.
+    """
+    if environment.get('ST_EVIDENCE_GOVERN') == 'off' or environment.get(RUN_ADMITTED) or not BUILDS.intersection(checks):
+        return None
+    gate_slot = shutil.which('gate-slot')
+    if not gate_slot:
+        return None
+    print('fractal-test: run waits for gate-slot heavy admission; host wait/refusal reasons follow',
+          file=sys.stderr, flush=True)
+    child_environment = dict(environment, **{RUN_ADMITTED: '1'})
+    # Replace the outside process: gate-slot owns signals and the complete runner lifetime, with no waiting parent left outside its scope.
+    return os.execve(gate_slot, heavy_admission([sys.executable, str(Path(__file__).resolve()), *argv], gate_slot),
+                     child_environment)
+
+
+def governed(argv, name, output=None):
+    """Use the enclosing run's kernel-verified cap, or the existing standalone per-check cap selection.
+    No cargo stage ticket is held for a whole check: the test guardian detaches from its parents, so cargo beneath it cannot
+    reuse an ancestor's stage ticket and would queue behind that ticket. Run-wide gate-slot admission uses a separate semaphore.
+    A host without a user systemd bus runs as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
     A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
     gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
@@ -3561,6 +3620,7 @@ def main(argv):
 
 def run_main(argv, cleanup):
     main_started = time.monotonic()
+    caller_environment = dict(os.environ)  # retain pool/handover switches across admission before the seat scrub drops them
     # Measurement-only callers may execute a candidate with REEXEC set. Such a run must never enter the accepted runner's SLOs.
     candidate = bool(os.environ.get(REEXEC) and not Path(__file__).parent.name.startswith('st-test-base-'))
     CLAIMED.clear()
@@ -3583,7 +3643,11 @@ def run_main(argv, cleanup):
     # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
     if not (HANDOVER and os.environ.get('ADMISSION_RUN')):  # a handed-over run keeps its place in the host's order too
         os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
-    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split('\n\n')[0],
+        epilog='Heavy runs take one gate-slot --class heavy admission for the entire run when gate-slot is '
+               'on PATH. Without gate-slot, standalone use retains the existing per-check host cap when available, otherwise no host cap. '
+               'ST_EVIDENCE_GOVERN=off explicitly disables wrapping.')
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     publication = parser.add_mutually_exclusive_group()
@@ -3637,6 +3701,11 @@ def run_main(argv, cleanup):
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
         return 0
+    if not args.status:
+        # Publication can top up to the full suite after merging a newer base, even if its initial selection was light.
+        admitted = admit_run(argv, all_checks if args.push and not args.out and not TARGET else checks, caller_environment)
+        if admitted is not None:
+            return admitted  # refusal propagates without any pool preparation, checks, or signing in this process
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
@@ -3718,6 +3787,8 @@ def run_main(argv, cleanup):
             round_number, round_started = top_up, time.monotonic()  # 0: the run itself; then the top-ups, including a handed-over round
             target, target_lock = None, None
             while True:
+                # Use the caller's normal git context, never the key-bearing signer's.
+                hydrate_commit(directory, commit)
                 tools = {}
                 for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
                     path = Path(scratch) / name
