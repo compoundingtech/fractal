@@ -21020,7 +21020,7 @@ pub mod tests {
     #[test]
     fn execs_and_run_seats_start_normal_and_standing_seats_keep_the_installs() {
         use super::{default_finite_work_to_normal, overlay_runtime_environment};
-        use fractal_kernel::model::*;
+        use super::{DesiredSubject, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec, RestartIntensity, RestartType};
         use fractal_runtime::PRIORITY_ENV;
         let runtime = BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
         let launch = |kind: MemberKind, subject: &str, owner_run: Option<&str>, declared: Option<(&str, &str)>| {
