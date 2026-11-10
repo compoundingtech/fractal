@@ -9006,6 +9006,14 @@ impl Store {
                     // mistake its not-yet-committed claims for an empty backlog.
                     let projection_state =
                         self.replication_projection_state.load(Ordering::Acquire);
+                    // Local claims project in their own transaction; only admission can
+                    // leave claims behind this pass. Read its committed watermark while
+                    // the writer still excludes admission, alongside the generation.
+                    let admitted: u64 = connection.query_row(
+                        "SELECT value FROM meta WHERE key='replication_admitted_index'", [],
+                        |row| row.get::<_, String>(0),
+                    )?.parse()?;
+                    let pending = through < admitted;
                     stages.enter("release");
                     drop(connection);
                     drop(stages);
@@ -9036,9 +9044,8 @@ impl Store {
                             error
                         })?;
                     }
-                    // Admission and catch-up deferral can run after this index read. Clear
-                    // only the generation observed before it; a newer deferral must survive.
-                    let pending = through < self.index()?;
+                    // Admission and catch-up deferral can run after the watermark read.
+                    // Clear only the generation observed before it; a newer deferral must survive.
                     before_clear();
                     if !pending {
                         let _ = self.replication_projection_state.compare_exchange(

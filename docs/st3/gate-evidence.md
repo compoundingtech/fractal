@@ -714,6 +714,17 @@ clock and its own digest as producer, accepts exactly the documented request key
 `tests` observation with `runner: "wrapper"`. It cannot check that the command really ran; that is
 the cooperative boundary (agents with the key's account can lie) and belongs in the known defects.
 
+Before invoking the signer, `scripts/st-test` hydrates missing reachable objects
+(including historical blobs) in the source checkout, using the caller's normal Git context.
+Local `upload-pack` disables lazy fetching, so a `blob:none` checkout cannot otherwise
+serve the private scratch fetch even when its working tree is complete. The caller fetches
+missing IDs from its configured promisor remote in batches of at most 200, without updating
+refs, recursing into submodules, or running maintenance. A failed fetch or one that makes
+no progress stops preparation. The signer itself never contacts a promisor remote: it disables
+lazy fetching and refuses with the missing-object count and an instruction to hydrate in the
+caller. Other callers must perform that preparation themselves. The signed observation and
+verifier requirements are unchanged.
+
 `scripts/testdata/evidence/wrapper-note/` is a golden note made with a throwaway key
 (`python3 scripts/evidence-wrap-test --write-fixture DIR` regenerates one). The verifier's tests
 read it too. A note applies only to the tree it names, so it helps CI only when the pushed commit
@@ -2130,6 +2141,8 @@ host's Watchman service, named by its socket. The note records `kit_shard_count=
 as to CI's aggregate note; its host and agent levels admit it for `pull_request` (`by_level`, `lane: true`). fractal-test asks the base's own
 `scripts/ci-fractal-web-changes` whether any web input changed since HEAD's merge base with the base: when none did, CI does not run the
 lane, so `--status` reads `not relevant` (covered) and a run skips it, neither a failure nor a note.
+The check's declared inputs and lane tree inputs include `nix/fractal-web-publisher.nix`; the existing `apps/fractal-web` input
+covers its server sources. Publisher packaging changes therefore invalidate web evidence just as the web detector requires.
 
 Locally, web runs in its own thread alongside the Rust build lane and the serial light-check lane. On a build host it holds one
 counted heavy cargo stage slot for its whole run, including the dev shell; the kit plays inherit that admission and take no second

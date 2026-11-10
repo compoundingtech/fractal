@@ -224,6 +224,9 @@ pub enum Effect {
         reason: Option<String>,
         /// A structured request's named answer, by id.
         answer: Option<String>,
+        /// Notes on named answers other than `answer`, as `(answer id, text)`; sent only to a
+        /// Fractal that takes them (`person-answer-option-notes`).
+        option_notes: Vec<(String, String)>,
     },
     LaunchRevise {
         id: String,
@@ -464,8 +467,9 @@ pub struct Ui {
     pub(crate) said: Option<(String, Result<fractal_client::ConversationSearch, String>)>,
     /// The named answer chosen on the focused structured request, before Enter sends it.
     answering: Option<usize>,
-    /// A decision's "request changes" answer, chosen: its id goes with the words typed next.
-    changes_answer: Option<String>,
+    /// Note bindings belong to requests, not to the transient highlighted row.
+    note_answers: HashMap<String, String>,
+    answer_errors: HashMap<String, String>,
     /// Voice mode: the speech helper listening for one input.
     pub(crate) voice: Option<voice::VoiceState>,
     /// Inputs whose text came from voice; their next message is tagged `dictated`.
@@ -823,7 +827,8 @@ impl Ui {
             said: None,
             voice: None,
             answering: None,
-            changes_answer: None,
+            note_answers: HashMap::new(),
+            answer_errors: HashMap::new(),
             dictated: HashSet::new(),
             agent_details: true,
             kdl: false,
@@ -1836,7 +1841,14 @@ impl Ui {
         if self.tab() == 1 {
             self.selected_id()
         } else {
-            self.attention_focus()
+            self.attention_focus().map(|id| self.answer_draft_key(&id))
+        }
+    }
+
+    fn answer_draft_key(&self, id: &str) -> String {
+        match self.note_answers.get(id) {
+            Some(answer) => format!("answer:{id}:{answer}"),
+            None => id.to_owned(),
         }
     }
 
@@ -2431,22 +2443,22 @@ impl Ui {
                 thread,
             }
         });
-        let text = self.conversation_state.drafts.get(key).map(String::as_str);
+        let draft_key = self.answer_draft_key(key);
+        let text = self.conversation_state.drafts.get(&draft_key).map(String::as_str);
         Drafts {
             text,
-            cursor: self.cursor.at(key, text.unwrap_or("")),
+            cursor: self.cursor.at(&draft_key, text.unwrap_or("")),
             editing: self.editing,
             confirm: self.confirm,
             answering: self.answering,
-            needs_words: self.changes_answer.as_ref().and_then(|wanted| {
-                self.structured_request().and_then(|(_, request)| {
-                    request
-                        .answers
-                        .iter()
-                        .find(|answer| &answer.id == wanted)
-                        .map(|answer| answer.label.clone())
-                })
-            }),
+            note_answer: self.note_answers.get(key).cloned(),
+            answer_error: self.answer_errors.get(key).map(String::as_str),
+            noted_answers: self.structured_request().map(|(_, request)| {
+                request.answers.iter().filter(|answer| {
+                    self.conversation_state.drafts.get(&format!("answer:{key}:{}", answer.id))
+                        .is_some_and(|text| !text.trim().is_empty())
+                }).map(|answer| answer.id.clone()).collect()
+            }).unwrap_or_default(),
             chat,
             // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
             form: self.form_state(key),
@@ -3977,18 +3989,60 @@ impl Ui {
         }
     }
 
-    /// An answer that asks for changes needs them in words: open the box for them at once, with
-    /// the answer remembered, so a person who chose it can type (Nathan, 2026-10-12: "it says it
-    /// needs my words but I can't type anywhere"). False for an answer that needs none.
+    /// Every saved, nonblank note on a named answer of request `id` other than `chosen`, in the
+    /// request's order, as `(answer id, text)`. These go with the answer; none is dropped.
+    fn option_notes(&self, id: &str, chosen: Option<&str>) -> Vec<(String, String)> {
+        let Some(AttentionKind::Request { structured: Some(request), .. }) = self
+            .world
+            .attention
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| &item.kind)
+        else {
+            return Vec::new();
+        };
+        request
+            .answers
+            .iter()
+            .filter(|answer| Some(answer.id.as_str()) != chosen)
+            .filter_map(|answer| {
+                let text = self.conversation_state.drafts.get(&format!("answer:{id}:{}", answer.id))?;
+                let text = text.trim();
+                (!text.is_empty()).then(|| (answer.id.clone(), text.to_owned()))
+            })
+            .collect()
+    }
+
+    /// Required changes use the same option-bound editor as optional notes.
     fn ask_for_words(&mut self, answer: &fractal_client::RequestAnswerOption) -> bool {
         if answer.outcome.as_deref() != Some("request_changes") {
             return false;
         }
-        self.changes_answer = Some(answer.id.clone());
+        let Some((id, _)) = self.structured_request() else { return false };
+        self.note_answers.insert(id.clone(), answer.id.clone());
+        self.answer_errors.remove(&id);
         self.answering = None;
         self.editing = true;
-        self.flash(format!("“{}”: write the changes, then Enter", answer.label));
         true
+    }
+
+    fn start_answer_note(&mut self) {
+        let Some((id, request)) = self.structured_request() else { return };
+        if !screens::can_note(&request, self.answering) {
+            return;
+        }
+        if let Some(answer) = self.answering.and_then(|index| request.answers.get(index)) {
+            self.note_answers.insert(id.clone(), answer.id.clone());
+        } else {
+            self.note_answers.remove(&id);
+        }
+        self.answer_errors.remove(&id);
+        self.answering = None;
+        self.editing = true;
+        if let Some(chat) = &mut self.chat {
+            chat.editing = false;
+        }
     }
 
     fn answer_key(&mut self, key: KeyEvent) -> bool {
@@ -3999,12 +4053,17 @@ impl Ui {
             self.answering = None;
             return false;
         };
-        let last = request.answers.len().saturating_sub(1);
+        let last = (request.answers.len() + usize::from(request.custom)).saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.answering = Some(index.saturating_sub(1)),
             KeyCode::Down | KeyCode::Char('j') => self.answering = Some((index + 1).min(last)),
             KeyCode::Esc => self.answering = None,
+            KeyCode::Char('c') => self.start_answer_note(),
             KeyCode::Enter => {
+                if index == request.answers.len() && request.custom {
+                    self.start_answer_note();
+                    return true;
+                }
                 self.answering = None;
                 let Some(answer) = request.answers.get(index) else {
                     return true;
@@ -4015,10 +4074,12 @@ impl Ui {
                 }
                 if self.live {
                     self.effects.push(Effect::Attention {
-                        id,
+                        id: id.clone(),
                         action: "work.done".into(),
-                        reason: Some(answer.label.clone()),
+                        reason: self.conversation_state.drafts
+                            .get(&format!("answer:{id}:{}", answer.id)).cloned(),
                         answer: Some(answer.id.clone()),
+                        option_notes: self.option_notes(&id, Some(&answer.id)),
                     });
                     self.flash(format!("Answering “{}”…", answer.label));
                 } else {
@@ -4040,7 +4101,7 @@ impl Ui {
             }
             // The other ways to answer or set the card aside are always reachable: write in
             // words (c), chat about it (t), dismiss it (x), go to the agent (g).
-            KeyCode::Char('c' | 't' | 'x' | 'g') => return false,
+            KeyCode::Char('t' | 'x' | 'g') => return false,
             _ => {}
         }
         true
@@ -4702,7 +4763,6 @@ impl Ui {
             match key.code {
                 KeyCode::Esc => {
                     self.editing = false;
-                    self.changes_answer = None;
                 }
                 KeyCode::Enter => self.submit(),
                 // Ctrl+Y speaks into the input instead of typing.
@@ -4853,6 +4913,7 @@ impl Ui {
                 action: "work.done".into(),
                 reason: Some("Read".into()),
                 answer: Some("read".into()),
+                option_notes: Vec::new(),
             });
         } else {
             self.flash("Read · demo: nothing was sent");
@@ -5054,10 +5115,16 @@ impl Ui {
                             self.flash("Put off until later · demo, this machine only");
                         }
                     }
-                    (
-                        "review" | "feedback" | "launch" | "message" | "revision" | "request",
-                        'c',
-                    ) => self.editing = true,
+                    ("request", 'c') => {
+                        if self.structured_request().is_some() {
+                            self.start_answer_note();
+                        } else {
+                            self.editing = true;
+                        }
+                    }
+                    ("review" | "feedback" | "launch" | "message" | "revision", 'c') => {
+                        self.editing = true;
+                    }
                     // An unplaced row answers only as st lists for it.
                     ("unplaced", 'c') => {
                         if self
@@ -5516,36 +5583,38 @@ impl Ui {
     }
 
     fn submit(&mut self) {
-        let Some(id) = self.draft_key() else { return };
+        let Some(draft_key) = self.draft_key() else { return };
+        let Some(id) = (if self.tab() == 1 { self.selected_id() } else { self.attention_focus() }) else { return };
+        self.answer_errors.remove(&id);
         let images = if self.tab() == 1 {
             self.attachments.get(&id).cloned().unwrap_or_default()
         } else {
             Vec::new()
         };
-        let draft = match self.conversation_state.send(&id) {
+        let draft = match self.conversation_state.send(&draft_key) {
             Some(PaneIntent::Send(draft)) => Some(draft),
+            _ if self.note_answers.contains_key(&id) => Some(String::new()),
             _ if !images.is_empty() => Some(String::new()),
             _ => None,
         };
         let Some(mut draft) = draft else {
-            // An answer that asks for changes is sent with the changes in words.
-            let wanted = self.changes_answer.clone().and_then(|wanted| {
-                self.structured_request().and_then(|(_, request)| {
-                    request
-                        .answers
-                        .iter()
-                        .find(|answer| answer.id == wanted)
-                        .map(|answer| answer.label.clone())
-                })
-            });
-            self.flash(match wanted {
-                Some(label) => format!(
-                    "“{label}” needs your words: write what should change, then Enter. Esc cancels"
-                ),
-                None => "Write something first".to_owned(),
-            });
+            if self.structured_request().is_some() {
+                self.answer_errors.insert(id, "Write an answer before sending.".into());
+            } else {
+                self.flash("Write something first");
+            }
             return;
         };
+        if let Some((_, request)) = self.structured_request()
+            && let Some(answer) = self.note_answers.get(&id)
+                .and_then(|wanted| request.answers.iter().find(|answer| &answer.id == wanted))
+            && answer.outcome.as_deref() == Some("request_changes")
+            && draft.trim().is_empty()
+        {
+            self.answer_errors.insert(id, format!("“{}” requires a note explaining what should change.", answer.label));
+            self.editing = true;
+            return;
+        }
         // A message st will not take is not sent, and the box keeps it.
         if self.live
             && self.tab() == 1
@@ -5608,6 +5677,7 @@ impl Ui {
                         .into(),
                         reason: Some(draft),
                         answer: None,
+                        option_notes: Vec::new(),
                     }),
                     Some(AttentionKind::Launch { .. }) => Some(Effect::LaunchRevise {
                         id: id.clone(),
@@ -5625,7 +5695,8 @@ impl Ui {
                         }
                         .into(),
                         reason: Some(draft),
-                        answer: self.changes_answer.take(),
+                        answer: self.note_answers.get(&id).cloned(),
+                        option_notes: self.option_notes(&id, self.note_answers.get(&id).map(String::as_str)),
                     }),
                     Some(AttentionKind::Message { from, .. }) => Some(Effect::Reply {
                         id: id.clone(),
@@ -5641,6 +5712,7 @@ impl Ui {
                             action: answer.into(),
                             reason: Some(draft),
                             answer: None,
+                            option_notes: Vec::new(),
                         }),
                     Some(AttentionKind::Revision { .. }) => self
                         .current_item()
@@ -5659,7 +5731,7 @@ impl Ui {
             match effect {
                 Some(effect) => {
                     self.effects.push(effect);
-                    self.conversation_state.drafts.remove(&id);
+                    self.conversation_state.drafts.remove(&draft_key);
                     self.follow_latest();
                     // An answer on Home is done: the next item opens closed, so it does not
                     // take the keys (Nathan, 2026-10-02).
@@ -5852,10 +5924,11 @@ impl Ui {
         if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
             // r closes a request that needs nothing from the person; the step continues. A
             // decision or choice is set aside by name: st tells its asker it was dismissed.
-            let named = action == 'r'
-                && self
-                    .structured_request()
-                    .is_some_and(|(_, request)| !request.answers.is_empty());
+            let request = if action == 'r' { self.structured_request() } else { None };
+            let named = request.as_ref().is_some_and(|(_, request)| !request.answers.is_empty());
+            let chosen = request.as_ref()
+                .and_then(|(_, request)| request.answers.iter().find(|answer| answer.id == "dismiss"))
+                .map(|answer| answer.id.as_str());
             let answer = match action {
                 'y' => "Yes",
                 'n' => "No",
@@ -5863,11 +5936,17 @@ impl Ui {
                 _ => "Nothing for me to do here.",
             };
             if self.live {
+                let reason = chosen
+                    .and_then(|chosen| self.conversation_state.drafts.get(&format!("answer:{id}:{chosen}")))
+                    .cloned()
+                    .unwrap_or_else(|| answer.into());
+                let option_notes = self.option_notes(&id, chosen);
                 self.effects.push(Effect::Attention {
                     id,
                     action: "work.done".into(),
-                    reason: Some(answer.into()),
+                    reason: Some(reason),
                     answer: named.then(|| "dismiss".to_owned()),
+                    option_notes,
                 });
                 self.flash(format!("Answering “{answer}”…"));
             } else {
@@ -5905,6 +5984,7 @@ impl Ui {
                     action: name.into(),
                     reason,
                     answer: None,
+                    option_notes: Vec::new(),
                 });
                 self.flash("Sending…");
             } else {
@@ -6486,7 +6566,7 @@ impl Ui {
             Hit::Key('a') if self.answering.is_some() => {
                 let count = self
                     .structured_request()
-                    .map_or(0, |(_, request)| request.answers.len());
+                    .map_or(0, |(_, request)| request.answers.len() + usize::from(request.custom));
                 self.answering = self.answering.map(|index| (index + 1) % count.max(1));
             }
             Hit::Key(key) => {
@@ -6500,34 +6580,36 @@ impl Ui {
                 }
             }
             Hit::Enter if self.new_mission.is_some() => self.create_launch(),
-            // "Send this answer" sends the answer being chosen, not the (empty) text box.
-            Hit::Enter if self.answering.is_some() => {
-                self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            Hit::ChatEnter => {
+                self.answering = None;
+                self.editing = false;
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = true;
+                }
+                self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            Hit::ChatComposer => {
+                self.answering = None;
+                self.editing = false;
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = true;
+                }
             }
             Hit::Enter => {
-                if self.chat.is_some() {
-                    self.submit_chat()
-                } else {
-                    self.submit()
+                // A visible Send belongs to this draft even after Esc or refusal restored it.
+                // Chat has a distinct send target; a stale chat must not capture this click.
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = false;
                 }
-            }
-            Hit::Escape if self.answering.is_some() => self.answering = None,
-            Hit::Escape if self.new_mission.is_some() => {
-                self.new_mission = None;
-                self.close_form_tab();
+                if self.answering.is_some() && !self.editing {
+                    self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                } else {
+                    self.answering = None;
+                    self.submit();
+                }
             }
             Hit::Escape => {
-                if self.popover.take().is_none() {
-                    self.editing = false;
-                    self.confirm = None;
-                    if let Some(chat) = &mut self.chat {
-                        if chat.editing {
-                            chat.editing = false;
-                        } else {
-                            self.chat = None;
-                        }
-                    }
-                }
+                self.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             }
             Hit::ToggleTool(id) | Hit::Pane(PaneIntent::Expand(id)) => {
                 if let Some(conversation) = self.content_conversation() {
@@ -6576,7 +6658,14 @@ impl Ui {
             Hit::JumpLatest => self.follow_latest(),
             Hit::Composer => {
                 if let Some(chat) = &mut self.chat {
-                    chat.editing = true;
+                    chat.editing = false;
+                }
+                if self.structured_request().is_some() {
+                    if self.note_answers.contains_key(&self.attention_focus().unwrap_or_default()) {
+                        self.editing = true;
+                    } else {
+                        self.start_answer_note();
+                    }
                 } else {
                     self.editing = true;
                 }
@@ -8104,7 +8193,7 @@ mod tests {
         assert!(ui.chat.as_ref().is_some_and(|chat| chat.editing));
         type_in(&mut ui, "xj a question");
         let key = format!("chat:{}", "attention/pick");
-        assert_eq!(ui.conversation_state.drafts[&key], "xj a question");
+        assert_eq!(ui.conversation_state.drafts.get(&key).map(String::as_str), Some("xj a question"));
         // Answering in words after choosing does too.
         let mut ui2 = {
             let mut again = Ui::new(ui.world.clone());
@@ -8119,8 +8208,13 @@ mod tests {
         assert_eq!(ui2.answering, Some(1));
         ui2.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert!(ui2.editing);
+        assert_eq!(ui2.note_answers.get("attention/pick").map(String::as_str), Some("b"));
         type_in(&mut ui2, "jk and x too");
-        assert_eq!(ui2.conversation_state.drafts["attention/pick"], "jk and x too");
+        assert_eq!(
+            ui2.conversation_state.drafts.get("answer:attention/pick:b").map(String::as_str),
+            Some("jk and x too"),
+            "the highlighted option's note receives every typed command letter"
+        );
         assert_eq!(ui2.answering, None, "the box has the keyboard, the choice yielded");
     }
 
@@ -8341,8 +8435,8 @@ mod tests {
         ui.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, answer: Some(answer), reason: Some(reason), .. }]
-                if id == "attention/shipped" && answer == "read" && reason == "Read it"),
+            matches!(&ui.effects[..], [Effect::Attention { id, answer: Some(answer), reason: None, .. }]
+                if id == "attention/shipped" && answer == "read"),
             "{:?}",
             ui.effects
         );
@@ -8522,14 +8616,10 @@ mod tests {
         ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("what should change? Enter sends it with “Follow the brief”"), "{screen}");
+        assert!(screen.contains("Follow the brief") && screen.contains("request changes"), "{screen}");
         // Enter with nothing written says what is wanted, not just "Write something first".
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            ui.flash.as_ref().is_some_and(|(text, _)| text.contains("“Follow the brief” needs your words")),
-            "{:?}",
-            ui.flash
-        );
+        assert!(ui.answer_errors.get("attention/decide").is_some_and(|error| error.contains("requires a note")));
         assert!(ui.effects.is_empty());
         // Choosing it with a click opens the box for the words at once, and the person can type
         // (Nathan, 2026-10-12: "it says it needs my words but I can't type anywhere").
@@ -8540,22 +8630,22 @@ mod tests {
         for letter in "keep the brief".chars() {
             ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
         }
-        assert_eq!(ui.conversation_state.drafts["attention/decide"], "keep the brief");
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/decide:follow").map(String::as_str), Some("keep the brief"));
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("in your own words") && screen.contains("◉ Follow the brief"), "{screen}");
+        assert!(screen.contains("Follow the brief") && screen.contains("request changes"), "{screen}");
         // Selected with the keys, its box is already on the card, and the first letter typed
         // opens it and goes into it (even one that is otherwise a command).
         ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        ui.conversation_state.drafts.remove("attention/decide");
+        ui.conversation_state.drafts.remove("answer:attention/decide:follow");
         ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(ui.answering, Some(0));
         assert!(!ui.editing);
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("in your own words") && screen.contains("Start typing"), "{screen}");
+        assert!(screen.contains("Start typing"), "{screen}");
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(ui.editing && ui.confirm.is_none(), "x typed into the box, not a dismissal");
-        assert_eq!(ui.conversation_state.drafts["attention/decide"], "xy");
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/decide:follow").map(String::as_str), Some("xy"));
     }
 
     #[test]
@@ -8691,6 +8781,7 @@ mod tests {
             action: "work.done".into(),
             reason: None,
             answer: None,
+            option_notes: Vec::new(),
         });
         let mut next = world;
         if let Load::Ready(items) = &mut next.attention {

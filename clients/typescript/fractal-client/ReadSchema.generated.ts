@@ -146,6 +146,14 @@ export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
 export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
 
+/** A note about another named option, not the chosen answer. IDs must exist in the request and be unique; text must be nonblank. */
+export const PersonOptionNote = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "text": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(8000))
+}).annotate({ identifier: "PersonOptionNote", description: "A note about another named option, not the chosen answer. IDs must exist in the request and be unique; text must be nonblank." }))()
+export type PersonOptionNote = typeof PersonOptionNote.Type
+export type PersonOptionNoteEncoded = typeof PersonOptionNote.Encoded
+
 /** Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile. */
 export const PrivateNotesUri = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^dev\\.schickling\\.agent-private-notes://[^/]+/[^/]+$", "u"))).pipe(Schema.brand("st3/PrivateNotesUri")).annotate({ identifier: "PrivateNotesUri", description: "Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile." }))()
 export type PrivateNotesUri = typeof PrivateNotesUri.Type
@@ -619,8 +627,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
-  /** Stale after 90 seconds without a new observation; missing when this runtime has no observation. */
-  "observation": optionalKey(Schema.Literals(["current","stale","missing"])).annotate({ description: "Stale after 90 seconds without a new observation; missing when this runtime has no observation." }),
+  /** Stale after the shared harness observation freshness window without a new observation; missing when this runtime has no observation. */
+  "observation": optionalKey(Schema.Literals(["current","stale","missing"])).annotate({ description: "Stale after the shared harness observation freshness window without a new observation; missing when this runtime has no observation." }),
   "operational": optionalKey(Operational),
   "owner_run_id": Schema.OptionFromOptionalNullOr(MissionRunId, NULL_NONE),
   /** st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons. */
@@ -1557,6 +1565,38 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "Attention" }))()
 export type Attention = typeof Attention.Type
 export type AttentionEncoded = typeof Attention.Encoded
+
+export const AttentionBudgetDeclared = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "asks": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "state": Schema.Literal("declared") }),
+  Schema.Struct({ "state": Schema.Literal("undeclared"), "asks": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "AttentionBudgetDeclared" }))()
+export type AttentionBudgetDeclared = typeof AttentionBudgetDeclared.Type
+export type AttentionBudgetDeclaredEncoded = typeof AttentionBudgetDeclared.Encoded
+
+export const AttentionBudgetRequestRef = /*#__PURE__*/ (() => Schema.Struct({
+  "claim_id": Schema.String,
+  "subject": Schema.String
+}).annotate({ identifier: "AttentionBudgetRequestRef" }))()
+export type AttentionBudgetRequestRef = typeof AttentionBudgetRequestRef.Type
+export type AttentionBudgetRequestRefEncoded = typeof AttentionBudgetRequestRef.Encoded
+
+export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
+  "charged": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "declared": AttentionBudgetDeclared,
+  "fleet_complete": Schema.Literal(false),
+  "inclusive": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "local_claim_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "mission": Schema.String,
+  "not_charged": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "person": Schema.String,
+  "request_refs": Schema.Array(AttentionBudgetRequestRef).check(Schema.isMaxLength(128)),
+  "request_refs_complete": Schema.Boolean,
+  "unattributed_for_person": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "window_end_inclusive_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "window_start_exclusive_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AttentionBudgetReport" }))()
+export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
+export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
 
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
@@ -2895,6 +2935,8 @@ export type UsageEncoded = typeof Usage.Encoded
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
+  /** Notes about other named options, omitted when empty. */
+  "option_notes": optionalKey(Schema.Array(PersonOptionNote)).annotate({ description: "Notes about other named options, omitted when empty." }),
   "outcome": Schema.Literals([
   "accept",
   "decline",

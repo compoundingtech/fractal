@@ -113,6 +113,7 @@
     "schedules",
     "launch",
     "alerts",
+    "budgets",
     "machines",
     "agents",
     "persons",

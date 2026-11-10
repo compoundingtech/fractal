@@ -1846,6 +1846,13 @@ The coverage query reads interval bounds only; it does not materialize older tra
 
 ## Pairing and remote access
 
+Person-scoped commands, including `fractal devices ... --as person/<id>`, pairing begin,
+and Fabric enable, are supported only from a local terminal on the daemon host.
+SSH sessions have no verifiable caller ancestry, so the daemon cannot distinguish a person
+from an agent and refuses these requests with `foreign-agent-actor`. Run them from a local
+terminal on the same host, not through SSH. Paired remote device access described below is
+unchanged.
+
 Person pairing is device-to-person. Its begin request names the concrete initiating `person/*` identity and
 is accepted only on the trusted local Unix API; the daemon persists that person as the delegator.
 The response shows a short-lived single-use code and pairing ID. A remote device reaches the
@@ -2842,6 +2849,10 @@ same host without becoming shared projection or checkpoint authority.
 in `fractal agents new`. Workspace paths are absolute on the selected host; omission asks that host for
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
+`description` is the agent's charter: nonempty UTF-8 of at most 8 KiB (8,192 bytes), lines
+included. A charter over 1,000 bytes publishes only when every active fleet member advertises
+`features.agent_charter=1` (see [compatibility](../compatibility.md#agent-charter-publication));
+otherwise the action fails with `agent-charter-feature-barrier` and publishes nothing.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
 
 Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
@@ -2962,7 +2973,8 @@ Agent projections include optional `workspace` and `checkout {repository, base, 
 The agent resource exposes observed harness status as `harness_state`, `since` (RFC 3339),
 and `observation: current | stale | missing`. `since` is the start of that state in that
 runtime incarnation; repeated observations and changes to display details preserve it.
-`observation` becomes stale after 90 seconds without fresh evidence, and is missing when
+`observation` becomes stale after the shared `HARNESS_OBSERVATION_FRESHNESS` window
+(five-minute refresh plus thirty seconds) without fresh evidence, and is missing when
 this runtime has no observation. Stale idle is exposed as indeterminate, never proven idle.
 Desired runtime state and agent-declared work progress remain separate from harness evidence.
 
