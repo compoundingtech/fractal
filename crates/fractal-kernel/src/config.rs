@@ -14,7 +14,7 @@ use crate::model::PlannerSpec;
 pub mod changes;
 mod client;
 mod fixture_paths;
-pub use fixture_paths::FixturePathRefusal;
+pub use fixture_paths::{FixturePathRefusal, fixture_fabric_context};
 mod local_only;
 pub use local_only::{CLIENT_CONTROL_FIXTURE, LocalOnlyRefusal, NetworkOperation, NetworkPolicy};
 

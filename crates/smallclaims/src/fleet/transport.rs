@@ -245,16 +245,16 @@ struct Finished {
     stderr: String,
 }
 
-async fn run_raw(program: &Path, arguments: &[&str]) -> Result<Finished> {
+async fn run_raw(program: &Path, arguments: &[&str], context: Option<&FabricExecutionContext>) -> Result<Finished> {
     // Exec fails with "text file busy" while another process still holds the program open for
     // writing: Fabric replaced by `fabric update`, or a file a sibling fork has not yet let go
     // of. It clears within moments, so wait it out a few times instead of failing the call.
     let mut busy = 0;
     let output = loop {
+        let mut command = fabric_command(program, context)?;
         let attempt = tokio::time::timeout(
             COMMAND_TIMEOUT,
-            tokio::process::Command::new(program)
-                .args(arguments)
+            command.args(arguments)
                 .stdin(std::process::Stdio::null())
                 .kill_on_drop(true)
                 .output(),
@@ -289,10 +289,10 @@ fn failed(program: &Path, arguments: &[&str], finished: Finished) -> anyhow::Err
 /// it rejected the option with a usage error (exit 2) and printed nothing on stdout, so the
 /// caller takes the text path in `legacy`. Every other failure is reported as a
 /// [`FabricError`] when Fabric printed one, and as an opaque command failure when it did not.
-async fn run_json(program: &Path, arguments: &[&str]) -> Result<Option<Value>> {
+async fn run_json(program: &Path, arguments: &[&str], context: Option<&FabricExecutionContext>) -> Result<Option<Value>> {
     let mut with_flag = arguments.to_vec();
     with_flag.push("--json");
-    let finished = run_raw(program, &with_flag).await?;
+    let finished = run_raw(program, &with_flag, context).await?;
     if finished.success {
         let value = serde_json::from_str(finished.stdout.trim()).with_context(|| {
             format!(
@@ -312,8 +312,8 @@ async fn run_json(program: &Path, arguments: &[&str]) -> Result<Option<Value>> {
     Err(failed(program, &with_flag, finished))
 }
 
-async fn run(program: &Path, arguments: &[&str]) -> Result<String> {
-    let finished = run_raw(program, arguments).await?;
+async fn run(program: &Path, arguments: &[&str], context: Option<&FabricExecutionContext>) -> Result<String> {
+    let finished = run_raw(program, arguments, context).await?;
     if !finished.success {
         return Err(failed(program, arguments, finished));
     }
@@ -361,8 +361,8 @@ mod legacy {
             .map(|(_, code)| *code)
     }
 
-    pub(super) async fn run_dial(program: &Path, arguments: &[&str]) -> Result<String> {
-        run(program, arguments).await.map_err(|error| {
+    pub(super) async fn run_dial(program: &Path, arguments: &[&str], context: Option<&FabricExecutionContext>) -> Result<String> {
+        run(program, arguments, context).await.map_err(|error| {
             let Some(failure) = error.downcast_ref::<CommandFailure>() else {
                 return error;
             };
@@ -382,7 +382,7 @@ mod legacy {
 
 /// The addresses `tailscale ip` reports.
 pub async fn tailscale_addresses(tailscale: &Path) -> Result<Vec<IpAddr>> {
-    Ok(parse_tailscale_ips(&run(tailscale, &["ip"]).await?))
+    Ok(parse_tailscale_ips(&run(tailscale, &["ip"], None).await?))
 }
 
 pub const LEGACY_FLEET_PROTOCOL_PREFIX: &str = "st3/fleet/";
@@ -400,21 +400,82 @@ pub fn default_fabric_protocol(fleet_id: &str) -> String {
     format!("{LEGACY_FLEET_PROTOCOL_PREFIX}{fleet_id}")
 }
 
+/// Immutable local daemon selection. Ordinary callers keep ambient defaults.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FabricExecutionContext {
+    root: PathBuf,
+    home: PathBuf,
+    control_socket: PathBuf,
+}
+
+impl FabricExecutionContext {
+    pub fn new(root: PathBuf, home: PathBuf, control_socket: PathBuf) -> Result<Self> {
+        let context = Self { root, home, control_socket };
+        context.validate()?;
+        Ok(context)
+    }
+
+    pub fn home(&self) -> &Path { &self.home }
+    pub fn control_socket(&self) -> &Path { &self.control_socket }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(self.root.is_absolute() && self.home.starts_with(&self.root)
+            && self.control_socket == self.home.join("run/control.sock"),
+            "Fabric execution context must select one absolute root, home and its own control socket");
+        let parent = self.root.parent().context("Fabric root has no parent")?;
+        let mut prefix = parent.to_owned();
+        for component in self.control_socket.strip_prefix(parent)?.components() {
+            anyhow::ensure!(matches!(component, std::path::Component::Normal(_)),
+                "Fabric execution context rejects path traversal");
+            prefix.push(component);
+            match std::fs::symlink_metadata(&prefix) {
+                Ok(metadata) => anyhow::ensure!(!metadata.file_type().is_symlink(), "Fabric execution context rejects symlink aliases"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for path in [parent.to_owned(),
+            self.home.join("identity.toml"), self.home.join("peers.toml"), self.home.join("config.toml")] {
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => anyhow::ensure!(!metadata.file_type().is_symlink(), "Fabric execution context rejects symlink aliases"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn fabric_command(program: &Path, context: Option<&FabricExecutionContext>) -> Result<tokio::process::Command> {
+    let mut command = tokio::process::Command::new(program);
+    if let Some(context) = context {
+        context.validate()?;
+        // Fabric 19e7f896 has global --home; control is derived as home/run/control.sock.
+        command.env("FABRIC_HOME", context.home()).arg("--home").arg(context.home());
+    }
+    Ok(command)
+}
+
 /// The `fabric` command, which talks to the local Fabric daemon.
 #[derive(Clone, Debug)]
 pub struct Fabric {
     program: PathBuf,
+    context: Option<FabricExecutionContext>,
 }
 
 impl Fabric {
     pub fn new(program: PathBuf) -> Self {
-        Self { program }
+        Self { program, context: None }
+    }
+
+    pub fn with_context(program: PathBuf, context: FabricExecutionContext) -> Self {
+        Self { program, context: Some(context) }
     }
 
     /// Local endpoint state, queried without contacting any peer. Address changes or a
     /// restarted Fabric endpoint wake replication independently of failed-peer timers.
     pub async fn addresses(&self) -> Result<BTreeSet<String>> {
-        let value: Value = serde_json::from_str(&run(&self.program, &["addr"]).await?)?;
+        let value: Value = serde_json::from_str(&run(&self.program, &["addr"], self.context.as_ref()).await?)?;
         let addresses = value["addrs"]
             .as_array()
             .context("fabric addr needs addrs")?;
@@ -424,7 +485,7 @@ impl Fabric {
     /// Fabric owns reconnecting this passive local event stream. Older builds lack the
     /// command; the worker then retains its address/suspend watcher and retry timers.
     pub fn peer_events(&self) -> Result<tokio::process::Child> {
-        Ok(tokio::process::Command::new(&self.program)
+        Ok(fabric_command(&self.program, self.context.as_ref())?
             .args(["peer-events", "--watch"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -435,9 +496,9 @@ impl Fabric {
 
     /// This machine's Fabric NodeID.
     pub async fn id(&self) -> Result<String> {
-        let id = match run_json(&self.program, &["id"]).await? {
+        let id = match run_json(&self.program, &["id"], self.context.as_ref()).await? {
             Some(value) => value["id"].as_str().unwrap_or_default().to_owned(),
-            None => run(&self.program, &["id"]).await?.trim().to_owned(),
+            None => run(&self.program, &["id"], self.context.as_ref()).await?.trim().to_owned(),
         };
         anyhow::ensure!(!id.is_empty(), "fabric id printed nothing");
         Ok(id)
@@ -446,13 +507,13 @@ impl Fabric {
     /// Persist a loopback listener exposure so Fabric restores it after a restart.
     /// Repeating it is harmless; fleet leave and uninstall remove it explicitly.
     pub async fn expose(&self, protocol: &str, address: &str) -> Result<()> {
-        run(&self.program, &["expose", protocol, "--tcp", address])
+        run(&self.program, &["expose", protocol, "--tcp", address], self.context.as_ref())
             .await
             .map(|_| ())
     }
 
     pub async fn unexpose(&self, protocol: &str) -> Result<()> {
-        run(&self.program, &["unexpose", protocol])
+        run(&self.program, &["unexpose", protocol], self.context.as_ref())
             .await
             .map(|_| ())
     }
@@ -463,7 +524,7 @@ impl Fabric {
     pub async fn expose_exec(&self, protocol: &str, argv: &[&str]) -> Result<()> {
         let mut arguments = vec!["expose", protocol, "--exec", "--"];
         arguments.extend_from_slice(argv);
-        run(&self.program, &arguments).await.map(|_| ())
+        run(&self.program, &arguments, self.context.as_ref()).await.map(|_| ())
     }
 
     /// Expose the Unix socket at `socket` to trusted peers under `protocol`: Fabric opens one
@@ -472,7 +533,7 @@ impl Fabric {
     /// any earlier exposure of `protocol`.
     pub async fn expose_socket(&self, protocol: &str, socket: &Path) -> Result<()> {
         let socket = socket.to_str().context("the socket path is not UTF-8")?;
-        run(&self.program, &["expose", protocol, "--socket", socket])
+        run(&self.program, &["expose", protocol, "--socket", socket], self.context.as_ref())
             .await
             .map(|_| ())
     }
@@ -484,6 +545,7 @@ impl Fabric {
         run(
             &self.program,
             &["add", node, name, "--inbound-only", "--allow", service],
+            self.context.as_ref(),
         )
         .await
         .map(|_| ())
@@ -491,13 +553,13 @@ impl Fabric {
 
     /// Remove a trusted peer by NodeID or name. Fabric ends its admitted sessions.
     pub async fn remove(&self, peer: &str) -> Result<()> {
-        run(&self.program, &["remove", peer]).await.map(|_| ())
+        run(&self.program, &["remove", peer], self.context.as_ref()).await.map(|_| ())
     }
 
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
     pub async fn peers(&self) -> Result<Vec<(String, String)>> {
-        let Some(value) = run_json(&self.program, &["peers"]).await? else {
-            return Ok(legacy::parse_peers(&run(&self.program, &["peers"]).await?));
+        let Some(value) = run_json(&self.program, &["peers"], self.context.as_ref()).await? else {
+            return Ok(legacy::parse_peers(&run(&self.program, &["peers"], self.context.as_ref()).await?));
         };
         let peers = value["peers"]
             .as_array()
@@ -519,7 +581,7 @@ impl Fabric {
     /// that closes; the probe is what names it. `None` when the probe was answered by anything
     /// else (supported, a fault, a timeout, an unknown peer) or could not be run.
     pub async fn refusal(&self, node: &str, protocol: &str) -> Option<FabricGrantRefusal> {
-        let finished = run_raw(&self.program, &["probe", node, protocol, "--json"])
+        let finished = run_raw(&self.program, &["probe", node, protocol, "--json"], self.context.as_ref())
             .await
             .ok()?;
         let answer: Value = serde_json::from_str(finished.stdout.trim()).ok()?;
@@ -541,12 +603,12 @@ impl Fabric {
     /// its path. Fabric reuses the socket while its listener lives.
     pub async fn dial_socket(&self, node: &str, protocol: &str) -> Result<PathBuf> {
         let arguments = ["dial", node, protocol];
-        let printed = match run_json(&self.program, &arguments).await? {
+        let printed = match run_json(&self.program, &arguments, self.context.as_ref()).await? {
             Some(value) => value["socket"]
                 .as_str()
                 .context("fabric dial printed no socket")?
                 .to_owned(),
-            None => legacy::run_dial(&self.program, &arguments)
+            None => legacy::run_dial(&self.program, &arguments, self.context.as_ref())
                 .await?
                 .trim()
                 .to_owned(),
@@ -562,12 +624,12 @@ impl Fabric {
     /// is a [`FabricError`].
     pub async fn dial(&self, node: &str, protocol: &str) -> Result<SocketAddr> {
         let arguments = ["dial", node, protocol, "--tcp", "127.0.0.1:0"];
-        let printed = match run_json(&self.program, &arguments).await {
+        let printed = match run_json(&self.program, &arguments, self.context.as_ref()).await {
             Ok(Some(value)) => Ok(value["address"]
                 .as_str()
                 .context("fabric dial printed no address")?
                 .to_owned()),
-            Ok(None) => legacy::run_dial(&self.program, &arguments)
+            Ok(None) => legacy::run_dial(&self.program, &arguments, self.context.as_ref())
                 .await
                 .map(|printed| printed.trim().to_owned()),
             Err(error) => Err(error),
@@ -961,6 +1023,61 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn isolated_context_pins_environment_and_all_command_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let boundary = root.path().join("instance");
+        let home = boundary.join("fabric");
+        let context = FabricExecutionContext::new(boundary, home.clone(), home.join("run/control.sock")).unwrap();
+        let log = root.path().join("context-calls");
+        let program = shim(root.path(), &format!(
+            "printf '%s|%s\\n' \"$FABRIC_HOME\" \"$*\" >> '{}'\n[ \"$1\" = --home ] || exit 1\n[ \"$2\" = \"$FABRIC_HOME\" ] || exit 1\nshift 2\ncase \"$1\" in peers) echo '{{\"peers\":[]}}';; esac",
+            log.display()
+        ));
+        let fabric = Fabric::with_context(program, context);
+        fabric.expose_socket("fixture", Path::new("/paired.sock")).await.unwrap();
+        fabric.add_inbound_only("node", "test-peer", "fixture").await.unwrap();
+        assert!(fabric.peers().await.unwrap().is_empty());
+        fabric.remove("test-peer").await.unwrap();
+        fabric.unexpose("fixture").await.unwrap();
+        assert!(fabric.peer_events().unwrap().wait().await.unwrap().success());
+        let prefix = format!("{}|--home {} ", home.display(), home.display());
+        let calls = std::fs::read_to_string(log).unwrap();
+        let commands: Vec<_> = calls.lines().map(|line| line.strip_prefix(&prefix).unwrap()).collect();
+        assert_eq!(commands, [
+            "expose fixture --socket /paired.sock",
+            "add node test-peer --inbound-only --allow fixture",
+            "peers --json", "remove test-peer", "unexpose fixture", "peer-events --watch",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn isolated_context_rejects_changed_home_and_control_aliases_before_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let boundary = root.path().join("instance");
+        let home = boundary.join("fabric");
+        let context = FabricExecutionContext::new(boundary, home.clone(), home.join("run/control.sock")).unwrap();
+        let log = root.path().join("must-not-run");
+        let program = shim(root.path(), &format!("touch '{}'", log.display()));
+        let fabric = Fabric::with_context(program, context);
+        let outside = root.path().join("production-fabric");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &home).unwrap();
+        assert!(fabric.peers().await.is_err());
+        assert!(fabric.peer_events().is_err());
+        assert!(!log.exists());
+        std::fs::remove_file(&home).unwrap();
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        std::os::unix::fs::symlink(outside.join("control.sock"), home.join("run/control.sock")).unwrap();
+        assert!(fabric.remove("node").await.is_err());
+        assert!(!log.exists());
+        std::fs::remove_file(home.join("run/control.sock")).unwrap();
+        std::os::unix::fs::symlink(outside.join("identity.toml"), home.join("identity.toml")).unwrap();
+        assert!(fabric.add_inbound_only("node", "test-peer", "fixture").await.is_err());
+        assert!(!log.exists());
     }
 
     #[tokio::test]

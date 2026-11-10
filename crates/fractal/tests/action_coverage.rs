@@ -7318,10 +7318,11 @@ fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
     let bin = root.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let calls = root.path().join("calls");
+    let contexts = root.path().join("contexts");
     let program = bin.join("fabric");
     std::fs::write(&program, format!(
-        "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in peers) echo '{{\"peers\":[{{\"node\":\"{}\",\"name\":\"st-device-0123456789ab\",\"allow\":[\"st3-client-v0\"]}},{{\"node\":\"{}\",\"name\":\"st-fixture-device-fedcba987654\",\"allow\":[\"client-control-fixture\"]}}]}}';; esac\n",
-        calls.display(), "0123456789abcdef".repeat(4), "fedcba9876543210".repeat(4)
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$FABRIC_HOME\" \"$*\" >> '{}'\n[ \"$1\" = --home ] || exit 1\n[ \"$2\" = \"$FABRIC_HOME\" ] || exit 1\nshift 2\necho \"$@\" >> '{}'\ncase \"$1\" in peers) echo '{{\"peers\":[{{\"node\":\"{}\",\"name\":\"st-device-0123456789ab\",\"allow\":[\"st3-client-v0\"]}},{{\"node\":\"{}\",\"name\":\"st-fixture-device-fedcba987654\",\"allow\":[\"client-control-fixture\"]}}]}}';; esac\n",
+        contexts.display(), calls.display(), "0123456789abcdef".repeat(4), "fedcba9876543210".repeat(4)
     )).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
     let config = root.path().join("config.toml");
@@ -7342,6 +7343,7 @@ fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
         let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
         command.env_remove("ST_AGENT").env_remove("ST_MISSION_RUN").env_remove("ST_INSTANCE")
             .env("HOME", root.path().join("home"))
+            .env("FABRIC_HOME", root.path().join("ambient-production-fabric"))
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("XDG_STATE_HOME", root.path().join("xdg-state"))
             .env("XDG_RUNTIME_DIR", root.path().join("run")).env("PATH", &bin);
@@ -7364,9 +7366,26 @@ fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
     let recorded = std::fs::read_to_string(&calls).unwrap();
     assert!(recorded.ends_with("remove st-fixture-device-fedcba987654\nunexpose client-control-fixture\n"));
     assert!(!recorded.contains("remove st-device-"));
+    let context_log = std::fs::read_to_string(&contexts).unwrap();
+    let fabric_home = instance.root().join("fabric");
+    let expected_prefix = format!("{}|--home {} ", fabric_home.display(), fabric_home.display());
+    assert_eq!(context_log.lines().count(), 5);
+    assert!(context_log.lines().all(|line| line.starts_with(&expected_prefix)));
     write_config(&privileged);
     assert!(!run(true, &["enable"]).status.success());
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), recorded, "privileged sockets are never exposed");
+    write_config(&paired);
+    let production = root.path().join("ambient-production-fabric");
+    std::fs::create_dir(&production).unwrap();
+    std::os::unix::fs::symlink(&production, &fabric_home).unwrap();
+    let refused = run(true, &["enable"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("local-only-fixture-path-refused"));
+    std::fs::remove_file(&fabric_home).unwrap();
+    std::fs::create_dir_all(fabric_home.join("run")).unwrap();
+    std::os::unix::fs::symlink(production.join("control.sock"), fabric_home.join("run/control.sock")).unwrap();
+    assert!(!run(true, &["enable"]).status.success());
+    assert_eq!(std::fs::read_to_string(&contexts).unwrap(), context_log, "aliases are refused before Fabric runs");
 }
 
 #[test]

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the client-control fixture on its own Fabric node, home and control socket rather than the ambient production Fabric daemon.",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No database or client wire schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or membership rule changes."},
+  "compatibility": {"status": "changed", "detail": "Fixture exposure, grant, revoke and status derive the trusted instance root/fabric home and root/fabric/run/control.sock. Every command pins FABRIC_HOME and global --home, ignoring ambient daemon selection. Other homes, control sockets and symlink aliases are refused before Fabric executes. Ordinary Fabric callers keep existing defaults."},
+  "downtime": {"status": "none", "detail": "No production daemon restart or exposure change is required."},
+  "manual": {"status": "changed", "detail": "The approved fixture packet must start and stop a dedicated Fabric daemon under the fixture root/fabric home within its Fabric-mesh scope, and record the actual dedicated Fabric NodeID separately from the Fractal daemon identity. Source support grants no setup or execution authority."},
+  "recovery": {"status": "changed", "detail": "Remove fixture peers and exposure through the same explicitly selected fixture home, then stop that dedicated daemon. Do not mutate or restart the production Fabric daemon."}
+}
