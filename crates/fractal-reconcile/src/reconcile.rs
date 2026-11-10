@@ -106,6 +106,10 @@ const SESSION_START_WINDOW_MS: u128 = 10 * 60 * 1000;
 /// How long a planned restart waits for the seat to write its handoff and say it is ready.
 const RESTART_PREPARE_DEADLINE_MS: u128 = 120_000;
 const WORK_WAKE_RETRY_MS: u128 = 15_000;
+/// How many evaluations in a row `follow_mission_reads` makes because its own last evaluation
+/// wrote. A step handoff takes three; a run that writes on every evaluation is then left to the
+/// next change from elsewhere, as before.
+const MISSION_READS_CONTINUATIONS: u32 = 8;
 // A mechanical gate may run for minutes. Each poll reruns the entire host reconciliation
 // pass, including PTY snapshots. Ten seconds bounds result recognition without keeping a
 // busy host in near-continuous reconciliation while gates are still running.
@@ -1394,6 +1398,9 @@ pub struct Reconciler<R = NativeRuntime> {
     mission_evaluation: Mutex<()>,
     /// How far `evaluate_changed_mission_runs` has read the change feed, apart from the passes.
     mission_reads_cursor: Mutex<Option<(u64, i64)>>,
+    /// Execs a mission step declared during the current run evaluation, which start as soon as
+    /// that evaluation ends (see [`Self::start_declared_execs`]).
+    declared_execs: Mutex<BTreeSet<String>>,
     /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
     /// is checked again on a subject change or the existing full-pass safety interval.
     launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
@@ -1613,6 +1620,7 @@ impl Reconciler<NativeRuntime> {
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
             mission_evaluation: Mutex::new(()),
             mission_reads_cursor: Mutex::new(None),
+            declared_execs: Mutex::new(BTreeSet::new()),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1817,6 +1825,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
             mission_evaluation: Mutex::new(()),
             mission_reads_cursor: Mutex::new(None),
+            declared_execs: Mutex::new(BTreeSet::new()),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -10648,7 +10657,67 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         self.incremental.evaluated(&subject, reads, due);
+        self.start_declared_execs();
         evaluated.unwrap_or(false)
+    }
+
+    /// Start the execs a mission step declared in the run evaluation that just ended, instead of
+    /// in the next pass's members phase. A pass evaluates members before mission runs and every
+    /// pass waits out `StartSpacing`, so leaving a new step's exec to a pass held each agentless
+    /// step handoff for one or two pass intervals. Only an exec that has never run qualifies: no
+    /// runtime under its ID, no recorded observation, no rollout, and nothing to render, since
+    /// render writes every member's files together in the pass. `perform_start` keeps every start
+    /// fence and the start-job admission, so a pass that reaches the same exec does not start it
+    /// twice. Anything declined here, and every error, is left to the next pass, as before.
+    fn start_declared_execs(&self) {
+        let declared = std::mem::take(
+            &mut *self
+                .declared_execs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        if declared.is_empty() {
+            return;
+        }
+        let declared = declared.into_iter().collect::<Vec<_>>();
+        let subjects = match self.store.desired_subjects_named(&declared) {
+            Ok(subjects) => subjects,
+            Err(error) => {
+                eprintln!("st3: reading the execs mission steps declared: {error:#}");
+                return;
+            }
+        };
+        for subject in &subjects {
+            if let Err(error) = self.start_declared_exec(subject) {
+                eprintln!("st3: starting {} for its step: {error:#}", subject.subject);
+            }
+        }
+    }
+
+    fn start_declared_exec(&self, subject: &DesiredSubject) -> Result<()> {
+        let Some(member) = subject.member.as_ref().filter(|member| {
+            subject.kind == "exec"
+                && subject.owner_step.is_some()
+                && member.host == self.host
+                && !member.terminal
+                && member.lifecycle == MemberLifecycle::Service
+        }) else {
+            return Ok(());
+        };
+        let renders = subject
+            .desired
+            .get("children")
+            .and_then(Value::as_array)
+            .is_some_and(|children| children.iter().any(|child| child["name"] == "render"));
+        if renders
+            || !self.owned_desired_ready(subject)
+            || self.store.latest_actual_value(&subject.subject)?.is_some()
+            || self.store.rollout_selection(&subject.subject)?.is_some()
+            || self.runtime.observe_exec(&member.runtime_id)?.is_some()
+        {
+            return Ok(());
+        }
+        self.perform_start(subject, member, "its mission step declared it")
     }
 
     /// Evaluate the runs whose last evaluation read a subject that changed since, such as a
@@ -10691,13 +10760,18 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Follow the post-commit feed and evaluate the runs each change touched; see
     /// [`Self::evaluate_changed_mission_runs`]. A run that wrote wakes the pass, which carries
-    /// its effects on (seats, wake messages) and tells clients when it ends.
+    /// its effects on (seats, wake messages) and tells clients when it ends. An evaluation moves
+    /// each step at most one state, so a handoff is a chain of evaluations (the first step
+    /// completes, the next becomes ready, then starts its work); an evaluation that wrote is
+    /// followed at once by another, up to [`MISSION_READS_CONTINUATIONS`] in a row, rather than
+    /// waiting for a pass to write something else.
     pub async fn follow_mission_reads(self: Arc<Self>) {
         let mut changes = self.event_notify.subscribe();
         // Look once at the start too, for what committed before this subscribed.
         changes.mark_changed();
+        let mut continuations = 0;
         loop {
-            if changes.changed().await.is_err() {
+            if continuations == 0 && changes.changed().await.is_err() {
                 return;
             }
             changes.borrow_and_update();
@@ -10708,17 +10782,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                     })
                 })
                 .await;
-            match changed {
+            continuations = match changed {
                 Ok((_, true)) => {
                     crate::reconcile_telemetry::record_wake(
                         crate::reconcile_telemetry::WakeCause::Reconciler,
                         None,
                     );
                     self.notify.notify_one();
+                    if continuations < MISSION_READS_CONTINUATIONS { continuations + 1 } else { 0 }
                 }
-                Ok((_, false)) => {}
-                Err(error) => eprintln!("st3: evaluating the runs a change touched: {error:#}"),
-            }
+                Ok((_, false)) => 0,
+                Err(error) => {
+                    eprintln!("st3: evaluating the runs a change touched: {error:#}");
+                    0
+                }
+            };
         }
     }
 
@@ -14368,6 +14446,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             &format!("materialize:{}:{}", view.subject, view.attempt),
             &declared_agents,
         )?;
+        // A newly declared exec starts when this run's evaluation ends, not in a later pass.
+        self.declared_execs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(response.reconcile_subjects.iter().filter(|subject| {
+                intent
+                    .subjects
+                    .get(subject.as_str())
+                    .is_some_and(|desired| desired.kind == "exec")
+            }).cloned());
         Ok(response.changed)
     }
 
@@ -23377,6 +23465,105 @@ version 2
         assert_eq!(
             ready.body.pointer("/fields/readiness_epoch"),
             Some(&Value::from(before.readiness_epoch + 1))
+        );
+        follower.abort();
+    }
+
+    /// An agentless step's exec exits and its `driver exec` wrapper reports the exit. The next
+    /// step's exec starts from that change alone: the follower completes the first step, readies
+    /// the second, declares its exec and starts it, with no pass, which would first wait out
+    /// `StartSpacing`.
+    #[tokio::test]
+    async fn an_exec_steps_exit_starts_the_next_steps_exec_without_a_pass() {
+        use serde_json::json;
+        // On disk, so this test's reads wait for the follower's writes rather than fail.
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("store.sqlite"), "node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "relay" state="ready" {
+  goal "Hand off from one agentless exec to the next."
+  step "first" {
+    agentless
+    exec "first" { host "node"; workspace "/tmp"; command "true"; restart "never" }
+    gate "first succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/first" is 0 }
+  }
+  step "second" {
+    agentless
+    depends-on { step "first" "completed" }
+    exec "second" { host "node"; workspace "/tmp"; command "true"; restart "never" }
+    gate "second succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/second" is 0 }
+  }
+}
+"#,
+            "relay",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "relay".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "relay-run".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Arc::new(Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        ));
+        let started = |step: &str| {
+            store
+                .desired_subject_with_writer(&format!("exec/{}/{step}", run.id))
+                .unwrap()
+                .is_some_and(|(desired, _)| {
+                    let id = &desired.member.as_ref().unwrap().runtime_id;
+                    runtime.started_members.lock().unwrap().iter().any(|member| &member.runtime_id == id)
+                })
+        };
+        for _ in 0..4 {
+            if started("first") {
+                break;
+            }
+            reconciler.reconcile_once().unwrap();
+        }
+        assert!(started("first"), "a pass starts the first step's exec");
+        assert!(!started("second"), "the first step has not completed");
+        let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("exec/{}/first", run.id),
+                kind: "runtime.observed".into(),
+                actor: Some(format!("exec/{}/first", run.id)),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(0)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        // What the API does after the wrapper's claim commits.
+        reconciler.event_notify.send_modify(|generation| *generation += 1);
+        // A bound for a loaded machine, not an expected duration.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while !started("second") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the second step's exec starts from the first exec's exit alone");
+        let steps = store.mission_run(&run.subject).unwrap().unwrap().steps;
+        assert_eq!(
+            steps.iter().map(|step| (step.step.as_str(), step.status.as_str())).collect::<Vec<_>>(),
+            [("first", "completed"), ("second", "working")]
         );
         follower.abort();
     }
