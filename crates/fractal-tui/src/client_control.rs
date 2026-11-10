@@ -394,7 +394,7 @@ mod tests {
                         assert!(control.active().is_none());
                         assert!(control.result(&command, visible()).unwrap().is_none());
                     }
-                    "ignore-stale-started" | "ignore-item-mismatch" | "ignore-final-grant" => {
+                    "refuse-invalid-frame" | "ignore-stale-started" | "ignore-item-mismatch" | "ignore-final-grant" => {
                         assert_eq!(control.grant, before);
                     }
                     expected => panic!("Unhandled shared trace expectation: {expected}"),
