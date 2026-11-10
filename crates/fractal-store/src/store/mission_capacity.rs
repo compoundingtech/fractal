@@ -260,7 +260,7 @@ mission "authorized" state="ready" {
         sync(&peer, &store);
         let refusal = publish(&store, AUTHORIZED, "older").unwrap_err();
         assert_eq!(refusal.code, "mission-authority-unavailable");
-        assert!(refusal.message.contains("has not advertised mission_authority=1; declare authority on a mission once every member is upgraded"),
+        assert!(refusal.message.contains("has not advertised mission_authority=1); declare authority on a mission once every member is upgraded"),
             "{}", refusal.message);
         assert!(store.mission_spec("authorized", None).unwrap().is_none());
         claim(&peer, "daemon/birch", "daemon.started", None,

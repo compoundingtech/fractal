@@ -3362,10 +3362,11 @@ mod tests {
 
     #[test]
     fn mission_authority_refusals() {
+        let mut mismatches = Vec::new();
         for (body, code) in [
             (r#"authority"#, "empty-authority"),
             (r#"authority {}"#, "empty-authority"),
-            (r#"authority "none""#, "unexpected-value"),
+            (r#"authority "none""#, "invalid-node"),
             (r#"authority { write "resource/a"; }; authority { write "resource/b"; }"#, "duplicate-mission-field"),
             (r#"authority { write "resource/a"; write "resource/a"; }"#, "duplicate-authority"),
             (r#"authority { move "agent/a"; }"#, "invalid-authority"),
@@ -3381,7 +3382,9 @@ mod tests {
             (r#"authority { publish "/*"; }"#, "invalid-authority-pattern"),
             (r#"step "outer" { mission "inner" { goal "Inner."; authority { write "resource/a"; }; step "x" { agentless; }; }; }"#, "nested-mission-authority"),
         ] {
-            assert_eq!(authority_error(body), code, "{body}");
+            let actual = authority_error(body);
+            if actual != code { mismatches.push(format!("{body}: {actual}, expected {code}")); }
         }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 }
