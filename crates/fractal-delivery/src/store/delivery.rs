@@ -299,7 +299,7 @@ impl DeliveryStore for Store {
         let child = parent.map(|parent| ChildMissionContext {
             root_revision: parent.root_revision.clone(),
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
-            parent_step_run: normalize_step_run(subscription), default_selector: None,
+            parent_step_run: normalize_step_run(subscription), default_selector: None, started_by: None,
         });
         self.create_mission_run_inner(request, child, None, Some((resource, discovery)))
     }

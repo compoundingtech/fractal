@@ -6,7 +6,7 @@ order: 6
 
 # Products and gates
 
-KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+KDL is the runnable format. TS samples use the data form of the in-repo [`fractal` package](https://github.com/compoundingtech/fractal/tree/main/packages/fractal), which renders exactly the KDL shown; it is not published to npm yet. Effect samples show the program form, a roadmap API that does not run yet. Use KDL for the runnable commands in these guides.
 
 A worker's completion report is a report, not a verdict. **Products** describe promised graph state; **gates** decide whether finished work can pass. All declared products must hold and all gates must pass.
 
@@ -28,6 +28,7 @@ A graph or human gate can remain pending until there is enough evidence. A faile
 Inside a mission, place this after a worker's `prepare` step:
 
 ```ts group=approval variant=effect
+// Roadmap: program-form missions do not run yet. The TS tab declares this step as data.
 import { Effect } from 'effect'
 import { Fractal } from 'fractal/effect'
 
@@ -50,31 +51,29 @@ export const approve = Fractal.step(
 ```
 
 ```ts group=approval variant=ts
-import { Fractal } from 'fractal'
-
-const ada = Fractal.person({ id: 'ada' })
-
-// Await after the prepare step inside the mission.
-export const approve = () => Fractal.step(
-  { id: 'approve' },
-  async () => {
-    const answer = await Fractal.ask({
+// One entry of a Fractal.mission({ ... }) `steps` list, after the prepare step.
+{
+  id: 'approve',
+  agentless: true,
+  dependsOn: [{ step: 'prepare', state: 'completed' }],
+  gates: [
+    {
+      kind: 'human',
       name: 'The operator approves',
-      reviewer: ada,
+      reviewer: Fractal.person('person/ada'),
       question: 'Is the result ready to use?',
-    })
-    if (answer._tag === 'Rejected') {
-      throw new Error('Result rejected')
-    }
-  },
-)
+    },
+  ],
+},
 ```
 
 ```kdl group=approval variant=kdl
 step "approve" {
   agentless
-  depends-on { step "prepare" completed }
-  gate "The operator approves" type="human" {
+  depends-on {
+    step "prepare" "completed"
+  }
+  gate "The operator approves" mode="approve" type="human" {
     reviewer "person/ada"
     question "Is the result ready to use?"
   }

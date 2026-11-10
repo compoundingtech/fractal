@@ -1678,3 +1678,31 @@ fn the_agent_card_fold_reads_set_owned_declarations_as_the_reduction_does() {
         .unwrap();
     assert!(reads.may_have_rollout("agent/garden/orchard"));
 }
+
+/// A set status read asks for every member's rollout, which selects the set each time. Within one
+/// read snapshot every member reference is validated once, so the read stays linear in the set.
+#[test]
+fn set_status_reads_validate_each_member_once_per_snapshot() {
+    let per_member = [8usize, 32].map(|count| {
+        let store = Store::open_memory("amber").unwrap();
+        let mut source = "version 2\n".to_owned();
+        for index in 0..count {
+            source.push_str(&format!("agent \"garden/worker-{index}\" {{ command \"true\" }}\n"));
+        }
+        apply(&store, &parse_intent(&source, "amber").unwrap(), 10);
+        let subjects = (0..count).map(|index| format!("agent/garden/worker-{index}")).collect::<Vec<_>>();
+        let before = STATEMENTS_RUN.with(std::cell::Cell::get);
+        store
+            .read_snapshot(|_| {
+                store.with_owned_set_snapshot_reads(|| {
+                    for subject in &subjects {
+                        store.rollout(subject).unwrap();
+                    }
+                });
+                Ok(())
+            })
+            .unwrap();
+        (STATEMENTS_RUN.with(std::cell::Cell::get) - before) / count
+    });
+    assert!(per_member[1] <= per_member[0] + 2, "statements per member: {per_member:?}");
+}

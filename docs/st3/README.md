@@ -10,6 +10,8 @@ Use these documents for implementation details:
 - [Architecture](design.md) defines the stable system shape.
 - [Native runtime invariants](invariants.md) names the current delivery, harness and lifecycle proof obligations.
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
+- [Program engine](program-engine.md) is the accepted design for missions whose body is a program: where
+  it runs, its journal, versioning by bundle hash, authority, child runs and visibility.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Native driver contracts](native-driver-contracts.md) retains launch, scope, helper, harness-state and context obligations after catalog-runner retirement.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
@@ -95,6 +97,8 @@ Use these documents for implementation details:
 - [Gate evidence](gate-evidence.md) explains signed test and review records, local checks and CI verification.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
+- [Objectives](objectives.md) explains the `objective` kind: the objectives Fractal ships in
+  `slo/objectives.kdl`, the ones a fleet declares, their indicators, targets and breach response.
 - [What a run waits on](waiting-on.md) explains `fractal missions waiting-on RUN` and `fractal missions blocked`:
   each open step's wait, a run's stalled verdict, and the fleet's blocked runs by cause, read in
   milliseconds from published state.
