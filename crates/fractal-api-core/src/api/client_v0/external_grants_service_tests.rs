@@ -396,6 +396,10 @@ async fn service_selectors_match_only_disclosed_claim_kinds() {
             for suffix in ["&limit=1","&limit=500&order=desc","&limit=2&after=1&before=9223372036854775807"] {
                 for (selected,absent) in [
                     (format!("subject={hidden_subject}"),"subject=gate-operation/service/unused".to_owned()),
+                    (format!("subject_prefix={hidden_subject}"),"subject_prefix=gate-operation/service/unused".to_owned()),
+                    ("kind=gate.reviewer-reassigned".to_owned(),"kind=gate.unknown".to_owned()),
+                    (format!("subject_prefix={mixed_subject}&kind=gate.reviewer-reassigned"),"subject_prefix=gate-operation/service/unused&kind=gate.reviewer-reassigned".to_owned()),
+                    (format!("subject={mixed_subject}&kind=gate.reviewer-reassigned"),"subject=gate-operation/service/unused&kind=gate.reviewer-reassigned".to_owned()),
                     (format!("owner_run={hidden_owner}"),"owner_run=mission-run/service-unused".to_owned()),
                     (format!("subject={hidden_subject}&owner_run={hidden_owner}"),"subject=gate-operation/service/unused&owner_run=mission-run/service-unused".to_owned()),
                 ] {
@@ -408,7 +412,11 @@ async fn service_selectors_match_only_disclosed_claim_kinds() {
                     assert_eq!(page,&json!({"claims":[],"next_cursor":null}));
                 }
                 for selector in [format!("subject={mixed_subject}"),format!("owner_run={mixed_owner}"),
-                    format!("subject={mixed_subject}&owner_run={mixed_owner}")] {
+                    format!("subject={mixed_subject}&owner_run={mixed_owner}"),
+                    format!("subject_prefix={mixed_subject}"),"kind=gate.result".to_owned(),
+                    format!("subject_prefix={mixed_subject}&kind=gate.result"),
+                    format!("subject={mixed_subject}&kind=gate.result"),
+                    format!("owner_run={mixed_owner}&kind=gate.result")] {
                     let (status,page) = call(&app,"GET",&format!("{prefix}?{selector}{suffix}"),Value::Null,false).await;
                     assert_eq!(status,StatusCode::OK);
                     assert!(page["next_cursor"].is_null());

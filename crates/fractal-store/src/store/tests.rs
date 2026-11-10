@@ -442,7 +442,7 @@ fn subject_claim_pages_seek_the_subject_index() {
         .unwrap();
     let connection = store.readers.get();
     for descending in [false, true] {
-        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(true, descending, false));
+        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(ClaimsSubject::Exact, false, descending, false));
         let plan = connection
             .prepare(/* sqlite-large-value: allow-for-now lv-h8911c1538a9c owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &query)
             .unwrap()

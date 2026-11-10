@@ -6,6 +6,27 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testPersonOptionNotesRoundTripAndEmptyOmission() throws {
+        let legacy = Data(#"{"id":"land","text":"Ship it."}"#.utf8)
+        let decoded = try JSONDecoder().decode(PersonAnswerInput.self, from: legacy)
+        XCTAssertTrue(decoded.optionNotes.isEmpty)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: legacy) as? NSDictionary)
+        let notes = [PersonOptionNote(id: "hold", text: "Keep as a fallback.")]
+        let input = PersonAnswerInput(id: "land", text: "Ship it.", optionNotes: notes)
+        let wire = try JSONEncoder().encode(input)
+        XCTAssertEqual(try JSONDecoder().decode(PersonAnswerInput.self, from: wire).optionNotes, notes)
+        let stored = Data(#"{"type":"decision","outcome":"accept","id":"land","text":"Ship it.","option_notes":[{"id":"hold","text":"Keep as a fallback."}]}"#.utf8)
+        let answer = try JSONDecoder().decode(PersonAnswer.self, from: stored)
+        XCTAssertEqual(answer.optionNotes, notes)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(answer)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: stored) as? NSDictionary)
+        let empty = try JSONDecoder().decode(PersonAnswer.self,
+            from: Data(#"{"type":"decision","outcome":"accept","id":"land","option_notes":[]}"#.utf8))
+        let emptyWire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(empty)) as? [String: Any])
+        XCTAssertNil(emptyWire["option_notes"])
+    }
+
     func testDeviceCommandTypedArgumentsAndResourceRoundTrip() throws {
         let request = DeviceCommandRequest(device: "device/phone",
             command: .navigate(.conversation(target: "agent/example/worker", sessionID: "session/example")), ttlMS: 30000)

@@ -16,7 +16,7 @@ pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn generic_claims_page(
     store: &Store,
-    subject: Option<&str>,
+    filter: fractal_store::store::ClaimsFilter<'_>,
     owner_run: Option<&str>,
     mut after: u64,
     mut before: Option<u64>,
@@ -26,7 +26,7 @@ pub(super) fn generic_claims_page(
 ) -> anyhow::Result<ClaimsPage> {
     let mut claims = Vec::with_capacity(limit.saturating_add(1));
     loop {
-        let page = store.claims_page_with_kinds(subject, owner_run, after, before, descending, limit.saturating_add(1), kinds)?;
+        let page = store.claims_page_matching_with_kinds(filter, owner_run, after, before, descending, limit.saturating_add(1), kinds)?;
         let next = page.next_cursor;
         for claim in page.claims.into_iter().filter(generic_claim_visible) {
             claims.push(claim);
@@ -343,6 +343,8 @@ fn require_service_claims(session: &ClientSession) -> Result<(), ApiError> {
 #[derive(Deserialize)]
 pub struct ClaimsQuery {
     subject: Option<String>,
+    subject_prefix: Option<String>,
+    kind: Option<String>,
     owner_run: Option<String>,
     #[serde(default, alias = "after")]
     after_index: u64,
@@ -357,8 +359,8 @@ pub struct ClaimsQuery {
 impl ClaimsQuery {
     fn has_selector(&self) -> bool {
         // Every new query field requires an explicit selector-admission decision.
-        let Self { subject, owner_run, after_index: _, before_index: _, order: _, limit: _ } = self;
-        subject.is_some() || owner_run.is_some()
+        let Self { subject, subject_prefix, kind, owner_run, after_index: _, before_index: _, order: _, limit: _ } = self;
+        subject.is_some() || subject_prefix.is_some() || kind.is_some() || owner_run.is_some()
     }
 }
 
@@ -399,7 +401,11 @@ pub async fn list_claims(
         };
         generic_claims_page(
             &store,
-            subject.as_deref(),
+            fractal_store::store::ClaimsFilter {
+                subject: subject.as_deref(),
+                subject_prefix: query.subject_prefix.as_deref(),
+                kind: query.kind.as_deref(),
+            },
             query.owner_run.as_deref(),
             query.after_index,
             query.before_index,
@@ -627,10 +633,7 @@ pub async fn resolve_attention(
                     evidence: vec![],
                     episode: Some(proof.episode.clone()),
                     delegation: Some(proof),
-                    answer: Some(crate::person_request::AnswerInput {
-                        id: Some("read".into()),
-                        text: None,
-                    }),
+                    answer: Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() }),
                     idempotency_key: request.idempotency_key,
                 },
                 false,

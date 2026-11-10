@@ -564,7 +564,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
-        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier") {
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier" | "agent-charter-feature-barrier") {
             body["applied"] = json!("none");
         }
         if let Some(applied) = body["details"].get("applied").cloned() {
@@ -2109,6 +2109,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-document-reference"
         | "invalid-declared-admission"
         | "declared-admission-feature-barrier"
+        | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
