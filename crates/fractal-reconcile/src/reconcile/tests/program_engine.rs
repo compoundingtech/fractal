@@ -21,6 +21,9 @@ const step = async (ctx, key, effect) => {
 export default {
   [Symbol.for('fractal.program.v1')]: async (ctx) => {
     const first = await step(ctx, 'first', async () => ({ attempt: ctx.attempt }))
+    if (ctx.payload.mode === 'credential') {
+      await step(ctx, 'who', async () => (await ctx.spawn(['sh', '-c', 'printf %s "$ST_RUN_CREDENTIAL"'])).stdout)
+    }
     if (ctx.payload.mode === 'busy') for (;;) {}
     const waited = await step(ctx, 'wait', async () => {
       const script = 'sleep 1000 & echo $$ $! > "$PIDS.tmp"; mv "$PIDS.tmp" "$PIDS"; while [ ! -e "$GATE" ]; do sleep 0.05; done; echo opened'
@@ -220,4 +223,25 @@ fn an_unresponsive_worker_fails_only_its_own_step() {
     fixture.until("the other program completes", || fixture.status(&waiting.step) == "completed");
     // The host itself stayed up: only the busy worker was terminated.
     assert_eq!(fixture.engine.host_pid(), host);
+}
+
+/// An effect carries a credential that binds its run while the attempt runs and no longer once
+/// it ends, and the journal is written as the run (docs/st3/program-engine.md §3).
+#[test]
+fn a_programs_effects_and_journal_act_as_its_run() {
+    let fixture = fixture(Liveness::default());
+    let started = fixture.start("credential", "credential");
+    fixture.until("the effect reports its credential", || pids(&started.pids).is_some());
+    let who = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap().into_iter()
+        .find(|claim| claim.body["fields"]["key"] == "who" && claim.body["fields"]["status"] == "completed")
+        .unwrap();
+    let credential = who.body["fields"]["value"].as_str().unwrap().to_owned();
+    let binding = fixture.store.run_binding(&credential).unwrap();
+    assert_eq!((binding.run.as_str(), binding.step_run.as_str(), binding.attempt), (started.run.as_str(), started.step.as_str(), 1));
+    std::fs::write(&started.gate, "").unwrap();
+    fixture.until("the program completes", || fixture.status(&started.step) == "completed");
+    assert_eq!(fixture.store.run_binding(&credential).unwrap_err().code, "run-credential-ended");
+    let claims = fixture.store.claims_for(&started.step, Some(JOURNAL_KIND)).unwrap();
+    assert!(!claims.is_empty());
+    assert!(claims.iter().all(|claim| claim.actor.as_deref() == Some(started.run.as_str())), "{claims:#?}");
 }
