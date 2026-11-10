@@ -510,11 +510,14 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
-        // "." is the default terminal's home sentinel, not the daemon's working directory.
-        // Resolve it on the launching host so PTY records carry an absolute directory.
-        let home = if cwd == Path::new(".") {
+        // Only API-created default terminals opt into home resolution. A seat or mission
+        // workspace of "." retains its ordinary working-directory semantics.
+        let home = if cwd == Path::new(".") && tags.get("st3.cwd").is_some_and(|value| value == "home") {
             let home = std::env::home_dir().context("resolve default terminal home directory")?;
-            anyhow::ensure!(home.is_absolute(), "default terminal home directory must be absolute");
+            anyhow::ensure!(
+                home.is_absolute(),
+                "default terminal home directory must be absolute"
+            );
             Some(home)
         } else {
             None
@@ -2222,10 +2225,24 @@ exit 0
         let runtime =
             PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
 
-        spawn_work(&runtime, Path::new("."), &BTreeMap::new()).unwrap();
+        runtime
+            .spawn(
+                "work",
+                &Launch::Argv(vec!["true".into()]),
+                Path::new("."),
+                &BTreeMap::new(),
+                None,
+                &BTreeMap::from([("st3.cwd".into(), "home".into())]),
+                None,
+            )
+            .unwrap();
 
         let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
-        let cwd = arguments.lines().skip_while(|arg| *arg != "--cwd").nth(1).unwrap();
+        let cwd = arguments
+            .lines()
+            .skip_while(|arg| *arg != "--cwd")
+            .nth(1)
+            .unwrap();
         assert!(Path::new(cwd).is_absolute(), "{arguments}");
         assert_eq!(Path::new(cwd), std::env::home_dir().unwrap());
     }
@@ -2240,8 +2257,30 @@ exit 0
         spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
 
         let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
-        let cwd = arguments.lines().skip_while(|arg| *arg != "--cwd").nth(1).unwrap();
+        let cwd = arguments
+            .lines()
+            .skip_while(|arg| *arg != "--cwd")
+            .nth(1)
+            .unwrap();
         assert_eq!(Path::new(cwd), root.path());
+    }
+
+    #[test]
+    fn untagged_dot_workspace_is_forwarded_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-dot-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+
+        spawn_work(&runtime, Path::new("."), &BTreeMap::new()).unwrap();
+
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments
+            .lines()
+            .skip_while(|arg| *arg != "--cwd")
+            .nth(1)
+            .unwrap();
+        assert_eq!(cwd, ".");
     }
 
     #[test]
