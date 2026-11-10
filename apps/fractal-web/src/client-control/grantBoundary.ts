@@ -1,6 +1,7 @@
 import type * as Wire from '@fractal/client/schema'
 import type { ClientControlRouteTarget } from './navigation.ts'
 import { decodeCommand } from './wire.ts'
+import type { ClientControlLifecycle } from './lifecycle.ts'
 
 const destinationFor = (command: Wire.DeviceCommand): ClientControlRouteTarget | undefined => {
   if (command.command_kind !== 'phone.navigate') return undefined
@@ -18,6 +19,7 @@ export const handleGrantedDeviceCommand = async (input: {
   readonly currentTarget: () => ClientControlRouteTarget | undefined
   readonly command: unknown
   readonly permission: () => Wire.ClientControlGrant | undefined
+  readonly lifecycle: Pick<ClientControlLifecycle, 'allows'>
   readonly foreground: () => boolean
   readonly navigate: (target: ClientControlRouteTarget) => Promise<void>
   readonly signVisibleState: () => Promise<void>
@@ -33,17 +35,21 @@ export const handleGrantedDeviceCommand = async (input: {
       && (target._tag !== 'Attention' || (permission.item_id !== undefined && target.askId === permission.item_id))
   const allowed = () => {
     const permission = input.permission()
-    return permission !== undefined && permission.verbs.includes(command.command_kind)
+    const policy = command.control_grant
+    return permission !== undefined && policy !== undefined && input.lifecycle.allows(command)
+      && permission.verbs.includes(command.command_kind) && policy.verbs.includes(command.command_kind)
       && command.device_id === permission.device && command.grant_id === permission.grant_id
       && command.run_id === permission.run_id
       && targetAllowed(permission, destination ?? input.currentTarget())
+      && targetAllowed(policy, destination ?? input.currentTarget())
   }
   if (!allowed()) return 'Refused'
   if (!input.foreground()) return 'NotForeground'
   if (destination !== undefined) await input.navigate(destination)
   // Navigation may yield; revoked authority or lost foreground must never sign afterward.
   const permission = input.permission()
-  if (permission === undefined || !targetAllowed(permission, input.currentTarget())) return 'Refused'
+  if (permission === undefined || command.control_grant === undefined
+    || !targetAllowed(permission, input.currentTarget()) || !targetAllowed(command.control_grant, input.currentTarget())) return 'Refused'
   if (!allowed()) return 'Refused'
   if (!input.foreground()) return 'NotForeground'
   await input.signVisibleState()

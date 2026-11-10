@@ -1,3 +1,4 @@
+import { defaultWebCryptoSha256, type ClientControlSha256 } from '../../../../clients/typescript/fractal-client/ClientControl.generated.ts'
 import { guardFixtureBoundary, type FixtureGuardInput } from './fixtureGuard.ts'
 import type { FixtureNoAnswerGuard } from './fixtureNoAnswerGuard.ts'
 import { isFixturePlainText } from './fixtureText.ts'
@@ -68,6 +69,8 @@ export const observeFixtureDom = async (input: {
   readonly titleSelector: string
   readonly questionSelector: string
   readonly noAnswerGuard: FixtureNoAnswerGuard
+  /** Hashes exact question UTF-8 bytes, independently of visible-state canonicalization. */
+  readonly sha256?: ClientControlSha256
   readonly writeEvidence: (evidence: FixtureDomEvidence) => Promise<void>
 }): Promise<FixtureDomEvidence> => {
   const boundary = guardFixtureBoundary(input.boundary)
@@ -102,7 +105,7 @@ export const observeFixtureDom = async (input: {
   if (!isFixturePlainText(title) || !isFixturePlainText(question))
     throw new TypeError('Rendered ask title and question must preserve the approved plain fixture text')
   if (new URL(input.page.url()).origin !== boundary.origin) throw new TypeError('Origin changed during observation')
-  const renderedQuestionTextSha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(question))), byte => byte.toString(16).padStart(2, '0')).join('')
+  const renderedQuestionTextSha256 = Array.from(await (input.sha256 ?? defaultWebCryptoSha256)(new TextEncoder().encode(question)), byte => byte.toString(16).padStart(2, '0')).join('')
   const renderedItemIds = [...new Set(snapshots[0]!.itemIds)]
   input.noAnswerGuard.assertNoAnswers()
   const evidence: FixtureDomEvidence = {

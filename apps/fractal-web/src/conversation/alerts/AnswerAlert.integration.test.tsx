@@ -23,7 +23,7 @@ import type { PromptAnswerPort } from './prompt-answer-port.ts'
 import { fixtureSource } from '../../data/fixtureSource.ts'
 import { DataSourceProvider } from '../../data/react.tsx'
 import { handleGrantedDeviceCommand } from '../../client-control/grantBoundary.ts'
-import { testCommand, testGrant } from '../../client-control/command.test-support.ts'
+import { testCommand, testGrant, testLifecycle } from '../../client-control/command.test-support.ts'
 import type { ClientControlRouteTarget } from '../../client-control/navigation.ts'
 
 const alert = {
@@ -210,22 +210,24 @@ it.each(['decision', 'feedback'] as const)(
     let target: ClientControlRouteTarget = { _tag: 'NowRoot' }
     let signatures = 0
     const permission = testGrant(shown.id)
+    const lifecycle = testLifecycle(permission)
+    const commandFor = (verb: string, args: unknown = {}) => testCommand(verb, args, permission)
     const commands = [
-      { command: testCommand('phone.inspect'), refused: false },
-      { command: testCommand('phone.navigate', { screen: 'Attention', params: { id: shown.id } }), refused: false },
-      { command: testCommand('phone.inspect'), refused: false },
-      { command: testCommand('phone.navigate', { screen: 'Attention', params: { id: 'attention/not-bound' } }), refused: true },
+      { command: commandFor('phone.inspect'), refused: false },
+      { command: commandFor('phone.navigate', { screen: 'Attention', params: { id: shown.id } }), refused: false },
+      { command: commandFor('phone.inspect'), refused: false },
+      { command: commandFor('phone.navigate', { screen: 'Attention', params: { id: 'attention/not-bound' } }), refused: true },
       ...['work.done', 'prompt.respond', 'attention.answer', 'attention.close', 'phone.message.read', 'read-position.advance']
-        .map(verb => ({ command: testCommand(verb, verb === 'phone.message.read' ? { message_id: 'message/unit' } : {}), refused: true })),
-      { command: testCommand('phone.navigate', { screen: 'NowRoot' }), refused: false },
-      { command: testCommand('phone.inspect'), refused: false },
+        .map(verb => ({ command: commandFor(verb, verb === 'phone.message.read' ? { message_id: 'message/unit' } : {}), refused: true })),
+      { command: commandFor('phone.navigate', { screen: 'NowRoot' }), refused: false },
+      { command: commandFor('phone.inspect'), refused: false },
     ]
     for (const { command, refused } of commands) {
       const before = signatures
       const previous = target
       await act(async () => {
         expect(await handleGrantedDeviceCommand({
-          command, permission: () => permission, currentTarget: () => target,
+          command, permission: () => permission, lifecycle, currentTarget: () => target,
           foreground: () => true, navigate: async next => { target = next },
           signVisibleState: async () => { signatures += 1 },
         })).toBe(refused ? 'Refused' : 'Applied')

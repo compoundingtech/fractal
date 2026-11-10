@@ -5,6 +5,8 @@ import golden from '../../../../fixtures/clients/client-control-v1.golden.json' 
 import {
   CLIENT_RESULT_SIGNED_FIELDS,
   clientResultCanonicalBytes,
+  defaultWebCryptoSha256,
+  type ClientControlSha256,
   visibleStateCanonicalJson,
   visibleStateDigest,
 } from '../../../../clients/typescript/fractal-client/ClientControl.generated.ts'
@@ -28,6 +30,18 @@ describe('web consumption of the repository client-control golden file', () => {
     expect(visibleStateCanonicalJson(vector.input.visible_state)).toBe(vector.canonical_visible_state)
     expect(await visibleStateDigest(vector.input.visible_state)).toBe(vector.visible_state_sha256)
     expect(await clientResultCanonicalBytes(vector.input)).toEqual(new TextEncoder().encode(vector.canonical_bytes))
+    expect(await visibleStateDigest(vector.input.visible_state, defaultWebCryptoSha256)).toBe(vector.visible_state_sha256)
+    expect(await clientResultCanonicalBytes(vector.input, defaultWebCryptoSha256)).toEqual(new TextEncoder().encode(vector.canonical_bytes))
+    const hashInputs: Uint8Array[] = []
+    const recordingSha256: ClientControlSha256 = async input => {
+      hashInputs.push(input.slice())
+      return defaultWebCryptoSha256(input)
+    }
+    const expectedHashInput = new TextEncoder().encode(vector.canonical_visible_state)
+    expect(await visibleStateDigest(vector.input.visible_state, recordingSha256)).toBe(vector.visible_state_sha256)
+    expect(hashInputs).toEqual([expectedHashInput])
+    expect(await clientResultCanonicalBytes(vector.input, recordingSha256)).toEqual(new TextEncoder().encode(vector.canonical_bytes))
+    expect(hashInputs).toEqual([expectedHashInput, expectedHashInput])
     const key = await verificationKey()
     expect(await verifyClientResultBinding(binding, vector.signature_p1363_base64url, key)).toBe(true)
     for (const changed of vector.negative_bindings) {

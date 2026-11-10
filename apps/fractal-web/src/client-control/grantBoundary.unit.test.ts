@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type * as Wire from '@fractal/client/schema'
 import { handleGrantedDeviceCommand } from './grantBoundary.ts'
 import type { ClientControlRouteTarget } from './navigation.ts'
-import { testCommand, testGrant } from './command.test-support.ts'
+import { testCommand, testGrant, testLifecycle, testLifecycleResource } from './command.test-support.ts'
+import { createClientControlLifecycle } from './lifecycle.ts'
 
 const exercise = async (
   command: unknown,
@@ -13,7 +14,7 @@ const exercise = async (
   let signatures = 0
   let currentTarget = initialTarget
   const result = await handleGrantedDeviceCommand({
-    command, permission: () => grant, foreground: () => true,
+    command, permission: () => grant, lifecycle: testLifecycle(grant), foreground: () => true,
     currentTarget: () => currentTarget,
     navigate: async target => { navigations.push(target); currentTarget = target },
     signVisibleState: async () => { signatures += 1 },
@@ -23,6 +24,49 @@ const exercise = async (
 
 const refused = { result: 'Refused', navigations: [], signatures: 0 }
 describe('generated client-control grant-check handler boundary', () => {
+  it.each(['ended', 'revoked'] as const)('requires verified lifecycle activation and refuses after %s', async terminal => {
+    const grant = testGrant()
+    const lifecycle = createClientControlLifecycle({
+      subscriptionId: 'commands', authority: grantId => grantId === grant.grant_id ? grant : undefined,
+    })
+    const calls: string[] = []
+    const attempt = () => handleGrantedDeviceCommand({
+      command: testCommand('phone.navigate', { screen: 'NowRoot' }), permission: () => grant, lifecycle,
+      currentTarget: () => ({ _tag: 'NowRoot' }), foreground: () => true,
+      navigate: async () => { calls.push('navigate') }, signVisibleState: async () => { calls.push('sign') },
+    })
+    expect(await attempt()).toBe('Refused')
+    expect(calls).toEqual([])
+    expect(lifecycle.acceptResource(testLifecycleResource(grant))).toBe('activate')
+    expect(await attempt()).toBe('Applied')
+    expect(calls).toEqual(['navigate', 'sign'])
+    calls.length = 0
+    expect(lifecycle.acceptResource(testLifecycleResource(grant, terminal, 2))).toBe('terminate')
+    expect(await attempt()).toBe('Refused')
+    expect(calls).toEqual([])
+  })
+
+  it('requires each delivered command to carry its own policy as well as active lifecycle', async () => {
+    const { control_grant: _policy, ...command } = testCommand('phone.inspect')
+    expect(await exercise(command)).toEqual(refused)
+    const limited = { ...testGrant(), screens: ['NowRoot'] }
+    expect(await exercise(testCommand('phone.navigate', { screen: 'Attention', params: { id: limited.item_id } }, limited))).toEqual(refused)
+  })
+
+  it('does not sign if a verified lifecycle end arrives while navigation yields', async () => {
+    const grant = testGrant()
+    const lifecycle = testLifecycle(grant)
+    let signatures = 0
+    const result = await handleGrantedDeviceCommand({
+      command: testCommand('phone.navigate', { screen: 'NowRoot' }), permission: () => grant, lifecycle,
+      currentTarget: () => ({ _tag: 'NowRoot' }), foreground: () => true,
+      navigate: async () => { lifecycle.acceptResource(testLifecycleResource(grant, 'ended', 2)) },
+      signVisibleState: async () => { signatures += 1 },
+    })
+    expect(result).toBe('Refused')
+    expect(signatures).toBe(0)
+  })
+
   it('refuses Conversation under a NowRoot/Attention grant without navigating or signing', async () => {
     expect(await exercise(testCommand('phone.navigate', { screen: 'Conversation', params: { target: 'agent/unit' } }))).toEqual(refused)
   })
@@ -91,8 +135,8 @@ describe('generated client-control grant-check handler boundary', () => {
 
   it('allows optional item_id absence for NowRoot but refuses unbound Attention', async () => {
     const { item_id: _item, ...unbound } = testGrant()
-    expect(await exercise(testCommand('phone.inspect'), unbound)).toEqual({ result: 'Applied', navigations: [], signatures: 1 })
-    expect(await exercise(testCommand('phone.navigate', { screen: 'Attention', params: { id: 'attention/unit-ask' } }), unbound)).toEqual(refused)
+    expect(await exercise(testCommand('phone.inspect', {}, unbound), unbound)).toEqual({ result: 'Applied', navigations: [], signatures: 1 })
+    expect(await exercise(testCommand('phone.navigate', { screen: 'Attention', params: { id: 'attention/unit-ask' } }, unbound), unbound)).toEqual(refused)
   })
 
   it.each(['device_id', 'grant_id', 'run_id'] as const)('refuses mismatched %s binding', async field => {
@@ -107,6 +151,7 @@ describe('generated client-control grant-check handler boundary', () => {
     const calls: string[] = []
     const result = await handleGrantedDeviceCommand({
       command: testCommand('phone.navigate', { screen: 'NowRoot' }), permission: () => grant,
+      lifecycle: testLifecycle(grant),
       foreground: () => foreground, currentTarget: () => ({ _tag: 'NowRoot' }),
       navigate: async () => { calls.push('navigate') }, signVisibleState: async () => { calls.push('sign') },
     })
@@ -119,6 +164,7 @@ describe('generated client-control grant-check handler boundary', () => {
     let signatures = 0
     const result = await handleGrantedDeviceCommand({
       command: testCommand('phone.navigate', { screen: 'NowRoot' }), permission: () => active, foreground: () => true,
+      lifecycle: testLifecycle(active),
       currentTarget: () => ({ _tag: 'NowRoot' }),
       navigate: async () => { active = undefined }, signVisibleState: async () => { signatures += 1 },
     })
