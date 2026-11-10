@@ -233,11 +233,12 @@ daemon's `[programs]` table says what a write outside it does:
 
 ```toml
 [programs]
-authority = "audit"   # the default: the write proceeds and `rule.audited` records it on `rule/run-authority`
-# authority = "enforce"   # the write is refused with `run-authority-denied`
+authority = "enforce"   # the default: the write is refused with `run-authority-denied`
+# authority = "audit"    # the write proceeds and `rule.audited` records it on `rule/run-authority`
 ```
 
-Read the audit log with `fractal rules audit run-authority` before you enforce. The setting is read
+Audit lets you discover the grants a new program needs: read them with
+`fractal rules audit run-authority`, declare them, then return to enforce. The setting is read
 when the daemon starts.
 
 ## Definitions do not start work

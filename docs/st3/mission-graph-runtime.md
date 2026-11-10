@@ -258,9 +258,9 @@ generation with a predecessor needs `revise ID`, as does everything a revision w
 it changes, each on that run's mission; any other claim needs `write SUBJECT`. A run always
 journals `program.step` on its own step runs. `cancel` is reserved and grants nothing yet: setting
 another run's outcome, which is how a run is cancelled, takes a person or agent actor. A write
-outside the effective authority is recorded as `rule.audited` on `rule/run-authority` and
-proceeds, or is refused with `run-authority-denied`, as the daemon's `[programs] authority` says
-(`audit` by default).
+outside the effective authority is refused with `run-authority-denied`, or, when the daemon's
+`[programs] authority` is `audit`, recorded as `rule.audited` on `rule/run-authority` and let
+through (`enforce` by default).
 
 A request whose caller's ancestry carries a live run credential
 (`ST_RUN_CREDENTIAL`, one per program attempt) is bound to `mission-run/RUN`: like a bound agent, it
