@@ -15919,8 +15919,8 @@ pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert_eq!(target.projected_through(), admitted);
     assert!(
-        target.replication_projection_deferred(),
-        "later claims still need a pass"
+        !target.replication_projection_deferred(),
+        "inline local writes leave no admitted claim behind the pass"
     );
     assert!(target.project_replication_backlog().unwrap());
     assert!(!target.replication_projection_deferred());
