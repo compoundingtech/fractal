@@ -2526,7 +2526,6 @@ pub fn native_slice_page_at_generation(
     let filter_digest = native_page_filter_digest(query)?;
     let requested_limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS)
         .clamp(1, CLIENT_MAX_PAGE_ITEMS);
-    crate::otel::roster_attribute("st.conversation.requested_limit", requested_limit as i64);
     if let Some(cursor) = &cursor {
         if cursor.session_id != session_id
             || cursor.collection != format!("timeline/{session_id}")
@@ -2546,6 +2545,7 @@ pub fn native_slice_page_at_generation(
         }
     }
     let limit = cursor.as_ref().map_or(requested_limit, |cursor| cursor.limit);
+    crate::otel::roster_attribute("st.conversation.requested_limit", limit as i64);
     let expires_at_unix_ms = cursor.as_ref().map_or_else(
         || client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS),
         |cursor| cursor.expires_at_unix_ms,
