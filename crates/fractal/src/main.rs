@@ -1399,9 +1399,9 @@ struct MissionPublishArgs {
     /// Preview against this exact store index.
     #[arg(long, visible_alias = "at")]
     at_index: Option<u64>,
-    /// Complete person or agent subject authoring the publication.
+    /// Complete person, agent or run subject authoring the publication.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", value_parser = parse_publication_actor)]
+    #[arg(long = "as", value_parser = parse_mission_publication_actor)]
     actor: String,
     /// The workspace a run would use, where publish checks mission and step exec gates.
     #[arg(long, default_value = ".")]
@@ -3389,10 +3389,11 @@ struct ApplyArgs {
     allow_empty: bool,
     #[arg(long, requires = "set")]
     confirm_retire: Option<String>,
-    /// Complete person or agent subject authoring the publication.
+    /// Complete person, agent or run subject authoring the publication; defaults to the
+    /// harness's own seat, else to the run a program effect acts as.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
-    actor: String,
+    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_mission_publication_actor)]
+    actor: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3452,9 +3453,10 @@ fn read_apply_files(files: &[PathBuf], allow_empty: bool) -> Result<IntentInput>
 }
 
 async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Result<()> {
+    let actor = own_publication_actor(args.actor.clone(), "apply")?;
     let intent = read_apply_files(&args.files, args.allow_empty)?;
     if args.set.is_some() {
-        return run_owned_set_apply(client, intent, args, json_output).await;
+        return run_owned_set_apply(client, intent, args, actor, json_output).await;
     }
     publish_mission_intent(
         client,
@@ -3463,7 +3465,7 @@ async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Resul
             file: PathBuf::new(),
             dry_run: args.dry_run,
             at_index: args.at_index,
-            actor: args.actor,
+            actor,
             workspace: args.workspace,
             no_gate_check: args.no_gate_check,
             check: args.check,
@@ -3478,6 +3480,7 @@ async fn run_owned_set_apply(
     client: &Client,
     intent: IntentInput,
     args: ApplyArgs,
+    actor: String,
     json_output: bool,
 ) -> Result<()> {
     use fractal_daemon::store::owned_sets::{Options, Preview, Request, Source};
@@ -3510,7 +3513,7 @@ async fn run_owned_set_apply(
     let mut request = Request {
         intent,
         options,
-        actor: args.actor,
+        actor,
         idempotency_key: uuid::Uuid::now_v7().to_string(),
         program_bundles: BTreeMap::new(),
     };
@@ -6322,7 +6325,7 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
-        Command::Apply(args) => Some(args.actor.as_str()),
+        Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
@@ -10196,6 +10199,21 @@ fn configured_actor(
         return Ok(run);
     }
     configured_human(None, configured, command)
+}
+
+/// The actor of a publication whose `--as` defaults to the caller's own identity: the explicit or
+/// `ST_AGENT` subject, else the run a program effect acts as (docs/st3/program-engine.md §3).
+fn own_publication_actor(explicit: Option<String>, command: &str) -> Result<String> {
+    explicit
+        .or_else(|| {
+            run_actor(
+                fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").as_deref(),
+                fractal_drivers::contracts::env("ST_MISSION_RUN").as_deref(),
+            )
+        })
+        .with_context(|| {
+            format!("fractal {command} needs `--as person/NAME`, `--as agent/PATH` or `--as mission-run/RUN`")
+        })
 }
 
 /// A program effect carries its attempt's run credential and acts as its run
@@ -16314,6 +16332,22 @@ fn parse_publication_actor(actor: &str) -> std::result::Result<String, String> {
         );
     }
     Ok(actor.to_owned())
+}
+
+/// The author of a mission publication: a person, an agent, or a run, which publishes what its
+/// `authority` block's `publish` rules grant (docs/st3/program-engine.md §3). Starting, revising
+/// and cancelling runs stay with the program API and the person or agent commands.
+fn parse_mission_publication_actor(actor: &str) -> std::result::Result<String, String> {
+    if actor
+        .strip_prefix("mission-run/")
+        .is_some_and(|run| !run.is_empty() && !run.ends_with('/'))
+    {
+        return Ok(actor.to_owned());
+    }
+    parse_publication_actor(actor).map_err(|_| {
+        "mission publication authority must be an explicit `person/NAME`, `agent/PATH` or `mission-run/RUN` subject"
+            .into()
+    })
 }
 
 #[cfg(test)]

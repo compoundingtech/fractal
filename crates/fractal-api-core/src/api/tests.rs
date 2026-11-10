@@ -113,6 +113,40 @@ async fn a_run_credential_binds_requests_to_its_run() {
     assert_eq!(state.store.index().unwrap(), before);
 }
 
+/// A program effect's `fractal apply` publishes a mission as its run, and as no other actor.
+#[tokio::test]
+async fn a_run_bound_request_publishes_as_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let source = "version 2\nmission \"x/notes\" state=\"ready\" {\n  goal \"Take notes.\"\n  step \"work\" { }\n}\n";
+    let apply = |actor: &str| {
+        let body = serde_json::to_string(&apply_request(&state, source, actor, actor)).unwrap();
+        let request = Request::builder().method("POST").uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body)).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    for actor in ["person/operator", "agent/example/worker"] {
+        let (status, refused) = apply(actor).await;
+        assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("foreign-agent-actor")), "{actor} {refused}");
+    }
+    assert!(state.store.latest_claim("mission/x/notes", Some("mission.published")).unwrap().is_none());
+    let (status, published) = apply(&step.run).await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let claim = state.store.latest_claim("mission/x/notes", Some("mission.published")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some(step.run.as_str()));
+}
+
 /// A program effect's CLI names its run on the trusted Unix client; only a request its run
 /// credential binds to that same run may.
 #[tokio::test]

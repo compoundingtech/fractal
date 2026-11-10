@@ -1810,6 +1810,41 @@ fn a_program_effect_acts_as_its_run() {
     assert!(parse_actor_subject("mission-run/").is_err());
 }
 
+/// A run publishes missions as itself: `apply` and `missions publish` take `--as mission-run/RUN`,
+/// and `apply` defaults to it when it holds a run credential. The commands a run's authority cannot
+/// grant still take only a person or an agent.
+#[test]
+fn a_run_is_a_mission_publication_actor() {
+    for actor in ["person/operator", "agent/fleet/worker", "mission-run/abc"] {
+        assert_eq!(parse_mission_publication_actor(actor).as_deref(), Ok(actor));
+    }
+    for actor in ["mission-run/", "mission-run/abc/", "mission/abc", "person/", "abc"] {
+        assert!(parse_mission_publication_actor(actor).is_err(), "{actor}");
+    }
+    assert!(parse_publication_actor("mission-run/abc").is_err());
+    for command in [
+        vec!["st", "apply", "notes.kdl", "--as", "mission-run/abc"],
+        vec!["st", "missions", "publish", "notes.kdl", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_ok(), "{command:?}");
+    }
+    for command in [
+        vec!["st", "missions", "retire", "x/notes", "--as", "mission-run/abc"],
+        vec!["st", "agents", "rollout", "fleet/worker", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_err(), "{command:?}");
+    }
+    let Command::Apply(args) = Cli::try_parse_from(["st", "apply", "notes.kdl", "--as", "mission-run/abc"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected apply")
+    };
+    assert_eq!(own_publication_actor(args.actor, "apply").unwrap(), "mission-run/abc");
+    // Without `--as`, apply resolves its actor from its environment when it runs.
+    assert!(Cli::try_parse_from(["st", "apply", "notes.kdl"]).is_ok());
+}
+
 #[test]
 fn execution_actor_options_parse_and_fail_closed() {
     for (path, tail) in [
@@ -8609,7 +8644,7 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             confirm_retire: None,
             dry_run: false,
             at_index: None,
-            actor: "person/test".into(),
+            actor: Some("person/test".into()),
             workspace: root.to_owned(),
             no_gate_check: false,
             check: false,

@@ -240,6 +240,12 @@ name. The CLI defaults its actor to the run when the credential is present and n
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
 same run. The same-UID boundary is cooperative, as for agents.
 
+**Publication.** A run publishes with `fractal apply` like any other author: `apply` and
+`fractal missions publish` take `--as mission-run/RUN`, and `apply` without `--as` publishes as
+the harness's own seat, else as the run whose credential it holds. Its `publish` rules decide
+which missions it may publish. The commands no run authority grants (agent lifecycle, owned sets,
+mission retirement, run outcomes) still take only a person or an agent.
+
 **Journal.** The engine writes `program.step` claims as `mission-run/RUN`; a run may always journal
 on its own step runs, whatever it declares.
 
