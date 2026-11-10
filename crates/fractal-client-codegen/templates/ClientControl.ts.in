@@ -41,7 +41,7 @@ export function visibleStateCanonicalJson(state: ClientVisibleState): string {
 }
 export type ClientControlSha256 = (bytes: Uint8Array) => Promise<Uint8Array>;
 export const defaultWebCryptoSha256: ClientControlSha256 = async bytes =>
-  new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+  new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes).buffer));
 export async function visibleStateDigest(state: ClientVisibleState, sha256: ClientControlSha256 = defaultWebCryptoSha256): Promise<string> {
   const digest = await sha256(new TextEncoder().encode(visibleStateCanonicalJson(state)));
   return Array.from(digest, b => b.toString(16).padStart(2, '0')).join('');
