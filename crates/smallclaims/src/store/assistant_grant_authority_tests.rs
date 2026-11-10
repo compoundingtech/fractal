@@ -189,6 +189,7 @@ fn malformed_base_cannot_mask_a_valid_credential_but_valid_policy_can_repair_it(
     let mut renewal = fields();
     renewal["expires_at_unix_ms"] = json!(20000);
     append(&store, SUBJECT, POLICY, renewal);
+    drain_authority(&store);
     assert!(authority::contains(&store.readers.get(), &pending.id).unwrap());
     assert_eq!(authority::by_credential(&store.readers.get(), &digest).unwrap().unwrap().id, pending.id);
     assert_reference_and_rebuild(&store);
@@ -461,6 +462,8 @@ fn reset_projection(connection: &Connection) {
         "DELETE FROM assistant_grant_effective;
          DELETE FROM assistant_grant_authority;
          DELETE FROM assistant_grant_pending;
+         DELETE FROM assistant_grant_attachments;
+         DELETE FROM assistant_grant_attachment_witnesses;
          DELETE FROM assistant_grant_membership_windows;
          DELETE FROM assistant_grant_dirty;
          DELETE FROM assistant_grant_auth_cursor;
@@ -686,6 +689,7 @@ fn committed_backfill_slice_resumes_after_reopen_and_is_idempotent() {
         changed["expires_at_unix_ms"] = json!(20000);
         append(&store, SUBJECT, POLICY, changed);
         append(&store, SUBJECT, REVOKED, fields());
+        drain_authority(&store);
         let mut connection = store.connection.write();
         expected = snapshot(&connection);
         assert_eq!(expected.len(), 70);
@@ -1416,6 +1420,7 @@ fn dirty_work_before_saved_round_robin_cursor_is_serviced_in_the_same_slice() {
 }
 
 include!("assistant_grant_receipt_cost_tests.rs");
+include!("assistant_grant_attachment_tests.rs");
 
 #[path = "assistant_grant_membership_property_tests.rs"]
 mod membership_property_tests;

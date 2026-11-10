@@ -46,6 +46,8 @@ fn receipt_projection_work_state(connection: &Connection) -> Vec<Vec<Vec<SqlValu
         "SELECT claim_id FROM assistant_grant_dirty ORDER BY claim_id",
         "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim FROM assistant_grant_additions ORDER BY id",
         "SELECT writer,claim_id FROM assistant_grant_auth_work ORDER BY writer,claim_id",
+        "SELECT claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id FROM assistant_grant_attachments ORDER BY claim_id,candidate_kind",
+        "SELECT base_claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record FROM assistant_grant_attachment_witnesses ORDER BY base_claim_id",
     ].into_iter().map(|sql| {
         let mut statement = connection.prepare(sql).unwrap();
         let columns = statement.column_count();

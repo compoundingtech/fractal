@@ -9612,6 +9612,12 @@ fn assistant_grant_subject_maintenance_checks(
          SELECT pending.grant_subject, 'retracted authority effective-state recomputation'
          FROM assistant_grant_recompute work
          JOIN assistant_grant_pending pending ON pending.claim_id=work.claim_id
+         UNION
+         SELECT grant_subject, 'authenticated grant attachment in progress'
+         FROM assistant_grant_attachments
+         UNION
+         SELECT grant_subject, 'attachment conflict-witness cleanup'
+         FROM assistant_grant_attachment_witnesses
          ORDER BY 1,2",
     )?;
     let rows = statement.query_map([], |row| {

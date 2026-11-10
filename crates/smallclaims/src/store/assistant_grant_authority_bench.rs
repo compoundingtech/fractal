@@ -382,6 +382,8 @@ fn measure_backfill(config: Config) {
              DELETE FROM assistant_grant_authority;
              DELETE FROM assistant_grant_effective;
              DELETE FROM assistant_grant_pending;
+             DELETE FROM assistant_grant_attachments;
+             DELETE FROM assistant_grant_attachment_witnesses;
              DELETE FROM assistant_grant_dirty;
              DELETE FROM assistant_grant_auth_cursor;
              DELETE FROM assistant_grant_additions;

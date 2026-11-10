@@ -153,6 +153,23 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE INDEX IF NOT EXISTS assistant_grant_retractions_writer_key_index
             ON assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence);
          CREATE TABLE IF NOT EXISTS assistant_grant_recompute (claim_id TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS assistant_grant_attachments (
+            claim_id TEXT NOT NULL, candidate_kind TEXT NOT NULL,
+            grant_subject TEXT NOT NULL, origin TEXT NOT NULL, actor TEXT NOT NULL,
+            after_claim_id TEXT NOT NULL, upper_claim_id TEXT NOT NULL,
+            PRIMARY KEY(claim_id,candidate_kind));
+         CREATE INDEX IF NOT EXISTS assistant_grant_attachments_subject_index
+            ON assistant_grant_attachments(grant_subject);
+         CREATE INDEX IF NOT EXISTS assistant_grant_pending_attachment_index
+            ON assistant_grant_pending(grant_subject,authenticated,origin,actor,kind,claim_id);
+         CREATE TABLE IF NOT EXISTS assistant_grant_attachment_witnesses (
+            base_claim_id TEXT PRIMARY KEY, grant_subject TEXT NOT NULL,
+            principal TEXT NOT NULL, owner TEXT NOT NULL, profile TEXT NOT NULL,
+            expires_at TEXT NOT NULL, revoked INTEGER NOT NULL, grant_record TEXT NOT NULL);
+         CREATE INDEX IF NOT EXISTS assistant_grant_attachment_witnesses_subject_index
+            ON assistant_grant_attachment_witnesses(grant_subject);
+         CREATE INDEX IF NOT EXISTS assistant_grant_attachment_witnesses_active_index
+            ON assistant_grant_attachment_witnesses(principal,owner,revoked,expires_at,profile);
          CREATE INDEX IF NOT EXISTS assistant_grant_authority_base_index
             ON assistant_grant_authority(base_claim_id,kind,store_index DESC);
          CREATE TABLE IF NOT EXISTS assistant_grant_membership_state (
@@ -363,6 +380,8 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
             OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
             OR EXISTS(SELECT 1 FROM assistant_grant_additions)
             OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
+            OR EXISTS(SELECT 1 FROM assistant_grant_attachments)
+            OR EXISTS(SELECT 1 FROM assistant_grant_attachment_witnesses)
             OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
             OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)",
         [VERSION], |row| row.get(0),
@@ -372,7 +391,9 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
 // Keep the subject lookup outermost even when the global work queues are large.
 // Cost still grows with this subject's claims and matching proof obligations.
 pub const SUBJECT_PENDING_QUERY: &str =
-        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=?1)
+            OR EXISTS(SELECT 1 FROM assistant_grant_attachment_witnesses WHERE grant_subject=?1)
+            OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
                 CROSS JOIN assistant_grant_dirty AS dirty
                 WHERE claims.subject=?1 AND dirty.claim_id=claims.id)
             OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
@@ -444,7 +465,15 @@ pub const CANDIDATES_QUERY: &str = "SELECT grant_record FROM assistant_grant_eff
     UNION ALL
     SELECT grant_record FROM assistant_grant_effective
     WHERE ?3 IS NULL AND principal=?1 AND owner=?2
-      AND (?4 IS NULL OR claim_id<>?4) AND (?5 IS NULL OR profile<>?5)";
+      AND (?4 IS NULL OR claim_id<>?4) AND (?5 IS NULL OR profile<>?5)
+    UNION
+    SELECT witness.grant_record FROM assistant_grant_attachment_witnesses AS witness
+    JOIN assistant_grant_pending AS pending ON pending.claim_id=witness.base_claim_id
+    WHERE witness.principal=?1 AND witness.owner=?2
+      AND (?3 IS NULL OR (witness.revoked=0 AND witness.expires_at>?3))
+      AND (?4 IS NULL OR witness.base_claim_id<>?4) AND (?5 IS NULL OR witness.profile<>?5)
+      AND pending.authenticated=1
+      AND EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=witness.grant_subject)";
 /// Authenticated effective snapshots for conflict admission, not bearer access.
 /// A pending revoke must not erase an opposite-profile conflict witness before
 /// it authenticates. Bearer and transition readers independently fence subjects.
@@ -532,48 +561,85 @@ fn recompute_base(connection: &Connection, base_id: &str) -> Result<()> {
             transition_unchecked(connection,&grant,REVOKED)?.is_some(),record])?;
     Ok(())
 }
+// Authentication creates constant-sized state; opposite-side history is queued.
 fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
-    let mut changed = false;
-    if claim.kind == GRANTED {
-        // A malformed base stays pending until a valid issuer policy repairs it.
-        // Otherwise a newer malformed copy could mask a valid bearer lookup.
-        if structurally_valid(claim,claim) {
-            changed |= insert_authority(connection,claim,claim)?;
-        }
-        // Only this base's issuer prefix can attach to it. In particular, an
-        // authenticated wrong-actor history cannot enlarge later admission work.
-        let mut statement = connection.prepare_cached(
-            "SELECT record FROM assistant_grant_pending WHERE grant_subject=?1
-             AND authenticated=1 AND origin=?2 AND actor=?3 AND kind<>?4")?;
-        let records = statement.query_map(params![claim.subject,claim.origin,claim.actor,GRANTED], |row| row.get::<_,String>(0))?;
-        for record in records {
-            let transition: ClaimRecord = serde_json::from_str(&record?)?;
-            if transition_valid(claim,&transition) {
-                if transition.kind == POLICY {
-                    changed |= insert_authority(connection,claim,claim)?;
-                }
-                changed |= insert_authority(connection,&transition,claim)?;
-            }
-        }
-        if changed { recompute_base(connection,&claim.id)?; }
-    } else {
-        let mut statement = connection.prepare_cached(
-            "SELECT record FROM assistant_grant_pending WHERE grant_subject=?1
-             AND authenticated=1 AND kind=?2 AND origin=?3 AND actor=?4")?;
-        let records = statement.query_map(params![claim.subject,GRANTED,claim.origin,claim.actor], |row| row.get::<_,String>(0))?;
-        for record in records {
-            let grant: ClaimRecord = serde_json::from_str(&record?)?;
-            let mut changed = false;
-            if transition_valid(&grant,claim) {
-                if claim.kind == POLICY {
-                    changed |= insert_authority(connection,&grant,&grant)?;
-                }
-                changed |= insert_authority(connection,claim,&grant)?;
-                if changed { recompute_base(connection,&grant.id)?; }
-            }
-        }
+    if claim.kind==GRANTED && structurally_valid(claim,claim) {
+        if insert_authority(connection,claim,claim)? { recompute_base(connection,&claim.id)?; }
+    }
+    let kinds: &[&str] = if claim.kind==GRANTED { &[POLICY,REVOKED] } else { &[GRANTED] };
+    for kind in kinds {
+        connection.execute(
+            "INSERT OR IGNORE INTO assistant_grant_attachments
+             (claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id)
+             SELECT ?1,?2,?3,?4,?5,'',claim_id FROM assistant_grant_pending
+             INDEXED BY assistant_grant_pending_attachment_index
+             WHERE grant_subject=?3 AND authenticated=1 AND origin=?4 AND actor=?5 AND kind=?2
+             ORDER BY claim_id DESC LIMIT 1",
+            params![claim.id,kind,claim.subject,claim.origin,claim.actor],
+        )?;
     }
     Ok(())
+}
+
+fn attachment_one(connection: &Connection) -> Result<bool> {
+    let task: Option<(String,String,String,String,String,String,String)> = connection.query_row(
+        "SELECT claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id
+         FROM assistant_grant_attachments ORDER BY claim_id,candidate_kind LIMIT 1", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+    ).optional()?;
+    let Some((id,kind,subject,origin,actor,after,upper)) = task else { return Ok(false); };
+    let record: Option<String> = connection.query_row(
+        "SELECT record FROM assistant_grant_pending WHERE claim_id=?1 AND authenticated=1",
+        [&id], |row| row.get(0),
+    ).optional()?;
+    let candidate: Option<(String,String)> = if record.is_some() {
+        connection.query_row(
+            "SELECT claim_id,record FROM assistant_grant_pending
+             INDEXED BY assistant_grant_pending_attachment_index
+             WHERE grant_subject=?1 AND authenticated=1 AND origin=?2 AND actor=?3 AND kind=?4
+               AND claim_id>?5 AND claim_id<=?6 ORDER BY claim_id LIMIT 1",
+            params![subject,origin,actor,kind,after,upper],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional()?
+    } else { None };
+    let Some((candidate_id,candidate)) = candidate else {
+        connection.execute(
+            "DELETE FROM assistant_grant_attachments WHERE claim_id=?1 AND candidate_kind=?2", params![id,kind],
+        )?;
+        return Ok(true);
+    };
+    let claim: ClaimRecord = serde_json::from_str(&record.expect("authenticated task owner"))?;
+    let candidate: ClaimRecord = serde_json::from_str(&candidate)?;
+    let (base,transition) = if claim.kind==GRANTED { (&claim,&candidate) } else { (&candidate,&claim) };
+    // Both endpoint rows were re-read as authenticated in this transaction.
+    // Demotion precedes attachment and cancels the owner's tasks.
+    if transition_valid(base,transition) {
+        connection.execute(
+            "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
+             SELECT claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record
+             FROM assistant_grant_effective WHERE claim_id=?1", [&base.id],
+        )?;
+        let mut changed = false;
+        if transition.kind==POLICY { changed |= insert_authority(connection,base,base)?; }
+        changed |= insert_authority(connection,transition,base)?;
+        if changed { recompute_base(connection,&base.id)?; }
+    }
+    // Invalid candidates advance and consume exactly the same unit.
+    connection.execute(
+        "UPDATE assistant_grant_attachments SET after_claim_id=?3 WHERE claim_id=?1 AND candidate_kind=?2",
+        params![id,kind,candidate_id],
+    )?;
+    Ok(true)
+}
+
+fn attachment_witness_one(connection: &Connection) -> Result<bool> {
+    let base: Option<String> = connection.query_row(
+        "SELECT base_claim_id FROM assistant_grant_attachment_witnesses ORDER BY base_claim_id LIMIT 1",
+        [], |row| row.get(0),
+    ).optional()?;
+    let Some(base) = base else { return Ok(false); };
+    connection.execute("DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id=?1", [base])?;
+    Ok(true)
 }
 fn local_origin(connection: &Connection) -> Result<String> {
     Ok(connection.query_row("SELECT value FROM meta WHERE key='assistant_grant_authority_local_origin'", [], |row| row.get(0))?)
@@ -602,6 +668,7 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
             "UPDATE assistant_grant_pending SET authenticated=0,auth_member_key=NULL,
              auth_sequence=NULL,auth_envelope_hash=NULL,auth_record_position=NULL WHERE claim_id=?1", [id],
         )?;
+        connection.execute("DELETE FROM assistant_grant_attachments WHERE claim_id=?1", [id])?;
         connection.execute(
             "INSERT OR IGNORE INTO assistant_grant_recompute
              SELECT claim_id FROM assistant_grant_pending WHERE claim_id=?1", [id],
@@ -676,6 +743,8 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
 // A still-pending unauthenticated transition continues to fence bearer use.
 fn rebuild_authenticated_subject(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
     // Fanout is durable work, not a subject-history replay in this claim's unit.
+    // At most two kind partitions belong to an owner; cancellation is constant.
+    connection.execute("DELETE FROM assistant_grant_attachments WHERE claim_id=?1", [&claim.id])?;
     connection.execute(
         "INSERT OR IGNORE INTO assistant_grant_recompute(claim_id) VALUES(?1)",
         [&claim.id])?;
@@ -1222,6 +1291,11 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
         }
+        if membership_current && (attachment_one(connection)? || attachment_witness_one(connection)?) {
+            remaining -= 1;
+            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+            continue;
+        }
         break;
     }
     // A completed version only drains the old-build dirty queue. Readiness also
@@ -1253,6 +1327,8 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
              OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
              OR EXISTS(SELECT 1 FROM assistant_grant_additions)
              OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
+             OR EXISTS(SELECT 1 FROM assistant_grant_attachments)
+             OR EXISTS(SELECT 1 FROM assistant_grant_attachment_witnesses)
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)", [], |row| row.get(0))?;
     if dirty { return Ok(false); }

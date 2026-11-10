@@ -271,6 +271,32 @@ the budget. A key learned below a cursor can restore a demoted row through its
 independent addition task. On upgrade, committed legacy writer-retry obligations
 become durable verifier rechecks before their old queue is dropped. Old key-only
 cursors are requeued rather than interpreted in the new start/key ordering.
+Positive attachment uses a separate durable task for each authenticated claim
+and opposite claim kind. Its exact subject/origin/actor/kind index fixes a
+high-water claim ID when the task is created; a monotone keyset cursor visits one
+candidate per unit, including incompatible candidates. Task completion and
+conflict-witness cleanup also consume the shared 64-unit transaction budget
+(a zero-duration slice performs at most one unit). Authentication and task
+creation commit atomically; no append or receive transaction enumerates the
+opposite history. A first local base with no opposite history remains immediately
+usable. Late opposite claims create their own tasks, including pairs beyond an
+older task's high-water mark.
+
+The subject remains fenced until its attachment tasks and witness cleanup finish.
+Before changing an effective base, maintenance retains its previous effective
+record as a conflict witness, so partially attached restrictive transitions cannot
+hide an established cross-subject conflict. Demotion cancels the demoted claim's
+tasks; attachment candidates must still have authenticated endpoints. Private
+doctor diagnostics report `authenticated grant attachment in progress` and
+`attachment conflict-witness cleanup`. Total attachment work and eventual pair
+storage can still be \(O(\text{bases}\times\text{transitions})\), but each
+transaction is bounded and its cursor survives restart.
+
+This adds empty task/witness tables and an index without changing projection
+version 1 or rescanning existing history. Earlier projection builds attached
+authenticated claims atomically, so their committed pairs need no replay;
+unfinished authentication/backfill continues through the new bounded tasks.
+
 Subject readiness starts with indexed subject claims and probes the queued
 obligations by their keys; unrelated queue growth does not cause a queue scan.
 It is not constant cost: a subject with many claims or matching proof/range
