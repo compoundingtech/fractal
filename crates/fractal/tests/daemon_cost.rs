@@ -1048,6 +1048,9 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get("GET /v1/desired", "/v1/desired?subject={seat}"),
+    // Sparse kind selection must not walk every unrelated desired declaration.
+    get("GET /v1/desired", "/v1/desired?kind=mission&limit=1"),
     get(
         "GET /v1/resource-references/{*subject}",
         "/v1/resource-references/resource/bench/cost",
@@ -3609,7 +3612,14 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             }),
             ..cost
         };
-        costs.insert(probe.route.to_owned(), cost);
+        // Route coverage deduplicates by route, but both desired selection shapes need
+        // independent cost rows so the all-subject probe cannot hide the named probe.
+        let key = if probe.route == "GET /v1/desired" {
+            format!("{} ({})", probe.route, probe.path)
+        } else {
+            probe.route.to_owned()
+        };
+        costs.insert(key, cost);
     }
     // A real seat update invalidates its card between every read. Count only the read, using
     // the same canonical claim path as a driver; the warm probe above remains unchanged.
