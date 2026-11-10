@@ -1747,6 +1747,8 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "peer-too-old",
   "validation-failed",
   "idempotency-conflict",
+  "grant-profile-conflict",
+  "assistant-grant-authority-not-ready",
   "legacy-action-receipt-untrusted",
   "issuer-required",
   "pairing-origin-required",
