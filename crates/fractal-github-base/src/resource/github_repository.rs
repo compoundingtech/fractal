@@ -2380,6 +2380,45 @@ mod tests {
         assert_eq!(requests.iter().filter(|(_, path, _)| path.contains("/status")).count(), 1);
     }
 
+    #[tokio::test]
+    async fn pat_legacy_status_reads_revalidate_with_their_etag() {
+        use crate::github_http::app_read::{select, tests::{install, server_with_headers}};
+        use reqwest::StatusCode;
+        let root = tempfile::tempdir().unwrap();
+        let owner = "status-etag-fixture";
+        install(root.path(), owner, "gh-ci", "fixture-ci", chrono::Utc::now() + chrono::Duration::minutes(60));
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let mut pull = open_pull(1, "status-head", "SUCCESS");
+        pull.pointer_mut("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+            .unwrap().as_array_mut().unwrap().retain(|context| context["__typename"] == "CheckRun");
+        let revalidations = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = revalidations.clone();
+        let fixture = server_with_headers(move |headers, authorization, path, _| {
+            if !path.contains("/commits/") {
+                return (StatusCode::OK, Default::default(), json!({"data":{"repository":{"pullRequests":{
+                    "pageInfo":{"hasNextPage":false}, "nodes":[pull.clone()]}}}}));
+            }
+            assert_eq!(authorization, "Bearer fixture-pat");
+            let validator = headers.get("if-none-match").map(|value| value.to_str().unwrap().to_owned());
+            recorded.lock().push(validator.clone());
+            let mut response = reqwest::header::HeaderMap::new();
+            response.insert("etag", "\"status-etag\"".parse().unwrap());
+            if validator.as_deref() == Some("\"status-etag\"") {
+                return (StatusCode::NOT_MODIFIED, response, Value::Null);
+            }
+            (StatusCode::OK, response, json!({"state":"success","total_count":1,
+                "statuses":[{"context":"legacy/build","state":"success"}]}))
+        }).await;
+        for _ in 0..2 {
+            let details = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+                Duration::ZERO, "status-etag-fixture/repo", (owner, "repo"), true, true,
+                &BTreeSet::new(), true, &[]).await.unwrap();
+            assert!(details.open[0]["checks"].as_array().unwrap().iter().any(|check| check["name"] == "legacy/build"));
+        }
+        assert_eq!(*revalidations.lock(), [None, Some("\"status-etag\"".to_owned())],
+            "the second status read must be conditional, so an unchanged head costs no PAT quota");
+    }
+
     #[test]
     fn legacy_status_merge_preserves_checks_and_refuses_truncation() {
         let mut pull = open_pull(1, "head", "SUCCESS");

@@ -284,7 +284,7 @@ pub(crate) mod tests {
         }).await
     }
 
-    async fn server_with_headers(handler: impl Fn(&reqwest::header::HeaderMap, &str, &str, &Value) -> (StatusCode, reqwest::header::HeaderMap, Value) + Send + Sync + 'static) -> Server {
+    pub(crate) async fn server_with_headers(handler: impl Fn(&reqwest::header::HeaderMap, &str, &str, &Value) -> (StatusCode, reqwest::header::HeaderMap, Value) + Send + Sync + 'static) -> Server {
         async fn handle(State(handler): State<Arc<Handler>>, request: axum::extract::Request) -> axum::response::Response {
             let authorization = request.headers().get("authorization").unwrap().to_str().unwrap().to_owned();
             let path = request.uri().to_string();
