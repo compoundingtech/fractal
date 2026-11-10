@@ -1643,8 +1643,8 @@ impl MailboxRetry {
 /// not need. At one host's 07:30:58Z restart, about 60 drivers sent their harness events, presence
 /// diagnostics and native sessions in the new daemon's first eight seconds. Those requests added
 /// about seven seconds of writer time to those eight, and write-acks queued behind them. Over 30
-/// seconds the same work takes under a quarter of the writer. Harness evidence stays fresh for 90
-/// seconds, so nothing ages out while a driver waits.
+/// seconds the same work takes under a quarter of the writer. The shared harness observation
+/// freshness window exceeds this settling interval, so nothing ages out while a driver waits.
 pub const RESUME_SETTLE: Duration = Duration::from_secs(30);
 
 /// How long a driver re-executed into a new binary waits before it sends what its seat's delivery

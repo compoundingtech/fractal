@@ -9233,7 +9233,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
         }
         if let Some(attempt) = attempted.as_ref() {
-            let diagnostic = self.restart_admission_error(&subject.subject, attempt, previous)?;
+            let diagnostic = match self.verified_restart_exit(&subject.subject, attempt)? {
+                Some(detail) => Some(detail),
+                None => self.restart_admission_error(&subject.subject, attempt, previous)?,
+            };
             return self.fail_requested_restart(
                 subject,
                 member,
@@ -9289,6 +9292,45 @@ impl<R: RuntimeControl> Reconciler<R> {
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
         Ok(true)
+    }
+
+    /// A verified launch receipt belongs to its exact attempt, even if the PTY
+    /// disappears before the next reconciliation observation.
+    fn verified_restart_exit(
+        &self,
+        subject: &str,
+        attempt: &crate::model::ClaimRecord,
+    ) -> Result<Option<String>> {
+        let Some(operation) = attempt.body["fields"]["operation"].as_str() else {
+            return Ok(None);
+        };
+        // Start completion is a local observation, not a replicated claim. Include
+        // both storage classes so retained legacy receipts remain readable too.
+        let receipts = self.store.observations_for(subject, "runtime.action.succeeded")?;
+        let receipt = receipts.iter().rev().find(|claim| {
+            claim.body["fields"]["action"] == "start"
+                && claim.body["fields"]["operation_status"] == "verified"
+                && claim.body["fields"]["operation"] == operation
+                && crate::store::claim_log_order(claim) > crate::store::claim_log_order(attempt)
+        });
+        let Some(incarnation) = receipt
+            .and_then(|claim| claim.body["fields"]["incarnation_id"].as_str())
+        else {
+            return Ok(None);
+        };
+        // The live harness projection excludes exited runtimes. Read the retained
+        // driver report for this receipt's incarnation, not a live/work overlay.
+        let reports = self.store.observations_for(subject, "harness.observed")?;
+        let reason = reports
+            .iter()
+            .rev()
+            .find(|report| report.body["fields"]["incarnation_id"] == incarnation)
+            .filter(|report| report.body["fields"]["state"] == "ended")
+            .and_then(|report| report.body["fields"]["reason"].as_str());
+        Ok(Some(reason.map_or_else(
+            || "the replacement started successfully but is no longer observable".into(),
+            |reason| format!("the replacement started and then exited: {reason}"),
+        )))
     }
 
     /// A driver may publish its refusal and exit before the physical observation arrives.
@@ -47395,7 +47437,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            "version 2\nagent \"worker\" {{ description \"Keep the widget build green.\"; workspace {:?}; harness \"codex\" {{}} }}\n",
             workspace.path().display().to_string()
         );
         apply_source(&store, &source, "session-start");
@@ -47466,6 +47508,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert_eq!(message.title.as_deref(), Some("Session restarted: where you were"));
         assert!(message.content.contains("Branch agent/widget has PR 12 open"));
         assert!(message.content.contains("doc/agents/node.worker/handoff@"));
+        // The restart carries the seat's charter from its current declaration.
+        assert!(message.content.contains("## Your charter\n\nKeep the widget build green.\n"));
         assert_eq!(
             message.tags,
             vec![format!("{}worker-two", crate::handoff::SESSION_START_TAG_PREFIX)]

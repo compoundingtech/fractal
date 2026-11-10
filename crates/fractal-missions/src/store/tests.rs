@@ -7962,6 +7962,56 @@ fn step_timing_reads_seek_the_runs_own_steps() {
     assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
 }
 
+#[test]
+fn step_history_input_window_bounds_materialization_and_keeps_sparse_boundary_state() {
+    use rusqlite::StatementStatus;
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(&store, "version 2\nmission \"history-window\" state=\"ready\" { goal \"Bound history.\"; step \"work\" { agentless; } }", "history-window");
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "history-window".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "history-window-run".into(),
+    }).unwrap();
+    let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "working", None).unwrap();
+    let read = || store.mission_step_histories_for_runs(std::slice::from_ref(&run.subject), u128::MAX).unwrap();
+    let before = read();
+    let started_at = before[subject].attempts[0].started_at;
+    assert!(started_at.is_some());
+    let insert = |from: usize, to: usize| {
+        let connection = store.connection.write();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hdeb3f26f345c owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (SELECT ?2 UNION ALL SELECT x+1 FROM n WHERE x<?3)
+             INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT 'history-note-'||x,(SELECT batch_id FROM claims WHERE subject=?1 LIMIT 1),
+                 ?1,'work.progress','node',CASE WHEN x%2=0 THEN '{\"fields\":{\"clock\":\"running\"}}' ELSE '{\"fields\":{\"summary\":\"ordinary note\"}}' END,'[]',CAST(1000000000000000+x AS TEXT) FROM n",
+            rusqlite::params![subject, from, to],
+        ).unwrap();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h0e67d9bae7b1 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+             SELECT id,store_index FROM claims WHERE subject=?1",
+            [subject],
+        ).unwrap();
+    };
+    let measure = || {
+        let connection = store.readers.get();
+        let sql = format!("SELECT COUNT(*) FROM ({})", crate::store::missions::mission_step_history_sql());
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7e4c2618a702 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+        let rows: usize = statement.query_row(/* sqlite-large-value: allow-for-now lv-hd3351dff2a3a owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ [serde_json::to_string(&[&run.id]).unwrap()], |row| row.get(0)).unwrap();
+        (rows, statement.get_status(StatementStatus::VmStep))
+    };
+    insert(1, 1_000);
+    let small = measure();
+    insert(1_001, 10_000);
+    let large = measure();
+    assert_eq!(small.0, large.0, "read/materialized rows must not grow with old progress notes");
+    assert!(large.0 <= 1_548, "at most 129 claims for each of 12 lifecycle kinds");
+    assert!(large.1 <= small.1 + 100, "indexed input seeks must stay bounded: {small:?} -> {large:?}");
+    let after = read();
+    assert!(!after[subject].complete, "omitted input must be reported");
+    assert_eq!(after[subject].attempts[0].started_at, started_at, "sparse state before the note window is boundary context");
+}
+
 /// The run-driven timing read returns the rows the claims-driven read of #5108 returned, in the same
 /// order: across two runs, a retried step, a step never started and a subject filter.
 #[test]

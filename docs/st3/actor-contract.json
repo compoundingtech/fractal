@@ -417,6 +417,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st budgets attention": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
       "st changes list": {
         "actor": "optional",
         "accepts_person": true,
@@ -2209,6 +2218,15 @@
         "ignores_actor": false
       },
       "st subject basis": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st subject decisions": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,

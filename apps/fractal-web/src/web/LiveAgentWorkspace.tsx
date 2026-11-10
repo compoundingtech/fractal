@@ -20,6 +20,7 @@ import * as React from 'react'
 import { RegisteredPortal, usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
+import { flushSync } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
@@ -380,6 +381,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const narrow = dimensions === undefined ? windowNarrow : dimensions.width < 900
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
   const sidebarOpener = React.useRef<HTMLButtonElement>(null)
+  const panelOpener = React.useRef<HTMLButtonElement>(null)
   const windowWidth = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
   const windowHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
   const viewport = dimensions?.width ?? windowWidth
@@ -642,6 +644,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
   const narrowDetailsOpen = narrow && current !== '' && (diffOpen || openedTool !== undefined)
   const closeDetails = () => { setDiffOpen(false); setOpenedTool(undefined) }
+  // An explicit dock close unmounts the control that has focus. Commit the close, then hand focus to the header
+  // toggle that reopens the dock. Passive closes (agent switch, crossing the narrow breakpoint) leave focus alone.
+  const closeDockedInspector = () => {
+    flushSync(() => setDiffOpen(false))
+    panelOpener.current?.focus()
+  }
   const openDetailsUri = (uri: string) => {
     const ref = uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri
     open({ ref })
@@ -698,13 +706,13 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {shortcutHelp}
               {narrow ? null : <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
-              <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
+              <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setResourcesAgent(undefined); if (dockedInspector === undefined) setDiffOpen(false); else closeDockedInspector() }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
-                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
+                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={closeDockedInspector} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
                 </React.Suspense>
               ) : undefined}>
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} panelToggleRef={panelOpener} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
                 <GatewayConnectionStatus />
                 {!narrow && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>

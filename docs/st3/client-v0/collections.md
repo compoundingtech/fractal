@@ -161,7 +161,8 @@ before displaying the new order. Rows leaving a bounded window appear in
 
 Rows are joined in Fractal so a client never joins collections itself. A mission's
 `run_details` carry `steps` for each open run and for its latest run, and every
-run's steps in a mission detail read. An agent names its queue in
+run's steps in a mission detail read. A window never carries the detail-only step history
+(`attempts`, `waits`, `transitions`, `history_complete`) or per-step `eta`. An agent names its queue in
 `current_work`, `next_work`, and `upcoming_work`: each step's mission, run,
 path, title, first goal, and state, and the `subagents` its harness runs now.
 A work row names its `mission_id`.

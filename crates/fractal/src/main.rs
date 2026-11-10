@@ -358,6 +358,11 @@ enum Command {
         #[command(subcommand)]
         command: AttentionCommand,
     },
+    /// Inspect mission budgets.
+    Budgets {
+        #[command(subcommand)]
+        command: BudgetsCommand,
+    },
     /// Assess fleet machines, health, and capacity.
     Machines(MachinesArgs),
     /// Inspect current agents or explicit agent history.
@@ -2376,6 +2381,8 @@ enum SubjectCommand {
         #[arg(long = "kind", required = true)]
         kinds: Vec<String>,
     },
+    /// Fold the complete immutable decision.tree history without creating asks.
+    Decisions { subject: String },
 
     /// Show one typed subject card.
     Show(SubjectShowArgs),
@@ -3966,6 +3973,26 @@ struct SubscriptionRequestArgs {
 }
 
 #[derive(Subcommand)]
+enum BudgetsCommand {
+    /// Read a mission's attention budget without charging it.
+    Attention {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Mission)))]
+        mission: String,
+        /// Act as this person or agent; defaults to the harness agent or configured person.
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_actor_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        actor: Option<String>,
+        /// Person whose attention budget to read; required for agent callers.
+        #[arg(long, value_parser = parse_person_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+        person: Option<String>,
+        /// Evaluate the budget at this Unix timestamp in milliseconds.
+        #[arg(long, value_name = "UNIX_MS")]
+        at: Option<u128>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AttentionCommand {
     /// List current alerts, then unread updates.
     Ls {
@@ -5117,7 +5144,7 @@ pub fn main(cli_build_stamp: Option<&'static str>, local_build_stamp: Option<&'s
         std::env::args_os().next().as_deref(),
         std::env::var_os("FRACTAL_SUPPRESS_DEPRECATION").as_deref(),
     ) {
-        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed on 2026-11-16.");
+        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed once every host and caller uses 'fractal'.");
     }
     fractal_drivers::version::set_build_stamps(cli_build_stamp, local_build_stamp);
     fractal_tui::set_build_stamps(cli_build_stamp, local_build_stamp);
@@ -5986,6 +6013,16 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.json,
             )
             .await
+        }
+        Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } => {
+            let response = attention_budget_client(
+                &endpoint, actor.as_deref(), config.person.as_deref(),
+            )?
+                .attention_budget(&mission, person.as_deref(), at)
+                .await?;
+            print_client_value(&response, cli.json)
         }
         Command::Machines(args) => run_machines(&endpoint, args, cli.json).await,
         Command::Agents { command } => {
@@ -7422,7 +7459,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7863,6 +7900,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let telemetry_started = Instant::now();
     telemetry.shutdown();
     stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
+    fractal_daemon::api::flush_ancestry_diagnostics();
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
@@ -9176,6 +9214,22 @@ fn trace_scalar(value: &Value) -> String {
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| value.to_string())
+}
+
+/// Keep the Unix acting identity separate from the report's recipient filter.
+/// Fabric credentials establish their own authority and need no local actor.
+fn attention_budget_client(
+    endpoint: &Endpoint,
+    explicit_actor: Option<&str>,
+    configured_person: Option<&str>,
+) -> Result<GeneratedClient> {
+    if matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
+        let actor = configured_actor(explicit_actor, configured_person, "budgets attention")?;
+        reject_foreign_agent_actor(&actor)?;
+        generated_client(endpoint, Some(&actor))
+    } else {
+        generated_client(endpoint, None)
+    }
 }
 
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
@@ -11626,6 +11680,21 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 ))
                 .await?;
             print_value(&result, json_output)
+        }
+        SubjectCommand::Decisions { subject } => {
+            let snapshot: fractal_daemon::store::custom::DecisionInputs = client.get(&format!(
+                "/v1/custom/decision-inputs?subject={}", urlencoding::encode(&subject),
+            )).await?;
+            let basis = snapshot.basis;
+            let inputs = snapshot.claims.into_iter().enumerate().map(|(order, claim)| {
+                fractal_schema::custom::decisions::Claim {
+                    id: claim.id, kind: claim.kind, actor: claim.actor,
+                    order: order as u64,
+                    fields: claim.body.get("fields").unwrap_or(&claim.body).clone(),
+                }
+            }).collect::<Vec<_>>();
+            let folded = fractal_schema::custom::decisions::fold(&subject, &inputs, basis);
+            print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
             if args.references {
@@ -14677,6 +14746,20 @@ fn render_declared_admission(output: &mut String, admission: &fractal_client::De
             let _ = writeln!(output, "  token_budget: {tokens}");
         }
     }
+}
+
+/// The charter section of an agent card: the `description` of the agent's current declaration,
+/// line by line, with terminal control sequences removed.
+fn render_agent_charter(charter: &str) -> String {
+    let mut output = String::from("Charter\n");
+    for line in charter.lines() {
+        if !line.trim().is_empty() {
+            output.push_str("  ");
+            push_todo_terminal_text(&mut output, line);
+        }
+        output.push('\n');
+    }
+    output
 }
 
 /// One line naming a running subagent: what it does, its type, and, given the time, when it

@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 
 from unittest import mock
+import release_gh
 
 from release_notes import FIELDS
 
@@ -178,9 +179,10 @@ with tempfile.TemporaryDirectory() as temporary:
         (checkout / f'.github/{kind}-compat-baseline.json').write_text(json.dumps(pin))
     (checkout / 'scripts/release_notes.py').write_text(STUB_NOTES)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
-    # Fixture history must not depend on the account's interactive signing agent.
+    # Fixture history must not depend on account signing or identity hooks.
     sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'core.hooksPath', '/dev/null', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     sh('git', 'remote', 'add', 'origin', str(checkout), cwd=checkout)
@@ -481,6 +483,61 @@ except module.CommandFailed as error:
     assert str(error) == 'sh exited 3: reason', str(error)
 else:
     raise AssertionError('a failing command must raise')
+
+# API diagnostics name the method and endpoint regardless of gh option ordering. Neither command
+# payloads nor responses echoing those payloads may appear in retry, failure, or reconciliation logs.
+endpoint = 'repos/example/project/git/refs/tags/edge'
+payload = 'private-payload-value'
+api_cases = (
+    (('api', '--method', 'PATCH', endpoint, '-f', f'sha={payload}'), 'PATCH'),
+    (('api', endpoint, '-X', 'PATCH', '-F', f'sha={payload}'), 'PATCH'),
+    (('api', '--method=PATCH', '--raw-field', f'sha={payload}', endpoint), 'PATCH'),
+    (('api', '-XPATCH', f'-fsha={payload}', endpoint), 'PATCH'),
+    (('api', '--input', payload, endpoint), 'POST'),
+    (('api', '-F', f'sha={payload}', endpoint), 'POST'),
+    (('api', '--header', f'Authorization: {payload}', '--paginate', endpoint), 'GET'),
+    (('api', endpoint), 'GET'),
+)
+for args, method in api_cases:
+    for response_stream in ('stderr', 'stdout'):
+        for retry_delays, reconciled in (('', False), ('0', False), ('0', True), ('', True)):
+            response = dict(stdout='', stderr='')
+            response[response_stream] = f'HTTP 504: rejected {payload}\n{TOKEN}'
+            result = subprocess.CompletedProcess(['gh', *args], 1, **response)
+            log = io.StringIO()
+            with mock.patch.dict(os.environ, RELEASE_GH_RETRY_DELAYS=retry_delays), \
+                    mock.patch.object(release_gh.subprocess, 'run', return_value=result) as github, \
+                    mock.patch.object(release_gh.sys, 'stderr', log):
+                try:
+                    completed = release_gh.gh(*args, step='diagnostic-test',
+                                              done=(lambda: True) if reconciled else None)
+                except SystemExit as error:
+                    assert not reconciled
+                    message = str(error)
+                    assert f'gh api {method} {endpoint} failed: HTTP 504' in message, message
+                else:
+                    assert reconciled and completed.returncode == 0
+                    message = ''
+            output = log.getvalue() + message
+            assert f'gh api {method} {endpoint}' in output, output
+            assert payload not in output and TOKEN not in output and 'sha=' not in output, output
+            assert github.call_count == (2 if retry_delays and not reconciled else 1)
+            if retry_delays:
+                assert 'retrying in 0s' in output, output
+            if reconciled:
+                assert 'took effect before it failed' in output, output
+
+# Permanent failures do not retry, and even non-HTTP response text is never printed.
+result = subprocess.CompletedProcess(['gh', 'api', endpoint], 1, '', f'permission denied: {payload}')
+with mock.patch.dict(os.environ, RELEASE_GH_RETRY_DELAYS='0'), \
+        mock.patch.object(release_gh.subprocess, 'run', return_value=result) as github:
+    try:
+        release_gh.gh('api', endpoint, step='diagnostic-test')
+    except SystemExit as error:
+        assert str(error) == f'diagnostic-test: gh api GET {endpoint} failed: exit status 1', str(error)
+    else:
+        raise AssertionError('a permanent API failure must raise')
+    github.assert_called_once()
 
 # Mock the single-POST recovery protocol without any release mutations.
 from release_draft_recovery import create_verified_draft

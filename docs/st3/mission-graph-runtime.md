@@ -1505,6 +1505,8 @@ Fractal supplies these exact context names:
 
 The mission and step values are available for `${NAME}` KDL interpolation when the current context defines them. Step members and running gates receive those values as environment variables.
 
+Each `ST_` name in the table also has a `FRACTAL_` spelling with the same value, for example `${FRACTAL_MISSION_RUN}` for `${ST_MISSION_RUN}`. Mission KDL may use either spelling: publication stores the `ST_` spelling, so both publish the same mission revision and a rendered definition shows `${ST_…}`. Step members and running gates receive both environment variables.
+
 Loop KDL can also use `${loop.round}` and `${loop.feedback}`.
 
 Publication rejects an unknown `${NAME}`. Write `$${NAME}` for the literal text `${NAME}`, for example in a goal that quotes a shell variable. Fractal removes the first `$`.

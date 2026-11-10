@@ -109,19 +109,25 @@ details in #4002. A local timeout alone is not authority to remove a member.
 
 Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
 empty budgets block) requires every active fleet incarnation to advertise
-`features.declared_admission=1` in its latest own-origin, authenticated
-`daemon.started` claim anchored to the admitted incarnation. The publication gate
-requires signed, current, unambiguous membership and fails closed on missing,
+`features.declared_admission=1` in its latest own-origin, authenticated, signed
+`daemon.started` claim anchored to the admitted incarnation. Publications containing
+attention additionally require `features.declared_attention=1` from every active
+incarnation, including the local daemon, in that same advertisement. The publication
+gate requires signed, current, unambiguous membership and fails closed on missing,
 false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy
-writers. A refusal rejects the full publication before any declaration is written;
-an old member never receives a new-child publication through a refused write.
-Upgrade all active members or fence legacy peers before publishing the metadata.
+writers with `declared-admission-feature-barrier`. A refusal rejects the full
+publication before any declaration is written; an old member never receives a
+new-child publication through a refused write. Attention-free declarations continue
+publishing in mixed fleets with version-1 declared-admission support. Upgrade all
+active members or fence legacy peers before publishing attention.
 Keep every member on a supporting binary while populated metadata exists.
 This is an ongoing requirement. The gate checks support only at write time.
 It does not prevent a member from starting an old binary later.
 It does not prevent an old member from joining later.
 An old member drops agent metadata and fails mission revision validation.
-Remove the metadata with upgraded readers before a rollback.
+Remove attention with supporting readers before a mixed-version rollback; remove
+all declared-admission metadata before rolling back to readers that lack version-1
+declared-admission support.
 
 New agent authoring accepts only peak `memory-max` and `disk-max` budgets.
 `cpu-seconds` and `token-budget` are mission-run totals, including all retries,
@@ -135,6 +141,23 @@ not a claim about every external declaration.
 
 This per-feature gate does not establish the general adjacent-release guarantee
 described above. See [declared admission](priority.md#declared-admission).
+
+### Agent charter publication
+
+An agent's `description`, its charter, holds up to 8,192 UTF-8 bytes. A member that
+does not advertise `features.agent_charter=1` bounds it at 1,000 bytes whenever it
+parses declaration KDL: when it publishes or previews, and when it materializes the
+agents a mission declares for a run it evaluates. It admits replicated desired claims
+and reconciles a top-level agent from its stored declaration without that check.
+Publishing an agent declaration, directly or inside a mission, whose charter exceeds
+1,000 bytes therefore requires every active fleet incarnation to advertise
+`features.agent_charter=1`, under the membership and evidence policy of declared
+admission publication. Like declared admission, the gate fails closed without signed,
+anchored fleet membership: a standalone member with no anchored fleet cannot publish a
+charter over 1,000 bytes. A refusal fails with `agent-charter-feature-barrier` before
+anything is written. A charter of at most 1,000 bytes needs no advertisement. The
+gate checks support only at write time: keep every member on a supporting binary
+while a longer charter exists.
 
 ### Checkpoints in a mixed fleet
 
