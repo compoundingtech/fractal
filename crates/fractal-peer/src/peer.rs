@@ -48,6 +48,8 @@ mod seat_freshness;
 pub use seat_freshness::*;
 mod seat_freshness_reads;
 pub use seat_freshness_reads::*;
+#[cfg(test)]
+mod local_only_tests;
 
 /// The peer listener's shared state, with this node's daemon as the store.
 type PeerState = smallclaims::sync::PeerState<MainBackend>;
@@ -531,6 +533,10 @@ impl ClientRelay {
     }
 
     pub fn from_config(config: &Config) -> Result<Option<Self>> {
+        if config.local_only() {
+            config.network_policy().validate_config(config)?;
+            return Ok(None);
+        }
         let (Some(fleet), Some(secret)) = (
             config.fleet_id.as_deref(),
             config.shared_secret_file.as_deref(),
@@ -2104,6 +2110,7 @@ pub async fn conversation_gateway_relay(
 
 /// Run the replication worker: sync this node's store, through its daemon, with the fleet.
 pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
+    config.network_policy().require(crate::config::NetworkOperation::Replication)?;
     config.validate()?;
     if let Err(error) = crate::replication_worker_build::record(&config.state_dir) {
         eprintln!("st replication-worker: WARNING: cannot report worker build: {error:#}");
