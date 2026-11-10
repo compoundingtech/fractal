@@ -2592,6 +2592,14 @@ fn declared_admission_human_output_is_explicitly_not_enforced() {
 }
 
 #[test]
+fn agent_charter_prints_every_line_without_terminal_controls() {
+    assert_eq!(
+        render_agent_charter("Keep main green.\n\nOwn \u{1b}[31mreleases\u{1b}[0m and notes."),
+        "Charter\n  Keep main green.\n\n  Own releases and notes.\n"
+    );
+}
+
+#[test]
 fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
     let parked = stopped_agent(serde_json::json!({
         "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
