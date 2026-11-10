@@ -27,7 +27,7 @@ describe('web consumption of the repository client-control golden file', () => {
     expect(binding).toEqual(vector.input)
     expect(visibleStateCanonicalJson(vector.input.visible_state)).toBe(vector.canonical_visible_state)
     expect(await visibleStateDigest(vector.input.visible_state)).toBe(vector.visible_state_sha256)
-    expect(new TextDecoder().decode(await clientResultCanonicalBytes(vector.input))).toBe(vector.canonical_bytes)
+    expect(await clientResultCanonicalBytes(vector.input)).toEqual(new TextEncoder().encode(vector.canonical_bytes))
     const key = await verificationKey()
     expect(await verifyClientResultBinding(binding, vector.signature_p1363_base64url, key)).toBe(true)
     for (const changed of vector.negative_bindings) {
@@ -50,6 +50,45 @@ describe('web consumption of the repository client-control golden file', () => {
       { name: 'ECDSA', hash: 'SHA-256' }, await verificationKey(),
       bytes(golden.message_domain_signature_p1363_base64url), new TextEncoder().encode(golden.message_domain_bytes),
     )).toBe(true)
+  })
+
+  it.each([
+    '', '!', 'AA', 'A'.repeat(85), 'A'.repeat(87), 'A'.repeat(85) + 'B',
+    golden.vectors[0]!.signature_p1363_base64url + '=',
+    ' ' + golden.vectors[0]!.signature_p1363_base64url,
+    'A'.repeat(86),
+  ])('refuses malformed or invalid signatures without rejecting: %j', async signature => {
+    await expect(verifyClientResultBinding(golden.vectors[0]!.input, signature, await verificationKey())).resolves.toBe(false)
+  })
+
+  it('does not swallow a programmer error using a non-ECDSA verification key', async () => {
+    const key = await crypto.subtle.importKey('raw', new Uint8Array(16), 'AES-GCM', false, ['encrypt'])
+    await expect(verifyClientResultBinding(
+      golden.vectors[0]!.input, golden.vectors[0]!.signature_p1363_base64url, key,
+    )).rejects.toMatchObject({ name: 'InvalidAccessError' })
+  })
+
+  it.each([
+    { screen: 'NowRoot', params: null },
+    { screen: 'NowRoot', unexpected: 'value' },
+    { screen: 'Attention', params: null },
+    { screen: 'Attention' },
+    { screen: 'Attention', params: { id: 'attention/unit-ask', unexpected: 'value' } },
+  ])('strictly rejects unsupported navigation wire properties: %j', args => {
+    expect(() => decodeCommand(testCommand('phone.navigate', args))).toThrow()
+  })
+
+  it('strictly rejects unknown boundary keys and null optional values', () => {
+    expect(() => decodeCommand({ ...testCommand('phone.inspect'), unexpected: 'value' })).toThrow()
+    expect(() => decodeGrant({ ...encodeGrant(testGrant()), unexpected: 'value' })).toThrow()
+    expect(() => decodeGrant({ ...encodeGrant(testGrant()), item_id: null })).toThrow()
+    expect(() => decodeBinding({ ...golden.vectors[0]!.input, unexpected: 'value' })).toThrow()
+    expect(() => decodeResult({ command_id: golden.vectors[0]!.input.command_id, outcome: 'refused', unexpected: 'value' })).toThrow()
+    expect(() => decodeReceipt({
+      commandId: golden.vectors[0]!.input.command_id, commandKind: 'phone.inspect',
+      device: golden.vectors[0]!.input.device, issuer: 'agent/unit',
+      signedResult: null, terminalState: 'refused', verifiedResultSignature: null, unexpected: 'value',
+    })).toThrow()
   })
 
   it.each(golden.vectors)('signs and encodes a real web identity result using shared binding $name', async vector => {

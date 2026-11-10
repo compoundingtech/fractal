@@ -35,6 +35,26 @@ describe('generated client-control grant-check handler boundary', () => {
     expect(await exercise({ ...testCommand('phone.inspect'), state })).toEqual(refused)
   })
 
+  it.each([
+    { screen: 'NowRoot', params: null },
+    { screen: 'NowRoot', unexpected: 'value' },
+    { screen: 'Attention', params: null },
+    { screen: 'Attention' },
+    { screen: 'Attention', params: { id: 'attention/unit-ask', unexpected: 'value' } },
+  ])('refuses malformed navigation args without normalization: %j', async args => {
+    expect(await exercise(testCommand('phone.navigate', args))).toEqual(refused)
+  })
+
+  it('refuses an unknown delivered-command key without navigating or signing', async () => {
+    expect(await exercise({ ...testCommand('phone.navigate', { screen: 'NowRoot' }), unexpected: 'value' })).toEqual(refused)
+  })
+
+  it('accepts absent params only for the generated no-param route', async () => {
+    expect(await exercise(testCommand('phone.navigate', { screen: 'NowRoot' }))).toEqual({
+      result: 'Applied', navigations: [{ _tag: 'NowRoot' }], signatures: 1,
+    })
+  })
+
   it.each(['Agents', 'Missions', 'Usage', 'History'])(
     'refuses nongranted screen %s without navigation or signing', async screen => {
       expect(await exercise(testCommand('phone.navigate', { screen }))).toEqual(refused)

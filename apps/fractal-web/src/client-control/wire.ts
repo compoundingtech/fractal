@@ -7,21 +7,31 @@ import {
 } from '../../../../clients/typescript/fractal-client/ClientControl.generated.ts'
 import type { ClientControlIdentity } from './identity.ts'
 
-export const decodeCommand = Schema.decodeUnknownSync(Wire.DeviceCommand)
+export const decodeCommand = Wire.decodeUnknownSync(Wire.DeviceCommand, 'strict')
 export const encodeCommand = Schema.encodeSync(Wire.DeviceCommand)
-export const decodeGrant = Schema.decodeUnknownSync(Wire.ClientControlGrant)
+export const decodeGrant = Wire.decodeUnknownSync(Wire.ClientControlGrant, 'strict')
 export const encodeGrant = Schema.encodeSync(Wire.ClientControlGrant)
-export const decodeBinding = Schema.decodeUnknownSync(Wire.ClientResultBinding)
+export const decodeBinding = Wire.decodeUnknownSync(Wire.ClientResultBinding, 'strict')
 export const encodeBinding = Schema.encodeSync(Wire.ClientResultBinding)
-export const decodeResult = Schema.decodeUnknownSync(Wire.DeviceResult)
+export const decodeResult = Wire.decodeUnknownSync(Wire.DeviceResult, 'strict')
 export const encodeResult = Schema.encodeSync(Wire.DeviceResult)
-export const decodeReceipt = Schema.decodeUnknownSync(Wire.ClientCommandReceipt)
+export const decodeReceipt = Wire.decodeUnknownSync(Wire.ClientCommandReceipt, 'strict')
 export const encodeReceipt = Schema.encodeSync(Wire.ClientCommandReceipt)
 
 const base64url = (bytes: Uint8Array): string =>
   btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join('')).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '')
-const fromBase64url = (value: string): Uint8Array<ArrayBuffer> =>
-  Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), byte => byte.charCodeAt(0))
+const fromBase64url = (value: string): Uint8Array<ArrayBuffer> | undefined => {
+  // A 64-byte P1363 signature has exactly 86 unpadded base64url characters.
+  if (!/^[A-Za-z0-9_-]{86}$/u.test(value)) return undefined
+  let bytes: Uint8Array<ArrayBuffer>
+  try {
+    bytes = Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/')), byte => byte.charCodeAt(0))
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'InvalidCharacterError') return undefined
+    throw error
+  }
+  return bytes.length === 64 && base64url(bytes) === value ? bytes : undefined
+}
 
 /** Authority/foreground checks belong to the command handler; this codec creates no authority. */
 export const signDeviceResult = async (input: {
@@ -45,6 +55,14 @@ export const signDeviceResult = async (input: {
 export const verifyClientResultBinding = async (binding: unknown, signature: string, key: CryptoKey): Promise<boolean> => {
   let decoded: Wire.ClientResultBinding
   try { decoded = decodeBinding(binding) } catch { return false }
+  const signatureBytes = fromBase64url(signature)
+  if (signatureBytes === undefined) return false
   const bytes = await clientResultCanonicalBytes(encodeBinding(decoded) as CanonicalBinding) as Uint8Array<ArrayBuffer>
-  return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, fromBase64url(signature), bytes)
+  try {
+    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, signatureBytes, bytes)
+  } catch (error) {
+    // InvalidAccessError (wrong key/algorithm), TypeError and other programmer errors propagate.
+    if (error instanceof DOMException && (error.name === 'DataError' || error.name === 'OperationError')) return false
+    throw error
+  }
 }
