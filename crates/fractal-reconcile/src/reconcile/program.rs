@@ -39,9 +39,9 @@ pub const RESULT_KEY: &str = "$result";
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
 /// a person keeps its program loaded (§11).
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
-/// How long a run credential stays valid at most. It binds only while its attempt runs, so this
-/// only bounds a credential whose attempt the store never ends.
-const RUN_CREDENTIAL_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// A run credential has no expiry of its own: it binds only while its attempt is its step run's
+/// current, live attempt, however long that attempt waits on an ask or a child run.
+const RUN_CREDENTIAL_LIFETIME_MS: u64 = u64::MAX;
 const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf owner=fractal_reconcile::reconcile::program TODO=trace-statement-and-value-representation */ include_str!("program_host.mjs");
 /// How long a crashed host waits before its replacement starts, so a host that cannot start does
 /// not spin.
@@ -151,14 +151,6 @@ impl ProgramEngine {
             Err(reason) => return Ok(Dispatched::Refused(reason)),
         };
         let journal = self.journal(&dispatch.step, dispatch.attempt)?;
-        // The attempt's effects act as its run (docs/st3/program-engine.md §3). The credential
-        // binds only while this attempt is the step's live attempt, so its lifetime is a backstop;
-        // each start or resume mints a new one, and it never enters the journal or a log.
-        let mut env = dispatch.env.clone();
-        env.insert(
-            crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
-            self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?,
-        );
         let mut inner = self.lock();
         if inner.running.get(&dispatch.step).is_some_and(|running| {
             running.dispatch.attempt == dispatch.attempt && inner.host.as_ref().is_some_and(|host| host.generation == running.generation)
@@ -174,6 +166,15 @@ impl ProgramEngine {
             }
         };
         inner.faults.remove(&dispatch.step);
+        // The attempt's effects act as its run (docs/st3/program-engine.md §3). The credential is
+        // minted only here, once the host runs and this attempt is about to start, so a refused,
+        // already running or host-down dispatch leaves no row; each start or resume mints one, and
+        // it never enters the journal or a log.
+        let mut env = dispatch.env.clone();
+        env.insert(
+            crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
+            self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?,
+        );
         eprintln!(
             "fractal: program {} attempt {} started with {} journaled steps",
             dispatch.step,
