@@ -736,6 +736,10 @@
     "OrderedMembership": {"type": "object", "additionalProperties": false, "required": ["id", "container", "member", "position", "revision"], "properties": {"id": {"$ref": "#/$defs/ArrangementSubject"}, "container": {"$ref": "#/$defs/ArrangementId"}, "member": {"$ref": "#/$defs/ArrangementSubject"}, "position": {"$ref": "#/$defs/OrderedMembershipPosition"}, "revision": {"$ref": "#/$defs/Revision"}}},
     "OrderedMembershipState": {"description": "Always-observable state of a whole membership container, not only the held window. `live_count` counts live members; `changed_index` is an opaque host-local monotonic invalidation frontier scoped by `snapshot.host_id`: a larger value on the same host means the container may have changed. It is not a canonical revision, a count of global history, or comparable across hosts.", "type": "object", "additionalProperties": false, "required": ["container", "live_count", "changed_index"], "properties": {"container": {"$ref": "#/$defs/ArrangementId"}, "live_count": {"type": "integer", "minimum": 0}, "changed_index": {"type": "integer", "minimum": 0}}},
     "OrderedMembershipPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "ordered-memberships"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/OrderedMembership"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
+    "ReadPositionConversation": {"type": "string", "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$", "maxLength": 512, "description": "The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes."},
+    "ReadPosition": {"description": "One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim.", "allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "owner", "conversation", "at"], "properties": {"kind": {"const": "read-position"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp"}}}]},
+    "ReadPositionPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "read-positions"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/ReadPosition"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
+    "ReadPositionAdvanceParameters": {"type": "object", "additionalProperties": false, "required": ["owner", "conversation", "at"], "properties": {"owner": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person."}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp", "description": "The newest prose time seen; an `at` not beyond the stored position completes without a claim."}}},
     "Id": { "x-st-ref": "*", "description": "Subject reference `family/rest`.", "type": "string", "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$" },
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
@@ -2411,6 +2415,7 @@
             "activity": { "type": ["string", "null"], "description": "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text." },
             "host_id": { "oneOf": [{ "$ref": "#/$defs/HostId" }, { "type": "null" }] },
             "last_activity_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+            "last_prose_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When the agent last said something: assistant message or content in its current incarnation's timeline, or mail it sent. Tool calls and words to the agent do not count. Clients compare it with a reader's position for \"new since you last looked\". Absent on older daemons." },
             "mail_custody": { "$ref": "#/$defs/AgentMailCustody", "description": "Pending mail held for the named successor; omitted without custody." },
             "silent_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
             "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
@@ -3466,6 +3471,7 @@
             "harness.answer",
             "arrangement.edit",
             "arrangement.membership.edit",
+            "read-position.advance",
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
@@ -3666,6 +3672,7 @@
         {"properties": {"type": {"const": "harness.answer"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}, "id": {"allOf": [{"$ref": "#/$defs/Id"}, {"maxLength": 256, "description": "At most 256 UTF-8 bytes; runtime enforces byte length before settlement."}]}}},
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
+        {"properties": {"type": {"const": "read-position.advance"}, "parameters": {"$ref": "#/$defs/ReadPositionAdvanceParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
@@ -3921,7 +3928,8 @@
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
-        "membership_revision": { "$ref": "#/$defs/Revision" }
+        "membership_revision": { "$ref": "#/$defs/Revision" },
+        "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },
@@ -4573,6 +4581,7 @@
       "glasses",
       "arrangements",
       "ordered-memberships",
+      "read-positions",
       "summary",
       "clients",
       "usage",
@@ -4589,6 +4598,7 @@
       "work",
       "glasses",
       "arrangements",
+      "read-positions",
       "summary",
       "clients",
       "usage",
@@ -4704,6 +4714,17 @@
             "kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128},
             "collection": {"const": "ordered-memberships"},
             "person": {"$ref": "#/$defs/ArrangementPerson"}, "subject": {"$ref": "#/$defs/ArrangementId"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 200}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "id", "collection", "person"],
+          "properties": {
+            "kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "collection": {"const": "read-positions"},
+            "trace": {"$ref": "#/$defs/SubscribeTraceContext"},
+            "person": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person; requires the read-positions capability."},
             "limit": {"type": "integer", "minimum": 1, "maximum": 200}
           }
         },

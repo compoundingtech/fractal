@@ -54,6 +54,7 @@ mod declared_admission;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
+pub mod read_positions;
 pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
@@ -793,7 +794,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h22c8c670811c owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1109553f0fdc owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -843,6 +844,12 @@ CREATE INDEX IF NOT EXISTS claims_timeline_activity_time_index
 ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
 WHERE kind='harness.timeline'
   AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result');
+-- Prose lookups must not walk newer tool traffic or user prompts, including an empty result.
+CREATE INDEX IF NOT EXISTS claims_timeline_prose_time_index
+ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+  AND json_extract(body, '$.fields.role')='assistant';
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
@@ -1379,6 +1386,11 @@ ON local_observations(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS local_observations_timeline_index
 ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id)
 WHERE kind='harness.timeline';
+CREATE INDEX IF NOT EXISTS local_observations_timeline_prose_index
+ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id, after_store_index, observed_at_unix_ms)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+  AND json_extract(body, '$.fields.role')='assistant';
 -- The roster cache's local frontier: the newest agent timeline row a graph cut can see. Only
 -- an agent's timeline rows can change a roster card, so this partial covering index bounds the
 -- frontier lookup by newer agent timeline rows alone; heartbeats, telemetry and every other
@@ -7357,6 +7369,7 @@ impl Store {
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
+                | "read-position.advanced"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -11490,6 +11503,7 @@ pub fn append_claim_tx_with_assistant_answer(
         .map_err(anyhow::Error::new)?;
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
@@ -16061,6 +16075,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::glasses::validate_owner(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::read_positions::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
@@ -23145,6 +23161,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::glasses::validate_owner(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::read_positions::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;

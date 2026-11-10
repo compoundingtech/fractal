@@ -2842,6 +2842,39 @@ Projection rebuild and heal retain a local rebuild frontier, so replaying older 
 claims cannot move a lifecycle-updated frontier backwards. This watermark survives on the
 same host without becoming shared projection or checkpoint authority.
 
+## Read positions
+
+A read position is one person's position in one conversation: the time of the newest prose they
+have seen there, on any device or host. Positions sync across a person's TUI, web and phone;
+per-device storage is only an offline cache. Discover the `read-positions` capability, version
+1. It is granted only when the session can list, follow and advance (`read.projections`,
+`read.arrangements`, `control.arrangements`, and a concrete person or trusted local fleet agent);
+otherwise a client keeps positions locally, as against an older daemon. No new scopes exist:
+positions are person workspace state, granted with arrangements.
+
+Read `GET /v1/client/read-positions?person=person%2FNAME` (ordinary cursor/limit pagination).
+A person session selects only its own person; another person is `forbidden`. Items are
+`ReadPosition` resources ordered by conversation: `id`
+(`read-position/person/NAME/<conversation>`), `kind: "read-position"`, `owner`,
+`conversation` (`agent/...` or `session/...`, at most 512 bytes), `at`, `revision` (the
+winning claim) and `updated_at`.
+
+Advance with the `read-position.advance` action, fenced by `snapshot_id` only:
+`{owner, conversation, at}`. Positions only move forward. An `at` not beyond the stored
+position completes without a claim; otherwise the daemon appends `read-position.advanced` on
+`read-position/person/NAME`. Every completed advance returns `read_position_at`, the stored
+position after the merge. Each host keeps the largest `at` per conversation (equal times go
+to the larger canonical claim key), so advances from several devices and hosts converge in any
+replication order, and idempotency keys may be fresh per send.
+
+Follow `{"kind":"subscribe","collection":"read-positions","person":"person/NAME"}`. Frames
+are ordinary resource frames; treat each as an invalidation and re-list. A frame is sent
+whenever any of the person's positions changes, also outside the window's rows.
+
+A position is unknown until a conversation is first read anywhere: nothing there is new.
+A conversation is unread when its position is known and its roster `last_prose_at` is more
+than 2 seconds (roster skew) after it.
+
 ## Agent and plain-shell creation
 
 `agent.create` takes `name`, `harness` (`claude`, `codex`, `omp`, `pi`, `opencode`), optional `host`,

@@ -252,6 +252,13 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     if matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked") {
         return false;
     }
+    // A read position is shown only by its own collection, which shows nothing else.
+    if collection == fractal_schema::read_positions::COLLECTION {
+        return kind != fractal_schema::read_positions::KIND;
+    }
+    if kind == fractal_schema::read_positions::KIND {
+        return true;
+    }
     match collection {
         "machines" if kind == "transport.observed" => return false,
         "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
@@ -334,6 +341,7 @@ const ACTIONS: &[&str] = &[
     "arrangement.edit",
     "harness.answer",
     "arrangement.membership.edit",
+    "read-position.advance",
     "attention.resolve",
     "review.approve",
     "review.reject",
@@ -397,6 +405,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "prompt.respond",
     "arrangement.edit",
     "arrangement.membership.edit",
+    "read-position.advance",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -638,6 +647,9 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangement-placement-migration", "version":1, "state":if session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
+    // Synced read positions: list, follow and advance the session person's own positions.
+    // Granted only when all three are allowed, so a client never sends a doomed advance.
+    capabilities.push(json!({"id":"read-positions", "version":1, "state":if session.allows("read.projections") && session.allows("read.arrangements") && session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         if *action == "harness.answer" {
             return super::harness_questions::capability(state, session);
@@ -4502,6 +4514,8 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
         }
         "pairing" => "control.pairing",
         "arrangement" => "control.arrangements",
+        // Read positions are person workspace state, granted with arrangements.
+        "read-position" => "control.arrangements",
         _ => return None,
     })
 }

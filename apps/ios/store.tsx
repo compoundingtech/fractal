@@ -19,7 +19,8 @@ import { sendFences } from './sendFence';
 import { sendRefusal } from './composer';
 import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
-import { quality, localDrafts } from './qualityNative';
+import { quality, localDrafts, readPositions } from './qualityNative';
+import { readPositionRemote, syncsReadPositions } from './readPosition';
 import { nativeCollectionSocket } from './modules/fractal-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
@@ -190,6 +191,9 @@ function useAppStore(proof?: FabricProfile) {
     return () => { current = false; };
   }, [proof, caps?.session_actor]);
   useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
+  // Read positions belong to this device's pairing: the gateway and the person signed in to it. A daemon
+  // that keeps them for every device syncs them below; this device's copy is then an offline cache.
+  useEffect(() => { if (!proof) void readPositions.load(url, caps?.session_actor ?? ''); }, [proof, url, caps?.session_actor]);
   // The request of a send Fractal never confirmed, so sending the same message again repeats it instead of making a second.
   // Attention the person acted on from here: Fractal closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());
@@ -633,6 +637,24 @@ function useAppStore(proof?: FabricProfile) {
     const follow = feed.followArrangements(arrangementPerson, { onArrangements: setArrangements, onIssue: setArrangementsIssue });
     return () => follow.close();
   }, [feed, arrangementPerson, arrangementsGranted]);
+  // Read positions: listed on connect and again on each frame of the person's collection, and this
+  // device's advances sent as actions. An older daemon without `read-positions` leaves them here alone.
+  const readPositionsSynced = syncsReadPositions(caps?.capabilities);
+  const readPositionsActor = caps?.session_actor;
+  useEffect(() => {
+    if (proof || status !== 'online' || !client || !feed || !readPositionsSynced || !arrangementPerson || !readPositionsActor) return;
+    const person = arrangementPerson;
+    const stop = readPositions.connect(url, readPositionsActor, readPositionRemote(person, {
+      list: async cursor => (await client.readPositionsList(person, cursor ? { cursor } : {})).value,
+      // Like a message: the snapshot a window frame already brought fences the first try, a fresh one any try after Fractal applied nothing.
+      advance: async parameters => {
+        const fences = sendFences(lastSnapshot.current, fence);
+        return (await retryTransient(3, async () => { const id = actionId(); return client.readPositionAdvance({ id, idempotency_key: id, fence: await fences(), parameters }); }, notApplied)).value;
+      },
+    }));
+    const follow = feed.followReadPositions(person, { onChanged: () => { void readPositions.relist(); } });
+    return () => { follow.close(); stop(); };
+  }, [proof, status, client, feed, url, readPositionsActor, arrangementPerson, readPositionsSynced]);
   const loadSidebarTerminals = useCallback(async () => {
     if (!client) return;
     if (inventoryGranted !== false) return;

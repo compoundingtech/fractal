@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Sync per-person conversation read positions across devices and expose the latest prose timestamp",
+  "replay": {"status": "changed", "detail": "Opening a store initializes the read_positions projection and folds existing read-position.advanced claims once under read_positions_v1. Full replay also rebuilds this projection. No schema or checkpoint rules version bump; startup recovery completes before the store is served."},
+  "schema": {"status": "changed", "detail": "Adds the rebuildable read_positions table and its per-person index access paths plus projection readiness and repair metadata. Existing authoritative claims and identity are preserved; no numeric schema version change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules version or digest transition and no coordinated upgrade requirement introduced."},
+  "compatibility": {"status": "changed", "detail": "Adds read-positions v1 capability, read-positions.list, read-position.advance, an invalidation stream, and optional last_prose_at fields. Existing read/control.arrangements scopes are reused. Clients gate sync on the capability and retain device-local positions against older daemons; mixed-version member convergence remains unverified."},
+  "downtime": {"status": "unknown", "detail": "A normal daemon restart and one-time projection initialization are required. Restart-to-API and restart-to-health durations have not been measured; allow recovery to finish before assessing availability."},
+  "manual": {"status": "none", "detail": "No identity reset, re-pairing or manual migration required. The previously unshipped unscoped TUI read.json is not imported because its pending advances have no provable person and gateway owner. New caches are isolated by the existing endpoint/device-grant and person snapshot scope."},
+  "recovery": {"status": "changed", "detail": "Read positions can be rebuilt from accepted read-position.advanced claims. Roll forward if an older binary cannot interpret new claims; binary replacement does not remove claims or the new projection. Swap-back and mixed-build recovery have not been verified."}
+}

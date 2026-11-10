@@ -122,6 +122,31 @@ fn the_corpus_generates_valid_deployment_inputs() {
     }
 }
 
+#[test]
+fn the_corpus_generates_valid_read_position_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let spec = &corpus()[fractal_schema::read_positions::KIND];
+    let input = world.claim_of(spec, 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let expected = world.nodes[0].store.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.nodes[0].store.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    let actual = world.oracle.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.oracle.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 1);
+}
+
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
 fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
     let value = match kind {
@@ -1017,6 +1042,22 @@ impl World {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(self.fresh("usage")),
+            });
+        }
+        if spec.kind == fractal_schema::read_positions::KIND {
+            let conversation = self.subject_of("agent", index)?;
+            return Some(ClaimInput {
+                subject: fractal_schema::read_positions::subject(PERSON),
+                kind: spec.kind.clone(),
+                actor: Some(PERSON.into()),
+                fields: BTreeMap::from([
+                    ("owner".into(), json!(PERSON)),
+                    ("conversation".into(), json!(conversation)),
+                    ("at_ms".into(), json!(self.now())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("read")),
             });
         }
         let family = self.rng.pick(&spec.subjects).clone();
@@ -2043,7 +2084,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v17.json"
         }))
         .unwrap(),
     )
