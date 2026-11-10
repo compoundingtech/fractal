@@ -3,15 +3,18 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as React from 'react'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { SidebarAgentRow, assistantDarkTheme, compositionLightTheme, liveAccentTheme, type SidebarAgentRowData } from '@fractal/ui/assistant-ui/shell'
+import { RegistryContext } from '@effect/atom-react'
+import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
-import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryNumbers, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { SidebarTabs } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
 import { accountOf, FIXTURE_NOW, incompatibleSummaryAccount, quotaEnvelope } from './fixtures.ts'
 import { initialQuota, reduceQuota, type QuotaState } from './model.ts'
 import { UsageSection } from './UsageSection.tsx'
 import { usageSectionView } from './usageSectionView.ts'
 import type { QuotaAccount } from './wire.ts'
+import { usageSectionHeight, usageSectionOpen } from './usageSectionState.ts'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -74,26 +77,26 @@ const roster = ['Review the sidebar', 'Ship the relay', 'Tidy fixtures', 'Migrat
 
 interface Args { readonly state: StateName; readonly open: boolean; readonly width: number; readonly narrow: boolean; readonly scheme: 'dark' | 'light'; readonly onOpenUsage: () => void }
 
-const seeded = (key: string, open: boolean): string => {
-  try { globalThis.localStorage?.removeItem(`${key}.height`); globalThis.localStorage?.setItem(`${key}.open`, String(open)) } catch { /* storage may be absent */ }
-  return key
+const SeededSection = ({ open, children }: { readonly open: boolean; readonly children: React.ReactNode }) => {
+  const [registry] = React.useState(() => AtomRegistry.make({ initialValues: [[usageSectionOpen, open], [usageSectionHeight, geometryNumbers.drawerDefault]] }))
+  React.useEffect(() => () => registry.dispose(), [registry])
+  return <RegistryContext.Provider value={registry}>{children}</RegistryContext.Provider>
 }
 
 /** The real tabs, agent rows and section, at the sidebar's width, so the boundary above the section is the one live has. */
 const InSidebar = ({ state, open, width, narrow, onOpenUsage, label }: Args & { readonly label: string }) => {
-  const [storageKey] = React.useState(() => seeded(`story.usageSection.${label}`, open))
   const [mounted, setMounted] = React.useState(0)
-  return <NarrowLayoutContext.Provider value={narrow}>
+  return <SeededSection open={open}><NarrowLayoutContext.Provider value={narrow}>
     <aside aria-label={label} data-usage-frame={label} style={{ inlineSize: width }} {...stylex.props(styles.frame)}>
       <SidebarTabs panelHasTabbableContent selectedId="agents" onSelectionChange={() => undefined} tabs={[{ id: 'agents', label: 'Agents' }, { id: 'alerts', label: 'Alerts' }]}>
         <nav aria-label={`${label} roster`} {...stylex.props(styles.roster)}>
           {roster.map(item => <SidebarAgentRow key={item.ref} item={item} now={now} active={false} onOpen={() => undefined} />)}
         </nav>
-        <UsageSection key={mounted} view={usageSectionView({ state: states[state], now })} onOpenUsage={onOpenUsage} storageKey={storageKey} />
+        <UsageSection key={mounted} view={usageSectionView({ state: states[state], now })} onOpenUsage={onOpenUsage} />
       </SidebarTabs>
     </aside>
     <button type="button" data-remount={label} tabIndex={-1} aria-hidden="true" style={{ display: 'none' }} onClick={() => setMounted(value => value + 1)} />
-  </NarrowLayoutContext.Provider>
+  </NarrowLayoutContext.Provider></SeededSection>
 }
 
 const Surface = (args: Args) =>
@@ -106,7 +109,7 @@ const AllStatesSurface = (args: Args) =>
     {(Object.keys(states) as StateName[]).flatMap(name => [false, true].map(open =>
       <figure key={`${name}-${open}`} {...stylex.props(styles.specimen)}>
         <figcaption {...stylex.props(styles.caption)}>{name} · {open ? 'open' : 'collapsed'}</figcaption>
-        <div {...stylex.props(styles.bare)} style={{ inlineSize: args.width }}><UsageSection view={usageSectionView({ state: states[name], now })} onOpenUsage={args.onOpenUsage} storageKey={seeded(`story.usageSection.all.${name}.${open}`, open)} /></div>
+        <div {...stylex.props(styles.bare)} style={{ inlineSize: args.width }}><SeededSection open={open}><UsageSection view={usageSectionView({ state: states[name], now })} onOpenUsage={args.onOpenUsage} /></SeededSection></div>
       </figure>))}
   </main>
 

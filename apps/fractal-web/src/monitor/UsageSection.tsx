@@ -1,5 +1,5 @@
 // The sidebar's bottom Usage section: one worst-quota line when collapsed, worst-first rows with meters when open.
-import { useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomValue } from '@effect/atom-react'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -12,21 +12,11 @@ import { colorVars as c, geometryNumbers, geometryVars as g, radiusVars as r, sp
 import { useDataSource, useNow } from '../data/react.tsx'
 import { quotaStateAtom } from './state.ts'
 import { usageSectionView, type UsageLevel, type UsageRowView, type UsageSectionView } from './usageSectionView.ts'
+import { usageSectionHeight, usageSectionOpen } from './usageSectionState.ts'
 
 const DEFAULT_HEIGHT = geometryNumbers.drawerDefault
 const MIN_HEIGHT = geometryNumbers.drawerMin
 const MAX_HEIGHT = geometryNumbers.drawerMax
-
-const stored = (key: string): string | null => {
-  try { return globalThis.localStorage?.getItem(key) ?? null } catch { return null }
-}
-const remember = (key: string, value: string): void => {
-  try { globalThis.localStorage?.setItem(key, value) } catch { /* the choice still applies for this session */ }
-}
-const storedHeight = (key: string): number => {
-  const value = Number(stored(key))
-  return Number.isFinite(value) && value >= MIN_HEIGHT && value <= MAX_HEIGHT ? value : DEFAULT_HEIGHT
-}
 
 /** The reading as text: the at-limit `!` means the state never rests on colour. */
 const Percent = ({ row, muted }: { readonly row: UsageRowView; readonly muted: boolean }) =>
@@ -108,21 +98,21 @@ const Body = ({ view, onOpenUsage }: { readonly view: UsageSectionView; readonly
   }
 }
 
-export const UsageSection = ({ view, onOpenUsage, storageKey = 'wf.sidebar.usageSection' }: {
+export const UsageSection = ({ view, onOpenUsage }: {
   readonly view: UsageSectionView
   readonly onOpenUsage: () => void
-  readonly storageKey?: string
 }): React.ReactNode => {
   const narrow = React.useContext(NarrowLayoutContext)
-  const [open, setOpen] = React.useState(() => stored(`${storageKey}.open`) === 'true')
-  const [height, setHeight] = React.useState(() => storedHeight(`${storageKey}.height`))
-  const toggle = (next: boolean) => { setOpen(next); remember(`${storageKey}.open`, String(next)) }
+  const [open, toggle] = useAtom(usageSectionOpen)
+  const [committedHeight, commitHeight] = useAtom(usageSectionHeight)
+  const [dragHeight, setDragHeight] = React.useState<number>()
+  const height = dragHeight ?? committedHeight
   const wordsId = React.useId()
   return (
     <Aria.Disclosure isExpanded={open} onExpandedChange={toggle} data-usage-section="" {...stylex.props(styles.section)}>
       {open && !narrow
         ? <ResizableSplit id="usage-section" label="Resize Usage section" orientation="horizontal" reverse collapsed={false} value={height} min={MIN_HEIGHT} max={MAX_HEIGHT}
-          onChange={setHeight} onCommit={value => { setHeight(value); remember(`${storageKey}.height`, String(value)) }} onToggle={() => toggle(false)} onReset={() => { setHeight(DEFAULT_HEIGHT); remember(`${storageKey}.height`, String(DEFAULT_HEIGHT)) }} />
+          onChange={setDragHeight} onCommit={value => { commitHeight(value); setDragHeight(undefined) }} onToggle={() => toggle(false)} onReset={() => { commitHeight(DEFAULT_HEIGHT); setDragHeight(undefined) }} />
         : null}
       <div {...stylex.props(styles.header)}>
         <span id={wordsId} hidden>{summaryWords(view)}</span>
