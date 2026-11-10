@@ -422,12 +422,12 @@ describe('inputs and outputs', () => {
     ).toThrow('Program input change must be required and encode to a string')
     expect(() =>
       Fractal.mission(
-        // @ts-expect-error a number does not encode to a native text input
         {
           meta,
           id: 'factory/test',
           goal: 'g',
           reportTo,
+          // @ts-expect-error a number does not encode to a native text input
           input: Schema.Struct({ count: Schema.Number }),
         },
         body,
