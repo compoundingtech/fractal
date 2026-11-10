@@ -31,6 +31,11 @@ pub type LegacyDigestTable = (
 #[derive(Debug, PartialEq, Eq)]
 pub enum IncrementalProjection {
     Projected,
+    /// The frontier advanced, retaining a visible diagnostic without requesting replay.
+    ProjectedWithContext {
+        code: &'static str,
+        details: serde_json::Map<String, Value>,
+    },
     Replay(&'static str),
     /// The same replay decision, with identifiers from the guard that requested it.
     ReplayWithContext {
