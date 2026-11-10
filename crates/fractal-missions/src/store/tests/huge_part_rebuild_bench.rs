@@ -315,9 +315,8 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
                         page_metrics.snapshot(), end, (receive_time, admission_time, projection_time)));
                     received += exchange.envelopes.len();
                 }
-                // Concurrent local probe writes can advance the index past a finishing pass,
-                // which then keeps the deferral (smallclaims store.rs "Preserve newer projection
-                // deferrals"). The daemon's next pass settles it; count those timed passes.
+                // Keep both the probe and mutation writers running during timed settling.
+                // Unwinding must stop the mutation writers before their scope joins them.
                 let mut settle_passes = 0;
                 while worker.replication_projection_deferred() && settle_passes < 8 {
                     worker.project_replication_backlog().unwrap();
@@ -327,7 +326,7 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
                     .filter(|run| worker.run_projection_pending(&run.subject).unwrap())
                     .count();
                 let deferred = worker.replication_projection_deferred();
-                eprintln!("huge_receive_settle passes={settle_passes} deferred={deferred} pending_runs={pending_runs}");
+                eprintln!("huge_receive_settle passes={settle_passes} deferred={deferred} pending_runs={pending_runs} writers=running contended={contended}");
                 assert!(!deferred, "deferred projection still set after {settle_passes} settle passes; pending_runs={pending_runs}");
             });
             for run in &runs {
@@ -572,9 +571,18 @@ fn with_contended_mutations<T>(
                 });
             }));
         }
+        struct StopMutations<'a>(&'a AtomicBool);
+        impl Drop for StopMutations<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        // This guard lives inside the scope, so a receive panic signals stop before
+        // the scope waits for its threads. Each thread still finishes its logical pair.
+        let stop_mutations = StopMutations(&done);
         barrier.wait();
         let result = receive();
-        done.store(true, Ordering::Release);
+        drop(stop_mutations);
         for mutation in mutations { mutation.join().unwrap(); }
         result
     });
