@@ -47,7 +47,7 @@ fn receipt_projection_work_state(connection: &Connection) -> Vec<Vec<Vec<SqlValu
         "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim FROM assistant_grant_additions ORDER BY id",
         "SELECT writer,claim_id FROM assistant_grant_auth_work ORDER BY writer,claim_id",
     ].into_iter().map(|sql| {
-        let mut statement = connection.prepare(sql).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2245e419e29e owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         let columns = statement.column_count();
         statement.query_map([], |row| (0..columns).map(|column| row.get(column)).collect())
             .unwrap().collect::<rusqlite::Result<Vec<Vec<SqlValue>>>>().unwrap()
@@ -71,10 +71,10 @@ fn fresh_nonmember_proof_receipt_has_constant_complete_transaction_vm_cost() {
         // A proof from outside the writer's window must neither reset this
         // checkpoint nor consume/recreate its work, even for the same envelope.
         connection.execute(
-            "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) SELECT claim_id,position,rowid,?2,0 FROM replica_records WHERE claim_id=?1 LIMIT 1",
+            /* sqlite-large-value: allow-for-now lv-hfe820094f334 owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) SELECT claim_id,position,rowid,?2,0 FROM replica_records WHERE claim_id=?1 LIMIT 1",
             params![grant.id, key.public()],
         ).unwrap();
-        connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h18b15ee88afe owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     }
     let before = receipt_projection_work_state(&target.readers.get());
     assert_eq!(before[1].len(), 1, "checkpoint fixture must be nonempty");
@@ -154,12 +154,12 @@ fn membership_window_changes_share_the_fixed_transaction_budget_without_replacin
         let transaction = connection.transaction().unwrap();
         for index in 0..extra {
             transaction.execute(
-                "INSERT INTO assistant_grant_membership_windows VALUES('obsolete',?1,0,NULL)",
+                /* sqlite-large-value: allow-for-now lv-h6c78df838342 owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES('obsolete',?1,0,NULL)",
                 [format!("obsolete-{index:08}")],
             ).unwrap();
         }
         transaction.execute(
-            "UPDATE meta SET value=value WHERE key='fleet_anchor_key'", [],
+            /* sqlite-large-value: allow-for-now lv-h896ccf48254e owner=smallclaims::store::assistant_grant_receipt_cost_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=value WHERE key='fleet_anchor_key'", [],
         ).unwrap();
         transaction.commit().unwrap();
     }

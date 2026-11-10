@@ -272,7 +272,7 @@ fn assistant_grant_authority_measure_real_store() {
     let (final_rss_kib, peak_rss_kib) = memory_kib();
     let connection = store.readers.get();
     let count = |sql: &str| -> u64 {
-        connection.query_row(sql, [], |row| row.get(0)).unwrap()
+        connection.query_row(/* sqlite-large-value: allow-for-now lv-hd9109fd4002d owner=smallclaims::store::assistant_grant_authority_bench TODO=trace-statement-and-value-representation */ sql, [], |row| row.get(0)).unwrap()
     };
     let grant_kind_claims: u64 = connection.query_row(
         "SELECT COUNT(*) FROM claims WHERE kind IN (?1,?2,?3)",
@@ -377,7 +377,7 @@ fn measure_backfill(config: Config) {
     {
         let connection = store.connection.write();
         connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-h6064c7271014 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */
+            /* sqlite-large-value: allow-for-now lv-h54566dabc8dc owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */
             "DROP TRIGGER IF EXISTS assistant_grant_dirty_insert;
              DELETE FROM assistant_grant_authority;
              DELETE FROM assistant_grant_effective;
@@ -394,7 +394,7 @@ fn measure_backfill(config: Config) {
     assert!(store.advance_assistant_grant_authority_backfill().unwrap());
     {
         let mut connection = store.connection.write();
-        connection.execute("DELETE FROM meta WHERE key='assistant_grant_authority_version'", []).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hb93a7253f42d owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='assistant_grant_authority_version'", []).unwrap();
         // Fixed small pool of representative unrelated JSON sizes, not a history.
         let unrelated_bodies = [
             padded_body(json!({"fields": {"text": "synthetic conversation summary"}}), config.unrelated_body_bytes / 4),
@@ -453,7 +453,7 @@ fn measure_backfill(config: Config) {
                             // Model a genuine local append, not origin-based trust
                             // during upgrade of ambiguous historical raw rows.
                             transaction.execute(
-                                "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [&id],
+                                /* sqlite-large-value: allow-for-now lv-h84ea96cecd57 owner=smallclaims::store::assistant_grant_authority_bench TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [&id],
                             ).unwrap();
                         }
                     } else {

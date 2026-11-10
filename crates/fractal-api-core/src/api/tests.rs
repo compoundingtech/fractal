@@ -1,3 +1,5 @@
+#[path = "desired_batch_tests.rs"]
+mod desired_batch_tests;
 #[path = "agents_publication_tests.rs"]
 mod agents_publication_tests;
 mod exec_only;
@@ -25,6 +27,154 @@ fn incomplete_linux_environment_is_unavailable() {
     ] {
         assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_run_credential_in_the_environment_binds_a_run_and_never_an_agent_too() {
+    for (case, environment, expected) in [
+        ("credential", b"ST_RUN_CREDENTIAL=secret\0".as_slice(), HarnessAncestry::Run(RunCredential::new("secret"))),
+        ("empty credential", b"ST_RUN_CREDENTIAL=\0".as_slice(), HarnessAncestry::Unavailable),
+        ("credential and agent", b"ST_RUN_CREDENTIAL=secret\0ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Unavailable),
+        ("credential and legacy agent", b"FRACTAL_AGENT=agent/fixture/worker\0ST_RUN_CREDENTIAL=secret\0".as_slice(),
+            HarnessAncestry::Unavailable),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+    assert_eq!(format!("{:?}", RunCredential::new("secret")), "RunCredential(..)");
+}
+
+/// An effect's descendant that clears its own environment is still bound: the walk reads each
+/// ancestor's exec-time environment and finds the credential the effect was started with.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_program_effects_descendant_binds_its_run() {
+    use std::io::BufRead;
+    let mut effect = std::process::Command::new("sh")
+        .args(["-c", "env -i MARKER=1 sleep 10 & echo $!; wait"])
+        .env("ST_RUN_CREDENTIAL", "secret")
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(effect.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    let pid: u32 = line.trim().parse().unwrap();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    effect.kill().unwrap();
+    let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+    effect.wait().unwrap();
+    assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
+}
+
+/// A request whose ancestry carries a live run credential is attributed to `mission-run/RUN`,
+/// may not name another actor, and writes nothing once its attempt has ended.
+#[tokio::test]
+async fn a_run_credential_binds_requests_to_its_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let post = |subject: &str, actor: Option<&str>| {
+        let mut body = json!({"subject": subject, "kind": "custom.example.recorded", "fields": {}});
+        if let Some(actor) = actor { body["actor"] = json!(actor); }
+        app.clone().oneshot(Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap())
+    };
+    let response = post("custom/example/run-own", None).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let claims = state.store.claims_for("custom/example/run-own", Some("custom.example.recorded")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(step.run.as_str()));
+    assert!(step.run.starts_with("mission-run/"));
+
+    let named = post("custom/example/run-named", Some(&step.run)).await.unwrap();
+    assert_eq!(named.status(), StatusCode::OK);
+    for actor in ["person/operator", "agent/example/worker"] {
+        let before = state.store.index().unwrap();
+        let refused = post("custom/example/run-foreign", Some(actor)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY, "{actor}");
+        let body = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
+    // The attempt ends: the credential no longer binds, and the caller writes nothing.
+    state.store.set_step_run_state_for_tests(&step.subject, "completed", 1);
+    let before = state.store.index().unwrap();
+    let ended = post("custom/example/run-ended", None).await.unwrap();
+    assert_eq!(ended.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+/// A program effect's CLI names its run on the trusted Unix client; only a request its run
+/// credential binds to that same run may.
+#[tokio::test]
+async fn a_run_bound_unix_client_acts_as_its_run_and_no_other() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let binding = state.store.run_binding(&secret).unwrap();
+    let request = |person: &str, bound: bool| {
+        let mut request = Request::builder().method("POST").uri("/v1/client/actions")
+            .header(client_v0::LOCAL_PERSON_HEADER, person);
+        if bound { request = request.extension(BoundRun(binding.clone())); }
+        request.body(Body::empty()).unwrap()
+    };
+    let session = client_v0::authenticate(&state, &request(&step.run, true), "unix").unwrap();
+    assert_eq!((session.actor.as_str(), session.authority_actor.as_str()), (step.run.as_str(), step.run.as_str()));
+    assert!(session.local_peer);
+    for (person, bound) in [(step.run.as_str(), false), ("mission-run/another", true)] {
+        let refused = client_v0::authenticate(&state, &request(person, bound), "unix").unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{person} bound={bound}");
+    }
+}
+
+/// Handlers that hold a bound caller to itself read one bound identity, so a bound run is never
+/// an unbound person: it writes no seat's document, and it is the writer the rules decide.
+#[tokio::test]
+async fn a_bound_run_is_held_to_its_identity_by_document_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    state.store.set_rule("runs-keep-out", &smallclaims::rules::Rule {
+        mode: smallclaims::rules::Mode::Enforce,
+        actors: vec!["mission-run/*".into()],
+        kinds: vec!["doc.bound".into()],
+        subjects: vec!["doc/locked/**".into()],
+        ..Default::default()
+    }, "person/owner").unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let write = |name: &str, key: &str| {
+        let body = json!({"name": name, "bytes": b"notes".to_vec(), "expected_document": null, "idempotency_key": key});
+        let request = Request::builder().method("POST").uri("/v1/documents")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    let (status, refused) = write("doc/agents/garden/ash/handoff", "seat").await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("document-not-yours")), "{refused}");
+    let (status, refused) = write("doc/locked/notes", "locked").await;
+    assert_eq!(refused["code"], "rule-denied", "{status} {refused}");
+    let (status, written) = write("doc/runs/notes", "notes").await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(BoundActor::of(Request::builder().extension(BoundAgent("agent/a".into())).body(()).unwrap().extensions()),
+        Some(BoundActor::Agent("agent/a".into())));
 }
 
 #[cfg(target_os = "linux")]
@@ -1063,14 +1213,14 @@ fn doctor_lists_unmarked_pending_grants_without_dating_remote_history() {
         ("claim/revoked", "custom.client.assistant.v1.revoked", "amber", 0),
     ] {
         connection.execute(
-            "INSERT INTO assistant_grant_pending
+            /* sqlite-large-value: allow-for-now lv-h568eec89a376 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending
              (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
              VALUES(?1,?1,?2,?3,'person/operator',1,?4,'{}')",
             rusqlite::params![id, kind, origin, authenticated],
         ).unwrap();
     }
     connection.execute(
-        "INSERT INTO assistant_grant_local_appends(claim_id) VALUES('claim/marked')", [],
+        /* sqlite-large-value: allow-for-now lv-hac4604f86ba0 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES('claim/marked')", [],
     ).unwrap();
     let checks = pending_assistant_grant_checks(&connection, "amber").unwrap();
     assert_eq!(checks.len(), 3);
@@ -1084,7 +1234,7 @@ fn doctor_lists_unmarked_pending_grants_without_dating_remote_history() {
     assert!(checks[2].message.starts_with("claim/remote: grant lacks local-append provenance"));
     assert!(checks[2].message.contains("issuance age unknown"));
     assert!(!checks[2].message.contains("predates"));
-    connection.execute("UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-he965ae9e187f owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
     assert!(pending_assistant_grant_checks(&connection, "amber").unwrap().is_empty());
 }
 
@@ -1099,14 +1249,14 @@ fn doctor_lists_subject_maintenance_for_authenticated_membership_retries() {
         ("claim/revoke", "grant/pending-revoke", "cedar", 9, 0, "custom.client.assistant.v1.revoked"),
     ] {
         connection.execute(
-            "INSERT INTO assistant_grant_pending
+            /* sqlite-large-value: allow-for-now lv-he1ce05c0581f owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending
              (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence)
              VALUES(?1,?2,?3,?4,'person/operator',?5,?6,'{}','key/birch',?5)",
             rusqlite::params![id, subject, kind, origin, sequence, authenticated],
         ).unwrap();
     }
     connection.execute(
-        "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
+        /* sqlite-large-value: allow-for-now lv-h20114a3e8154 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
          VALUES('birch','key/birch',7,7,7,'claim/a')", [],
     ).unwrap();
     let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
@@ -1118,12 +1268,12 @@ fn doctor_lists_subject_maintenance_for_authenticated_membership_retries() {
         && check.message.contains("unauthenticated grant, policy or revocation evidence")));
     assert!(checks.iter().all(|check| check.message.contains("generic credential rejection")));
     connection.execute(
-        "UPDATE assistant_grant_retractions SET claim_id='claim/b' WHERE writer='birch'", [],
+        /* sqlite-large-value: allow-for-now lv-h25f52ee4e4eb owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_retractions SET claim_id='claim/b' WHERE writer='birch'", [],
     ).unwrap();
     let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
     assert_eq!(checks.len(), 1);
     assert!(checks[0].message.contains("subject=grant/pending-revoke"));
-    connection.execute("UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h28b4c5d9b4eb owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
     assert!(assistant_grant_subject_maintenance_checks(&connection).unwrap().is_empty());
 }
 
@@ -12789,6 +12939,52 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
         descending["claims"][0]["subject"].as_str(),
         Some("host/two")
     );
+}
+
+#[tokio::test]
+async fn claims_endpoint_filters_by_kind_and_subject_prefix() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (subject, kind) in [
+        ("custom/acme/change/1", "custom.acme.change"),
+        ("custom/acme/changes/x", "custom.acme.change"),
+        ("custom/acme/change/2", "custom.acme.note"),
+    ] {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    let app = router(state);
+    let subjects = |page: &Value| {
+        page["claims"].as_array().unwrap().iter()
+            .map(|claim| claim["subject"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for (query, expected) in [
+        ("kind=custom.acme.change", vec!["custom/acme/change/1", "custom/acme/changes/x"]),
+        ("subject_prefix=custom%2Facme%2Fchange%2F", vec!["custom/acme/change/1", "custom/acme/change/2"]),
+        ("kind=custom.acme.change&subject_prefix=custom%2Facme%2Fchange%2F", vec!["custom/acme/change/1"]),
+    ] {
+        let (status, page) = get_request(app.clone(), &format!("/v1/claims?{query}")).await;
+        assert_eq!(status, StatusCode::OK, "{query}: {page}");
+        assert_eq!(subjects(&page), expected, "{query}");
+    }
+    let (status, refused) = get_request(
+        app,
+        "/v1/claims?subject=custom%2Facme%2Fchange%2F1&subject_prefix=custom%2Facme%2F",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "invalid-claims-query");
 }
 
 async fn writer_binding_request(

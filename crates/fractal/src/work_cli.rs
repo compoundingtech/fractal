@@ -214,10 +214,7 @@ pub(super) async fn run_work(
                             format!("person-response:{}", uuid::Uuid::now_v7().simple())
                         }),
                         answer: (args.answer.is_some() || args.text.is_some()).then(|| {
-                            fractal_daemon::person_request::AnswerInput {
-                                id: args.answer,
-                                text: args.text,
-                            }
+                            fractal_daemon::person_request::AnswerInput { id: args.answer, text: args.text, option_notes: Vec::new() }
                         }),
                     },
                 )
@@ -345,19 +342,24 @@ pub(super) async fn run_work(
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
-        WorkCommand::Resume(args) => post_work(client, "resume", args, json_output).await,
+        WorkCommand::Resume(mut args) => {
+            let (actor, incarnation) =
+                clock_actor(args.actor.take(), args.incarnation.take(), "a work resume")?;
+            args.actor = Some(actor);
+            args.incarnation = incarnation;
+            post_work(client, "resume", args, json_output).await
+        }
         WorkCommand::Wait(args) => {
-            let actor = args.actor.context("a work wait needs explicit --as")?;
-            reject_foreign_agent_actor(&actor)?;
+            let (actor, incarnation) = clock_actor(args.actor, args.incarnation, "a work wait")?;
+            let incarnation = match incarnation {
+                Some(incarnation) => Some(incarnation),
+                None => current_agent_incarnation(client, &actor).await?,
+            };
             let wait_ms = fractal_daemon::graph::parse_duration(&args.wait_for, true)?;
             let subject = if args.subject.starts_with("step-run/") {
                 args.subject.clone()
             } else {
                 format!("step-run/{}", args.subject)
-            };
-            let incarnation = match args.incarnation {
-                Some(incarnation) => Some(incarnation),
-                None => current_agent_incarnation(client, &actor).await?,
             };
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
             let response: StepRunView = client
@@ -725,6 +727,36 @@ async fn post_work(
         }
         Ok(())
     }
+}
+
+/// Who stops or restarts a step's clock, and the fence it acts under. Inside a step's exec,
+/// which has no agent identity, that is the exec itself (`ST3_SUBJECT`) under the launch its
+/// runtime gave it (`ST3_START_OPERATION`); the daemon accepts it only from that live launch.
+/// An agent's fence stays the caller's to look up.
+fn clock_actor(
+    actor: Option<String>,
+    incarnation: Option<String>,
+    what: &str,
+) -> Result<(String, Option<String>)> {
+    let own_exec = || {
+        fractal_drivers::contracts::env("ST_AGENT")
+            .is_none()
+            .then(|| fractal_drivers::contracts::env("ST3_SUBJECT"))
+            .flatten()
+            .filter(|subject| subject.starts_with("exec/"))
+    };
+    let actor = actor
+        .or_else(own_exec)
+        .with_context(|| format!("{what} needs explicit --as"))?;
+    reject_foreign_agent_actor(&actor)?;
+    let incarnation = match incarnation {
+        None if actor.starts_with("exec/") => Some(
+            fractal_drivers::contracts::env("ST3_START_OPERATION")
+                .context("an exec acts under its launch, and ST3_START_OPERATION is not set; pass --incarnation")?,
+        ),
+        incarnation => incarnation,
+    };
+    Ok((actor, incarnation))
 }
 
 fn render_wait_lease(

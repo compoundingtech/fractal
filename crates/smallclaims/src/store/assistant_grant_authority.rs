@@ -14,11 +14,24 @@ const SCOPES: &[&str] = &[
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
     "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers",
 ];
+const SERVICE_SCOPES: &[&str] = &["read.claims", "read.work", "read.documents"];
 
+fn service_principal(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let component = |part: Option<&str>| part.is_some_and(|part| !part.is_empty()
+        && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)));
+    parts.next() == Some("plugin") && component(parts.next())
+        && component(parts.next()) && parts.next().is_none()
+}
+
+/// Projection identity includes legacy Service-on-assistant conflict witnesses.
+/// API bearer authentication must separately require a plugin principal for Service.
 pub fn principal(fields: &Value) -> Option<&str> {
     match fields.get("principal") {
         None => Some("assistant/chatgpt"),
-        Some(value) => value.as_str().filter(|value| matches!(*value, "assistant/chatgpt" | "assistant/mcp")),
+        Some(value) => value.as_str().filter(|value|
+            matches!(*value, "assistant/chatgpt" | "assistant/mcp")
+                || (profile(fields) == Some("service") && service_principal(value))),
     }
 }
 fn profile(fields: &Value) -> Option<&str> {
@@ -45,15 +58,19 @@ fn identity(claim: &ClaimRecord) -> bool {
 }
 fn policy_fields(claim: &ClaimRecord) -> bool {
     let fields = &claim.body["fields"];
+    // Historical Service-on-assistant rows remain conservative conflict evidence
+    // under their original assistant policy, never Service bearer credentials.
+    let service = principal(fields).is_some_and(service_principal);
+    let scopes = if service { SERVICE_SCOPES } else { SCOPES };
     identity(claim) && digest_only(fields)
         && fields["session_actor"].as_str().and_then(|actor|
             principal(fields).and_then(|principal| actor.strip_prefix(principal)))
             .and_then(|suffix| suffix.strip_prefix("/session/")) == fields["grant_id"].as_str()
-        && matches!(fields["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
-        && fields["disclosure_consent"] == true
+        && (service || (matches!(fields["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
+            && fields["disclosure_consent"] == true))
         && fields["expires_at_unix_ms"].as_u64().is_some()
-        && fields["scopes"].as_array().is_some_and(|scopes|
-            scopes.iter().all(|scope| scope.as_str().is_some_and(|scope| SCOPES.contains(&scope))))
+        && fields["scopes"].as_array().is_some_and(|values|
+            values.iter().all(|scope| scope.as_str().is_some_and(|scope| scopes.contains(&scope))))
 }
 fn base_valid(claim: &ClaimRecord) -> bool {
     identity(claim) && digest_only(&claim.body["fields"])
@@ -83,7 +100,7 @@ pub fn expiry_key(value: u64) -> String { format!("{value:020}") }
 
 pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hd3babb5b6b9a owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-hbfff283c1bdb owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
             claim_id TEXT NOT NULL, base_claim_id TEXT NOT NULL,
             grant_subject TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
@@ -189,12 +206,12 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE INDEX IF NOT EXISTS assistant_grant_membership_windows_seek
             ON assistant_grant_membership_windows(writer,start,member_key);"
     )?;
-    connection.execute_batch("SAVEPOINT assistant_grant_upgrade")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hff2d1c2b03b3 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_upgrade")?;
     install_auth_cursor(connection)?;
     install_proof_invalidation_triggers(connection)?;
     install_auth_work(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f117dab1bdd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_local_origin',?1)", [local_origin])?;
-    connection.execute_batch("RELEASE assistant_grant_upgrade")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h57db182d0631 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "RELEASE assistant_grant_upgrade")?;
     Ok(())
 }
 
@@ -207,7 +224,7 @@ fn install_auth_cursor(connection: &Connection) -> Result<()> {
         // The unreleased key-only cursor cannot describe the new window order.
         // Requeue every interrupted claim rather than trusting its stale position.
         connection.execute_batch(
-            "INSERT OR IGNORE INTO assistant_grant_dirty SELECT claim_id FROM assistant_grant_auth_cursor;
+            /* sqlite-large-value: allow-for-now lv-h7b614d59afc6 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty SELECT claim_id FROM assistant_grant_auth_cursor;
              DELETE FROM assistant_grant_auth_cursor;
              ALTER TABLE assistant_grant_auth_cursor ADD COLUMN membership_start INTEGER NOT NULL DEFAULT -1;"
         )?;
@@ -224,7 +241,7 @@ fn install_auth_work(connection: &Connection) -> Result<()> {
         // Retain key/range obligations, but replace history-wide progress with
         // a fresh grant-work cursor. No committed obligation is discarded.
         connection.execute_batch(
-            "ALTER TABLE assistant_grant_additions ADD COLUMN claim_id TEXT NOT NULL DEFAULT '';
+            /* sqlite-large-value: allow-for-now lv-hed00daccc56e owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "ALTER TABLE assistant_grant_additions ADD COLUMN claim_id TEXT NOT NULL DEFAULT '';
              ALTER TABLE assistant_grant_additions ADD COLUMN active_claim TEXT NOT NULL DEFAULT '';
              UPDATE assistant_grant_additions SET sequence=-1,envelope_hash='',position=-1;"
         )?;
@@ -236,7 +253,7 @@ fn install_auth_work(connection: &Connection) -> Result<()> {
         for event in ["INSERT","UPDATE","DELETE"] {
             let row = if event=="DELETE" { "OLD" } else { "NEW" };
             connection.execute_batch(&format!(
-                "DROP TRIGGER IF EXISTS {table}_auth_work_{event};
+                /* sqlite-large-value: allow-for-now lv-h8579ec8dafea owner=smallclaims::store::assistant_grant_authority TODO=prepare-body-and-predecessor-values */ "DROP TRIGGER IF EXISTS {table}_auth_work_{event};
                  CREATE TRIGGER {table}_auth_work_{event} AFTER {event} ON {table} BEGIN
                    INSERT INTO assistant_grant_auth_work
                    SELECT COALESCE((SELECT origin FROM assistant_grant_pending WHERE claim_id={row}.claim_id),
@@ -261,7 +278,7 @@ fn install_auth_work(connection: &Connection) -> Result<()> {
     )?;
     if !installed {
         connection.execute_batch(
-            "INSERT OR IGNORE INTO assistant_grant_auth_work
+            /* sqlite-large-value: allow-for-now lv-hda7f8f715d53 owner=smallclaims::store::assistant_grant_authority TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO assistant_grant_auth_work
                SELECT origin,claim_id FROM assistant_grant_pending
                INDEXED BY assistant_grant_pending_unauthenticated_index WHERE authenticated=0;
              INSERT OR IGNORE INTO assistant_grant_auth_work
@@ -279,7 +296,7 @@ fn install_auth_work(connection: &Connection) -> Result<()> {
     )?;
     if legacy {
         connection.execute_batch(
-            "INSERT OR IGNORE INTO assistant_grant_proof_rechecks
+            /* sqlite-large-value: allow-for-now lv-hda9098901f71 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks
              SELECT pending.claim_id FROM assistant_grant_membership_dirty AS work
              JOIN assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_writer_index
                ON pending.origin=work.writer AND pending.authenticated=0
@@ -311,7 +328,7 @@ fn install_proof_invalidation_triggers(connection: &Connection) -> Result<()> {
         for event in ["DELETE","UPDATE"] {
             let changed = if event=="UPDATE" { format!("({changes}) AND ") } else { String::new() };
             connection.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS assistant_grant_proof_{stem}_{event}
+                /* sqlite-large-value: allow-for-now lv-ha2046fcea9c3 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS assistant_grant_proof_{stem}_{event}
                  AFTER {event} ON {table} WHEN {changed}EXISTS({dependent})
                  BEGIN
                    INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key)
@@ -332,7 +349,7 @@ fn install_proof_invalidation_triggers(connection: &Connection) -> Result<()> {
               OR (OLD.state='valid' AND NEW.state<>'valid')) AND "
         } else { "" };
         connection.execute_batch(&format!(
-            "DROP TRIGGER IF EXISTS assistant_grant_proof_record_{event};
+            /* sqlite-large-value: allow-for-now lv-h0d8e722e48bb owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS assistant_grant_proof_record_{event};
              CREATE TRIGGER assistant_grant_proof_record_{event}
              AFTER {event} ON replica_records WHEN {changed}EXISTS({dependent})
              BEGIN
@@ -406,7 +423,7 @@ pub const SUBJECT_PENDING_QUERY: &str =
                       AND pending.auth_sequence>=windows.start
                       AND (windows.end IS NULL OR pending.auth_sequence<=windows.end)))";
 fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
-    connection.query_row(SUBJECT_PENDING_QUERY, [subject], |row| row.get(0)).map_err(internal)
+    connection.query_row(/* sqlite-large-value: allow-for-now lv-h648b9952e737 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ SUBJECT_PENDING_QUERY, [subject], |row| row.get(0)).map_err(internal)
 }
 /// A pending proof or unauthenticated revoke fences only its grant subject.
 pub fn subject_ready(connection: &Connection, subject: &str) -> Result<(), FractalError> {
@@ -505,7 +522,7 @@ pub fn rebuild_subject(connection: &Connection, subject: &str) -> Result<()> {
 // One base PK lookup and at most two indexed latest-transition seeks. Neither
 // another base nor an earlier policy/revoke is replayed during recomputation.
 fn recompute_base(connection: &Connection, base_id: &str) -> Result<()> {
-    connection.execute("DELETE FROM assistant_grant_effective WHERE claim_id=?1", [base_id])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h67e21448c6af owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_effective WHERE claim_id=?1", [base_id])?;
     let record: Option<String> = connection.query_row(
         "SELECT authority.record FROM assistant_grant_authority AS authority
          JOIN assistant_grant_pending AS pending ON pending.claim_id=authority.claim_id
@@ -519,13 +536,13 @@ fn recompute_base(connection: &Connection, base_id: &str) -> Result<()> {
         // The final repairing policy disappeared. The raw base remains pending,
         // but must no longer mask a valid older credential in authority lookup.
         connection.execute(
-            "DELETE FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?1",
+            /* sqlite-large-value: allow-for-now lv-hd5498a2a9ed1 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?1",
             [base_id])?;
         return Ok(());
     }
     let fields = &policy.body["fields"];
     connection.execute(
-        "INSERT INTO assistant_grant_effective(claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record)
+        /* sqlite-large-value: allow-for-now lv-h3f4f98505546 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_effective(claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
         params![grant.id,grant.subject,principal(fields),grant.actor,profile(fields),
             expiry_key(fields["expires_at_unix_ms"].as_u64().unwrap_or(0)),
@@ -599,15 +616,15 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
         // Trim can remove a receipt and its raw claim in one transaction.
         // Retire cached state through bounded demotion, not a stuck dirty row.
         connection.execute(
-            "UPDATE assistant_grant_pending SET authenticated=0,auth_member_key=NULL,
+            /* sqlite-large-value: allow-for-now lv-h28df63bc590a owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "UPDATE assistant_grant_pending SET authenticated=0,auth_member_key=NULL,
              auth_sequence=NULL,auth_envelope_hash=NULL,auth_record_position=NULL WHERE claim_id=?1", [id],
         )?;
         connection.execute(
-            "INSERT OR IGNORE INTO assistant_grant_recompute
+            /* sqlite-large-value: allow-for-now lv-h7ab907abb853 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_recompute
              SELECT claim_id FROM assistant_grant_pending WHERE claim_id=?1", [id],
         )?;
-        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
-        connection.execute("DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h1a4864d9f6c8 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h3221720b83b7 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
         return Ok(());
     };
     if !KINDS.contains(&claim.kind.as_str()) { return Ok(()); }
@@ -650,7 +667,7 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
             Authentication::Unauthenticated => (false,None,None,None,None),
             Authentication::Pending => (admitted,previous_key,previous_sequence,previous_hash,previous_position),
         };
-        let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h9cf86ad98d1e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position)
+        let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h5e92793f2a03 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(claim_id) DO UPDATE SET
               authenticated=excluded.authenticated,auth_member_key=excluded.auth_member_key,auth_sequence=excluded.auth_sequence,
               auth_envelope_hash=excluded.auth_envelope_hash,auth_record_position=excluded.auth_record_position
@@ -663,11 +680,11 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
         if changed && !admitted && authenticated { attach_claim(connection,&claim)?; }
         if admitted && !authenticated { rebuild_authenticated_subject(connection,&claim)?; }
         if matches!(authentication, Authentication::Pending) {
-            connection.execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [id])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-he3fa452add20 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [id])?;
             return Ok(());
         }
     }
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h3221720b83b7 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hd91341d01a91 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
     Ok(())
 }
 
@@ -677,7 +694,7 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
 fn rebuild_authenticated_subject(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
     // Fanout is durable work, not a subject-history replay in this claim's unit.
     connection.execute(
-        "INSERT OR IGNORE INTO assistant_grant_recompute(claim_id) VALUES(?1)",
+        /* sqlite-large-value: allow-for-now lv-h53b6a1e0835c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_recompute(claim_id) VALUES(?1)",
         [&claim.id])?;
     Ok(())
 }
@@ -701,13 +718,13 @@ fn recompute_one(connection: &Connection) -> Result<bool> {
         [&claim_id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
     if let Some((dependent,base)) = pair {
         connection.execute(
-            "DELETE FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?2",
+            /* sqlite-large-value: allow-for-now lv-h67b7b4921e3a owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?2",
             params![dependent,base])?;
         recompute_base(connection,&base)?;
     } else {
-        connection.execute("DELETE FROM assistant_grant_recompute WHERE claim_id=?1", [&claim_id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h981cb88354da owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_recompute WHERE claim_id=?1", [&claim_id])?;
         connection.execute(
-            "DELETE FROM assistant_grant_pending WHERE claim_id=?1
+            /* sqlite-large-value: allow-for-now lv-h9ab29a0fbe52 owner=smallclaims::store::assistant_grant_authority TODO=prepare-body-and-predecessor-values */ "DELETE FROM assistant_grant_pending WHERE claim_id=?1
              AND NOT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [&claim_id],
         )?;
     }
@@ -767,7 +784,7 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
         params![id,position_cursor,rowid_cursor,key_cursor,initial],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
     let Some((position,record_rowid,writer,sequence,hash,eligible)) = record else {
-        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hdb10afe3ddca owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
         return Ok(Authentication::Unauthenticated);
     };
     // A nonempty key resumes this record; an empty key advances past it.
@@ -775,7 +792,7 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
     let mut next_key = String::new();
     let mut next_start = -1;
     if eligible {
-        let mut statement = connection.prepare_cached(AUTHENTICATION_KEYS_QUERY)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf53f8e0e2462 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ AUTHENTICATION_KEYS_QUERY)?;
         let keys = statement.query_map(
             params![writer,sequence,hash,
                 if (position,record_rowid)==(position_cursor,rowid_cursor) { start_cursor } else { -1 },
@@ -789,7 +806,7 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
             // SQL would permit unbounded scans before reaching the page limit.
             if end.is_none_or(|end| sequence<=end) && signature.as_deref().is_some_and(|signature|
                 VerifiedEnvelopeSignature::verify(shard.as_deref(),&fleet_id,&writer,sequence,&hash,key,signature).is_some()) {
-                connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-h773f1bab1a89 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
                 return Ok(Authentication::Authenticated(Some((key.clone(),sequence,hash,position))));
             }
         }
@@ -805,12 +822,12 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
              WHERE claim_id=?1 AND (position,rowid)>(?2,?3))",
             params![id,position,record_rowid], |row| row.get(0))?;
         if !more {
-            connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h0a908802271b owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
             return Ok(Authentication::Unauthenticated);
         }
     }
     connection.execute(
-        "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start)
+        /* sqlite-large-value: allow-for-now lv-h87d2d3e94117 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start)
          VALUES(?1,?2,?3,?4,?5)
          ON CONFLICT(claim_id) DO UPDATE SET position=excluded.position,
             record_rowid=excluded.record_rowid,member_key=excluded.member_key,
@@ -841,7 +858,7 @@ pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, ha
         // Signatures may predate their replica record and therefore could not
         // invalidate a claim cursor when inserted. New evidence must restart
         // its claim even when its indexed position precedes that cursor.
-        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h188a54cc0c91 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
         refresh_claim(connection,&id)?;
     }
     Ok(())
@@ -875,7 +892,7 @@ impl MembershipUpdate {
                 let enqueue = |lower: u64, upper: u64| -> Result<()> {
                     if lower<=upper {
                         connection.execute(
-                            "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
+                            /* sqlite-large-value: allow-for-now lv-h63ca01e24d8b owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
                              SELECT ?1,?2,?3,?4 WHERE EXISTS(
                                SELECT 1 FROM assistant_grant_pending INDEXED BY assistant_grant_pending_evidence_index
                                WHERE origin=?1 AND auth_member_key=?2 AND auth_sequence BETWEEN ?3 AND ?4)",
@@ -897,13 +914,13 @@ impl MembershipUpdate {
             }
             if let Some((start,end)) = window {
                 connection.execute(
-                    "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,?4)
+                    /* sqlite-large-value: allow-for-now lv-h1941e256906a owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,?4)
                      ON CONFLICT(writer,member_key) DO UPDATE SET start=excluded.start,end=excluded.end",
                     params![writer,key,start,end],
                 )?;
             } else {
                 connection.execute(
-                    "DELETE FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
+                    /* sqlite-large-value: allow-for-now lv-h177538cdd4af owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
                     params![writer,key],
                 )?;
             }
@@ -912,7 +929,7 @@ impl MembershipUpdate {
                     // Snapshot the current receipt frontier. Future-only windows
                     // cannot help existing rows and must not create retry work.
                     connection.execute(
-                        "INSERT INTO assistant_grant_additions(writer,member_key,lower_sequence,upper_sequence)
+                        /* sqlite-large-value: allow-for-now lv-h2fc5feb42670 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_additions(writer,member_key,lower_sequence,upper_sequence)
                          SELECT ?1,?2,?3,MIN(?4,sequence) FROM replica_records
                          WHERE writer=?1 AND sequence>=?3 ORDER BY sequence DESC LIMIT 1",
                         params![writer,key,lower,upper],
@@ -932,14 +949,14 @@ impl MembershipUpdate {
         if self.complete {
             if let Some(fleet_id) = &self.fleet_id {
                 connection.execute(
-                    "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_fleet_id',?1)",
+                    /* sqlite-large-value: allow-for-now lv-h0ce05c43b4a2 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_fleet_id',?1)",
                     [fleet_id],
                 )?;
             } else {
-                connection.execute("DELETE FROM meta WHERE key='assistant_grant_authority_fleet_id'", [])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-ha3bce0201694 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='assistant_grant_authority_fleet_id'", [])?;
             }
             connection.execute(
-                "UPDATE assistant_grant_membership_state SET applied_generation=?1 WHERE id=1",
+                /* sqlite-large-value: allow-for-now lv-h86c509920fc9 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_membership_state SET applied_generation=?1 WHERE id=1",
                 [self.generation],
             )?;
         }
@@ -976,17 +993,17 @@ fn proof_invalidation_one(connection: &Connection) -> Result<bool> {
          WHERE origin=?1 AND auth_sequence=?2 AND auth_envelope_hash=?3
            AND auth_member_key=?4 AND claim_id>?5 ORDER BY claim_id LIMIT 1"
     };
-    let claim: Option<String> = connection.query_row(query,params![writer,sequence,hash,key,cursor],
+    let claim: Option<String> = connection.query_row(/* sqlite-large-value: allow-for-now lv-h8247508e87c0 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ query,params![writer,sequence,hash,key,cursor],
         |row| row.get(0)).optional()?;
     if let Some(claim) = claim {
-        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
-        connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&claim])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h921f15324dcd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hfc49ec7f7720 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&claim])?;
         connection.execute(
-            "UPDATE assistant_grant_proof_invalidations SET claim_id=?2 WHERE id=?1",
+            /* sqlite-large-value: allow-for-now lv-hcd8ada722bbd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_proof_invalidations SET claim_id=?2 WHERE id=?1",
             params![task,claim],
         )?;
     } else {
-        connection.execute("DELETE FROM assistant_grant_proof_invalidations WHERE id=?1", [task])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h83f6fdabc1cb owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_invalidations WHERE id=?1", [task])?;
     }
     Ok(true)
 }
@@ -1004,13 +1021,13 @@ fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, ke
     let covered_lower = lower.max(start);
     let covered_upper = upper.min(end.unwrap_or(i64::MAX as u64));
     if covered_lower>covered_upper { return Ok(false); }
-    connection.execute("DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h4e21f68dabd5 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
     for remainder in [
         (lower<covered_lower).then(|| (lower,covered_lower-1)),
         (covered_upper<upper).then(|| (covered_upper+1,upper)),
     ].into_iter().flatten() {
         connection.execute(
-            "INSERT INTO assistant_grant_retractions
+            /* sqlite-large-value: allow-for-now lv-hd746bcc76346 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions
              (writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
              VALUES(?1,?2,?3,?4,?5,?6)",
             params![writer,key,remainder.0,remainder.1,sequence,claim],
@@ -1035,11 +1052,11 @@ fn addition_one(connection: &Connection) -> Result<bool> {
         ).optional()?;
         if let Some(next) = next {
             connection.execute(
-                "UPDATE assistant_grant_additions SET active_claim=?2,sequence=-1,envelope_hash='',position=-1 WHERE id=?1",
+                /* sqlite-large-value: allow-for-now lv-h73bc9ba2f84a owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "UPDATE assistant_grant_additions SET active_claim=?2,sequence=-1,envelope_hash='',position=-1 WHERE id=?1",
                 params![task,next],
             )?;
         } else {
-            connection.execute("DELETE FROM assistant_grant_additions WHERE id=?1", [task])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h4bcc00c86e41 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_additions WHERE id=?1", [task])?;
         }
         return Ok(true);
     }
@@ -1054,7 +1071,7 @@ fn addition_one(connection: &Connection) -> Result<bool> {
     ).optional()?;
     let Some((sequence,hash,position,valid)) = record else {
         connection.execute(
-            "UPDATE assistant_grant_additions SET claim_id=active_claim,active_claim='' WHERE id=?1", [task],
+            /* sqlite-large-value: allow-for-now lv-hb39485ba125b owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_additions SET claim_id=active_claim,active_claim='' WHERE id=?1", [task],
         )?;
         return Ok(true);
     };
@@ -1082,13 +1099,13 @@ fn addition_one(connection: &Connection) -> Result<bool> {
                 VerifiedEnvelopeSignature::verify(shard.as_deref(),fleet_id,&writer,sequence,&hash,&key,&signature).is_some()) {
                 refresh_claim_with_authentication(connection,&claim,true,
                     Some(Authentication::Authenticated(Some((key,sequence,hash.clone(),position)))))?;
-                connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
-                connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-h4e1ea146a20c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-h1e384e782172 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
             }
         }
     }
     connection.execute(
-        "UPDATE assistant_grant_additions SET sequence=?2,envelope_hash=?3,position=?4 WHERE id=?1",
+        /* sqlite-large-value: allow-for-now lv-h9bbb6621cf95 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "UPDATE assistant_grant_additions SET sequence=?2,envelope_hash=?3,position=?4 WHERE id=?1",
         params![task,sequence,hash,position],
     )?;
     Ok(true)
@@ -1104,7 +1121,7 @@ fn refresh_recheck(connection: &Connection, claim: &str) -> Result<bool> {
         [claim], |row| row.get(0),
     )?;
     if !unfinished {
-        connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [claim])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h5a430ec6f457 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [claim])?;
     }
     Ok(!unfinished)
 }
@@ -1149,7 +1166,7 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
                     false
                 };
                 connection.execute(
-                    "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
+                    /* sqlite-large-value: allow-for-now lv-h29b7dbf310f3 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
                 )?;
                 dirty_after = claim;
                 dirty_visits += 1;
@@ -1157,7 +1174,7 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
                 if unfinished || remaining==0 || started.elapsed()>=budget { return Ok(false); }
                 continue;
             }
-            connection.execute("DELETE FROM meta WHERE key='assistant_grant_dirty_cursor'", [])?;
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hf280419e5a4a owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='assistant_grant_dirty_cursor'", [])?;
             if dirty_visits==0 && !dirty_after.is_empty() {
                 // A late insert/evidence arrival may sort before the saved
                 // cursor. Wrap now, not in a later otherwise empty slice.
@@ -1204,14 +1221,14 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
                 params![writer,key,lower,upper,sequence,id], |row| Ok((row.get(0)?,row.get(1)?)),
             ).optional()?;
             if let Some((sequence,id)) = pending {
-                connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
-                connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-h2daf7a592c21 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-hbc290dd6ae0d owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
                 connection.execute(
-                    "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
+                    /* sqlite-large-value: allow-for-now lv-h7be65771e125 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
                     params![task,sequence,id],
                 )?;
             } else {
-                connection.execute("DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
+                connection.execute(/* sqlite-large-value: allow-for-now lv-hc1e17d6d240e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_retractions WHERE id=?1", [task])?;
             }
             remaining -= 1;
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }

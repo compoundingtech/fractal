@@ -16,7 +16,7 @@ fn projection_rows(connection: &Connection) -> [Vec<Vec<SqlValue>>; 3] {
          FROM assistant_grant_pending ORDER BY claim_id",
         "SELECT * FROM assistant_grant_effective ORDER BY claim_id",
     ].map(|query| {
-        let mut statement = connection.prepare(query).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfff109a32004 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=trace-statement-and-value-representation */ query).unwrap();
         let columns = statement.column_count();
         statement.query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
             .unwrap().collect::<rusqlite::Result<_>>().unwrap()
@@ -186,12 +186,12 @@ fn assert_fresh_backfill(store: &Store, expected_windows: &Windows, context: &st
     reset_projection(&transaction);
     for ((writer, key), (start, end)) in expected_windows {
         transaction.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,?4)",
+            /* sqlite-large-value: allow-for-now lv-hbb32eb74d7c6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,?4)",
             params![writer,key,start,end],
         ).unwrap();
     }
     transaction.execute(
-        "UPDATE assistant_grant_membership_state SET applied_generation=?1 WHERE id=1",
+        /* sqlite-large-value: allow-for-now lv-h268eaf45d33c owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_membership_state SET applied_generation=?1 WHERE id=1",
         [fleet_generation(&transaction).unwrap()],
     ).unwrap();
     while !authority::backfill_slice(&transaction, Duration::from_secs(1)).unwrap() {}
@@ -295,23 +295,23 @@ fn seeded_membership_events_match_fresh_fleet_fold_after_every_event() {
             {
                 let connection = target.connection.write();
                 match mutation {
-                    0 => { connection.execute("DELETE FROM replica_envelope_signatures WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
+                    0 => { connection.execute(/* sqlite-large-value: allow-for-now lv-hfb3ab4e9ffc0 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
                         params![proof.writer,proof.sequence,proof.hash,proof.member_key]).unwrap(); }
-                    1 => { connection.execute("UPDATE replica_envelope_signatures SET member_key=?5 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
+                    1 => { connection.execute(/* sqlite-large-value: allow-for-now lv-hf715aec3d234 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelope_signatures SET member_key=?5 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
                         params![proof.writer,proof.sequence,proof.hash,proof.member_key,format!("untrusted-{seed}-{index}")]).unwrap(); }
-                    2 => { connection.execute("UPDATE batches SET origin=?2 WHERE id=?1", params![batch.0,format!("unrelated-{seed}-{index}")]).unwrap(); }
-                    _ => { connection.execute("UPDATE batches SET replica_sequence=?2 WHERE id=?1", params![batch.0,batch.2+10000]).unwrap(); }
+                    2 => { connection.execute(/* sqlite-large-value: allow-for-now lv-h8a99bdf3afc3 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE batches SET origin=?2 WHERE id=?1", params![batch.0,format!("unrelated-{seed}-{index}")]).unwrap(); }
+                    _ => { connection.execute(/* sqlite-large-value: allow-for-now lv-h9cad1e7a0461 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET replica_sequence=?2 WHERE id=?1", params![batch.0,batch.2+10000]).unwrap(); }
                 }
             }
             assert_windows(&target, &target, &format!("seed={seed} mutation={index} kind={mutation}"));
             {
                 let connection = target.connection.write();
                 if mutation == 1 {
-                    connection.execute("DELETE FROM replica_envelope_signatures WHERE member_key=?1", [format!("untrusted-{seed}-{index}")]).unwrap();
+                    connection.execute(/* sqlite-large-value: allow-for-now lv-h55ce404e22db owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures WHERE member_key=?1", [format!("untrusted-{seed}-{index}")]).unwrap();
                 }
                 if mutation < 2 { insert_raw_signature(&connection, proof); }
                 else {
-                    connection.execute("UPDATE batches SET origin=?2,replica_sequence=?3 WHERE id=?1", params![batch.0,batch.1,batch.2]).unwrap();
+                    connection.execute(/* sqlite-large-value: allow-for-now lv-h6007bc2d61c3 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE batches SET origin=?2,replica_sequence=?3 WHERE id=?1", params![batch.0,batch.1,batch.2]).unwrap();
                 }
             }
             assert_windows(&target, &target, &format!("seed={seed} restored={index}"));
@@ -431,7 +431,7 @@ fn fenced_opposite_profile_witness_matches_independent_raw_history_oracle() {
         assert_conflict_oracle(&target, &own, &witness, true);
         assert!(!authority::contains(&target.readers.get(), &witness.id).unwrap());
         {
-            target.connection.write().execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&witness.id]).unwrap();
+            target.connection.write().execute(/* sqlite-large-value: allow-for-now lv-he4d6e9e7421e owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&witness.id]).unwrap();
         }
         assert_conflict_oracle(&target, &own, &witness, true);
         drain_authority(&target);
@@ -537,7 +537,7 @@ fn learned_fence_revalidates_signed_transition(kind: &str) {
         shuffle(&mut events, &mut state);
         for (index, proof) in events.into_iter().enumerate() {
             target.connection.write().execute(
-                "DELETE FROM replica_envelope_signatures
+                /* sqlite-large-value: allow-for-now lv-hf625193e6fe4 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
                 params![proof.writer,proof.sequence,proof.hash,proof.member_key],
             ).unwrap();
@@ -717,28 +717,28 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             let connection = writer.transaction().unwrap();
             let query = match mutation {
                 "signature-delete" =>
-                    "DELETE FROM replica_envelope_signatures
+                    /* sqlite-large-value: allow-for-now lv-hbb5e6b92e1b0 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
                 "signature-update" =>
-                    "UPDATE replica_envelope_signatures SET signature='invalid'
+                    /* sqlite-large-value: allow-for-now lv-hbc780a1c9dac owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelope_signatures SET signature='invalid'
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
                 "record-invalid" | "record-invalid-refresh" =>
-                    "UPDATE replica_records SET state='invalid'
+                    /* sqlite-large-value: allow-for-now lv-h054ba51f20f6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid'
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
                 "record-repaired-refresh" =>
-                    "UPDATE replica_records SET state='repaired'
+                    /* sqlite-large-value: allow-for-now lv-hc7948a0a84cd owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired'
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
                 "record-delete" =>
-                    "DELETE FROM replica_records
+                    /* sqlite-large-value: allow-for-now lv-ha76a98dcc427 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
                 "envelope-invalid" =>
-                    "UPDATE replica_envelopes SET receipt_state=?4
+                    /* sqlite-large-value: allow-for-now lv-h6891eac9f9c6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state=?4
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 "envelope-delete" =>
-                    "DELETE FROM replica_envelopes
+                    /* sqlite-large-value: allow-for-now lv-hf168a0847ffd owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelopes
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND ?4 IS NOT NULL",
                 "claim-delete" =>
-                    "DELETE FROM claims WHERE id IN(
+                    /* sqlite-large-value: allow-for-now lv-h1a8e7267f37b owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM claims WHERE id IN(
                        SELECT claim_id FROM assistant_grant_pending
                        WHERE origin=?1 AND auth_sequence=?2 AND auth_envelope_hash=?3 AND auth_record_position=?4)",
                 _ => unreachable!(),
@@ -750,12 +750,12 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             } else {
                 SqlValue::Integer(position as i64)
             };
-            assert_eq!(connection.execute(query, params![grant.origin,sequence,hash,last]).unwrap(), 1);
+            assert_eq!(connection.execute(/* sqlite-large-value: allow-for-now lv-h565adf25d451 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=trace-statement-and-value-representation */ query, params![grant.origin,sequence,hash,last]).unwrap(), 1);
             if mutation.ends_with("-refresh") {
                 // Prepared-envelope revalidation changes evidence and invokes
                 // its non-verifying hook in the same writer transaction.
                 connection.execute(
-                    "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
+                    /* sqlite-large-value: allow-for-now lv-hf26931e7ebc2 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
                 ).unwrap();
                 authority::refresh_envelope(&connection,&grant.origin,sequence,&hash).unwrap();
                 assert!(!connection.query_row(
@@ -801,7 +801,7 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
                 params![grant.origin,sequence,hash], |row| row.get(0),
             ).unwrap();
             assert_eq!(connection.execute(
-                "UPDATE replica_envelopes SET receipt_state='pending'
+                /* sqlite-large-value: allow-for-now lv-h731a7b88489d owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
                 params![grant.origin,sequence,hash],
             ).unwrap(), 1);
@@ -872,7 +872,7 @@ fn restored_window_coverage_cancels_pending_retraction_fence() {
     // Withdraw only the signed removal. Raw fleet history expands the original
     // key again while its old retraction page is still outstanding.
     target.connection.write().execute(
-        "DELETE FROM replica_envelope_signatures
+        /* sqlite-large-value: allow-for-now lv-h187f367a46c6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures
          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
         params![proof.writer,proof.sequence,proof.hash,proof.member_key],
     ).unwrap();
@@ -1202,7 +1202,7 @@ fn many_past_covering_additions_visit_needy_grants_not_unrelated_receipts() {
     for unrelated in [64, 512] {
         let (target, established, needy, additions) = past_covering_addition_backlog(unrelated);
         target.connection.write().execute_batch(
-            "CREATE TEMP TABLE addition_work (unit INTEGER);
+            /* sqlite-large-value: allow-for-now lv-h8d3c6e9a6220 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE addition_work (unit INTEGER);
              CREATE TEMP TRIGGER count_addition_updates AFTER UPDATE ON assistant_grant_additions
              BEGIN INSERT INTO addition_work VALUES(1); END;
              CREATE TEMP TRIGGER count_addition_completion AFTER DELETE ON assistant_grant_additions
@@ -1262,7 +1262,7 @@ fn ordinary_dirty_subject_is_not_starved_by_past_covering_addition_backlog() {
     ).unwrap();
     assert!(queued > 4, "fixture needs a sustained addition backlog");
     connection.execute(
-        "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
+        /* sqlite-large-value: allow-for-now lv-h2483f627e2e6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
     ).unwrap();
     assert!(authority::subject_ready(&connection, &grant.subject).is_err());
     authority::take_authentication_claims();

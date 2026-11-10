@@ -76,15 +76,21 @@ afterEach(async () => {
 /** Fresh modules per test: the bar's preference registry and seen cursor are module singletons. */
 const mount = async () => {
   vi.resetModules()
-  const [React, { createRoot }, { DevBar }] = await Promise.all([import('react'), import('react-dom/client'), import('./DevBar.tsx')])
+  const [React, { createRoot }, { DevBar }, { RegistryContext }, AtomRegistry] = await Promise.all([
+    import('react'), import('react-dom/client'), import('./DevBar.tsx'), import('@effect/atom-react'), import('effect/reactivity/AtomRegistry'),
+  ])
+  const registry = AtomRegistry.make()
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  await React.act(async () => root.render(React.createElement(DevBar, { defaultVisible: true })))
   unmount = async () => {
     await React.act(async () => root.unmount())
+    registry.dispose()
     host.remove()
   }
+  await React.act(async () => root.render(
+    React.createElement(RegistryContext.Provider, { value: registry }, React.createElement(DevBar, { defaultVisible: true })),
+  ))
   return { act: React.act, host }
 }
 
@@ -192,7 +198,7 @@ it('publishes the measured bar height to the workspace, follows resizes, and cle
     disconnect() { this.entry.disconnected = true }
   })
   let rowHeight = 44
-  const isRow = (element: Element) => element.matches('[role="group"][aria-label="Developer bar"]')
+  const isRow = (element: Element) => element.matches('[role="toolbar"][aria-label="Developer bar"]')
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
     return DOMRect.fromRect({ width: 48, height: isRow(this) ? rowHeight : 500 })
   })

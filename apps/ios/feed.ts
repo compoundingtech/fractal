@@ -138,6 +138,7 @@ export class Feed {
   private live = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
+  private cancelOpen: (() => void) | undefined;
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
   private terminal: TerminalFollow | undefined;
   private conversation: { target: string; handlers: ConversationHandlers; failures: number; timer?: ReturnType<typeof setTimeout> } | undefined;
@@ -250,6 +251,8 @@ export class Feed {
 
   private suspend(unexpected = false): void {
     this.attempt++;
+    this.cancelOpen?.();
+    this.cancelOpen = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     const open = this.stream;
@@ -311,22 +314,31 @@ export class Feed {
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
-      let waiting: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('Fractal did not answer')), OPEN_WAIT_MS); });
+      const { promise: timeout, reject: timedOut } = Promise.withResolvers<never>();
+      const waiting = setTimeout(() => timedOut(new Error('Fractal did not answer')), OPEN_WAIT_MS);
+      const { promise: handshake, resolve: ready, reject: cancel } = Promise.withResolvers<void>();
+      this.cancelOpen = () => cancel(new Error('The collections socket opening was cancelled'));
       const attempt = this.client.collectionStream({
         ...(this.socket ? { socket: (url, protocols, headers) => {
           const socket = this.socket!(url, protocols, headers);
           socket.onping = () => { if (!stale()) this.heard(); };
           return socket;
         } } : {}),
+        onOpen: () => { if (!stale()) ready(); },
         onFrame: frame => { if (!stale()) { const received = performance.now(); this.heard(); this.frame(frame, received); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
+      const opening = Promise.all([attempt.then(opened => {
+        if (stale()) { opened.close(); return opened; }
+        // Hold the carrier while it handshakes so timeout, backgrounding and reconnect close it.
+        this.stream = opened;
+        return opened;
+      }), handshake]).then(([opened]) => opened);
       let opened: Awaited<typeof attempt>;
-      try { opened = await Promise.race([attempt, timeout]); }
-      // A socket that opens after its try was given up on is closed, never used.
+      try { opened = await Promise.race([opening, timeout]); }
+      // A carrier returned after its try was given up on is closed, never used.
       catch (error) { void attempt.then(late => late.close(), () => {}); throw error; }
-      finally { clearTimeout(waiting); }
+      finally { clearTimeout(waiting); if (!stale()) this.cancelOpen = undefined; }
       if (stale()) { opened.close(); return; }
       this.stream = opened;
       this.heard();

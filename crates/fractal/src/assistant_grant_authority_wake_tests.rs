@@ -11,14 +11,14 @@ async fn completed_authority_reconciles_older_build_appends_without_reopen() {
     // trigger and the store's commit notification connect it to maintenance.
     // An invalid grant is still durable dirty work and must be reconciled.
     store.connection.write().execute_batch(
-        "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h212901f6fe4a owner=fractal::assistant_grant_authority_wake_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
              VALUES('batch/old-writer','node',1,'old-writer','1');"
     ).unwrap();
     // Two independently committed appends ensure this exercises an already
     // completed worker, even if its first poll races the initial raw append.
     for id in ["claim/old-writer/first", "claim/old-writer/second"] {
         store.connection.write().execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h89976b37066a owner=fractal::assistant_grant_authority_wake_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
              VALUES(?1,'batch/old-writer','custom/client/assistant-v1-invalid',
                 'custom.client.assistant.v1.granted','node','person/owner','{}','[]','1')",
             [id],
@@ -44,7 +44,7 @@ async fn authority_commit_between_completed_drain_and_wait_is_not_lost() {
     // Deterministically place this commit after the completed drain and before
     // waiting. No scheduler timing or sleep is needed to hit the race boundary.
     store.connection.write().execute_batch(
-        "BEGIN;
+        /* sqlite-large-value: allow-for-now lv-h0c36a77fc900 owner=fractal::assistant_grant_authority_wake_tests TODO=chunk-or-reference-exact-wire-values */ "BEGIN;
          INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
              VALUES('batch/race','node',1,'race','1');
          INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
@@ -79,7 +79,7 @@ async fn authority_maintenance_shutdown_exits_and_unregisters_its_observer() {
         .expect("shutdown drops the observer without waiting for another commit")
         .expect_err("no observer sender remains registered");
     store.connection.write().execute(
-        "INSERT INTO meta(key,value) VALUES('authority-after-shutdown','1')", [],
+        /* sqlite-large-value: allow-for-now lv-hb8c82682a9d0 owner=fractal::assistant_grant_authority_wake_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('authority-after-shutdown','1')", [],
     ).unwrap();
     assert!(changes.has_changed().is_err(), "later commits cannot invoke the removed observer");
 }

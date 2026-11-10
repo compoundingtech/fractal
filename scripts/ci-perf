@@ -56,7 +56,7 @@ summarize_load() {
     printf '| Request | n | p50 ms | p99 ms | max ms | budget ms | target ms |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n'
     jq -r '.paths | to_entries[] |
       "| \(.key) | \(.value.count) | \(.value.p50_ms | floor) | \(.value.p99_ms | floor) | \(.value.max_ms | floor) | \(.value.budget_ms | floor) | \(if .value.descriptive_target_ms == null then "-" else "\(.value.descriptive_target_ms | floor)\(if .value.over_descriptive_target then " over" else "" end)" end) |"' "$report"
-    printf '\nTarget: the p99 in slo/targets.toml, described and never gated. Budgets and main'"'"'s baseline are the gates.\n'
+    printf '\nTarget: the p99 in slo/objectives.kdl, described and never gated. Budgets and main'"'"'s baseline are the gates.\n'
     printf 'Runner reference: %s ms to sort 2^21 values on one core (the same work on every host).\n' \
       "$(jq -r '.runner_reference_ms // "-"' "$report")"
     jq -r 'if (.unavailable // {}) == {} then empty else
@@ -169,7 +169,7 @@ PY
     if [ -s "$RUNNER_TEMP/perf-source-state.json" ]; then
       export AGENT_SPEC_REVISION="$(git rev-parse HEAD)"
     fi
-    # The daemon beside a CPU and disk hog at seat priority; reported against slo/targets.toml,
+    # The daemon beside a CPU and disk hog at seat priority; reported against slo/objectives.kdl,
     # never a required check (docs/ci.md).
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     FRACTAL_LOAD_GATE=1 ST_LOAD_GATE=1 FRACTAL_LOAD_HOG=1 ST_LOAD_HOG=1 FRACTAL_LOAD_HOG_REPORT="$out/hog" ST_LOAD_HOG_REPORT="$out/hog" \
