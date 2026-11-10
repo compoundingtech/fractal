@@ -464,7 +464,7 @@ fn reset_projection(connection: &Connection) {
          DELETE FROM assistant_grant_membership_windows;
          DELETE FROM assistant_grant_dirty;
          DELETE FROM assistant_grant_auth_cursor;
-         DELETE FROM assistant_grant_membership_dirty;
+         DELETE FROM assistant_grant_additions;
          DELETE FROM assistant_grant_retractions;
          DELETE FROM assistant_grant_recompute;
          DELETE FROM assistant_grant_proof_invalidations;
@@ -966,7 +966,7 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
 }
 
 #[test]
-fn changed_membership_writer_flood_uses_the_same_fixed_refresh_budget() {
+fn membership_addition_receipt_flood_uses_the_same_fixed_refresh_budget() {
     let (source,key) = source();
     let target = node("reader",Some(key.public()));
     receive(&target,&export(&source,&target));
@@ -977,12 +977,13 @@ fn changed_membership_writer_flood_uses_the_same_fixed_refresh_budget() {
     let mut connection = target.connection.write();
     let markers = backfill_markers(&connection);
     connection.execute(
-        "INSERT INTO assistant_grant_membership_dirty VALUES('anchor',0,'')", [],
+        "INSERT INTO assistant_grant_additions(writer,member_key,lower_sequence,upper_sequence)
+         VALUES('anchor',?1,0,9223372036854775807)", [key.public()],
     ).unwrap();
     connection.execute_batch(
         "CREATE TEMP TABLE refreshed_items (claim_id TEXT);
-         CREATE TEMP TRIGGER count_membership_refresh AFTER UPDATE ON assistant_grant_membership_dirty
-         BEGIN INSERT INTO refreshed_items VALUES(NEW.claim_id); END;",
+         CREATE TEMP TRIGGER count_membership_refresh AFTER UPDATE ON assistant_grant_additions
+         BEGIN INSERT INTO refreshed_items VALUES(NEW.sequence); END;",
     ).unwrap();
     let transaction = connection.transaction().unwrap();
     assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());

@@ -44,7 +44,7 @@ fn receipt_projection_work_state(connection: &Connection) -> Vec<Vec<Vec<SqlValu
         "SELECT id,applied_generation FROM assistant_grant_membership_state ORDER BY id",
         "SELECT claim_id,position,record_rowid,member_key FROM assistant_grant_auth_cursor ORDER BY claim_id",
         "SELECT claim_id FROM assistant_grant_dirty ORDER BY claim_id",
-        "SELECT writer,sequence,claim_id FROM assistant_grant_membership_dirty ORDER BY writer",
+        "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position FROM assistant_grant_additions ORDER BY id",
     ].into_iter().map(|sql| {
         let mut statement = connection.prepare(sql).unwrap();
         let columns = statement.column_count();

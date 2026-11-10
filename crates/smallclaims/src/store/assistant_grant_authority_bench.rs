@@ -334,7 +334,7 @@ fn assistant_grant_authority_measure_real_store() {
         "dirty_queue_size": count("SELECT COUNT(*) FROM assistant_grant_dirty"),
         "pending_queue_size": count("SELECT COUNT(*) FROM assistant_grant_pending"),
         "pending_unauthenticated_queue_size": count("SELECT COUNT(*) FROM assistant_grant_pending WHERE authenticated=0"),
-        "membership_dirty_queue_size": count("SELECT COUNT(*) FROM assistant_grant_membership_dirty"),
+        "membership_addition_queue_size": count("SELECT COUNT(*) FROM assistant_grant_additions"),
         "authentication_cursor_queue_size": count("SELECT COUNT(*) FROM assistant_grant_auth_cursor"),
     }));
 }
@@ -384,7 +384,7 @@ fn measure_backfill(config: Config) {
              DELETE FROM assistant_grant_pending;
              DELETE FROM assistant_grant_dirty;
              DELETE FROM assistant_grant_auth_cursor;
-             DELETE FROM assistant_grant_membership_dirty;
+             DELETE FROM assistant_grant_additions;
              DELETE FROM meta WHERE key='assistant_grant_authority_version'
                 OR key LIKE 'assistant_grant_authority_cursor/%';",
         ).unwrap();

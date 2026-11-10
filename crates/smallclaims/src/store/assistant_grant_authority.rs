@@ -131,16 +131,11 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor (
             claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL, record_rowid INTEGER NOT NULL, member_key TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS assistant_grant_coverage_epochs (
-            writer TEXT PRIMARY KEY, epoch INTEGER NOT NULL);
-         CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor_epochs (
-            claim_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL);
-         CREATE TRIGGER IF NOT EXISTS assistant_grant_auth_cursor_epoch_delete
-         AFTER DELETE ON assistant_grant_auth_cursor BEGIN
-            DELETE FROM assistant_grant_auth_cursor_epochs WHERE claim_id=OLD.claim_id;
-         END;
-         CREATE TABLE IF NOT EXISTS assistant_grant_membership_dirty (
-            writer TEXT PRIMARY KEY, sequence INTEGER NOT NULL, claim_id TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS assistant_grant_additions (
+            id INTEGER PRIMARY KEY, writer TEXT NOT NULL, member_key TEXT NOT NULL,
+            lower_sequence INTEGER NOT NULL, upper_sequence INTEGER NOT NULL,
+            sequence INTEGER NOT NULL DEFAULT -1, envelope_hash TEXT NOT NULL DEFAULT '',
+            position INTEGER NOT NULL DEFAULT -1);
          CREATE TABLE IF NOT EXISTS assistant_grant_retractions (
             id INTEGER PRIMARY KEY, writer TEXT NOT NULL, member_key TEXT NOT NULL,
             lower_sequence INTEGER NOT NULL, upper_sequence INTEGER NOT NULL,
@@ -257,8 +252,8 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
     let pending: bool = connection.query_row(
         "SELECT COALESCE((SELECT value FROM meta WHERE key='assistant_grant_authority_version'),'')<>?1
             OR EXISTS(SELECT 1 FROM assistant_grant_dirty)
-            OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
             OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
+            OR EXISTS(SELECT 1 FROM assistant_grant_additions)
             OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
             OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
             OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)",
@@ -484,6 +479,11 @@ pub fn refresh_claim(connection: &Connection, id: &str) -> Result<()> {
 }
 
 fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bool) -> Result<()> {
+    refresh_claim_with_authentication(connection,id,membership_current,None)
+}
+
+fn refresh_claim_with_authentication(connection: &Connection, id: &str,
+    membership_current: bool, verified: Option<Authentication>) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
         format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1"));
     let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1665a4a8cfdf owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h5520ddeb5d20 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional()?;
@@ -523,7 +523,9 @@ fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bo
             previous.unwrap_or((false,None,None,None,None));
         // Trust depends on precise evidence, never monotonic admission. Retraction
         // tasks target that dependency; local append is a separate durable fact.
-        let authentication = if local_append && claim.origin == local_origin(connection)? {
+        let authentication = if let Some(verified) = verified {
+            verified
+        } else if local_append && claim.origin == local_origin(connection)? {
             Authentication::Authenticated(None)
         } else if membership_current {
             authenticated_claim(connection,&claim.id)?
@@ -636,17 +638,9 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
         return Ok(Authentication::Unauthenticated);
     };
     let shard = fleet_meta(connection,"shard_id")?;
-    // Coverage may add a valid key below this cursor, or for an earlier record.
-    // Epochs restart only in-flight work, without a history-sized cursor update.
-    let epoch: i64 = connection.query_row(
-        "SELECT COALESCE((SELECT epoch FROM assistant_grant_coverage_epochs
-         WHERE writer=(SELECT origin FROM claims WHERE id=?1)),0)",
-        [id], |row| row.get(0))?;
     let cursor: Option<(i64,i64,String)> = connection.query_row(
-        "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor AS cursor
-         WHERE claim_id=?1 AND COALESCE((SELECT epoch FROM assistant_grant_auth_cursor_epochs
-           WHERE claim_id=cursor.claim_id),0)=?2",
-        params![id,epoch], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
     let initial = cursor.is_none();
     let (position_cursor,rowid_cursor,key_cursor) = cursor.unwrap_or((i64::MIN,i64::MIN,String::new()));
     let record: Option<(i64,i64,String,u64,String,bool)> = connection.query_row(
@@ -702,10 +696,6 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Authenticati
          ON CONFLICT(claim_id) DO UPDATE SET position=excluded.position,
             record_rowid=excluded.record_rowid,member_key=excluded.member_key",
         params![id,position,record_rowid,next_key])?;
-    connection.execute(
-        "INSERT INTO assistant_grant_auth_cursor_epochs VALUES(?1,?2)
-         ON CONFLICT(claim_id) DO UPDATE SET epoch=excluded.epoch",
-        params![id,epoch])?;
     Ok(Authentication::Pending)
 }
 pub const AUTHENTICATION_KEYS_QUERY: &str =
@@ -714,8 +704,8 @@ pub const AUTHENTICATION_KEYS_QUERY: &str =
      LEFT JOIN replica_envelope_signatures AS signatures
        ON signatures.writer=windows.writer AND signatures.sequence=?2
       AND signatures.envelope_hash=?3 AND signatures.member_key=windows.member_key
-      AND ?2>=windows.start AND (windows.end IS NULL OR ?2<=windows.end)
      WHERE windows.writer=?1 AND windows.member_key>?4
+       AND ?2>=windows.start AND (windows.end IS NULL OR ?2<=windows.end)
      ORDER BY windows.member_key LIMIT ?5";
 /// Refresh only this envelope's grant records, after receipt/signature state has
 /// been written, and before its transaction is committed.
@@ -797,28 +787,26 @@ impl MembershipUpdate {
                     params![writer,key],
                 )?;
             }
-            let adds_coverage = match (old,*window) {
-                (None,Some(_)) => true,
-                (Some((old_start,old_end)),Some((start,end))) =>
-                    start<old_start || end.unwrap_or(u64::MAX)>old_end.unwrap_or(u64::MAX),
-                _ => false,
-            };
-            if adds_coverage {
-                // In-flight admitted rows retain authenticated=1 while paging,
-                // so the unauthenticated retry queue alone cannot reach them.
-                // Their durable obligations resume against this new epoch.
-                connection.execute(
-                    "INSERT INTO assistant_grant_coverage_epochs VALUES(?1,1)
-                     ON CONFLICT(writer) DO UPDATE SET epoch=epoch+1", [writer],
-                )?;
-                // A new proof may cover even an earlier failed row. Only already
-                // unauthenticated history restarts; established subjects stay live.
-                connection.execute(
-                    "INSERT OR REPLACE INTO assistant_grant_membership_dirty
-                     SELECT ?1,0,'' WHERE EXISTS(
-                       SELECT 1 FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
-                       WHERE origin=?1 AND authenticated=0)", [writer],
-                )?;
+            if let Some((start,end)) = window {
+                let enqueue = |lower: u64, upper: u64| -> Result<()> {
+                    // Snapshot the current receipt frontier. Future-only windows
+                    // cannot help existing rows and must not create retry work.
+                    connection.execute(
+                        "INSERT INTO assistant_grant_additions(writer,member_key,lower_sequence,upper_sequence)
+                         SELECT ?1,?2,?3,MIN(?4,sequence) FROM replica_records
+                         WHERE writer=?1 AND sequence>=?3 ORDER BY sequence DESC LIMIT 1",
+                        params![writer,key,lower,upper],
+                    )?;
+                    Ok(())
+                };
+                let end = end.unwrap_or(i64::MAX as u64);
+                if let Some((old_start,old_end)) = old {
+                    if *start<old_start { enqueue(*start,end.min(old_start-1))?; }
+                    let old_end = old_end.unwrap_or(i64::MAX as u64);
+                    if end>old_end { enqueue((*start).max(old_end+1),end)?; }
+                } else {
+                    enqueue(*start,end)?;
+                }
             }
         }
         if self.complete {
@@ -911,6 +899,64 @@ fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, ke
     Ok(true)
 }
 
+// A key addition owns a separate monotone receipt cursor. Never rewind the
+// original authentication cursor: later admissions cannot undo its progress.
+// One receipt header (including an irrelevant one) consumes one budget unit.
+fn addition_one(connection: &Connection) -> Result<bool> {
+    let task: Option<(i64,String,String,u64,u64,i64,String,i64)> = connection.query_row(
+        "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position
+         FROM assistant_grant_additions ORDER BY id LIMIT 1", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)),
+    ).optional()?;
+    let Some((task,writer,key,lower,upper,sequence,hash,position)) = task else { return Ok(false); };
+    let record: Option<(u64,String,i64,Option<String>,bool)> = connection.query_row(
+        "SELECT sequence,envelope_hash,position,claim_id,state='valid' FROM replica_records
+         WHERE writer=?1 AND sequence BETWEEN ?2 AND ?3
+           AND (sequence,envelope_hash,position)>(?4,?5,?6)
+         ORDER BY sequence,envelope_hash,position LIMIT 1",
+        params![writer,lower,upper,sequence,hash,position],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional()?;
+    let Some((sequence,hash,position,claim,valid)) = record else {
+        connection.execute("DELETE FROM assistant_grant_additions WHERE id=?1", [task])?;
+        return Ok(true);
+    };
+    if let Some(claim) = claim.filter(|_| valid) {
+        let signature: Option<String> = connection.query_row(
+            "SELECT signatures.signature FROM replica_envelope_signatures AS signatures
+             WHERE signatures.writer=?1 AND signatures.sequence=?2
+               AND signatures.envelope_hash=?3 AND signatures.member_key=?4
+               AND EXISTS(SELECT 1 FROM claims WHERE id=?5 AND origin=?1)
+               AND EXISTS(SELECT 1 FROM assistant_grant_pending AS pending
+                 WHERE pending.claim_id=?5 AND pending.origin=?1
+                   AND (pending.authenticated=0
+                     OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?5)
+                     OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?5)))
+               AND EXISTS(SELECT 1 FROM assistant_grant_membership_windows
+                 WHERE writer=?1 AND member_key=?4 AND ?2>=start AND (end IS NULL OR ?2<=end))
+               AND EXISTS(SELECT 1 FROM replica_envelopes WHERE writer=?1 AND sequence=?2
+                 AND envelope_hash=?3 AND receipt_state IN ('validated','degraded'))",
+            params![writer,sequence,hash,key,claim], |row| row.get(0),
+        ).optional()?;
+        if let Some(signature) = signature {
+            let fleet_id = fleet_meta(connection,"assistant_grant_authority_fleet_id")?;
+            let shard = fleet_meta(connection,"shard_id")?;
+            if fleet_id.as_deref().is_some_and(|fleet_id|
+                VerifiedEnvelopeSignature::verify(shard.as_deref(),fleet_id,&writer,sequence,&hash,&key,&signature).is_some()) {
+                refresh_claim_with_authentication(connection,&claim,true,
+                    Some(Authentication::Authenticated(Some((key,sequence,hash.clone(),position)))))?;
+                connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
+                connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
+            }
+        }
+    }
+    connection.execute(
+        "UPDATE assistant_grant_additions SET sequence=?2,envelope_hash=?3,position=?4 WHERE id=?1",
+        params![task,sequence,hash,position],
+    )?;
+    Ok(true)
+}
+
 fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut remaining: usize, membership_current: bool) -> Result<bool> {
     let started = Instant::now();
     if remaining==0 { return Ok(false); }
@@ -982,26 +1028,12 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
         }
-        let task: Option<(String,u64,String)> = connection.query_row(
-            "SELECT writer,sequence,claim_id FROM assistant_grant_membership_dirty ORDER BY writer LIMIT 1",
-            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-        let Some((writer,sequence,id)) = task else { break; };
-        let pending: Option<(u64,String)> = connection.query_row(
-            "SELECT sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
-             WHERE origin=?1 AND authenticated=0 AND (sequence,claim_id)>(?2,?3)
-             ORDER BY sequence,claim_id LIMIT 1", params![writer,sequence,id],
-            |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-        if let Some((sequence,id)) = pending {
-            connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
-            refresh_claim_inner(connection,&id,membership_current)?;
-            connection.execute(
-                "UPDATE assistant_grant_membership_dirty SET sequence=?2,claim_id=?3 WHERE writer=?1",
-                params![writer,sequence,id])?;
-        } else {
-            connection.execute("DELETE FROM assistant_grant_membership_dirty WHERE writer=?1", [writer])?;
+        if membership_current && addition_one(connection)? {
+            remaining -= 1;
+            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+            continue;
         }
-        remaining -= 1;
-        if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+        break;
     }
     // A completed version only drains the old-build dirty queue. Readiness also
     // includes that queue, but must never cause a completed history rescan.
@@ -1043,8 +1075,8 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
     }
     let dirty: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)
-             OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
              OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
+             OR EXISTS(SELECT 1 FROM assistant_grant_additions)
              OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)", [], |row| row.get(0))?;

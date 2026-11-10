@@ -246,11 +246,16 @@ clear that obligation, including when revalidation changes a record to invalid
 or repaired and refreshes its envelope in the same transaction. Only maintenance
 using current membership can discharge it after verification finishes; partial
 authentication pages retain the obligation and subject fence.
-Coverage additions increment a durable per-writer epoch. An authentication cursor
-resumes only in the epoch in which it was created; otherwise it restarts before
-the first record/key, including for a previously admitted row under recheck.
-This prevents a newly eligible key below the cursor from being missed without
-updating every cursor or revisiting already settled authenticated history.
+Coverage additions queue durable writer/key/range tasks with independent monotone
+receipt cursors, capped at the writer's current stored receipt frontier. A
+future-only addition creates no historical work. Each task visits one receipt
+header per budget unit and verifies only its named key for unauthenticated or
+in-flight claims; success records the real verified proof. Original authentication
+cursors never rewind for membership additions, and ordinary key pages exclude
+windows that do not cover the receipt sequence. A key learned below an existing
+cursor can therefore restore a demoted row without repeatedly restarting a
+mid-page recheck. Total addition work is linear in stored receipts in the newly
+covered range; unrelated receipt headers consume units but do not authenticate.
 Subject readiness starts with indexed subject claims and probes the queued
 obligations by their keys; unrelated queue growth does not cause a queue scan.
 It is not constant cost: a subject with many claims or matching proof/range

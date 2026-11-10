@@ -845,11 +845,21 @@ fn restored_window_coverage_cancels_pending_retraction_fence() {
     assert_established_grants_ready(&target, &grants);
 }
 
+#[derive(Clone, Copy, Debug)]
+enum AlternateProofCoverage {
+    MidPage,
+    AlreadyAdmitted,
+    AfterDemotion,
+    FutureOnly,
+}
+
 // Use only real admitted keys and cryptographically valid signatures. The
 // alternate proof predates the cursor, so membership is the only late evidence.
-fn admitted_recheck_finds_alternate_proof(seed: u64, add_coverage: bool) {
+fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCoverage) {
+    let add_coverage = !matches!(coverage, AlternateProofCoverage::AlreadyAdmitted);
+    let key_pages = if matches!(coverage, AlternateProofCoverage::FutureOnly) { 4 } else { 1 };
     let (anchor, anchor_key) = source();
-    let mut keys: Vec<_> = (0..authority::MEMBERSHIP_KEYS_PER_REFRESH + 2)
+    let mut keys: Vec<_> = (0..authority::MEMBERSHIP_KEYS_PER_REFRESH * key_pages + 2)
         .map(|_| Arc::new(MemberKey::generate().unwrap().0)).collect();
     keys.sort_by(|left, right| left.public().cmp(right.public()));
     let low = keys.remove(0);
@@ -918,6 +928,94 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, add_coverage: bool) {
         assert!(authority::subject_ready(&connection, SUBJECT).is_err());
         assert!(!authority::contains(&connection, &grant.id).unwrap());
     }
+    if matches!(coverage, AlternateProofCoverage::FutureOnly) {
+        let cursor = || target.readers.get().query_row(
+            "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+            [&grant.id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?)),
+        ).optional().unwrap();
+        let mut previous = cursor();
+        let mut completed_at = None;
+        // Keep signed admissions arriving for substantially longer than the four
+        // original key pages. None covers an existing receipt, so none may
+        // restart that search or leave a durable addition task behind.
+        for unit in 0..16 {
+            let future_key = MemberKey::generate().unwrap().0;
+            let floor = 1_000_000 + unit as u64;
+            let highest: u64 = target.readers.get().query_row(
+                "SELECT MAX(sequence) FROM replica_records WHERE writer='peer'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(floor > highest);
+            append(&anchor, "host/peer", "fleet.member-admitted", json!({
+                "member_key": future_key.public(), "via": "member", "sponsor": "anchor",
+                "writer_floor": floor, "mode": "listening"
+            }));
+            receive_without_authority_maintenance(&target, &export(&anchor, &target));
+            assert_eq!(cursor(), previous, "receiving membership restarted the recheck");
+            target.advance_assistant_grant_authority_backfill().unwrap();
+            let next = cursor();
+            let connection = target.readers.get();
+            let queued: u64 = connection.query_row(
+                "SELECT COUNT(*) FROM assistant_grant_additions WHERE writer='peer'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(queued, 0, "future-only admission queued historical retry work");
+            assert!(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_membership_windows
+                 WHERE writer='peer' AND member_key=?1 AND start=?2)",
+                params![future_key.public(),floor], |row| row.get::<_,bool>(0),
+            ).unwrap(), "signed admission must actually reach membership");
+            if let (Some(before), Some(after)) = (&previous, &next) {
+                assert!(after > before, "future-only admission restarted or stalled the original cursor");
+            }
+            let rechecking: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+                [&grant.id], |row| row.get(0),
+            ).unwrap();
+            if !rechecking {
+                completed_at.get_or_insert(unit);
+                assert!(next.is_none(), "completed recheck retained its original cursor");
+                let authenticated: bool = connection.query_row(
+                    "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
+                    [&grant.id], |row| row.get(0),
+                ).unwrap();
+                assert!(!authenticated, "uncovered alternate signature must fail closed");
+                assert!(!authority::contains(&connection, &grant.id).unwrap());
+            } else {
+                assert!(completed_at.is_none(), "later future-only admission recreated a finished recheck");
+            }
+            previous = next;
+        }
+        assert!(completed_at.is_some_and(|unit| unit <= key_pages + 2),
+            "sustained future-only admissions prevented bounded recheck completion");
+        assert_windows(&target, &target, &format!("seed={seed} future-only recheck"));
+        return;
+    }
+    if matches!(coverage, AlternateProofCoverage::AfterDemotion) {
+        // The valid earlier-key signature is already in raw provenance. Exhaust
+        // the old search before changing membership: restoration must come from
+        // the new key/range task, not an original cursor that still happens to run.
+        let mut demoted = false;
+        for _ in 0..key_pages + 3 {
+            target.advance_assistant_grant_authority_backfill().unwrap();
+            let connection = target.readers.get();
+            let authenticated: bool = connection.query_row(
+                "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
+                [&grant.id], |row| row.get(0),
+            ).unwrap();
+            if !authenticated {
+                assert!(!connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)
+                     OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+                    [&grant.id], |row| row.get::<_,bool>(0),
+                ).unwrap(), "demotion must finish the original retry obligation");
+                assert!(!authority::contains(&connection, &grant.id).unwrap());
+                demoted = true;
+                break;
+            }
+        }
+        assert!(demoted, "original recheck did not demote within its bounded key pages");
+    }
     if add_coverage {
         append(&anchor, "host/peer", "fleet.member-admitted", json!({
             "member_key": alternate.public(), "via": "member", "sponsor": "anchor",
@@ -925,9 +1023,9 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, add_coverage: bool) {
         }));
         receive_without_authority_maintenance(&target, &export(&anchor, &target));
     }
-    // Membership coverage must restart even an authenticated row's in-flight
-    // search. A cached flag is not permission to skip a newly eligible earlier key.
-    assert_windows(&target, &target, &format!("seed={seed} add_coverage={add_coverage}"));
+    // Newly eligible earlier keys have independent retry work; the original
+    // search need not restart or survive until that work restores authority.
+    assert_windows(&target, &target, &format!("seed={seed} coverage={coverage:?}"));
     let recorded_key: String = target.readers.get().query_row(
         "SELECT auth_member_key FROM assistant_grant_pending WHERE claim_id=?1",
         [&grant.id], |row| row.get(0),
@@ -939,13 +1037,27 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, add_coverage: bool) {
 #[test]
 fn newly_admitted_key_below_mid_page_cursor_reauthenticates_already_admitted_row() {
     for seed in 1..=4 {
-        admitted_recheck_finds_alternate_proof(seed, true);
+        admitted_recheck_finds_alternate_proof(seed, AlternateProofCoverage::MidPage);
     }
 }
 
 #[test]
 fn same_row_dual_signed_proof_survives_recorded_key_removal_after_mid_page_recheck() {
     for seed in 1..=4 {
-        admitted_recheck_finds_alternate_proof(seed, false);
+        admitted_recheck_finds_alternate_proof(seed, AlternateProofCoverage::AlreadyAdmitted);
+    }
+}
+
+#[test]
+fn sustained_future_only_admissions_do_not_restart_mid_page_admitted_recheck() {
+    for seed in 1..=4 {
+        admitted_recheck_finds_alternate_proof(seed, AlternateProofCoverage::FutureOnly);
+    }
+}
+
+#[test]
+fn newly_admitted_earlier_key_restores_demoted_row_from_existing_signature() {
+    for seed in 1..=4 {
+        admitted_recheck_finds_alternate_proof(seed, AlternateProofCoverage::AfterDemotion);
     }
 }
