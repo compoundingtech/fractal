@@ -52,6 +52,14 @@ pub fn client_socket(config: &crate::config::Config) -> Result<PathBuf> {
     Ok(socket)
 }
 
+/// Fixture operations never consult the ambient or production Fabric daemon.
+pub fn fabric_for_state_dir(program: PathBuf, state_dir: &Path) -> Result<Fabric> {
+    Ok(match crate::config::fixture_fabric_context(state_dir)? {
+        Some(context) => Fabric::with_context(program, context),
+        None => Fabric::new(program),
+    })
+}
+
 /// `STATE/fabric-gateway.toml`, written by `st devices fabric enable`. Its presence is the switch.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -107,8 +115,8 @@ impl GatewayExposure {
         }
     }
 
-    fn fabric(&self) -> Fabric {
-        Fabric::new(self.fabric.clone())
+    pub fn fabric(&self, state_dir: &Path) -> Result<Fabric> {
+        fabric_for_state_dir(self.fabric.clone(), state_dir)
     }
 }
 
@@ -189,7 +197,10 @@ pub async fn grant(state_dir: &Path, node: &str) -> Grant {
         Ok(None) => return Grant::NotEnabled,
         Err(error) => return failed(error),
     };
-    let fabric = exposure.fabric();
+    let fabric = match exposure.fabric(state_dir) {
+        Ok(fabric) => fabric,
+        Err(error) => return failed(error),
+    };
     let name = service_peer_name(&exposure.service, node);
     let peers = match fabric.peers().await {
         Ok(peers) => peers,
@@ -229,9 +240,9 @@ pub async fn grant(state_dir: &Path, node: &str) -> Grant {
 pub async fn revoke(state_dir: &Path, node: &str) -> Result<Option<String>> {
     let exposure = GatewayExposure::load(state_dir)?;
     let fabric = match &exposure {
-        Some(exposure) => exposure.fabric(),
+        Some(exposure) => exposure.fabric(state_dir)?,
         None => match crate::fleet::transport::resolve_tool(None, "fabric") {
-            Some(program) => Fabric::new(program),
+            Some(program) => fabric_for_state_dir(program, state_dir)?,
             None => return Ok(None),
         },
     };
@@ -330,8 +341,9 @@ mod tests {
             "add {PHONE} st-fixture-device-0123456789ab --inbound-only --allow {FIXTURE_SERVICE}\n"
         )));
         assert_eq!(revoke(&fixture_state, OTHER).await.unwrap(), None);
-        assert!(granted_peers(&exposure.fabric(), FIXTURE_SERVICE).await.unwrap().is_empty());
-        assert_eq!(granted_peers(&exposure.fabric(), DEFAULT_SERVICE).await.unwrap(), ["st-device-fedcba987654"]);
+        let fixture_fabric = exposure.fabric(&fixture_state).unwrap();
+        assert!(granted_peers(&fixture_fabric, FIXTURE_SERVICE).await.unwrap().is_empty());
+        assert_eq!(granted_peers(&fixture_fabric, DEFAULT_SERVICE).await.unwrap(), ["st-device-fedcba987654"]);
         assert_eq!(grant(&fixture_state, OTHER).await, Grant::AlreadyTrusted {
             peer: "st-device-fedcba987654".into(),
         });
@@ -340,7 +352,7 @@ mod tests {
             (PHONE, "st-fixture-device-0123456789ab"),
             (OTHER, "st-device-fedcba987654"),
         ]);
-        assert_eq!(granted_peers(&exposure.fabric(), DEFAULT_SERVICE).await.unwrap(), ["st-device-fedcba987654"]);
+        assert_eq!(granted_peers(&fixture_fabric, DEFAULT_SERVICE).await.unwrap(), ["st-device-fedcba987654"]);
         assert_eq!(revoke(&fixture_state, PHONE).await.unwrap().as_deref(), Some("st-fixture-device-0123456789ab"));
         assert!(calls(&log).ends_with("remove st-fixture-device-0123456789ab\n"));
         assert!(!calls(&log).contains("remove st-device-"));
@@ -360,7 +372,7 @@ mod tests {
         fs::write(
             &program,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1\" in peers) echo '{peers}';; esac\n",
+                "#!/bin/sh\nif [ \"$1\" = --home ]; then [ \"$2\" = \"$FABRIC_HOME\" ] || exit 1; shift 2; fi\necho \"$@\" >> {log}\ncase \"$1\" in peers) echo '{peers}';; esac\n",
                 log = log.display()
             ),
         )

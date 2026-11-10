@@ -9463,9 +9463,10 @@ async fn run_devices_fabric(
     command: DevicesFabricCommand,
     json_output: bool,
 ) -> Result<()> {
-    use fractal_daemon::fabric_gateway::{GatewayExposure, granted_peers};
-    use fractal_daemon::fleet::transport::{Fabric, resolve_tool};
+    use fractal_daemon::fabric_gateway::{GatewayExposure, fabric_for_state_dir, granted_peers};
+    use fractal_daemon::fleet::transport::resolve_tool;
     let state_dir = &config.state_dir;
+    config.validate_fixture_paths()?;
     let exposure = GatewayExposure::load(state_dir)?;
     match command {
         DevicesFabricCommand::Enable { service } => {
@@ -9478,7 +9479,7 @@ async fn run_devices_fabric(
             let program = resolve_tool(override_path.as_deref(), "fabric")
                 .context("this machine cannot use Fabric: fabric is not installed")?;
             let program = std::fs::canonicalize(&program).unwrap_or(program);
-            let fabric = Fabric::new(program.clone());
+            let fabric = fabric_for_state_dir(program.clone(), state_dir)?;
             if let Some(previous) = exposure.as_ref().filter(|previous| previous.service != service) {
                 anyhow::bail!(
                     "the client gateway is already exposed as {}; run fractal devices fabric disable first",
@@ -9510,7 +9511,7 @@ async fn run_devices_fabric(
                 println!("The client gateway is not exposed over Fabric.");
                 return Ok(());
             };
-            let fabric = Fabric::new(exposure.fabric.clone());
+            let fabric = exposure.fabric(state_dir)?;
             let mut removed = Vec::new();
             for peer in granted_peers(&fabric, &exposure.service).await? {
                 fabric.remove(&peer).await?;
@@ -9519,7 +9520,11 @@ async fn run_devices_fabric(
             fabric
                 .unexpose(&exposure.service)
                 .await
-                .with_context(|| format!("removed {} device grant(s); run fabric unexpose {}", removed.len(), exposure.service))?;
+                .with_context(|| if config.local_only() {
+                    format!("removed {} device grant(s); retry fractal --instance client-control-fixture devices fabric disable against its dedicated Fabric daemon only", removed.len())
+                } else {
+                    format!("removed {} device grant(s); run fabric unexpose {}", removed.len(), exposure.service)
+                })?;
             GatewayExposure::remove(state_dir)?;
             if json_output {
                 println!("{}", json!({"service": exposure.service, "enabled": false, "removed": removed}));
@@ -9532,7 +9537,7 @@ async fn run_devices_fabric(
         }
         DevicesFabricCommand::Status => {
             let peers = match &exposure {
-                Some(exposure) => granted_peers(&Fabric::new(exposure.fabric.clone()), &exposure.service).await?,
+                Some(exposure) => granted_peers(&exposure.fabric(state_dir)?, &exposure.service).await?,
                 None => Vec::new(),
             };
             if json_output {

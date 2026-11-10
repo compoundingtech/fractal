@@ -88,6 +88,31 @@ fn exact_path(actual: &Path, expected: &Path, root: &Path, kind: &'static str) -
     Ok(())
 }
 
+fn fabric_context_at_root(
+    root: &Path,
+    home: &Path,
+    control: &Path,
+) -> Result<crate::fleet::transport::FabricExecutionContext, FixturePathRefusal> {
+    exact_path(home, &root.join("fabric"), root, "fabric_home")?;
+    exact_path(control, &root.join("fabric/run/control.sock"), root, "fabric_control_socket")?;
+    for name in ["identity.toml", "peers.toml", "config.toml"] {
+        exact_path(&home.join(name), &home.join(name), root, "fabric_home")?;
+    }
+    crate::fleet::transport::FabricExecutionContext::new(root.to_owned(), home.to_owned(), control.to_owned())
+        .map_err(|_| refusal("fabric_home"))
+}
+
+/// Pairing paths have only state_dir, so they share the same independent root authority.
+pub fn fixture_fabric_context(state_dir: &Path) -> Result<Option<crate::fleet::transport::FabricExecutionContext>, FixturePathRefusal> {
+    if !super::NetworkPolicy::for_state_dir(state_dir).is_local_only() {
+        return Ok(None);
+    }
+    let root = fixture_root(state_dir).ok_or_else(|| refusal("state_dir"))?;
+    let state = fractal_client::product_dirs::resolve(root.join("state/st3"), root.join("state/fractal"));
+    exact_path(state_dir, &state, &root, "state_dir")?;
+    fabric_context_at_root(&root, &root.join("fabric"), &root.join("fabric/run/control.sock")).map(Some)
+}
+
 fn validate_at_root(config: &Config, root: &Path) -> Result<(), FixturePathRefusal> {
     let state = fractal_client::product_dirs::resolve(root.join("state/st3"), root.join("state/fractal"));
     exact_path(&config.state_dir, &state, root, "state_dir")?;
@@ -103,7 +128,9 @@ fn validate_at_root(config: &Config, root: &Path) -> Result<(), FixturePathRefus
     let socket = root.join("run/fractal-client.sock");
     exact_path(&config.client_gateway_socket, &socket, root, "client_gateway_socket")?;
     let bound = super::socket_binding_path(&socket);
-    exact_path(&bound, &bound, root, "client_gateway_socket")
+    exact_path(&bound, &bound, root, "client_gateway_socket")?;
+    fabric_context_at_root(root, &root.join("fabric"), &root.join("fabric/run/control.sock"))?;
+    Ok(())
 }
 
 impl Config {
@@ -114,6 +141,11 @@ impl Config {
         }
         let root = fixture_root(&self.state_dir).ok_or_else(|| refusal("state_dir"))?;
         validate_at_root(self, &root)
+    }
+
+    pub fn fixture_fabric_context(&self) -> Result<Option<crate::fleet::transport::FabricExecutionContext>, FixturePathRefusal> {
+        self.validate_fixture_paths()?;
+        fixture_fabric_context(&self.state_dir)
     }
 }
 
@@ -141,6 +173,43 @@ mod tests {
         let mut explicit = fixture(&root);
         explicit.store_dir = Some(explicit.state_dir.clone());
         validate_at_root(&explicit, &root).unwrap();
+    }
+
+    #[test]
+    fn dedicated_fabric_context_refuses_production_home_and_control() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".st-instance/client-control-fixture");
+        let fabric_home = root.join("fabric");
+        let control = fabric_home.join("run/control.sock");
+        let context = fixture(&root).fixture_fabric_context().unwrap().unwrap();
+        assert_eq!(context.home(), fabric_home);
+        assert_eq!(context.control_socket(), control);
+        let production = home.path().join(".local/share/fabric");
+        assert_eq!(fabric_context_at_root(&root, &production, &production.join("run/control.sock")).unwrap_err().path, "fabric_home");
+        assert_eq!(fabric_context_at_root(&root, &fabric_home, &production.join("run/control.sock")).unwrap_err().path, "fabric_control_socket");
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn dedicated_fabric_context_rejects_home_control_and_identity_symlinks() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".st-instance/client-control-fixture");
+        let fabric_home = root.join("fabric");
+        let config = fixture(&root);
+        let production = home.path().join("production");
+        fs::create_dir_all(&production).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        symlink(&production, &fabric_home).unwrap();
+        assert_eq!(config.fixture_fabric_context().unwrap_err().path, "fabric_home");
+        fs::remove_file(&fabric_home).unwrap();
+        fs::create_dir_all(fabric_home.join("run")).unwrap();
+        let control = fabric_home.join("run/control.sock");
+        symlink(production.join("control.sock"), &control).unwrap();
+        assert_eq!(config.fixture_fabric_context().unwrap_err().path, "fabric_control_socket");
+        fs::remove_file(&control).unwrap();
+        symlink(production.join("identity.toml"), fabric_home.join("identity.toml")).unwrap();
+        assert_eq!(config.fixture_fabric_context().unwrap_err().path, "fabric_home");
     }
 
     #[test]
