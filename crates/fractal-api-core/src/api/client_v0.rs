@@ -556,9 +556,25 @@ impl ClientSession {
         };
         // Free mode: an agent's local session holds every scope a person's does. Its actions
         // still record the agent as their actor.
-        Ok(Self {
-            actor: person.into(),
-            authority_actor: person.into(),
+        Ok(Self::acting(person))
+    }
+
+    /// A program effect's local session, acting as `run` (docs/st3/program-engine.md §3). Only a
+    /// request its run credential binds to that same run may name it; run authority then decides
+    /// each write.
+    pub fn local_run(run: &str, bound_run: Option<&str>) -> Result<Self, ApiError> {
+        if bound_run != Some(run) {
+            return Err(forbidden(
+                "a trusted Unix client acts as a mission run only when its run credential binds that run",
+            ));
+        }
+        Ok(Self::acting(run))
+    }
+
+    fn acting(actor: &str) -> Self {
+        Self {
+            actor: actor.into(),
+            authority_actor: actor.into(),
             pairing_grant: None,
             pairing_issued_here: false,
             grant_expires_at: None,
@@ -566,14 +582,14 @@ impl ClientSession {
             transport: "unix",
             local_peer: false,
             peer_process: None,
-            custom_forms,
+            custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
-        })
+        }
     }
 
     pub fn pairing() -> Self {
@@ -658,6 +674,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
+    capabilities.push(json!({"id":"person-answer-option-notes", "version":1, "state":"granted"}));
     // Pairing accepts `fabric_node_id` and reports `fabric_grant`.
     capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-message-participants", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -758,7 +775,8 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
-    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+    if let Some(web) = request.extensions().get::<LocalWebSession>()
+        && !request.headers().contains_key(AUTHORIZATION) {
         let mut session = ClientSession::local(Some(&web.person))?;
         session.actor = format!("client/local-web/{}", web.id);
         session.transport = "local-web";
@@ -774,10 +792,15 @@ pub fn authenticate(
                 .headers()
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
-            let mut session = ClientSession::local(person)?;
+            let bound_run = request.extensions().get::<super::BoundRun>().map(|bound| bound.0.run.as_str());
+            let mut session = match person.filter(|person| person.starts_with("mission-run/")) {
+                Some(run) => ClientSession::local_run(run, bound_run)?,
+                None => ClientSession::local(person)?,
+            };
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
+                || bound_run.is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
                 || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
@@ -810,6 +833,9 @@ pub fn authenticate(
     let digest = credential_digest(credential);
     if let Some(session) = assistant::authenticate(state, &digest, transport)? {
         assistant::authorize_route(&session, request)?;
+        if external_grants::is_service(&session) {
+            external_grants::audit_service_read(state, &session)?;
+        }
         return Ok(session);
     }
     let pairings = state
@@ -1059,7 +1085,9 @@ pub fn mission_list_cards_with(
                 else if steps.iter().any(|s| s.status=="blocked") {"blocked"} else {"system"};
             let shown=steps.iter().map(|step| json!({
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
-                "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
+                "attempt":step.attempt,
+                "assignee":step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                "claimant":step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
                 "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
                 "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),

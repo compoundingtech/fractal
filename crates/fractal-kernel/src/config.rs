@@ -151,6 +151,10 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// What a write outside a mission run's authority does. Written only when it differs from
+    /// the default.
+    #[serde(skip_serializing_if = "ProgramsConfig::is_default")]
+    pub programs: ProgramsConfig,
     /// How long a person has to answer an ask that names no deadline. Written only when it
     /// differs from the default.
     #[serde(skip_serializing_if = "AsksConfig::is_default")]
@@ -458,6 +462,27 @@ impl LimitsConfig {
         );
         Ok(())
     }
+}
+
+/// `[programs]`: how the daemon holds a program's run to its authority
+/// (docs/st3/program-engine.md §3).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProgramsConfig {
+    /// `audit` lets a write outside a run's authority proceed and records it; `enforce` refuses it.
+    pub authority: RunAuthorityMode,
+}
+
+impl ProgramsConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunAuthorityMode {
+    #[default]
+    Audit,
+    Enforce,
 }
 
 /// The reconcile pass cap when `[reconcile] max_passes_per_minute` is not set.
@@ -789,6 +814,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
+            programs: ProgramsConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
             wait_for_peers_after_start: None,

@@ -32,7 +32,39 @@ pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyh
             .is_none())
 }
 
-/// Store-local budgets: one latest boot floor and at most five identities per recipient.
+/// A batch settles when every member is delivered/read or terminally withdrawn (closed/expired).
+/// Read outside recovery locks; withdrawal never manufactures a delivery receipt.
+pub fn recovery_batch_settled(
+    store: &Store,
+    batch: &std::collections::BTreeSet<String>,
+) -> anyhow::Result<bool> {
+    if batch.is_empty() {
+        return Ok(false);
+    }
+    for subject in batch {
+        if store.message_expiry(subject)?.is_some_and(|expiry| !expiry.superseded) {
+            continue;
+        }
+        let settled = if !crate::store::messages_shard::graph_sent(store, subject)? {
+            mailbox_reads::lifecycle_step(store, subject, "message.delivered")?.is_some()
+                || mailbox_reads::lifecycle_step(store, subject, "message.read")?.is_some()
+                || mailbox_reads::lifecycle_step(store, subject, "message.closed")?.is_some()
+        } else {
+            crate::store::message_marks::recorded_at(
+                &store.readers.get(), subject, &["message.delivered", "message.read", "message.closed"], None,
+            )?.is_some()
+                || store.latest_claim(subject, Some("message.delivered"))?.is_some()
+                || store.latest_claim(subject, Some("message.read"))?.is_some()
+                || store.latest_claim(subject, Some("message.closed"))?.is_some()
+        };
+        if !settled {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Store-local recovery: one latest boot floor and one outstanding batch per recipient.
 #[derive(Default)]
 struct PollRecovery(BTreeMap<String, PollBoot>);
 
@@ -59,15 +91,22 @@ fn poll_backlog(
             break;
         }
     }
-    // Empty/recent-only polls and exhausted sessions need no second mailbox scan.
-    if let Some(PollBoot { floor: current, admitted }) = recovery.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner).0.get(recipient)
-        && *current == floor && (!has_backlog || admitted.len() == RECOVERY_BACKLOG_LIMIT)
-    {
-        return Ok(admitted.clone());
-    }
-    if !has_backlog {
+    let previous = recovery.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .0.get(recipient).map(|boot| (boot.floor, boot.admitted.clone()));
+    if previous.as_ref().is_some_and(|(current, _)| *current > floor) {
         return Ok(Default::default());
+    }
+    let completed = if let Some((current, admitted)) = &previous {
+        if *current == floor && !admitted.is_empty() {
+            if !recovery_batch_settled(store, admitted)? {
+                return Ok(admitted.clone());
+            }
+            true
+        } else { false }
+    } else { false };
+    if !has_backlog {
+        return Ok(previous.filter(|(current, _)| *current == floor)
+            .map(|(_, admitted)| admitted).unwrap_or_default());
     }
     // A page or filtered query must not choose newer mail ahead of older eligible mail.
     // Read before locking: the mutex protects only the five-slot admission decision.
@@ -82,6 +121,9 @@ fn poll_backlog(
         }
     }
     candidates.sort_unstable();
+    let selected = candidates.into_iter().take(RECOVERY_BACKLOG_LIMIT)
+        .map(|(_, subject)| subject).collect::<std::collections::BTreeSet<_>>();
+    let selecting = messages.iter().any(|message| selected.contains(&message.subject));
     let mut recovery = recovery.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let PollBoot { floor: current, admitted } = recovery.0.entry(recipient.into()).or_default();
     if *current > floor {
@@ -90,12 +132,14 @@ fn poll_backlog(
     if *current != floor {
         *current = floor;
         admitted.clear();
+    } else if completed && selecting && previous.as_ref().is_some_and(|(_, batch)| batch == admitted) {
+        admitted.clear();
     }
-    let available = RECOVERY_BACKLOG_LIMIT.saturating_sub(admitted.len());
-    let selected = candidates.iter().filter(|(_, subject)| !admitted.contains(subject))
-        .take(available).filter(|(_, subject)| messages.iter().any(|m| &m.subject == subject))
-        .map(|(_, subject)| subject.clone()).collect::<Vec<_>>();
-    admitted.extend(selected);
+    // Reserve the whole oldest batch across pages; a fast first page cannot refill early.
+    // Keep a completed batch visible for receipt reconciliation until another is selected.
+    if admitted.is_empty() && selecting {
+        *admitted = selected;
+    }
     Ok(admitted.clone())
 }
 
@@ -338,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn native_poll_caps_oldest_backlog_across_pages_and_resets_only_at_next_boot() {
+    fn native_poll_reserves_oldest_batch_across_pages_and_replaces_obsolete_boots() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("graph.db");
         let store = Store::open(&database, "node").unwrap();
@@ -397,7 +441,7 @@ mod tests {
                 .contains(&message.subject.as_str());
             assert_eq!(message.status, if admitted { "staged" } else { "closed" });
         }
-        // Neither completed nor staged offers refund a slot in this session.
+        // A single completed member cannot release the other staged members.
         crate::store::message_marks::record(&store, "message/1", "message.read", seat).unwrap();
         assert_eq!(poll(&["message/6"])[0].status, "closed");
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -408,6 +452,75 @@ mod tests {
                 "the next boot re-offered staged or expired mail");
         }
         assert_eq!(recovery.lock().unwrap().0.len(), 1, "old boot entries leaked");
+    }
+
+    #[test]
+    fn native_poll_drains_twelve_in_settled_batches_including_expiry_and_rejects_stale_floors() {
+        for phase in ["delivered", "closed", "expired"] {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("graph.db");
+        let store = Store::open(&database, "node").unwrap();
+        let seat = "agent/eval.worker";
+        for id in (0..12).rev() {
+            store.append_claim(&ClaimInput {
+                subject: format!("message/batch-{id:02}"), kind: "message.sent".into(),
+                actor: Some("person/eval".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                    ("to".into(), json!(seat)), ("content".into(), json!("QUARTZ SIGNAL")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        crate::store::mailbox_tests::ready(&store, "batch-boot");
+        let floor = store.native_mail_boot_floor(seat).unwrap().unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        crate::store::configure_projection_writer(&connection).unwrap();
+        for id in 0..12 {
+            connection.execute("UPDATE claims SET accepted_at_unix_ms=?1 WHERE subject=?2",
+                rusqlite::params![(floor.0 - 7_200_000 + id).to_string(), format!("message/batch-{id:02}")]).unwrap();
+        }
+        let peer = NativeDeliveryPeer { agent: seat.into(), transport: "omp-channel", pid: 37, archives_inbox: true };
+        let poll = || {
+            let mut messages = store.messages(Some(seat), false).unwrap();
+            hold_pre_boot_mail(&store, Some(&peer), Some(seat), &mut messages).unwrap();
+            messages.into_iter().filter(|m| m.status == "sent").map(|m| m.subject)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        for (start, end) in [(0, 5), (5, 10), (10, 12)] {
+            let expected = (start..end).map(|id| format!("message/batch-{id:02}"))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(poll(), expected);
+            for (position, subject) in expected.iter().enumerate() {
+                crate::store::message_marks::record(&store, subject,
+                    if position == 0 { "message.staged" } else { "message.delivered" }, seat).unwrap();
+            }
+            assert!(poll().is_empty(), "a staged member must block the next batch");
+            let withdraw = phase != "delivered";
+            store.append_claim(&ClaimInput {
+                subject: expected.first().unwrap().clone(), kind: format!("message.{phase}"),
+                actor: Some(if withdraw { "daemon/runtime" } else { seat }.into()),
+                fields: if phase == "expired" {
+                    BTreeMap::from([("status".into(), json!(phase)), ("reason".into(), json!("cutoff-uncertain-attempt"))])
+                } else { BTreeMap::from([("status".into(), json!(phase))]) },
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            if withdraw {
+                assert_eq!(store.message(expected.first().unwrap()).unwrap().unwrap().status, phase);
+                assert!(crate::store::message_marks::recorded_at(
+                    &store.readers.get(), expected.first().unwrap(), &["message.delivered", "message.read"], None,
+                ).unwrap().is_none());
+            }
+            assert!(recovery_batch_settled(&store, &expected).unwrap());
+        }
+        assert!(poll().is_empty());
+        let recovery = store.extension::<Mutex<PollRecovery>>();
+        let newer = (floor.0 + 1, floor.1);
+        recovery.lock().unwrap().0.insert(seat.into(), PollBoot { floor: newer, admitted: Default::default() });
+        assert!(poll_backlog(&store, &recovery, seat, floor, &store.messages(Some(seat), false).unwrap()).unwrap().is_empty());
+        assert_eq!(recovery.lock().unwrap().0[seat].floor, newer);
+        assert_eq!(recovery.lock().unwrap().0.len(), 1);
+        }
     }
 
 }

@@ -148,6 +148,17 @@ input-set token with `fractal subject basis SUBJECT --kind custom.domain.input` 
 and removes its card. The tool recomputes and appends a fresh derived claim. Filters exclude
 the output kind, dependency cycles are invalid, and bounds are enforced.
 
+`GET /v1/claims` lists claims in store-index order. `kind` keeps one kind, `subject` one exact
+subject and `subject_prefix` every subject that starts with those characters, such as
+`custom/acme/change/` (end the prefix with `/`, or `custom/acme/change` also matches
+`custom/acme/changes/x`). `kind` combines with either subject filter; `subject` and
+`subject_prefix` together are refused with `invalid-claims-query`, as is a prefix that is empty,
+not ASCII, or holds `*`, `?` or `[`. Page with `after_index`, `before_index`, `order` (`asc` or
+`desc`) and `limit` (1 to 500): the response is `{"claims": [...], "next_cursor": N}`, and
+`next_cursor` is the next page's `after_index` ascending or `before_index` descending. Each filter
+reads through a claims index. `fractal claims ls --kind KIND --subject-prefix PREFIX` prints one
+line per claim and the flag that reads the next page; `--json` prints the page.
+
 ## Decision trees
 
 [decision-tree.json](../../examples/fractal/decision-tree.json) registers `decision.tree` version 1

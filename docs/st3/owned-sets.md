@@ -46,6 +46,17 @@ Mission runs, mission-owned seats, resources, observers and subscriptions cannot
 Publish those through their existing routes. A mission definition may contain its normal
 run-owned declarations; changing its definition preserves active runs and their pinned revisions.
 
+An agent's nested `exec` and `pty` tasks (`exec/NAMESPACE/AGENT/TASK`) are members carried with
+their agent: they are published, adopted and retired together with it, and the agent's `under`
+grouping is unchanged. A changed task launch restarts the task; `--rollout when-idle` applies to
+agents only. Standalone top-level `exec` and `pty` declarations cannot be set members.
+
+A schedule or subscription in the bundle can pin a mission of the same bundle with
+`mission "NAME@ST_REVISION[NAME]"`. The daemon resolves each token to the revision this
+publication stores before validating the bundle, so one publication carries both the mission and
+its pinned schedule. A token naming a mission outside the bundle, or tokens pinning each other in
+a cycle, refuse the publication.
+
 ## Declaration diffs and readback
 
 `fractal apply --set NAME ... --dry-run` includes an additive `declaration_diffs` map keyed by
@@ -129,6 +140,8 @@ exclusive leadership during a partition. Keep the existing serial applier.
 
 Before activating owned sets, upgrade every active fleet member. Publication refuses activation
 unless each admitted member's latest own `daemon.started` advertises `features.owned_sets=1`.
+A set with agent `exec` or `pty` task members additionally requires `features.owned_set_tasks=1`,
+because older daemons refuse replicated revisions that carry such members.
 Ordinary publication and existing clients remain usable during the upgrade. An older daemon must
 not be introduced into a fleet after set activation.
 

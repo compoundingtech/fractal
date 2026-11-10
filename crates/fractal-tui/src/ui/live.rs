@@ -1854,6 +1854,10 @@ pub fn run(context: Context) -> Result<()> {
                 if let Some(id) = alert {
                     let _ = tx.send(Fetched::AlertOutcome(id,
                         outcome.as_ref().map(|_| ()).map_err(|error| {
+                            // Refused here before sending: nothing reached Fractal.
+                            if error.downcast_ref::<crate::OptionNotesUnsupported>().is_some() {
+                                return error.to_string();
+                            }
                             format!("Could not confirm answer: {} · request restored; check before sending again", plain(error))
                         })));
                 }
@@ -2818,9 +2822,10 @@ async fn perform(
             action,
             reason,
             answer,
+            option_notes,
         } => {
             let seen = model.attention().find(|card| card.header.id == id);
-            crate::attention_action(client, person, &id, seen, &action, reason, answer)
+            crate::attention_action(client, person, &id, seen, &action, reason, answer, option_notes)
                 .await
                 .map(|notice| (notice, None))
         }
@@ -4476,6 +4481,7 @@ mod tests {
             action: "review.approve".into(),
             reason: None,
             answer: None,
+            option_notes: Vec::new(),
         };
         let terminal = Effect::CreateTerminal {
             name: "shell".into(),

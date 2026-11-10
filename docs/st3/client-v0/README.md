@@ -2849,6 +2849,10 @@ same host without becoming shared projection or checkpoint authority.
 in `fractal agents new`. Workspace paths are absolute on the selected host; omission asks that host for
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
+`description` is the agent's charter: nonempty UTF-8 of at most 8 KiB (8,192 bytes), lines
+included. A charter over 1,000 bytes publishes only when every active fleet member advertises
+`features.agent_charter=1` (see [compatibility](../compatibility.md#agent-charter-publication));
+otherwise the action fails with `agent-charter-feature-barrier` and publishes nothing.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
 
 Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
