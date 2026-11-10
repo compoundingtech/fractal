@@ -2773,7 +2773,8 @@
       "command": "st work resume",
       "description": "Start the execution clock again after `work wait`",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal/tests/exec_clock_wait.rs::an_exec_that_waits_longer_than_its_step_timeout_completes"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
@@ -2863,7 +2864,8 @@
       "command": "st work wait",
       "description": "Stop the execution clock while claimed work waits for something outside this seat",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal/tests/exec_clock_wait.rs::an_exec_that_waits_longer_than_its_step_timeout_completes"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },

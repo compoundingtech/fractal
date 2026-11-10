@@ -599,7 +599,59 @@ pub async fn post_work_action(
         request.actor.as_deref(),
         &mut request.incarnation,
     )?;
+    if request.actor.as_deref().is_some_and(|actor| actor.starts_with("exec/")) {
+        return exec_clock_response(state, action, subject, request).await;
+    }
     work_action_response_viewing(state, action, subject, request, None, None, lease_view).await
+}
+
+/// `work wait` and `work resume` from a step's own exec, which holds no claim. The exec's launch
+/// is its fence: it names the start operation its runtime put in its environment
+/// (`ST3_START_OPERATION`), and only the exec's generation running on this host from that launch
+/// may act. A process from an earlier launch, another exec or another host is refused.
+async fn exec_clock_response(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+) -> Result<Json<StepRunView>, ApiError> {
+    let Some(launch) = request.incarnation.clone().filter(|launch| !launch.is_empty()) else {
+        return Err(ApiError::bad(FractalError::new(
+            "missing-work-incarnation",
+            "an exec's work action names its launch: the ST3_START_OPERATION its runtime gave it",
+        )));
+    };
+    let store = state.store.clone();
+    let runtime = fractal_runtime::ExecRuntime::new(state.state_dir.join("exec"), state.state_dir.join("logs"));
+    let node = state.node.clone();
+    let response = blocking_action(move || {
+        let read = |error: anyhow::Error| FractalError::new("store-read-failed", format!("{error:#}"));
+        let exec = request.actor.as_deref().unwrap_or_default();
+        // An exact retry answers from its record, even after the exec has exited.
+        if store.cached_idempotency_response::<StepRunView>(&request.idempotency_key).map_err(read)?.is_none() {
+            let generation = store
+                .desired_subject_with_writer(exec)
+                .map_err(read)?
+                .and_then(|(desired, _)| desired.member)
+                .filter(|member| !member.terminal && member.host == node)
+                .map(|member| runtime.observe(&member.runtime_id))
+                .transpose()
+                .map_err(read)?
+                .flatten();
+            let live = matches!(&generation, Some(fractal_runtime::ExecObservation::Running(generation))
+                if generation.start_operation.as_deref() == Some(launch.as_str()) || generation.generation_id == launch);
+            if !live {
+                return Err(FractalError::new(
+                    "inactive-work-incarnation",
+                    format!("`{launch}` is not the live launch of `{exec}` on this host"),
+                ));
+            }
+        }
+        store.work_action_answering(&subject, &action, &request, None, None, true)
+    })
+    .await?;
+    signal_changed(&state);
+    Ok(Json(response))
 }
 
 /// Add time to the execution budget of the step attempt this seat holds.
