@@ -307,7 +307,7 @@ impl GithubResponseDetails {
 
 impl std::fmt::Display for GithubResponseDetails {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "GitHub HTTP {} (resource={:?}, remaining={:?}, retry-after={:?})",
+        write!(formatter, "GitHub HTTP {} (x-ratelimit-resource={:?}, x-ratelimit-remaining={:?}, retry-after={:?})",
             self.status, self.resource, self.remaining, self.retry_after)
     }
 }
@@ -326,51 +326,17 @@ pub fn log_github_call(
     headers: &reqwest::header::HeaderMap,
 ) {
     #[cfg(test)]
-    let file = TEST_USAGE_LOG.try_with(Clone::clone).ok();
+    let file = match TEST_USAGE_LOG.try_with(Clone::clone) {
+        Ok(file) => Some(file),
+        Err(_) => return,
+    };
     #[cfg(not(test))]
-    let file = std::env::var_os("AGENT_POLICY_STATE_DIR").map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/state/agent-policy")))
-        .map(|directory| directory.join("gh-usage.jsonl"));
-    let Some(file) = file else { return };
-    if let Err(error) = append_github_call(&file, method, path, status, headers) {
-        tracing::warn!(%error, "could not append GitHub usage");
-    }
+    let file: Option<std::path::PathBuf> = None;
+    fractal_runtime::github_usage::log_github_call(
+        method, path, status, headers, github_spender().as_deref(), file.as_deref(),
+    );
 }
 
-fn append_github_call(
-    file: &Path,
-    method: &reqwest::Method,
-    path: &str,
-    status: Option<reqwest::StatusCode>,
-    headers: &reqwest::header::HeaderMap,
-) -> Result<()> {
-    use std::io::Write as _;
-    static HOST: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| std::env::var("HOSTNAME").ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
-        .unwrap_or_default().trim().split('.').next().unwrap_or_default().to_owned());
-    let host = HOST.as_str();
-    let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
-    let mut line = serde_json::to_vec(&serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "host": host,
-        "invocation": std::env::var("AGENT_INVOCATION_ID").unwrap_or_default(),
-        "agent": std::env::var("ST_AGENT").unwrap_or_default(),
-        "account": std::env::var("AI_ACCOUNT").unwrap_or_default(),
-        "category": "fractal-http",
-        "argv": ["api", "--method", method.as_str(), path],
-        "method": method.as_str(), "path": path,
-        "status": status.map(|status| status.as_u16()),
-        "remaining": header("x-ratelimit-remaining").and_then(|value| value.parse::<u64>().ok()),
-        "resource": header("x-ratelimit-resource"),
-        "retry_after": header("retry-after"),
-        "not_modified": status == Some(reqwest::StatusCode::NOT_MODIFIED),
-        "observer": github_spender(),
-    }))?;
-    line.push(b'\n');
-    if let Some(parent) = file.parent() { std::fs::create_dir_all(parent)?; }
-    std::fs::OpenOptions::new().create(true).append(true).open(file)?.write_all(&line)?;
-    Ok(())
-}
 
 /// Observes every actual HTTP response, before replay or redirect handling.
 pub struct ResponseObserver(fn(reqwest::StatusCode, &reqwest::header::HeaderMap));

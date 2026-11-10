@@ -222,7 +222,10 @@ async fn github_response(response: reqwest::Response) -> Result<reqwest::Respons
             status: status.as_u16()
         })),
         None => Err(anyhow::anyhow!("GitHub HTTP {status}")),
-    }.map_err(|error| error.context(details))
+    }.map_err(|error| {
+        let reason = format!("{error}; {details}");
+        error.context(details).context(reason)
+    })
 }
 
 /// A hung connection must end, or its observer would never be polled again.
@@ -2067,10 +2070,10 @@ mod tests {
             refusal(StatusCode::TOO_MANY_REQUESTS, &[], ""),
             Some(GithubRefusal::RateLimit)
         ));
-        // A token without access, or an SSO policy, waits for a person instead.
+        // Without rate-limit headers or a rate-limit message, retain permission failures.
         match refusal(
             StatusCode::FORBIDDEN,
-            &[("x-ratelimit-remaining", "4999")],
+            &[],
             r#"{"message": "Resource protected by organization SAML enforcement."}"#,
         ) {
             Some(GithubRefusal::Forbidden(message)) => {

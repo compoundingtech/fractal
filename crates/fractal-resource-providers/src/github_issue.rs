@@ -304,15 +304,15 @@ impl GitHubIssueInvocation {
                 return Err(interruption_error(reason));
             }
             response = builder.send() => response.map_err(|error| {
-                fractal_github_base::github_http::log_github_call(
-                    &reqwest::Method::GET, &path, None, &reqwest::header::HeaderMap::new(),
+                fractal_runtime::github_usage::log_github_call(
+                    &reqwest::Method::GET, &path, None, &reqwest::header::HeaderMap::new(), None, None,
                 );
                 map_transport_error(error)
             })?,
         };
         let status = response.status();
-        fractal_github_base::github_http::log_github_call(
-            &reqwest::Method::GET, &path, Some(status), response.headers(),
+        fractal_runtime::github_usage::log_github_call(
+            &reqwest::Method::GET, &path, Some(status), response.headers(), None, None,
         );
         if status.is_redirection() && status.as_u16() != 304 {
             return Err(IssueError::Denied);

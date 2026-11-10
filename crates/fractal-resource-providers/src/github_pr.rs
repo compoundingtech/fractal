@@ -281,15 +281,15 @@ impl GitHubPrInvocation {
                 return Err(interruption_error(reason));
             }
             response = builder.send() => response.map_err(|error| {
-                fractal_github_base::github_http::log_github_call(
-                    &reqwest::Method::POST, "/graphql", None, &reqwest::header::HeaderMap::new(),
+                fractal_runtime::github_usage::log_github_call(
+                    &reqwest::Method::POST, "/graphql", None, &reqwest::header::HeaderMap::new(), None, None,
                 );
                 map_transport_error(error)
             })?,
         };
         let status = response.status();
-        fractal_github_base::github_http::log_github_call(
-            &reqwest::Method::POST, "/graphql", Some(status), response.headers(),
+        fractal_runtime::github_usage::log_github_call(
+            &reqwest::Method::POST, "/graphql", Some(status), response.headers(), None, None,
         );
         if status.is_redirection() {
             return Err(PullRequestError::Denied);

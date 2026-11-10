@@ -17892,10 +17892,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     Value::String(retry_at.to_string()),
                                 ),
                             ]);
-                            if let Some(details) = error.downcast_ref::<crate::github_http::GithubResponseDetails>() {
-                                fields.insert("github_response".into(), serde_json::to_value(details)
-                                    .expect("GitHub response details contain only JSON primitives"));
-                            }
                             if let Some(attempt) = &refresh_attempt {
                                 fields.insert("attempt".into(), Value::String(attempt.clone()));
                             }
