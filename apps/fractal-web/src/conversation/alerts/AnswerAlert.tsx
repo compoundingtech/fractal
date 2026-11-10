@@ -193,7 +193,9 @@ export const AnswerAlert = ({
     : stuck ? { tone: 'progress' as const, text: 'This asks you to pick one of its answers, so your words can\'t be sent. Clear them to send.' }
       : movedToWords ? { tone: 'progress' as const, text: answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.` }
         : undefined
+  // A new revision may ask something new: the card starts over, so a choice made on the old one never lets Enter answer this one.
   return <DecisionCard
+    key={`${alert.id}\u0000${alert.revision}`}
     density={density}
     label={alert.title}
     data={{ 'data-alert-kind': alert.attention_kind }}

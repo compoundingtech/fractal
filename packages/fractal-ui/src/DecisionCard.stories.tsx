@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fireEvent, userEvent, within } from 'storybook/test'
 import { DecisionCard, DecisionRef, type DecisionCardProps, type DecisionOption } from './assistant-ui/composition/DecisionCard'
 import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { darkTheme } from './assistant-ui/embrace-theme'
@@ -33,21 +33,59 @@ const base: DecisionCardProps = {
 }
 
 /** A host's state: the card owns none of it. Recommended is preselected; sending is a separate act. */
-function Live({ start = ['thread'], placeholder = 'Or tell it something else…', ...card }: Partial<DecisionCardProps> & { readonly start?: readonly string[]; readonly placeholder?: string }) {
+function Live({ start = ['thread'], draft = '', placeholder = 'Or tell it something else…', onSent, ...card }: Partial<DecisionCardProps> & { readonly start?: readonly string[]; readonly draft?: string; readonly placeholder?: string; readonly onSent?: (answer: string) => void }) {
   const [selected, setSelected] = React.useState(start)
-  const [words, setWords] = React.useState('')
+  const [words, setWords] = React.useState(draft)
   const [sent, setSent] = React.useState<string>()
+  const answer = (value: string) => {
+    setSent(value)
+    onSent?.(value)
+  }
   return <>
     <DecisionCard
       {...base}
       selected={selected}
       onSelect={setSelected}
       words={{ value: words, placeholder, label: 'Your answer to example/atlas/builder', onChange: setWords }}
-      dismiss={{ label: 'Dismiss', onPress: () => setSent('dismiss') }}
-      send={{ label: 'Send', disabled: selected.length === 0 && words.trim() === '', onPress: () => setSent(words.trim() || selected.join(',')) }}
+      dismiss={{ label: 'Dismiss', onPress: () => answer('dismiss') }}
+      send={{ label: 'Send', disabled: selected.length === 0 && words.trim() === '', onPress: () => answer(words.trim() || selected.join(',')) }}
       {...card}
     />
     <output data-testid="sent" hidden>{sent}</output>
+  </>
+}
+
+const cutover: Partial<DecisionCardProps> = {
+  label: 'Cache migration waits on a cutover',
+  heading: 'Cut the build cache over to the content store now?',
+  headingText: 'Cut the build cache over to the content store now?',
+  context: 'Every build output already lives in the content store; the old cache is read only for misses.',
+  options: [
+    { id: 'now', label: 'Cut over now', recommended: { reason: 'Misses have been zero for a week.' }, rationale: 'Deletes the old cache.' },
+    { id: 'later', label: 'Wait a release', rationale: 'Keeps both caches another week.' },
+  ],
+}
+
+/** Two asks in a row, as the conversation dock shows them: answering one mounts the next, and focus follows into it. */
+function Queue() {
+  const [at, setAt] = React.useState(0)
+  const [answers, setAnswers] = React.useState<readonly string[]>([])
+  const card = React.useRef<HTMLElement>(null)
+  const follows = React.useRef(false)
+  React.useLayoutEffect(() => {
+    if (!follows.current) return
+    follows.current = false
+    if (document.activeElement === null || document.activeElement === document.body) card.current?.focus()
+  })
+  const onSent = (answer: string) => {
+    follows.current = card.current?.contains(document.activeElement) === true
+    setAnswers(sent => [...sent, answer])
+    setAt(index => index + 1)
+  }
+  return <>
+    {at === 0 ? <Live key="rename" focusRef={card} onSent={onSent} /> : null}
+    {at === 1 ? <Live key="cutover" {...cutover} start={['now']} focusRef={card} onSent={onSent} /> : null}
+    <output data-testid="answers" hidden>{answers.join(' ')}</output>
   </>
 }
 
@@ -75,8 +113,10 @@ export const scenarioExemptions: readonly string[] = [
   'Compact:primitive',
   'Docked:primitive',
   'DockedLight:primitive',
+  'DraftEnter:primitive',
   'Failed:primitive',
   'Full:primitive',
+  'HeldEnter:primitive',
   'NarrowContainer:primitive',
   'Pager:primitive',
   'Phone:primitive',
@@ -103,6 +143,63 @@ export const Docked: Story = {
     await expect(canvas.getByRole('radio', { name: /Keep an overload/ })).toBeChecked()
     await userEvent.keyboard('{Enter}')
     await expect(canvas.getByTestId('sent').textContent).toBe('overload')
+  },
+}
+/**
+ * Enter answers only a choice the person made on this question. The Enter that answers one ask, held or pressed again,
+ * lands on the next card's preselected recommendation unread: it must answer nothing until a choice or Send.
+ */
+export const HeldEnter: Story = {
+  args: { children: <Queue /> },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const answers = () => canvas.getByTestId('answers').textContent
+    const repeat = (target: Element) => fireEvent.keyDown(target, { key: 'Enter', code: 'Enter', repeat: true })
+    // The first ask, answered deliberately from the keyboard: its recommendation confirmed with its digit, then Enter.
+    await userEvent.click(canvas.getByRole('radio', { name: /Keep an overload/ }))
+    await userEvent.keyboard('1')
+    await userEvent.keyboard('{Enter}')
+    await expect(answers()).toBe('thread')
+    const next = canvas.getByRole('region', { name: cutover.label })
+    await expect(next).toHaveFocus()
+    await expect(canvas.getByRole('radio', { name: /Cut over now/ })).toBeChecked()
+    // The same Enter held: its repeats land on the next card and answer nothing.
+    repeat(next)
+    repeat(next)
+    await expect(answers()).toBe('thread')
+    // A fresh Enter on its frame, its preselected choice, or its empty field answers nothing either: nothing was chosen here.
+    await userEvent.keyboard('{Enter}')
+    canvas.getByRole('radio', { name: /Cut over now/ }).focus()
+    await userEvent.keyboard('{Enter}')
+    repeat(canvas.getByRole('radio', { name: /Cut over now/ }))
+    canvas.getByRole('textbox').focus()
+    await userEvent.keyboard('{Enter}')
+    repeat(canvas.getByRole('textbox'))
+    await expect(answers()).toBe('thread')
+    // A held Enter on Send answers nothing either; a fresh press on Send answers what is chosen, recommendation included.
+    const send = canvas.getByRole('button', { name: 'Send' })
+    send.focus()
+    repeat(send)
+    repeat(send)
+    await expect(answers()).toBe('thread')
+    await userEvent.keyboard('{Enter}')
+    await expect(answers()).toBe('thread now')
+  },
+}
+/** Words the card arrived with are a draft, not an answer: Enter sends only once the person writes or chooses here. */
+export const DraftEnter: Story = {
+  args: { children: <Live draft="Thread it, then rerun the worker" /> },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const field = canvas.getByRole('textbox')
+    field.focus()
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.getByTestId('sent').textContent).toBe('')
+    await userEvent.type(field, ' typecheck')
+    fireEvent.keyDown(field, { key: 'Enter', code: 'Enter', repeat: true })
+    await expect(canvas.getByTestId('sent').textContent).toBe('')
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.getByTestId('sent').textContent).toBe('Thread it, then rerun the worker typecheck')
   },
 }
 export const DockedLight: Story = { args: { scheme: 'light', children: <Live /> } }

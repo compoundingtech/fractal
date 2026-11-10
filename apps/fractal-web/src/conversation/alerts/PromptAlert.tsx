@@ -75,7 +75,9 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
   const body = question === undefined && shown.length > 0
     ? shown.map((call) => <pre key={call.id} {...stylex.props(styles.call)}>{[call.tool, ...call.lines].join('\n')}</pre>)
     : undefined
+  // Each revision and each question starts the card over, so a choice made on another never lets Enter answer this one.
   return <DecisionCard
+    key={`${asked.id}\u0000${asked.revision}\u0000${step}`}
     density={density}
     label={alert.title}
     data={{ 'data-alert-kind': alert.attention_kind }}

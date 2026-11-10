@@ -124,7 +124,7 @@ function OptionRow({ option, index, on, any, disabled, touch }: { readonly optio
     : <Aria.Radio value={option.id} isDisabled={disabled} {...stylex.props(styles.optionHost)}>{state => inner(state.isFocusVisible, state.isHovered)}</Aria.Radio>
 }
 
-function Options({ card, disabled, touch }: { readonly card: DecisionCardProps; readonly disabled: boolean; readonly touch: boolean }) {
+function Options({ card, choose, disabled, touch }: { readonly card: DecisionCardProps; readonly choose: (ids: readonly string[]) => void; readonly disabled: boolean; readonly touch: boolean }) {
   const options = card.options ?? []
   if (options.length === 0) return null
   const selected = card.selected ?? []
@@ -132,8 +132,8 @@ function Options({ card, disabled, touch }: { readonly card: DecisionCardProps; 
   const rows = options.map((option, index) => <OptionRow key={option.id} option={option} index={index} on={selected.includes(option.id)} any={any} disabled={disabled} touch={touch} />)
   const label = card.optionsLabel ?? 'Answers'
   return any
-    ? <Aria.CheckboxGroup aria-label={label} value={[...selected]} isDisabled={disabled} onChange={ids => card.onSelect?.(ids)} {...stylex.props(styles.options)}>{rows}</Aria.CheckboxGroup>
-    : <Aria.RadioGroup aria-label={label} value={selected[0] ?? null} isDisabled={disabled} onChange={id => card.onSelect?.([id])} {...stylex.props(styles.options)}>{rows}</Aria.RadioGroup>
+    ? <Aria.CheckboxGroup aria-label={label} value={[...selected]} isDisabled={disabled} onChange={choose} {...stylex.props(styles.options)}>{rows}</Aria.CheckboxGroup>
+    : <Aria.RadioGroup aria-label={label} value={selected[0] ?? null} isDisabled={disabled} onChange={id => choose([id])} {...stylex.props(styles.options)}>{rows}</Aria.RadioGroup>
 }
 
 /** Grows with its words up to the editor's maximum, then scrolls. */
@@ -148,7 +148,7 @@ function WordsField({ words, disabled, touch }: { readonly words: NonNullable<De
   return <textarea ref={field} rows={1} aria-label={words.label} placeholder={words.placeholder} value={words.value} disabled={disabled} onChange={event => words.onChange(event.target.value)} {...stylex.props(styles.field, touch && styles.fieldTouch)} />
 }
 
-function Row({ card, touch }: { readonly card: DecisionCardProps; readonly touch: boolean }) {
+function Row({ card, send, pager, touch }: { readonly card: DecisionCardProps; readonly send: () => void; readonly pager: DecisionPosition | undefined; readonly touch: boolean }) {
   const chosen = card.options?.filter(option => card.selected?.includes(option.id)).map(option => option.label).join(', ')
   return <div {...stylex.props(styles.row, touch && styles.rowTouch)}>
     <span {...stylex.props(styles.rowText)}>
@@ -156,8 +156,8 @@ function Row({ card, touch }: { readonly card: DecisionCardProps; readonly touch
       {card.resolved !== undefined || chosen === undefined || chosen === '' ? null : <span {...stylex.props(styles.rowChosen)}>{chosen}</span>}
     </span>
     {card.status === undefined ? null : <span role={card.status.tone === 'error' ? 'alert' : 'status'} {...stylex.props(styles.rowStatus, card.status.tone === 'error' && styles.statusError)}>{card.status.text}</span>}
-    {card.pager === undefined ? null : <Position noun="alert" position={card.pager} touch={touch} />}
-    {card.send === undefined || card.resolved !== undefined ? null : <Aria.Button isDisabled={card.send.disabled || card.busy === true} onPress={card.send.onPress} {...stylex.props(styles.send, touch && styles.touchButton)}>{card.send.label}</Aria.Button>}
+    {pager === undefined ? null : <Position noun="alert" position={pager} touch={touch} />}
+    {card.send === undefined || card.resolved !== undefined ? null : <Aria.Button isDisabled={card.send.disabled || card.busy === true} onPress={send} {...stylex.props(styles.send, touch && styles.touchButton)}>{card.send.label}</Aria.Button>}
     {card.onFold === undefined ? null : <Aria.Button aria-label="Show this decision" onPress={card.onFold} {...stylex.props(styles.pageButton, touch && styles.touchSquare)}><Icon name="chevron-down" size={12} /></Aria.Button>}
   </div>
 }
@@ -170,13 +170,53 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
   const disabled = card.busy === true || card.unavailable !== undefined
   const options = card.options ?? []
   const hasMore = card.contextFull !== undefined || card.more !== undefined
-  const setSelected = (ids: readonly string[]) => card.onSelect?.(ids)
+  // Enter answers only what the person chose or wrote on this question, never a preselection or a draft they may not have
+  // read: focus follows into the next card as one is answered, and the same Enter must not land on it. Send always answers.
+  const chosen = React.useRef(false)
+  const wrote = React.useRef(false)
+  const choose = (ids: readonly string[]) => {
+    chosen.current = true
+    card.onSelect?.(ids)
+  }
+  const words = card.words === undefined ? undefined : {
+    ...card.words,
+    onChange: (value: string) => {
+      wrote.current = true
+      card.words?.onChange(value)
+    },
+  }
+  const forget = () => {
+    chosen.current = false
+    wrote.current = false
+  }
+  const send = () => {
+    forget()
+    card.send?.onPress()
+  }
+  const enter = () => {
+    const deliberate = chosen.current || (wrote.current && (card.words?.value.trim() ?? '') !== '')
+    if (deliberate && card.send !== undefined && !card.send.disabled && !disabled) send()
+  }
+  // A choice belongs to the question it was made on; moving to another question or alert starts over.
+  const moving = (position: DecisionPosition | undefined): DecisionPosition | undefined => position === undefined ? undefined : {
+    ...position,
+    onPrevious: () => { forget(); position.onPrevious() },
+    onNext: () => { forget(); position.onNext() },
+  }
+  const pager = moving(card.pager)
+  const stepper = moving(card.stepper)
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing) return
+    // A held Enter repeats into whatever took focus after the first press answered, field, choice, frame or button alike:
+    // only a fresh press acts. Shift+Enter still repeats newlines.
+    if (event.key === 'Enter' && event.repeat && !event.shiftKey && isBare(event)) {
+      event.preventDefault()
+      return
+    }
     if (isField(event.target)) {
       if (event.key === 'Enter' && !event.shiftKey && isBare(event)) {
         event.preventDefault()
-        if (card.send !== undefined && !card.send.disabled && !disabled) card.send.onPress()
+        enter()
       } else if (event.key === 'Escape' && card.words !== undefined && card.words.value !== '') {
         event.preventDefault()
         event.stopPropagation()
@@ -187,35 +227,38 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
     if (!isBare(event)) return
     if (event.key === 'Enter' && !event.shiftKey && (isChoice(event.target) || event.target === event.currentTarget)) {
       event.preventDefault()
-      if (card.send !== undefined && !card.send.disabled && !disabled) card.send.onPress()
+      enter()
     } else if (event.key === 'Escape' && (card.selected?.length ?? 0) > 0 && !disabled) {
       event.preventDefault()
       event.stopPropagation()
-      setSelected([])
+      card.onSelect?.([])
     } else if (/^[1-9]$/.test(event.key) && !disabled) {
       const option = options[Number(event.key) - 1]
       if (option === undefined) return
       event.preventDefault()
       const selected = card.selected ?? []
-      setSelected(card.mode !== 'any' ? [option.id] : selected.includes(option.id) ? selected.filter(id => id !== option.id) : [...selected, option.id])
+      choose(card.mode !== 'any' ? [option.id] : selected.includes(option.id) ? selected.filter(id => id !== option.id) : [...selected, option.id])
       // Roving continues from the chosen row; focus is already inside this card, so nothing is taken from elsewhere.
       event.currentTarget.querySelectorAll<HTMLInputElement>('input')[Number(event.key) - 1]?.focus()
     }
   }
   const frame = {
-    ref: card.focusRef as React.Ref<HTMLElement>, tabIndex: -1, 'aria-label': card.label, onKeyDownCapture: onKeyDown, ...card.data,
+    ref: card.focusRef as React.Ref<HTMLElement>, tabIndex: -1, 'aria-label': card.label, onKeyDownCapture: onKeyDown,
+    // Pressing or clicking a choice confirms it, even the one already chosen for the person.
+    onClickCapture: (event: React.MouseEvent<HTMLElement>) => { if (isChoice(event.target)) chosen.current = true },
+    ...card.data,
   }
   if (card.density === 'row') {
     return <div {...stylex.props(styles.container)}>
-      <section {...frame} {...stylex.props(styles.card, styles.cardRow)}><Row card={card} touch={touch} /></section>
+      <section {...frame} {...stylex.props(styles.card, styles.cardRow)}><Row card={card} send={send} pager={pager} touch={touch} /></section>
     </div>
   }
   return <div {...stylex.props(styles.container)}>
     <section {...frame} style={card.maxBlockSize === undefined || full ? undefined : { maxBlockSize: card.maxBlockSize }} {...stylex.props(styles.card, full && styles.cardFull)}>
       <header {...stylex.props(styles.header, full && styles.headerFull)}>
         <span {...stylex.props(styles.meta)}>{card.meta.join(' · ')}</span>
-        {card.stepper === undefined ? null : <Position noun="question" position={card.stepper} touch={touch} />}
-        {card.pager === undefined ? null : <Position noun="alert" position={card.pager} touch={touch} />}
+        {stepper === undefined ? null : <Position noun="question" position={stepper} touch={touch} />}
+        {pager === undefined ? null : <Position noun="alert" position={pager} touch={touch} />}
         {card.onFold === undefined ? null : <Aria.Button aria-label="Fold this decision" onPress={card.onFold} {...stylex.props(styles.pageButton, touch && styles.touchSquare)}><span {...stylex.props(styles.flipUp)}><Icon name="chevron-down" size={12} /></span></Aria.Button>}
       </header>
       <div {...stylex.props(styles.scroll, full && styles.scrollFull)}>
@@ -233,15 +276,15 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
             {open ? <div id={panelId} {...stylex.props(styles.more)}>{card.more ?? card.contextFull}</div> : null}
           </>}
         {card.body === undefined ? null : <div {...stylex.props(styles.body)}>{card.body}</div>}
-        <Options card={card} disabled={disabled} touch={touch} />
+        <Options card={card} choose={choose} disabled={disabled} touch={touch} />
       </div>
       {card.unavailable === undefined ? null : <p {...stylex.props(styles.unavailable, full && styles.flush)}>{card.unavailable}</p>}
       {card.status === undefined ? null : <p role={card.status.tone === 'error' ? 'alert' : 'status'} {...stylex.props(styles.status, card.status.tone === 'error' && styles.statusError, full && styles.flush)}>{card.status.text}</p>}
       {card.unavailable !== undefined || (card.words === undefined && card.dismiss === undefined && card.send === undefined) ? null : <div {...stylex.props(styles.quiet, full && styles.flush, full && styles.quietFull)}>
-        {card.words === undefined ? <span {...stylex.props(styles.spacer)} /> : <WordsField words={card.words} disabled={disabled} touch={touch} />}
+        {words === undefined ? <span {...stylex.props(styles.spacer)} /> : <WordsField words={words} disabled={disabled} touch={touch} />}
         <span {...stylex.props(styles.actions)}>
           {card.dismiss === undefined ? null : <Aria.Button isDisabled={disabled} onPress={card.dismiss.onPress} {...stylex.props(styles.dismiss, touch && styles.touchButton)}>{card.dismiss.label}</Aria.Button>}
-          {card.send === undefined ? null : <Aria.Button isDisabled={disabled || card.send.disabled} aria-description={card.send.hint} onPress={card.send.onPress} {...stylex.props(styles.send, touch && styles.touchButton)}>{card.send.label}</Aria.Button>}
+          {card.send === undefined ? null : <Aria.Button isDisabled={disabled || card.send.disabled} aria-description={card.send.hint} onPress={send} {...stylex.props(styles.send, touch && styles.touchButton)}>{card.send.label}</Aria.Button>}
         </span>
       </div>}
     </section>
