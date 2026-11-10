@@ -778,7 +778,7 @@ fn supports_pairing_key_binding(capabilities: &serde_json::Value) -> bool {
         && capabilities["capabilities"].as_array().is_some_and(|capabilities| {
             capabilities.iter().any(|capability| {
                 capability["id"] == "pairing-key-binding"
-                    && capability["version"] == 1
+                    && capability["version"].as_u64().is_some_and(|version| version >= 1)
                     && capability["state"] == "granted"
             })
         })
@@ -1052,13 +1052,15 @@ mod tests {
     }
 
     #[test]
-    fn pairing_binding_requires_granted_version_one() {
+    fn pairing_binding_accepts_granted_version_one_or_newer() {
         let mut capabilities = serde_json::json!({
             "api_version": "fractal.client.v0",
             "capabilities": [{"id": "pairing-key-binding", "version": 1, "state": "granted"}]
         });
         assert!(supports_pairing_key_binding(&capabilities));
         capabilities["capabilities"][0]["version"] = 2.into();
+        assert!(supports_pairing_key_binding(&capabilities));
+        capabilities["capabilities"][0]["version"] = 0.into();
         assert!(!supports_pairing_key_binding(&capabilities));
         capabilities["capabilities"][0]["version"] = 1.into();
         capabilities["capabilities"][0]["state"] = "denied".into();
