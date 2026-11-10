@@ -47277,7 +47277,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         let store = Arc::new(Store::open_memory("node").unwrap());
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            "version 2\nagent \"worker\" {{ description \"Keep the widget build green.\"; workspace {:?}; harness \"codex\" {{}} }}\n",
             workspace.path().display().to_string()
         );
         apply_source(&store, &source, "session-start");
@@ -47348,6 +47348,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert_eq!(message.title.as_deref(), Some("Session restarted: where you were"));
         assert!(message.content.contains("Branch agent/widget has PR 12 open"));
         assert!(message.content.contains("doc/agents/node.worker/handoff@"));
+        // The restart carries the seat's charter from its current declaration.
+        assert!(message.content.contains("## Your charter\n\nKeep the widget build green.\n"));
         assert_eq!(
             message.tags,
             vec![format!("{}worker-two", crate::handoff::SESSION_START_TAG_PREFIX)]
