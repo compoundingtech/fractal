@@ -1855,6 +1855,7 @@ export type ErrorCode = (
   | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
+  | "set-managed-subject"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"

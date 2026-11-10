@@ -1571,6 +1571,41 @@ pub struct DeclarationDiff {
     pub fields: BTreeSet<String>,
 }
 
+/// An ad hoc change to a member of an owned set, accepted only with `--force --reason`
+/// (`store::owned_sets`). It stays open while the set revision it diverged from is selected;
+/// the next publication of that set closes it and reports it here as reverted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceDebt {
+    /// The `source.debt.recorded` claim.
+    pub id: String,
+    pub subject: String,
+    /// `apply` for a forced declaration, otherwise the lifecycle verb (`hold`).
+    pub verb: String,
+    pub set: String,
+    /// `owned-set/NAME@REVISION` the change diverged from.
+    pub set_revision: String,
+    pub repository: String,
+    pub r#ref: String,
+    pub sha: String,
+    /// The forced declaration claim, for `apply`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    pub actor: Option<String>,
+    pub reason: String,
+    /// Changed JSON pointers of the forced declaration against the set's.
+    #[serde(default)]
+    pub fields: BTreeSet<String>,
+    pub recorded_at: String,
+    /// In a publication report: `reverted` when the new source differs from the forced
+    /// declaration, `adopted` when the source now declares it, `closed` for runtime verbs
+    /// (`hold`, `suspend`, `resume`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The `source.debt.closed` claim and the set revision that wrote it, once closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionResponse {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1782,6 +1817,9 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
+    /// Accept an ad hoc change to an owned-set member and record it as source debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1796,6 +1834,12 @@ pub struct ApplyResponse {
     pub resolved_kdl: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<PlannedAction>,
+    /// Source debt this forced publication recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_recorded: Vec<SourceDebt>,
+    /// Open source debt this set publication closed, with each change it reverted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_reverted: Vec<SourceDebt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3628,6 +3672,9 @@ pub struct MissionRunReportView {
 pub struct MissionRetireRequest {
     pub actor: String,
     pub idempotency_key: String,
+    /// Retire a member of an `enforce` owned set ad hoc, recording source debt with this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

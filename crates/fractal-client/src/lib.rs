@@ -1318,6 +1318,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
+        | ErrorCode::SetManagedSubject
         | ErrorCode::MessageSelectorsNotReady
         | ErrorCode::Unknown => message.to_owned(),
     }

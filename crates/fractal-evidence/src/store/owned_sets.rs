@@ -222,6 +222,7 @@ impl OwnedSetsStore for Store {
             publication::CommitChecks {
                 owned: Some(options),
                 guard: None,
+                force: None,
             },
         )
     }
