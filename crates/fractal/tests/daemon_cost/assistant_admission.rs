@@ -157,7 +157,7 @@ async fn authenticated_get_during_pairing() {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let local_app = api::router(state.clone());
     let local = tokio::spawn(async move {
-        api::serve_reserved_unix_with_ready(reserved, local_app, None, || { ready_tx.send(()).unwrap(); }).await.unwrap();
+        api::serve_reserved_unix_with_ready(reserved, local_app, None, None, || { ready_tx.send(()).unwrap(); }).await.unwrap();
     });
     ready_rx.await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
