@@ -295,7 +295,9 @@ Choice: a child run. It needs no standing owner and reuses §6.
   `program.step` claims under the program step: each key with its latest status, start and end,
   duration (`ms`), typed failure, and the child run or ask it waits on (`child`). The view folds a
   step's newest 200 entries and marks older ones `truncated`; the text lists the newest 12 keys.
-  The innermost open key is the most recently started key without a result.
+  The innermost open key is the most recently started key without a result. The run view (client
+  v0 mission detail, `run_details[].steps[].program`) carries the same journal with the step's
+  open program fault, which the run's `blocker` names when no scheduler fault does.
 - `missions waiting-on` gives a program step the kind `program` (never `watching`) and names its
   innermost open key: a running effect with how long it runs, or the child run or ask it waits on.
   The published work row carries that key (`program`, `gate_kind: program`), read from the step's

@@ -2036,6 +2036,7 @@
         "loop_round": { "type": ["integer", "null"], "minimum": 0, "description": "Current round of this step's loop, enriched on mission detail reads." },
         "loop_max_rounds": { "type": ["integer", "null"], "minimum": 0 },
         "loop_reason": { "type": ["string", "null"] },
+        "program": { "$ref": "#/$defs/MissionStepProgram", "description": "Mission detail only, on the runs it enriches: a program step's current attempt journal. Absent for other steps and on older daemons." },
         "next_wake_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Observed not-before time: earliest work eligibility, not a promise of wake dispatch." },
         "wake_reason": { "type": ["string", "null"], "description": "The deferral's blocked reason, or the observed wake failure when no deferral reason exists." },
         "wake": { "oneOf": [{ "$ref": "#/$defs/MissionWake" }, { "type": "null" }] },
@@ -2046,6 +2047,31 @@
         "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." },
         "history_complete": { "type": "boolean", "description": "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." },
         "eta": { "$ref": "#/$defs/MissionStepEta" }
+      }
+    },
+    "MissionStepProgram": {
+      "type": "object",
+      "required": ["entries", "truncated", "stalled_after_ms"],
+      "properties": {
+        "open_key": { "type": ["string", "null"], "description": "The innermost open key: the most recently started key without a result." },
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/MissionStepProgramEntry" }, "description": "Each key's latest entry in this attempt, in the order the keys first appear; the newest 200 entries are read." },
+        "truncated": { "type": "boolean", "description": "Older journal entries exist beyond the ones read." },
+        "last_entry_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "stalled_after_ms": { "type": "integer", "minimum": 1, "description": "How long the journal may go without a new entry before the step raises `program/stalled`." },
+        "fault": { "oneOf": [{ "type": "object", "required": ["scope", "reason"], "properties": { "scope": { "type": "string" }, "reason": { "type": "string" } } }, { "type": "null" }], "description": "The open `program/host` or `program/stalled` fault on the step." }
+      }
+    },
+    "MissionStepProgramEntry": {
+      "type": "object",
+      "required": ["key", "status"],
+      "properties": {
+        "key": { "type": "string" },
+        "status": { "anyOf": [{ "enum": ["started", "completed", "failed"] }, { "type": "string" }] },
+        "started_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "ended_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+        "ms": { "type": ["integer", "null"], "minimum": 0, "description": "The effect's duration." },
+        "error": { "type": ["string", "null"], "description": "The typed failure with its `_tag` and fields, cut to 300 characters." },
+        "child": { "type": ["string", "null"], "description": "The child mission run or ask subject the key waits on." }
       }
     },
     "MissionStepAttempt": {
