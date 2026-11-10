@@ -2,7 +2,7 @@ import type { CollectionSocket } from '../../clients/typescript/fractal-client';
 
 export type HeartbeatSocket = CollectionSocket & { onping: (() => void) | null };
 export type HeartbeatSocketFactory = (url: string, protocols: string[], headers: Record<string, string>) => HeartbeatSocket;
-export type SocketEvent = { id: number; kind: 'open' | 'message' | 'ping' | 'error' | 'close'; data?: string; code?: number; reason?: string };
+export type SocketEvent = { id: number; kind: 'open' | 'message' | 'ping' | 'error' | 'close'; data?: string; domain?: string; code?: number; reason?: string };
 export type SocketBridge = {
   open(id: number, url: string, protocols: string[], headers: Record<string, string>): Promise<void> | void;
   send(id: number, data: string): Promise<void> | void;
@@ -30,7 +30,8 @@ export function collectionSocketFactory(bridge: SocketBridge): HeartbeatSocketFa
       else if (event.kind === 'ping') socket.onping?.();
       else {
         closed = true; listener.remove();
-        if (event.kind === 'error') socket.onerror?.({});
+        // Only NSError identity crosses into the SDK, never localized descriptions or userInfo.
+        if (event.kind === 'error') socket.onerror?.({ domain: event.domain, code: event.code });
         else socket.onclose?.({ code: event.code ?? 1006, reason: event.reason ?? '' });
       }
     });
