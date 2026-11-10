@@ -10,6 +10,28 @@
 //! All ordinary Store indexes and durability settings stay enabled during setup.
 //! Only authority projection work is disabled, so timed work is the actual
 //! install + resumable backfill, not insert-time maintenance.
+//!
+//! Real-store cold-cache run (Linux, run alone in a fresh process):
+//! `AUTHORITY_REAL_STORE=/restore/claims.sqlite3 AUTHORITY_REAL_ORIGIN=dev3 cargo test -p smallclaims --lib store::assistant_grant_authority_bench::assistant_grant_authority_measure_real_store -- --exact --ignored --nocapture --test-threads=1`
+//! Use a freshly restored working copy from the current main build; this is the
+//! cold-cache condition. The harness writes to it and does not reset projections,
+//! checkpoint, or restore it. Restore again for each measurement. Agents cannot
+//! use `echo 3 | sudo tee /proc/sys/vm/drop_caches`; `vmtouch -e` or
+//! `dd iflag=nocache` eviction is optional, not performed by this test.
+//! The origin defaults to dev3; override it with the source daemon's node name.
+//! Store::open includes install and the committed two-second startup slice.
+//! Test-only hooks time those exact operations, without repeating them. Background
+//! slices call the production Store maintenance entrypoint, including membership
+//! preparation. Readiness is the production authentication readiness check,
+//! observed after each committed slice (not an HTTP request or credential probe).
+//! One JSON measurement line is emitted; libtest may also print its own status.
+//! Timings exclude final diagnostic queries; byte/RSS samples are taken before
+//! those queries and while the store is still open (WAL bytes are physical size).
+//! `total_backfill_ms` sums install and committed slice wall times, including
+//! membership preparation; `elapsed_open_through_backfill_ms` also includes all
+//! other open work and readiness probes. Slice counts include the startup slice.
+//! Pending is a retained authentication evidence table, not necessarily queued
+//! work; authenticated rows remain there after completion.
 use super::*;
 use std::time::{Duration, Instant};
 
@@ -147,6 +169,174 @@ fn slice(connection: &mut Connection, budget: Duration) -> (bool, Duration) {
     transaction.commit().unwrap();
     assert_eq!(assistant_grant_authority::ready(connection).is_ok(), done);
     (done, started.elapsed())
+}
+
+pub(super) enum OpenAuthorityPhase {
+    BeforeInstall,
+    Installed,
+    StartupComplete,
+}
+
+struct OpenAuthorityTimings {
+    open_started: Instant,
+    phase_started: Instant,
+    install: Duration,
+    startup_slice: Duration,
+    first_ready: Option<Duration>,
+    ready_after_install: bool,
+    ready_after_startup: bool,
+}
+
+thread_local! {
+    static REAL_STORE_OPEN: std::cell::RefCell<Option<OpenAuthorityTimings>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Inert for all other tests; no instrumentation exists in non-test builds.
+pub(super) fn observe_open_authority(connection: &Connection, phase: OpenAuthorityPhase) {
+    REAL_STORE_OPEN.with_borrow_mut(|measurement| {
+        let Some(measurement) = measurement else { return; };
+        let now = Instant::now();
+        match phase {
+            OpenAuthorityPhase::BeforeInstall => measurement.phase_started = now,
+            OpenAuthorityPhase::Installed => {
+                measurement.install = now.duration_since(measurement.phase_started);
+                measurement.ready_after_install = assistant_grant_authority::ready(connection).is_ok();
+                if measurement.ready_after_install {
+                    measurement.first_ready = Some(measurement.open_started.elapsed());
+                }
+                measurement.phase_started = Instant::now();
+            }
+            OpenAuthorityPhase::StartupComplete => {
+                measurement.startup_slice = now.duration_since(measurement.phase_started);
+                measurement.ready_after_startup = assistant_grant_authority::ready(connection).is_ok();
+                if measurement.ready_after_startup && measurement.first_ready.is_none() {
+                    measurement.first_ready = Some(measurement.open_started.elapsed());
+                }
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "writes a freshly restored real store; opt-in Linux cold-cache/RSS measurement"]
+fn assistant_grant_authority_measure_real_store() {
+    let path = PathBuf::from(std::env::var_os("AUTHORITY_REAL_STORE")
+        .expect("set AUTHORITY_REAL_STORE to the restored claims.sqlite3 working copy"));
+    assert!(path.is_file(), "AUTHORITY_REAL_STORE must be an existing store, not a new fixture");
+    assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("claims.sqlite3"));
+    let origin = std::env::var("AUTHORITY_REAL_ORIGIN").unwrap_or_else(|_| "dev3".into());
+    let (db_bytes_before, wal_bytes_before) = physical_bytes(&path);
+    let (baseline_rss_kib, baseline_peak_kib) = memory_kib();
+    let started = Instant::now();
+    REAL_STORE_OPEN.with_borrow_mut(|measurement| {
+        *measurement = Some(OpenAuthorityTimings {
+            open_started: started,
+            phase_started: started,
+            install: Duration::ZERO,
+            startup_slice: Duration::ZERO,
+            first_ready: None,
+            ready_after_install: false,
+            ready_after_startup: false,
+        });
+    });
+    let store = Store::open(&path, &origin, Arc::new(runtime::Plain)).unwrap();
+    let open_elapsed = started.elapsed();
+    let timing = REAL_STORE_OPEN.with_borrow_mut(Option::take).unwrap();
+    let mut first_ready = timing.first_ready;
+    let mut slices = 1_u64;
+    let mut background_slices = 0_u64;
+    let mut max_slice = timing.startup_slice;
+    let mut slice_sum = timing.startup_slice;
+    // Always enter maintenance at least once: startup has not prepared the sealed
+    // membership snapshot, even if its version/readiness marker already exists.
+    loop {
+        let slice_started = Instant::now();
+        let done = store.advance_assistant_grant_authority_backfill().unwrap();
+        let elapsed = slice_started.elapsed();
+        slices += 1;
+        background_slices += 1;
+        max_slice = max_slice.max(elapsed);
+        slice_sum += elapsed;
+        let ready = assistant_grant_authority::ready(&store.readers.get()).is_ok();
+        if ready && first_ready.is_none() {
+            first_ready = Some(started.elapsed());
+        }
+        if done {
+            assert!(ready, "maintenance completed without authentication readiness");
+            break;
+        }
+    }
+    let total_elapsed = started.elapsed();
+    let (db_bytes_after, wal_bytes_after) = physical_bytes(&path);
+    let (final_rss_kib, peak_rss_kib) = memory_kib();
+    let connection = store.readers.get();
+    let count = |sql: &str| -> u64 {
+        connection.query_row(sql, [], |row| row.get(0)).unwrap()
+    };
+    let grant_kind_claims: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM claims WHERE kind IN (?1,?2,?3)",
+        params![assistant_grant_authority::GRANTED, assistant_grant_authority::POLICY,
+            assistant_grant_authority::REVOKED], |row| row.get(0),
+    ).unwrap();
+    let mut statement = connection.prepare(
+        "SELECT pending.claim_id,pending.kind,pending.origin,
+            CASE
+              WHEN NOT EXISTS(SELECT 1 FROM meta WHERE key='assistant_grant_authority_fleet_id')
+                THEN 'no fleet identity for member-writer authentication'
+              WHEN NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=pending.claim_id)
+                THEN 'no replica record and no durable local-append admission'
+              ELSE 'no authenticated member-writer evidence and no durable local-append admission'
+            END
+         FROM assistant_grant_pending AS pending
+         WHERE pending.authenticated=0 AND pending.kind=?1 ORDER BY pending.claim_id",
+    ).unwrap();
+    let pending_grants: Vec<Value> = statement.query_map([assistant_grant_authority::GRANTED], |row| {
+        Ok(json!({
+            "id": row.get::<_, String>(0)?,
+            "kind": row.get::<_, String>(1)?,
+            "origin": row.get::<_, String>(2)?,
+            "reason": row.get::<_, String>(3)?,
+        }))
+    }).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    let ms = |elapsed: Duration| elapsed.as_secs_f64() * 1_000.0;
+    println!("{}", json!({
+        "measurement": "assistant_grant_authority_real_store",
+        "store": path,
+        "origin": origin,
+        "store_open_ms": ms(open_elapsed),
+        "install_ms": ms(timing.install),
+        "startup_slice_ms": ms(timing.startup_slice),
+        "total_backfill_ms": ms(timing.install + slice_sum),
+        "elapsed_open_through_backfill_ms": ms(total_elapsed),
+        "slices": slices,
+        "background_slices": background_slices,
+        "max_slice_ms": ms(max_slice),
+        "slice_sum_ms": ms(slice_sum),
+        "authentication_ready_from_open_ms": first_ready.map(ms),
+        "ready_after_install": timing.ready_after_install,
+        "ready_after_startup": timing.ready_after_startup,
+        "readiness_checked_each_slice": true,
+        "baseline_rss_kib": baseline_rss_kib,
+        "baseline_peak_rss_kib": baseline_peak_kib,
+        "final_rss_kib": final_rss_kib,
+        "peak_rss_kib": peak_rss_kib,
+        "peak_rss_increase_kib": peak_rss_kib.saturating_sub(baseline_peak_kib),
+        "db_bytes_before": db_bytes_before,
+        "wal_bytes_before": wal_bytes_before,
+        "db_bytes_after": db_bytes_after,
+        "wal_bytes_after": wal_bytes_after,
+        "grant_kind_claims": grant_kind_claims,
+        "authority_rows": count("SELECT COUNT(*) FROM assistant_grant_authority"),
+        "effective_grants": count("SELECT COUNT(*) FROM assistant_grant_effective"),
+        "pending_unauthenticated_grant_claims": pending_grants.len(),
+        "pending_unauthenticated_grants": pending_grants,
+        "dirty_queue_size": count("SELECT COUNT(*) FROM assistant_grant_dirty"),
+        "pending_queue_size": count("SELECT COUNT(*) FROM assistant_grant_pending"),
+        "pending_unauthenticated_queue_size": count("SELECT COUNT(*) FROM assistant_grant_pending WHERE authenticated=0"),
+        "membership_dirty_queue_size": count("SELECT COUNT(*) FROM assistant_grant_membership_dirty"),
+        "authentication_cursor_queue_size": count("SELECT COUNT(*) FROM assistant_grant_auth_cursor"),
+    }));
 }
 
 #[test]

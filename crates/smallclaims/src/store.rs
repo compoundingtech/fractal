@@ -1276,7 +1276,15 @@ impl Store {
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
         );
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::BeforeInstall,
+        );
         assistant_grant_authority::install(&connection, &origin)?;
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::Installed,
+        );
         {
             let transaction = connection.unchecked_transaction()?;
             assistant_grant_authority::backfill_slice(
@@ -1284,6 +1292,10 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::StartupComplete,
+        );
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
