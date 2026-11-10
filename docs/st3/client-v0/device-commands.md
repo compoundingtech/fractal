@@ -127,3 +127,99 @@ available for five minutes of ephemeral correlation before eviction. The process
 discard a retained outcome early to make room. A daemon restart or eviction makes outcomes
 unavailable. Expired commands are never executed on reconnection. The normal envelope's snapshot
 describes the response context, not durable storage of the command.
+
+## Isolated client-control v1 signed results
+
+The generated client-control contract uses the same `phone.inspect` and
+`phone.navigate` verbs on iOS, web and TUI. `phone.message.read` is excluded from
+test grants. A granted request adds `grant_id`; its command carries `grant_id`,
+`run_id` and `control_grant` (including the pairing `session` actor). Ordinary
+ungranted reports retain the preceding wire shape.
+
+A granted `DeviceResult` adds `binding: ClientResultBinding` and the existing
+`signature: DeviceSignature` envelope. The binding contains `purpose`,
+`command_kind`, `device`, `session`, `grant_id`, `run_id`, `command_id`,
+`outcome`, nullable `error_code`, and `visible_state`. Outer command, outcome and
+error must agree with the binding; any outer `result` must equal `visible_state`.
+The closed visible-state type has `route`, `screen`, `visible_item_ids` and
+nullable `opened_item: {id, title, body}`. Arrays retain display order.
+
+`visible_state_sha256` is lowercase SHA-256 of UTF-8 RFC 8785 JCS JSON. The
+closed type admits only strings, null, arrays and fixed ASCII object keys:
+there is no floating-point normalization or arbitrary-key sorting ambiguity.
+No Unicode normalization is applied, lone surrogates are invalid, and slash,
+non-ASCII and U+2028/U+2029 are not escaped.
+
+Sign UTF-8 newline-joined lines below, **without a trailing newline**. Every
+right-hand value is its compact JSON encoding, including quotes for strings.
+The purpose is the first signed field, and the field order is normative:
+
+```text
+smallclaims-claim-fields-v1
+purpose="client.device-result.v1"
+command_kind="phone.inspect"
+device="device/example"
+session="client-session/example"
+grant_id="client-control-grant/example"
+run_id="mission-run/example"
+command_id="device-command/example"
+outcome="completed"
+error_code=null
+visible_state_sha256="<lowercase hex digest>"
+```
+
+Use P-256 ECDSA with SHA-256; signature encoding is 64-byte IEEE P1363 `r||s`,
+base64url without padding, not ASN.1 DER. The envelope format is `fields-v1` and
+`signed_fields` is exactly the ordered list above. The enrolled pairing key is
+the authority, never a caller-selected envelope key. Envelope `nonce` and
+`signed_at_unix_ms` are not signed or freshness authority: daemon time must be
+within both command and grant windows, and a command accepts only one result.
+This signature is purpose-specific and never authorizes `message.send` or a
+read-state mutation; fixture pairings must not acquire `control.messages`.
+
+The source templates live in `crates/fractal-client-codegen/templates`; regenerate
+all outputs with `cargo run -p fractal-client-codegen`. Rust exports canonical
+helpers through `fractal_schema::client_control` and `fractal_client`; TypeScript
+uses `ClientControl.generated.ts`, and Swift uses `ClientControl.generated.swift`.
+All three test suites read the same
+`fixtures/clients/client-control-v1.golden.json`, including fixed-public-test-key
+signatures and negative bindings for grant/run/command/purpose/kind/device/session,
+outcome, error and visible-state tampering. The fixture scalar and nonce are public
+test data, never enrollment keys.
+
+## Fixture enrollment and revocation
+
+Enrollment is a privileged local Unix-socket operation on the local-only
+`client-control-fixture` instance owned by `person/client-control-fixture`.
+The socket peer must have the daemon's UID. A remote bearer credential,
+request header, ordinary pairing, or main-instance operator cannot enroll.
+Each isolated client first generates its own P-256 key and uses the existing
+pairing flow. Enrollment binds the exact existing pairing subject, device and
+public key; it never generates keys or grants principal signing authority.
+Pairing scopes must include `read.projections` and `control.commands`, with
+only `read.*` scopes otherwise; `control.messages` is forbidden.
+
+The enrollment request records `device`, `pairing_subject`, `public_key`,
+`kind` (`ios`, `web`, `tui`), `host`, `instance`, `consent_ref` and
+`packet_digest`. The instance is exactly `client-control-fixture`.
+`consent_ref` must name the native ask `step-run/ask-…/ask`; `packet_digest`
+is the lowercase 64-hex SHA256 of the reviewed enrollment packet and input
+manifest. These become `consentRef` and `packetDigest` in the persisted
+`custom.client.test-enrolled` claim alongside the bound host, instance and kind.
+Invalid ask IDs return `consent-ref-invalid`; malformed digests return
+`consent-packet-invalid`; reuse across devices, kinds or re-enrollment returns
+`consent-ref-reused`. Re-enrollment or changed scope requires a fresh ask.
+
+Approval verification is an external mission gate: before the local call,
+verify the native ask was answered by `person/schickling` with explicit approval
+of the matching packet digest, kind, host and instance. Silence is not approval.
+The privileged operator attests that verified gate; the fixture daemon never
+connects to the main daemon or imports its person/ask claims. A signed exported
+consent receipt is not part of this protocol.
+
+The exact paired client's revoke control, a local agent, or the daemon-host
+operator appends `custom.client.test-revoked` naming the enrollment claim ID.
+This persisted withdrawal ends every grant bound to that enrollment, regardless
+of timestamps; new enrollment cannot resurrect old grants. Grant issue, command
+admission and result acceptance reload enrollment and pairing authority.
+Operators can revoke even after the pairing expires.

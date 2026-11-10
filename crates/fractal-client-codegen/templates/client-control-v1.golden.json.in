@@ -1,0 +1,501 @@
+{
+  "_generated": "cargo run -p fractal-client-codegen; source templates/client-control-v1.golden.json.in; fixed PUBLIC TEST key scalar 1, nonce scalar 2, never use for enrollment",
+  "format": "client-control-v1",
+  "public_key_sec1_base64url": "BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+  "private_scalar_hex_for_tests": "0000000000000000000000000000000000000000000000000000000000000001",
+  "message_domain_bytes": "smallclaims-claim-fields-v1\nmessage/test\nmessage.sent\nperson/client-control-fixture\ncontent=\"hello\"",
+  "message_domain_signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXgRe11q295ks9iyv8QCIwcWwVU7WhRTUdQe_JG0MhGy1w",
+  "vectors": [
+    {
+      "name": "inbox",
+      "input": {
+        "purpose": "client.device-result.v1",
+        "command_kind": "phone.inspect",
+        "device": "device/test-tui",
+        "session": "client-session/test-tui",
+        "grant_id": "client-control-grant/golden",
+        "run_id": "mission-run/golden",
+        "command_id": "device-command/golden-0",
+        "outcome": "completed",
+        "error_code": null,
+        "visible_state": {
+          "route": "/inbox",
+          "screen": "NowRoot",
+          "visible_item_ids": [
+            "message/seed"
+          ],
+          "opened_item": null
+        }
+      },
+      "canonical_visible_state": "{\"opened_item\":null,\"route\":\"/inbox\",\"screen\":\"NowRoot\",\"visible_item_ids\":[\"message/seed\"]}",
+      "visible_state_sha256": "f1b171d18c588f8d7bf6df15c3b2189632e6b2192faf64be714ea0e93b1e40fa",
+      "canonical_bytes": "smallclaims-claim-fields-v1\npurpose=\"client.device-result.v1\"\ncommand_kind=\"phone.inspect\"\ndevice=\"device/test-tui\"\nsession=\"client-session/test-tui\"\ngrant_id=\"client-control-grant/golden\"\nrun_id=\"mission-run/golden\"\ncommand_id=\"device-command/golden-0\"\noutcome=\"completed\"\nerror_code=null\nvisible_state_sha256=\"f1b171d18c588f8d7bf6df15c3b2189632e6b2192faf64be714ea0e93b1e40fa\"",
+      "signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXhyH3-4fQmuiZMfjBipdGKJyo7H1eIQ4nJVLpk44Q-3LA",
+      "negative_bindings": [
+        {
+          "purpose": "message.send",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/other",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/other",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/other",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.message.read",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/other",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/other",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "failed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": "tampered",
+          "visible_state": {
+            "route": "/inbox",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.inspect",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-0",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/tampered",
+            "screen": "NowRoot",
+            "visible_item_ids": [
+              "message/seed"
+            ],
+            "opened_item": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "unicode-opened-item",
+      "input": {
+        "purpose": "client.device-result.v1",
+        "command_kind": "phone.navigate",
+        "device": "device/test-tui",
+        "session": "client-session/test-tui",
+        "grant_id": "client-control-grant/golden",
+        "run_id": "mission-run/golden",
+        "command_id": "device-command/golden-1",
+        "outcome": "completed",
+        "error_code": null,
+        "visible_state": {
+          "route": "/inbox/message/seed",
+          "screen": "Conversation",
+          "visible_item_ids": [
+            "message/seed",
+            "message/é😀"
+          ],
+          "opened_item": {
+            "id": "message/seed",
+            "title": "Seed é 😀",
+            "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+          }
+        }
+      },
+      "canonical_visible_state": "{\"opened_item\":{\"body\":\"Line 1\\n\\t\\\"\\\\\\u0000\\u001f<>/  \",\"id\":\"message/seed\",\"title\":\"Seed é 😀\"},\"route\":\"/inbox/message/seed\",\"screen\":\"Conversation\",\"visible_item_ids\":[\"message/seed\",\"message/é😀\"]}",
+      "visible_state_sha256": "000b60d79d2f6dd48278100222bc4d479adc8e530e922264c1a69bcdb3749220",
+      "canonical_bytes": "smallclaims-claim-fields-v1\npurpose=\"client.device-result.v1\"\ncommand_kind=\"phone.navigate\"\ndevice=\"device/test-tui\"\nsession=\"client-session/test-tui\"\ngrant_id=\"client-control-grant/golden\"\nrun_id=\"mission-run/golden\"\ncommand_id=\"device-command/golden-1\"\noutcome=\"completed\"\nerror_code=null\nvisible_state_sha256=\"000b60d79d2f6dd48278100222bc4d479adc8e530e922264c1a69bcdb3749220\"",
+      "signature_p1363_base64url": "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXjB9ZRAQfZ5iiyRkjiPK6RlzvDHFcq0ODjctNAo_Bb3lQ",
+      "negative_bindings": [
+        {
+          "purpose": "message.send",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/other",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/other",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/other",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.message.read",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/other",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/other",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "failed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": "tampered",
+          "visible_state": {
+            "route": "/inbox/message/seed",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        },
+        {
+          "purpose": "client.device-result.v1",
+          "command_kind": "phone.navigate",
+          "device": "device/test-tui",
+          "session": "client-session/test-tui",
+          "grant_id": "client-control-grant/golden",
+          "run_id": "mission-run/golden",
+          "command_id": "device-command/golden-1",
+          "outcome": "completed",
+          "error_code": null,
+          "visible_state": {
+            "route": "/tampered",
+            "screen": "Conversation",
+            "visible_item_ids": [
+              "message/seed",
+              "message/é😀"
+            ],
+            "opened_item": {
+              "id": "message/seed",
+              "title": "Seed é 😀",
+              "body": "Line 1\n\t\"\\\u0000\u001f<>/  "
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

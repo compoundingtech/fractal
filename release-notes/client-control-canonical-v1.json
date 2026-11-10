@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Generate one purpose-specific canonical client-control result format for Rust, TypeScript and Swift",
+  "replay": {"status":"none","detail":"Canonical helpers and wire models do not change store replay or migrate existing claims."},
+  "schema": {"status":"changed","detail":"Adds closed visible-state, signed-result binding and per-run control-grant wire models. Granted commands carry grant/run metadata; result requests optionally carry a binding and existing DeviceSignature envelope."},
+  "rules": {"status":"changed","detail":"The client.device-result.v1 domain binds command kind, enrolled device and pairing session, grant, run, command id, outcome, error and RFC 8785 visible-state digest. It is never message.send authority and requires no control.messages scope."},
+  "compatibility": {"status":"changed","detail":"The existing phone.inspect and phone.navigate verb names are shared by all test-client kinds. Legacy ungranted request/result shapes remain decodable. All clients share fixed-key golden vectors and cross-domain rejection tests."},
+  "downtime": {"status":"none","detail":"Source-only contract generation requires no live setup, enrollment, daemon or pairing changes."},
+  "manual": {"status":"none","detail":"Regenerate checked-in canonical outputs with cargo run -p fractal-client-codegen. Fixture key scalar and signing nonce are public test material, never production identities."},
+  "recovery": {"status":"none","detail":"No persisted data or runtime state is changed by canonical source generation."}
+}
