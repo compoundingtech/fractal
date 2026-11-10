@@ -373,10 +373,6 @@ mod tests {
         let service_subject = subject("333333333333333333333333").unwrap();
         let mut service = source.clone();
         service["profile"] = json!("service");
-        service["principal"] = json!("plugin/test/reader");
-        service["grant_id"] = json!("333333333333333333333333");
-        service["session_actor"] = json!("plugin/test/reader/session/333333333333333333333333");
-        service["scopes"] = json!(SERVICE_SCOPES);
         // Simulate an existing profile record without enabling service issuance.
         let grant = state.store.append_claim(&ClaimInput {
             subject: service_subject.clone(), kind: GRANTED.into(), actor: Some("person/owner".into()),
