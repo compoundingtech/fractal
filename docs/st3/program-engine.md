@@ -195,7 +195,8 @@ repeated block or rule, an empty block, an unknown verb and any other `*`. There
 form: a mission without the block grants its runs nothing. The block is a field of the mission
 spec, kept in canonical order and absent when undeclared, so existing revisions hash unchanged and
 changing it is a mission revision. Publication holds a revision that declares it until every
-member advertises `mission_authority=1`, as for `capacity`.
+member advertises `mission_authority=1`, as for `capacity`. `cancel` is reserved: it parses and
+grants nothing yet, because setting another run's outcome takes a person or agent actor.
 
 **Starter.** A run's starter is the actor of its `mission-run.created`: its requester, or, for a
 child a program starts (§6), the parent run, `mission-run/PARENT`. The requester stays the human.
@@ -219,20 +220,29 @@ beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds n
 binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
 live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
 binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
-routes, no person headers, and `actor`/`requester` must be the run. The CLI defaults its actor to
-the run when the credential is present. The same-UID boundary is cooperative, as for agents.
+routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
+that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
+name. The CLI defaults its actor to the run when the credential is present and names it on the
+trusted Unix client, which the daemon accepts only from a request its credential binds to that
+same run. The same-UID boundary is cooperative, as for agents.
 
 **Journal.** The engine writes `program.step` claims as `mission-run/RUN`; a run may always journal
 on its own step runs, whatever it declares.
 
 **Enforcement** is one decision at the store's write admission, beside the rules gate, for every
-claim whose actor is a run. The claim names the grant it needs: `mission.published` on `mission/ID`
-needs `publish ID`; a run's creation and its initial generation need `start ID`; a later generation
-needs `revise ID`; any other claim needs `write SUBJECT`. Setting another run's outcome takes a
-person or agent actor, so a run cannot cancel one. The daemon's `[programs] authority` says what
-a write outside the authority does: `enforce` refuses it with `run-authority-denied`; `audit`
-lets it through and records `rule.audited` on `rule/run-authority`, so a new program can discover
-the grants it needs.
+claim whose actor is a run and every document a run binds. A run's message send stays on the graph
+append, where the decision applies, rather than the messages stream. The claim names the grant it
+needs, from fields its writer cannot choose: `mission.published` on `mission/ID` needs
+`publish ID`; a run's creation and a generation without a predecessor need `start ID`; a
+generation with a predecessor needs `revise ID`, and so does everything a revision writes on the
+runs it changes (its proposal, carried and terminalized steps, the superseded generation, the
+run's and its descendants' states), each on the mission of the run it changes; any other claim
+needs `write SUBJECT`. A refusal reaches its caller as `run-authority-denied`. The daemon's
+`[programs] authority` says what a write outside the authority does: `enforce` refuses it;
+`audit` lets it through and records `rule.audited` on `rule/run-authority`, so a new program can
+discover the grants it needs. Each decision reads only each revision's `authority` member along
+the starter chain.
 
 ### 4. Versioning
 

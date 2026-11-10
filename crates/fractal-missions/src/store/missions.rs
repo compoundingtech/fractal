@@ -4634,7 +4634,7 @@ impl MissionsStore for Store {
                     &[],
                     None,
                 )
-                .map_err(internal)?;
+                .map_err(smallclaims::error::typed)?;
             }
         }
         revision_seats::carry_completed_agents_tx(
@@ -4677,7 +4677,7 @@ impl MissionsStore for Store {
             None,
             idempotency_key,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         terminalize_generation_steps_tx(
             &transaction,
             &self.origin,
@@ -4704,7 +4704,7 @@ impl MissionsStore for Store {
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         if reopening {
             // The run's own state history says who reopened it, when, and why.
             append_claim_tx(
@@ -4722,7 +4722,7 @@ impl MissionsStore for Store {
                 &[],
                 None,
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
         }
         if let Some(proposal) = proposal {
             let changed = transaction
@@ -4753,7 +4753,7 @@ impl MissionsStore for Store {
                 &[],
                 None,
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
         }
         let view = mission_run_view_tx(&transaction, run_id).map_err(internal)?;
         transaction
