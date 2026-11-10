@@ -39,7 +39,7 @@ pub const RESULT_KEY: &str = "$result";
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
 /// a person keeps its program loaded (§11).
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
-const HOST_SOURCE: &str = include_str!("program_host.mjs");
+const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf owner=fractal_reconcile::reconcile::program TODO=trace-statement-and-value-representation */ include_str!("program_host.mjs");
 /// How long a crashed host waits before its replacement starts, so a host that cannot start does
 /// not spin.
 const HOST_RESTART_DELAY: Duration = Duration::from_millis(500);
