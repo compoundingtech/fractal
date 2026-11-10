@@ -287,10 +287,14 @@ These rows drive the visible indicator and termination only. They do not carry
 verbs, screens or budget policy; policy remains in each
 `DeviceCommand.control_grant`. A command without an active, nonterminal
 lifecycle grant for its `grant_id` must produce no navigation or signature.
-When a grant binds `item_id`, every lifecycle row must carry that exact item.
+Attention grants require an `item_id` naming an existing native ask in this
+instance; missing or unknown items are `screen-not-granted`. NowRoot-only grants
+do not require an item. Every lifecycle row preserves the bound item exactly.
 Clients ignore started rows whose sequence is not greater than the last
 observed sequence for the grant, and treat ended/revoked as permanently final
 for that grant ID: a later started row cannot reactivate it.
+The native-change watcher is fixture-scale only: each change reconciles grants
+under the shared admission lock and reloads mission-run authority.
 
 `fixtures/clients/client-control-lifecycle-v1.json` is shared decoder and
 acceptance-trace data for all clients, covering each state, stale/reordered
