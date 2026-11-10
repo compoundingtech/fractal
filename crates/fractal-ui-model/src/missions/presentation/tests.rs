@@ -386,3 +386,26 @@ fn a_settled_mission_says_when_and_serializes_words_json_ids() {
         );
     }
 }
+
+#[test]
+fn a_person_assignee_is_never_serialized_as_an_agent() {
+    // Both forms appeared in production-shaped mission projections: the ready generated
+    // person-ask step and the completed person step in its originating mission.
+    for state in ["ready", "completed"] {
+        let mission = mission(
+            "running",
+            vec![
+                step("human", state, json!({"claimant": null, "assignee": "person/avery", "agentless": false})),
+                step("agent", state, json!({"claimant": null, "assignee": "agent/reviewer", "agentless": false})),
+                step("unassigned", state, json!({"claimant": null, "assignee": null, "agentless": false})),
+            ],
+        );
+        let shown = present(&mission, &[], &Agents::default());
+        let owner = |path| {
+            serde_json::to_value(&shown.steps.iter().find(|step| step.path == path).unwrap().owner).unwrap()
+        };
+        assert_eq!(owner("human"), json!({"kind": "person", "person": "person/avery", "label": "avery"}));
+        assert_eq!(owner("agent"), json!({"kind": "agent", "agent": "agent/reviewer", "label": "reviewer"}));
+        assert_eq!(owner("unassigned"), json!({"kind": "nobody"}));
+    }
+}

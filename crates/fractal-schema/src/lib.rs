@@ -45,7 +45,7 @@ pub fn canonical_agent_actor(id: &str) -> Option<std::borrow::Cow<'_, str>> {
     if kind.is_empty() || name.is_empty() {
         return None;
     }
-    if matches!(kind, "agent" | "person" | "daemon") {
+    if matches!(kind, "agent" | "person" | "daemon" | "host" | "plugin") {
         Some(std::borrow::Cow::Borrowed(id))
     } else {
         Some(std::borrow::Cow::Owned(format!("agent/{id}")))
@@ -67,6 +67,13 @@ mod canonical_agent_actor_tests {
         );
         for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
             assert!(canonical_agent_actor(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_host_and_plugin_principals() {
+        for id in ["host/example", "plugin/example"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
         }
     }
 }

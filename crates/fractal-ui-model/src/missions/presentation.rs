@@ -203,14 +203,11 @@ fn canonical_seat(mut seat: Seat) -> Option<Seat> {
 
 /// The step's seat: its claimant, else its assignee; for a ready unclaimed step, the agent
 /// queuing it.
-fn seat_of(step: &MissionStep, fleet: &dyn Fleet) -> Option<Seat> {
+fn seat_of(step: &MissionStep, fleet: &dyn Fleet, held: Option<&str>) -> Option<Seat> {
     if step.agentless {
         return None;
     }
-    let held = step
-        .claimant
-        .as_deref()
-        .or(step.assignee.as_deref())
+    let held = held
         .and_then(fractal_schema::canonical_agent_actor)
         .filter(|id| id.starts_with("agent/"));
     let seat = held.map(|id| {
@@ -254,8 +251,10 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
         .iter()
         .map(|step| {
             let state = step_word(step, gated(step));
-            let seat = seat_of(step, fleet);
-            let queued = (step.state == "ready" && step.claimant.is_none())
+            let held = step.claimant.as_deref().or(step.assignee.as_deref());
+            let person = held.filter(|id| id.starts_with("person/"));
+            let seat = if person.is_some() { None } else { seat_of(step, fleet, held) };
+            let queued = (person.is_none() && step.state == "ready" && step.claimant.is_none())
                 .then(|| fleet.queued_for(&step.id))
                 .flatten()
                 .and_then(canonical_seat);
@@ -284,6 +283,11 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
                     .unwrap_or(Actor::Nobody)
             } else if step.agentless {
                 Actor::St
+            } else if let Some(person) = person {
+                Actor::Person {
+                    person: person.to_owned(),
+                    label: fleet.person_label(person),
+                }
             } else {
                 seat.as_ref().map(agent).unwrap_or(Actor::Nobody)
             };
