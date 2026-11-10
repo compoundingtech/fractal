@@ -1516,6 +1516,94 @@ public struct PairingKeyStatus: Codable, Sendable {
     public let deviceKeyFingerprint: String?
     enum CodingKeys: String, CodingKey { case kind, status, expiresAt = "expires_at", deviceKeyFingerprint = "device_key_fingerprint" }
 }
+public struct PairingExchangeEmpty: Codable, Sendable { public init() {} }
+/// Keep secret in memory only; do not log or persist a permit or its QR payload.
+public struct PairingFabricPermit: Codable, Sendable {
+    public let nodeID, attemptID, secret: String
+    public init(nodeID: String, attemptID: String, secret: String) { self.nodeID = nodeID; self.attemptID = attemptID; self.secret = secret }
+    enum CodingKeys: String, CodingKey { case nodeID = "node_id", attemptID = "attempt_id", secret }
+}
+public struct PairingQrPayload: Codable, Sendable {
+    public let tag: String
+    public let version: UInt8
+    public let gateway, id, code: String
+    public let expiresAtUnixMS: Int64
+    public let fabric: PairingFabricPermit?
+    public init(tag: String = "fractal.pairing", version: UInt8, gateway: String, id: String, code: String, expiresAtUnixMS: Int64, fabric: PairingFabricPermit? = nil) {
+        self.tag = tag; self.version = version; self.gateway = gateway; self.id = id; self.code = code; self.expiresAtUnixMS = expiresAtUnixMS; self.fabric = fabric
+    }
+    enum CodingKeys: String, CodingKey { case tag = "_tag", version, gateway, id, code, expiresAtUnixMS = "expires_at_unix_ms", fabric }
+}
+public struct PairingAdvertisement: Codable, Sendable {
+    public let apiVersion: String
+    public let capabilities: [PairingAdvertisedCapability]
+    public init(apiVersion: String, capabilities: [PairingAdvertisedCapability]) { self.apiVersion = apiVersion; self.capabilities = capabilities }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", capabilities }
+}
+public struct PairingAdvertisedCapability: Codable, Sendable {
+    public let id: String
+    public let version: UInt32
+    public let state: String
+    public init(id: String, version: UInt32, state: String = "granted") { self.id = id; self.version = version; self.state = state }
+}
+public enum PairingExchangeOperation: String, Codable, Sendable {
+    case capabilities, claim, approvalWait = "approval-wait", complete, ack
+}
+/// Body is the canonical request model for op, not a handwritten JSON copy.
+public struct PairingExchangeRequest<Body: Codable & Sendable>: Codable, Sendable {
+    public let v: UInt8
+    public let requestID: String
+    public let op: PairingExchangeOperation
+    public let body: Body
+    public init(requestID: String, op: PairingExchangeOperation, body: Body) { self.v = 1; self.requestID = requestID; self.op = op; self.body = body }
+    enum CodingKeys: String, CodingKey { case v, requestID = "request_id", op, body }
+}
+public struct PairingExchangeRefusal: Codable, Sendable {
+    public let code: ErrorCode
+    public let message: String
+    public init(code: ErrorCode, message: String) { self.code = code; self.message = message }
+}
+/// One reply envelope for every operation, with its typed success body.
+public struct PairingExchangeReply<Body: Codable & Sendable>: Codable, Sendable {
+    public let v: UInt8
+    public let requestID: String
+    public let ok: Bool
+    public let body: Body?
+    public let refusal: PairingExchangeRefusal?
+    public init(requestID: String, ok: Bool, body: Body? = nil, refusal: PairingExchangeRefusal? = nil) { self.v = 1; self.requestID = requestID; self.ok = ok; self.body = body; self.refusal = refusal }
+    enum CodingKeys: String, CodingKey { case v, requestID = "request_id", ok, body, refusal }
+}
+public struct PairingApprovalWaitRequest: Codable, Sendable {
+    public let pairingID, keyFingerprint: String
+    public init(pairingID: String, keyFingerprint: String) { self.pairingID = pairingID; self.keyFingerprint = keyFingerprint }
+    enum CodingKeys: String, CodingKey { case pairingID = "pairing_id", keyFingerprint = "key_fingerprint" }
+}
+public struct PairingApprovalWaitApproved: Codable, Sendable {
+    public let status, keyFingerprint, approvedAt: String
+    public init(keyFingerprint: String, approvedAt: String) { self.status = "approved"; self.keyFingerprint = keyFingerprint; self.approvedAt = approvedAt }
+    enum CodingKeys: String, CodingKey { case status, keyFingerprint = "key_fingerprint", approvedAt = "approved_at" }
+}
+public struct PairingExchangeAck: Codable, Sendable {
+    public let requestID: String
+    public init(requestID: String) { self.requestID = requestID }
+    enum CodingKeys: String, CodingKey { case requestID = "request_id" }
+}
+public struct PairingAdmissionPending: Codable, Sendable {
+    public let state, pairingID: String
+    public init(pairingID: String) { self.state = "admission-pending"; self.pairingID = pairingID }
+    enum CodingKeys: String, CodingKey { case state, pairingID = "pairing_id" }
+}
+public struct PairingResultRequest: Codable, Sendable {
+    public let apiVersion, attemptID, devicePublicKey, proof: String
+    public init(apiVersion: String, attemptID: String, devicePublicKey: String, proof: String) { self.apiVersion = apiVersion; self.attemptID = attemptID; self.devicePublicKey = devicePublicKey; self.proof = proof }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", attemptID = "attempt_id", devicePublicKey = "device_public_key", proof }
+}
+public struct PairingResultPending: Codable, Sendable {
+    public let code: ErrorCode
+    public let retryable: Bool
+    public let deadline: String
+    public init(deadline: String) { self.code = .pairingResultPending; self.retryable = true; self.deadline = deadline }
+}
 public struct PairingChallenge: Codable, Sendable {
     public let kind, pairingID, code, expiresAt: String; public let personRootFingerprint: String?
     public let principal: AssistantPrincipal?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?

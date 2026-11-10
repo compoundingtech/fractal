@@ -3496,6 +3496,24 @@ fn percent_encode_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn pairing_native_exchange_models_match_approval_wait_wire_fields() {
+        let request = PairingExchangeRequest {
+            v: 1, request_id: "wait-1".into(), op: PairingExchangeOperation::ApprovalWait,
+            body: PairingApprovalWaitRequest { pairing_id: "pairing/example".into(), key_fingerprint: format!("sha256:{}", "A".repeat(43)) },
+        };
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/pairing-approval-wait.json"
+        )).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), fixture["cases"][0]["value"]);
+        let approved: PairingExchangeReply<PairingApprovalWaitApproved> =
+            serde_json::from_value(fixture["cases"][6]["value"].clone()).unwrap();
+        assert_eq!(approved.body.unwrap().status, "approved");
+        let refused: PairingExchangeReply<PairingApprovalWaitApproved> =
+            serde_json::from_value(fixture["cases"][9]["value"].clone()).unwrap();
+        assert_eq!(refused.refusal.unwrap().code, ErrorCode::PairingRejected);
+    }
+
+    #[test]
     fn pairing_approval_wait_schema_validates_all_reply_and_request_fixtures() {
         let contract: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
