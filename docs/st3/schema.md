@@ -182,6 +182,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `planning-session.started` | `planning-session` | `authorized-requester` | `once` | `durable` | `mission:subject-reference`, `planner:subject-reference`, `planner_config:object`, `request:subject-reference`, `requester:subject-reference`, `target_generation:subject-reference`, `target_run:subject-reference`, `workspace:string` | `planning-session` |
 | `principal.key-granted` | `person`, `agent` | `system-only` | `append` | `durable` | `issuer!:string`, `issuer_key!:string`, `key!:string`, `label:string`, `role!:string` |  |
 | `principal.key-revoked` | `person`, `agent` | `system-only` | `append` | `durable` | `key!:string`, `reason:string` |  |
+| `program.step` | `step-run` | `system-only` | `append` | `durable` | `attempt:integer`, `error:any`, `key:string`, `ms:integer`, `program:string`, `status!:string`, `value:any` | `step`, `program` |
 | `publication.operation` | `*` | `system-only` | `append` | `durable` | `action:string`, `operation:string`, `status!:string` | `revision`, `reset`, `cancellation`, `refresh`, `feedback` |
 | `reconcile.fault` | `daemon`, `mission-run`, `observer`, `schedule`, `step-run`, `subscription` | `system-only` | `append` | `durable` | `reason:string`, `scope!:string`, `status!:string` |  |
 | `record.repaired` | `repair` | `ordinary-client` | `once` | `durable` | `reason!:string`, `record!:string`, `replacement!:string` | `repair` |

@@ -872,11 +872,23 @@ pub struct StepSpec {
     /// completes and fails when it fails or is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run: Option<String>,
+    /// The program bundle this agentless step runs (docs/st3/program-engine.md). The daemon's
+    /// program engine owns the step's outcome. Omitted when absent, so other steps hash as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
     pub gates: Vec<GateSpec>,
     pub nested_mission: Option<Box<MissionSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The hash
+/// is part of the step's definition, so a mission revision binds exactly one program.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgramSpec {
+    pub bundle: String,
+    pub sha256: String,
 }
 
 /// How the resource edge was authored. Older stored URI edges predate this discriminator.

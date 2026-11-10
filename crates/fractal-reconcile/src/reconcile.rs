@@ -62,6 +62,7 @@ pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
+pub mod program;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
@@ -1410,6 +1411,8 @@ pub struct Reconciler<R = NativeRuntime> {
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
+    program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1625,6 +1628,7 @@ impl Reconciler<NativeRuntime> {
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
+            program_engine: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1829,6 +1833,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
+            program_engine: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -11391,6 +11396,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
                     }
+                    if let Some(program) = &step.spec.program {
+                        changed |= self.dispatch_program(run, &step, view, program)?;
+                        return Ok(changed);
+                    }
                     if !view.agentless && !view.worker_reported {
                         return Ok(changed);
                     }
@@ -14260,6 +14269,42 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         Ok(true)
+    }
+
+    /// Hand an active program step to the program engine. The engine completes or fails it; a step
+    /// whose bundle no longer matches its revision fails here.
+    fn dispatch_program(
+        &self,
+        run: &MissionRunView,
+        step: &RuntimeStep<'_>,
+        view: &crate::model::StepRunView,
+        program: &crate::model::ProgramSpec,
+    ) -> Result<bool> {
+        let engine = self.program_engine.get_or_init(|| {
+            let notify = self.notify.clone();
+            let event_notify = self.event_notify.clone();
+            program::ProgramEngine::new(
+                self.store.clone(),
+                Arc::new(move || signal_changed(&notify, &event_notify)),
+                self.driver_state_dir.join("programs"),
+            )
+        });
+        let variables = run_variables(run, step, view);
+        let dispatch = program::Dispatch {
+            step: view.subject.clone(),
+            attempt: view.attempt,
+            program: program.clone(),
+            payload: run.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+            env: variables.into_iter().filter(|(name, _)| name.starts_with("ST_")).collect(),
+            cwd: run.workspace.clone(),
+        };
+        match engine.dispatch(dispatch)? {
+            program::Dispatched::Running => Ok(false),
+            program::Dispatched::Started => Ok(false),
+            program::Dispatched::Refused(reason) => {
+                self.store.set_step_state(&view.subject, "failed", Some(&reason))
+            }
+        }
     }
 
     fn materialize_step_declarations(
