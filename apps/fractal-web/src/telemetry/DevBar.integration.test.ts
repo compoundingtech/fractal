@@ -28,6 +28,7 @@ vi.mock('virtual:build-identity', () => ({
 vi.mock('@overeng/meters/react', () => ({
   MetersProvider: ({ children }: { readonly children: unknown }) => children,
   MeterStrip: () => null,
+  MeterTile: () => null,
 }))
 // One deterministic entry instead of the app registry, in both the unseen ids and the lazy prose.
 vi.mock('../changelog/metadata.ts', () => ({ changelogDeployment: 'main', changelogEntryIds: [fixture.entryId] }))
@@ -75,15 +76,21 @@ afterEach(async () => {
 /** Fresh modules per test: the bar's preference registry and seen cursor are module singletons. */
 const mount = async () => {
   vi.resetModules()
-  const [React, { createRoot }, { DevBar }] = await Promise.all([import('react'), import('react-dom/client'), import('./DevBar.tsx')])
+  const [React, { createRoot }, { DevBar }, { RegistryContext }, AtomRegistry] = await Promise.all([
+    import('react'), import('react-dom/client'), import('./DevBar.tsx'), import('@effect/atom-react'), import('effect/reactivity/AtomRegistry'),
+  ])
+  const registry = AtomRegistry.make()
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  await React.act(async () => root.render(React.createElement(DevBar, { defaultVisible: true })))
   unmount = async () => {
     await React.act(async () => root.unmount())
+    registry.dispose()
     host.remove()
   }
+  await React.act(async () => root.render(
+    React.createElement(RegistryContext.Provider, { value: registry }, React.createElement(DevBar, { defaultVisible: true })),
+  ))
   return { act: React.act, host }
 }
 
@@ -174,6 +181,88 @@ it('mirrors the unseen indicator on the overflow control when the changelog segm
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect({ width: 48, height: 20 }))
   const { host } = await mount()
   const overflow = host.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"][aria-label*="more status items"]')
-  expect(overflow?.getAttribute('aria-label')).toMatch(/: version, changelog, .*, including unseen changes$/)
+  expect(overflow?.getAttribute('aria-label')).toMatch(/: .*version, changelog, including unseen changes$/)
   expect(overflow?.querySelector('[data-devbar-unseen]')).not.toBeNull()
+}, 30_000)
+
+it('publishes the measured bar height to the workspace, follows resizes, and clears it when hidden or unmounted', async () => {
+  const observers: { readonly notify: () => void; readonly observed: Set<Element>; disconnected: boolean }[] = []
+  vi.stubGlobal('ResizeObserver', class {
+    readonly entry
+    constructor(notify: () => void) {
+      this.entry = { notify, observed: new Set<Element>(), disconnected: false }
+      observers.push(this.entry)
+    }
+    observe(element: Element) { this.entry.observed.add(element) }
+    unobserve(element: Element) { this.entry.observed.delete(element) }
+    disconnect() { this.entry.disconnected = true }
+  })
+  let rowHeight = 44
+  const isRow = (element: Element) => element.matches('[role="toolbar"][aria-label="Developer bar"]')
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    return DOMRect.fromRect({ width: 48, height: isRow(this) ? rowHeight : 500 })
+  })
+  const space = () => document.body.style.getPropertyValue('--wf-devbar-space')
+  const rowObservers = () => observers.filter(({ observed, disconnected }) => !disconnected && [...observed].some(isRow) && observed.size === 1)
+
+  const { act, host } = await mount()
+  // Same module instance as the mounted bar: mount resets the graph once, before importing it.
+  const { toggleDevBar: toggleBar } = await import('./devBarPreference.ts')
+  expect(space()).toBe('44px')
+
+  rowHeight = 52
+  expect(rowObservers()).toHaveLength(1)
+  await act(async () => rowObservers()[0]!.notify())
+  expect(space()).toBe('52px')
+
+  await act(async () => toggleBar())
+  expect(host.querySelector('[data-testid="wf-devbar"]')).toBeNull()
+  expect(space()).toBe('')
+  expect(rowObservers()).toHaveLength(0)
+
+  rowHeight = 60
+  await act(async () => toggleBar())
+  expect(space()).toBe('60px')
+  expect(rowObservers()).toHaveLength(1)
+
+  await unmount?.()
+  unmount = undefined
+  expect(space()).toBe('')
+  expect(rowObservers()).toHaveLength(0)
+}, 30_000)
+
+it('updates request details from the instrumentation without a timer, and unsubscribes on unmount', async () => {
+  vi.resetModules()
+  const transport = await import('./transport.ts')
+  const { instrumentFetch, subscribeRequestLog } = transport
+  let subscribers = 0
+  vi.spyOn(transport, 'subscribeRequestLog').mockImplementation((notify) => {
+    subscribers++
+    const unsubscribe = subscribeRequestLog(notify)
+    return () => {
+      subscribers--
+      unsubscribe()
+    }
+  })
+  const [React, { createRoot }, { RequestDetails }] = await Promise.all([
+    import('react'), import('react-dom/client'), import('./transportMeters.tsx'),
+  ])
+  const interval = vi.spyOn(globalThis, 'setInterval')
+  const fetch = instrumentFetch({ fetchImpl: async () => new Response(undefined, { status: 404 }), origin: 'https://example.test' })
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  await React.act(async () => root.render(React.createElement(RequestDetails)))
+  expect(subscribers).toBe(1)
+  expect(interval).not.toHaveBeenCalled()
+  expect(container.textContent).toContain('Latest errors\nnone')
+
+  await React.act(async () => { await fetch('https://example.test/v1/client/usage/quota') })
+  expect(container.textContent).toContain('404')
+  expect(container.textContent).toContain('GET /v1/client/usage/quota')
+  expect(interval).not.toHaveBeenCalled()
+
+  await React.act(async () => root.unmount())
+  container.remove()
+  expect(subscribers).toBe(0)
 }, 30_000)

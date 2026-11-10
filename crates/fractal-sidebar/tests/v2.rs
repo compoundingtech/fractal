@@ -41,7 +41,7 @@ fn nested_v2_golden_and_retirement() {
         assert_eq!(moves.len(), expected.len());
         for (intent, expected) in moves.iter().zip(expected) {
             let intent = serde_json::from_value(intent.clone()).unwrap();
-            assert_eq!(json!({"_tag":"PlannedV2", "edit":plan_v2(&arrangement, &members, &intent).unwrap()}), *expected);
+            assert_eq!(json!({"_tag":"PlannedV2", "edit":plan_v2(&tree, &intent).unwrap()}), *expected);
         }
         members.reverse();
         assert_eq!(build_v2(&arrangement, &members).unwrap(), tree);
@@ -129,15 +129,15 @@ fn v2_folder_cycles_noops_and_exact_folder_operations() {
     let (a, members) = input(&fixture()["cases"][0]);
     let outer = "00000000-0000-7000-8000-00000000000a";
     let inner = "00000000-0000-7000-8000-00000000000b";
-    assert!(matches!(plan_v2(&a, &members, &drop_member("agent/test/a", Some(inner), Some("agent/test/b"))), Err(V2Refusal::Move { refusal: MoveRefusal::NoChange { .. } })));
+    assert!(matches!(plan_v2(&build_v2(&a, &members).unwrap(), &drop_member("agent/test/a", Some(inner), Some("agent/test/b"))), Err(V2Refusal::Move { refusal: MoveRefusal::NoChange { .. } })));
     let mut intent: MoveIntent = serde_json::from_value(json!({"node":{"_tag":"Folder","id":outer},"parent":{"_tag":"Folder","id":inner},"before":null})).unwrap();
-    assert!(matches!(plan_v2(&a, &members, &intent), Err(V2Refusal::Move { refusal: MoveRefusal::Cycle { .. } })));
+    assert!(matches!(plan_v2(&build_v2(&a, &members).unwrap(), &intent), Err(V2Refusal::Move { refusal: MoveRefusal::Cycle { .. } })));
     intent.node = fractal_sidebar::model::NodeRef::Folder { id: inner.into() };
     intent.parent = fractal_sidebar::model::Parent::Root {};
     intent.before = Some(fractal_sidebar::model::NodeRef::Folder { id: outer.into() });
-    assert_eq!(serde_json::to_value(plan_v2(&a, &members, &intent).unwrap()).unwrap(), json!({"folders":[{"op":"folder.move","id":inner,"parent":null,"key":"ZV"}],"memberships":[]}));
+    assert_eq!(serde_json::to_value(plan_v2(&build_v2(&a, &members).unwrap(), &intent).unwrap()).unwrap(), json!({"folders":[{"op":"folder.move","id":inner,"parent":null,"key":"ZV"}],"memberships":[]}));
     intent.parent = fractal_sidebar::model::Parent::Folder { id: inner.into() };
-    assert!(matches!(plan_v2(&a, &members, &intent), Err(V2Refusal::Move { refusal: MoveRefusal::SelfMove { .. } })));
+    assert!(matches!(plan_v2(&build_v2(&a, &members).unwrap(), &intent), Err(V2Refusal::Move { refusal: MoveRefusal::SelfMove { .. } })));
 }
 
 fn root_members(a: &ArrangementInput, keys: &[&str]) -> Vec<MembershipInput> {
@@ -148,7 +148,7 @@ fn root_members(a: &ArrangementInput, keys: &[&str]) -> Vec<MembershipInput> {
 fn v2_minimal_rekey_can_choose_backward_and_preserves_sibling_order() {
     let (a, _) = input(&fixture()["cases"][1]);
     let members = root_members(&a, &["Zz", "a0", "a0", "a0", "b00"]);
-    let edit = plan_v2(&a, &members, &drop_member(&members[4].member, None, Some(&members[2].member))).unwrap();
+    let edit = plan_v2(&build_v2(&a, &members).unwrap(), &drop_member(&members[4].member, None, Some(&members[2].member))).unwrap();
     assert_eq!(serde_json::to_value(edit).unwrap(), json!({"folders":[],"memberships":[
         {"op":"place","member":members[4].member,"bucket":null,"key":"Zzf"},
         {"op":"place","member":members[1].member,"bucket":null,"key":"ZzL"}
@@ -161,14 +161,14 @@ fn v2_refuses_oversized_atomic_rekeys_and_payloads_without_truncation() {
     for (size, index, expected) in [(2046, 1023, 1024), (2050, 1025, 1026)] {
         let mut keys = vec!["a0"; size]; keys.push("b00");
         let members = root_members(&a, &keys);
-        let result = plan_v2(&a, &members, &drop_member(&members[size].member, None, Some(&members[index].member)));
+        let result = plan_v2(&build_v2(&a, &members).unwrap(), &drop_member(&members[size].member, None, Some(&members[index].member)));
         if expected == 1024 { assert_eq!(result.unwrap().memberships.len(), expected); }
         else { assert_eq!(result, Err(V2Refusal::TooManyOperations { count: expected })); }
     }
     let (a, mut members) = input(&fixture()["cases"][2]);
     members[2].member = format!("agent/test/{}", "x".repeat(fractal_schema::ordered_membership::MAX_EDIT_BYTES));
     let target = members[0].position.bucket.as_deref();
-    assert!(matches!(plan_v2(&a, &members, &drop_member(&members[2].member, target, Some(&members[0].member))), Err(V2Refusal::TooManyBytes { bytes }) if bytes > fractal_schema::ordered_membership::MAX_EDIT_BYTES));
+    assert!(matches!(plan_v2(&build_v2(&a, &members).unwrap(), &drop_member(&members[2].member, target, Some(&members[0].member))), Err(V2Refusal::TooManyBytes { bytes }) if bytes > fractal_schema::ordered_membership::MAX_EDIT_BYTES));
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn bounded_max_length_gap_rekeys_only_the_six_required_siblings() {
     let upper = format!("{prefix}z");
     let mut keys = vec![lower.as_str(); 13]; keys.extend([upper.as_str(), "b00"]);
     let members = root_members(&a, &keys);
-    let edit = plan_v2(&a, &members, &drop_member(&members[14].member, None, Some(&members[7].member))).unwrap();
+    let edit = plan_v2(&build_v2(&a, &members).unwrap(), &drop_member(&members[14].member, None, Some(&members[7].member))).unwrap();
     assert_eq!(edit.memberships.len(), 7);
     for operation in edit.memberships {
         let fractal_schema::ordered_membership::Operation::Place { member, key, .. } = operation else { panic!("Place only") };
@@ -196,7 +196,7 @@ fn prefix_boundary_capacity_rekeys_one_sibling_without_touching_the_upper_bound(
     let lower = format!("a0V{}", "z".repeat(max - 3));
     let upper = format!("a0W{}2", "0".repeat(max - 4));
     let members = root_members(&a, &[&lower, &lower, &lower, &upper, "b00"]);
-    let edit = plan_v2(&a, &members, &drop_member(&members[4].member, None, Some(&members[2].member))).unwrap();
+    let edit = plan_v2(&build_v2(&a, &members).unwrap(), &drop_member(&members[4].member, None, Some(&members[2].member))).unwrap();
     assert_eq!(serde_json::to_value(edit).unwrap(), json!({"folders":[],"memberships":[
         {"op":"place","member":members[4].member,"bucket":null,"key":"a0W"},
         {"op":"place","member":members[2].member,"bucket":null,"key":format!("a0W{}1", "0".repeat(max - 4))}

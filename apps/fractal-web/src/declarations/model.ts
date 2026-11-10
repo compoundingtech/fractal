@@ -1,7 +1,7 @@
 import { Predicate } from 'effect'
 import type { AgentDeclaration, MissionDeclaration, PublicationDefinition } from '@fractal/client/schema'
 import type { DeclarationPanelState } from '@fractal/ui/assistant-ui/shell'
-import type { Feed } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 
 /** Fractal's placeholder for an environment value it did not disclose. */
 export const REDACTED = '<redacted>'
@@ -78,7 +78,8 @@ export type MissionDeclarationValue = MissionDeclaration | PublicationDefinition
 
 type Unread = Extract<Feed<unknown>, { readonly _tag: 'Unavailable' }>
 const unread = (feed: Unread): DeclarationPanelState =>
-  feed.reason === 'ungranted' ? { _tag: 'Unavailable', message: 'Read access to declarations has not been granted to this connection.' }
+  feed.reason === 'unauthorized' ? { _tag: 'Unavailable', message: credentialExpiredMessage }
+    : feed.reason === 'ungranted' ? { _tag: 'Unavailable', message: 'Read access to declarations has not been granted to this connection.' }
     : feed.reason === 'unsupported' ? { _tag: 'Unavailable', message: `This connection cannot read declarations. ${feed.detail}` }
     : { _tag: 'Failed', message: `The declaration could not be loaded: ${feed.detail.replace(/\.$/, '')}. Nothing was changed; close and try again.` }
 

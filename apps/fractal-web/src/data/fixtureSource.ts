@@ -12,6 +12,7 @@ import {
   type Feed,
   type GatewayEvent,
   type Grants,
+  decodedRoster,
   observed,
   unavailable,
 } from './source.ts'
@@ -90,7 +91,9 @@ export const fixtureSource = ({
         : overrides.agents,
   ),
   missions: Atom.make(overrides.missions ?? observed({ value: world.missions })),
+  missionsDecode: Atom.make(decodedRoster),
   attention: Atom.make(overrides.attention ?? observed({ value: world.attention })),
+  attentionDecode: Atom.make(decodedRoster),
   events: Atom.make(overrides.events ?? observed({ value: world.events })),
   conversation: keyed({ table: world.conversations, pinned: overrides.conversation }),
   terminal: keyed({ table: world.terminals, pinned: overrides.terminal }),

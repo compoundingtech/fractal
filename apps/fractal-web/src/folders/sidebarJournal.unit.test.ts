@@ -15,7 +15,7 @@ beforeEach(() => localStorage.clear())
 it.each(['AwaitingPersistence', 'Sending', 'UnknownDelivery'] as const)('restarts %s through a new persistence barrier and replays exact bytes', status => {
   const journal = new SidebarJournal(scope)
   const pending = { ...state(), status }
-  expect(journal.run('Send', { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(journal.run({ _tag: 'Send', delivery: 'Replay' }, { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
   expect(journal.run('PersistPending', pending)._tag).toBe('Applied')
   const restarted = new SidebarJournal(scope)
   const restored = restarted.restore()
@@ -23,11 +23,11 @@ it.each(['AwaitingPersistence', 'Sending', 'UnknownDelivery'] as const)('restart
   if (restored._tag !== 'Restored' || !restored.state) throw new Error('missing restored state')
   expect(restored.effects).toEqual(['PersistPending'])
   expect(restored.state.status).toBe('AwaitingPersistence')
-  expect(restarted.run('Send', { ...restored.state, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(restarted.run({ _tag: 'Send', delivery: 'Replay' }, { ...restored.state, status: 'Sending' })._tag).toBe('PersistenceRequired')
   expect(restarted.run('PersistPending', restored.state)).toEqual({ _tag: 'Applied', effects: [], event: { _tag: 'Persisted', identity } })
-  expect(restarted.run('Send', { ...restored.state, status: 'Sending' })).toEqual({ _tag: 'Applied', effects: ['Send'], request: pending.request })
+  expect(restarted.run({ _tag: 'Send', delivery: 'Replay' }, { ...restored.state, status: 'Sending' })).toEqual({ _tag: 'Applied', effects: [{ _tag: 'Send', delivery: 'Replay' }], request: pending.request, delivery: 'Replay' })
   const changed = structuredClone(restored.state)
-  expect(restarted.run('Send', { ...changed, status: 'Sending', request: { ...changed.request!, identity: { ...identity, idempotency_key: 'changed' } } })._tag).toBe('PersistenceRequired')
+  expect(restarted.run({ _tag: 'Send', delivery: 'Replay' }, { ...changed, status: 'Sending', request: { ...changed.request!, identity: { ...identity, idempotency_key: 'changed' } } })._tag).toBe('PersistenceRequired')
 })
 it.each(['AwaitingObservation', 'AwaitingFreshBase', 'Refused', 'PartiallyApplied', 'Intent', 'Observed'] as const)('never resends restored %s', status => {
   const journal = new SidebarJournal(scope)
@@ -36,7 +36,7 @@ it.each(['AwaitingObservation', 'AwaitingFreshBase', 'Refused', 'PartiallyApplie
   const restarted = new SidebarJournal(scope)
   const restored = restarted.restore()
   expect(restored).toEqual({ _tag: 'Restored', state: pending, effects: status === 'Intent' ? ['ReadBase', 'Replan'] : status === 'Observed' ? ['PersistRemoval'] : ['ReadBase'] })
-  expect(restarted.run('Send', { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(restarted.run({ _tag: 'Send', delivery: 'Replay' }, { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
 })
 it('persists authoritative completion before allowing a dependent step and retains partial completion', () => {
   const journal = new SidebarJournal(scope)
@@ -44,7 +44,7 @@ it('persists authoritative completion before allowing a dependent step and retai
   expect(journal.run('PersistCompletion', completed)).toEqual({ _tag: 'Applied', effects: [], event: { _tag: 'CompletionPersisted', identity } })
   const restarted = new SidebarJournal(scope)
   expect(restarted.restore()).toEqual({ _tag: 'Restored', state: completed, effects: ['PersistCompletion'] })
-  expect(restarted.run('Send', { ...completed, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(restarted.run({ _tag: 'Send', delivery: 'Replay' }, { ...completed, status: 'Sending' })._tag).toBe('PersistenceRequired')
   const partial = { ...completed, status: 'PartiallyApplied' as const, refusal: 'DestinationMissing' as const }
   journal.run('PersistPending', partial)
   expect(restarted.restore()).toEqual({ _tag: 'Restored', state: partial, effects: ['ReadBase'] })
@@ -56,7 +56,7 @@ it('blocks sends and completion acknowledgements on failed writes', () => {
   const storage = { getItem: localStorage.getItem.bind(localStorage), removeItem: localStorage.removeItem.bind(localStorage), setItem: () => { throw cause } }
   const journal = new SidebarJournal(scope, storage)
   expect(journal.run('PersistPending', state())).toEqual({ _tag: 'StorageFailed', operation: 'write', cause, event: { _tag: 'StorageFailed', identity, phase: 'Pending' } })
-  expect(journal.run('Send', { ...state(), status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(journal.run({ _tag: 'Send', delivery: 'Replay' }, { ...state(), status: 'Sending' })._tag).toBe('PersistenceRequired')
   expect(journal.run('PersistCompletion', { ...state(), status: 'AwaitingCompletionPersistence' })._tag).toBe('StorageFailed')
 })
 it('refuses unknown versions before decoding state, corruption, foreign scopes and credential fields', () => {
@@ -94,13 +94,13 @@ it('replays unknown delivery exactly in-process, but a later failed write revoke
   journal.run('PersistPending', state())
   const uncertain = { ...state(), status: 'UnknownDelivery' as const }
   journal.run('PersistPending', uncertain)
-  expect(journal.run('Send', { ...uncertain, status: 'Sending' })).toEqual({ _tag: 'Applied', effects: ['Send'], request: uncertain.request })
+  expect(journal.run({ _tag: 'Send', delivery: 'Replay' }, { ...uncertain, status: 'Sending' })).toEqual({ _tag: 'Applied', effects: [{ _tag: 'Send', delivery: 'Replay' }], request: uncertain.request, delivery: 'Replay' })
   fail = true
   expect(journal.run('PersistPending', uncertain)._tag).toBe('StorageFailed')
-  expect(journal.run('Send', { ...uncertain, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(journal.run({ _tag: 'Send', delivery: 'Replay' }, { ...uncertain, status: 'Sending' })._tag).toBe('PersistenceRequired')
   fail = false
   journal.run('PersistPending', { ...uncertain, status: 'AwaitingObservation' })
-  expect(journal.run('Send', { ...uncertain, status: 'Sending' })._tag).toBe('PersistenceRequired')
+  expect(journal.run({ _tag: 'Send', delivery: 'Replay' }, { ...uncertain, status: 'Sending' })._tag).toBe('PersistenceRequired')
 })
 it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN])('refuses invalid durable numeric fields: %s', value => {
   const journal = new SidebarJournal(scope)
@@ -112,7 +112,7 @@ it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN])('refuses invalid dur
     const invalid = bytes.replace(`"${field}":${field === 'version' ? 1 : 4}`, `"${field}":${value}`)
     localStorage.setItem(key, invalid)
     expect(journal.restore()._tag).toBe('InvalidRecord')
-    expect(journal.run('Send', { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
+    expect(journal.run({ _tag: 'Send', delivery: 'Replay' }, { ...pending, status: 'Sending' })._tag).toBe('PersistenceRequired')
   }
   const request = pending.request!
   expect(journal.run('PersistPending', { ...pending, request: { ...request, fence: { ...request.fence, snapshot: { ...request.fence.snapshot, store_index: value } } } })._tag).toBe('InvalidRecord')

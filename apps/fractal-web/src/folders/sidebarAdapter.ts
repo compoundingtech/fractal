@@ -1,6 +1,6 @@
 import { ClientError, type ActionOf, type Arrangement, type OrderedMembership } from '@fractal/client'
 import type { MembershipEditEvent } from './edit.ts'
-import type { SidebarJournalRequest, SidebarJournalState } from './sidebarJournal.ts'
+import type { MembershipDelivery, SidebarJournalRequest, SidebarJournalState } from './sidebarJournal.ts'
 import type { MembershipComplete } from './memberships.ts'
 import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { drawnParents, insertAt, isLive, liveAncestor, positionKey, project, wouldCycle, type FolderDoc, type Insertion, type Projection, type ProjectedFolder } from './core.mts'
@@ -415,7 +415,7 @@ export const planMembershipMove = (model: MembershipProjection, intent: Membersh
   return { _tag: 'PlannedV2', edit: { folders, memberships: members } }
 }
 
-/** Send only requests returned by MembershipEditor.execute('Send'). Actor stays transport-owned. */
+/** Send only requests returned by the journal executor's Send effect. Actor stays transport-owned. */
 export const membershipWriteRequest = (request: SidebarJournalRequest): ActionOf<'arrangement.edit'> | ActionOf<'arrangement.membership.edit'> => {
   const { fence, identity, operations } = request
   const common = { api_version: 'st3.client.v0' as const, id: identity.action_id, idempotency_key: identity.idempotency_key,
@@ -425,12 +425,14 @@ export const membershipWriteRequest = (request: SidebarJournalRequest): ActionOf
     ? { ...common, type: 'arrangement.edit', parameters: { ...parameters, operations: [...operations.Folders] } }
     : { ...common, type: 'arrangement.membership.edit', parameters: { ...parameters, operations: [...operations.Memberships] } }
 }
-export const membershipWriteResult = (request: SidebarJournalRequest, result: unknown): MembershipEditEvent => {
+/** Forward Send delivery unchanged: admission errors cannot disprove an earlier uncertain commit. */
+export const membershipWriteResult = (request: SidebarJournalRequest, delivery: MembershipDelivery, result: unknown): MembershipEditEvent => {
   const identity = request.identity
   if (typeof result === 'object' && result !== null && 'action_id' in result && result.action_id === identity.action_id && 'status' in result) {
     if (result.status === 'accepted' || result.status === 'completed') return { _tag: 'Ack', identity }
     if (result.status === 'rejected') return { _tag: 'Refused', identity, refusal: 'Conflict' }
   }
+  if (delivery === 'Replay') return { _tag: 'Unknown', identity }
   if (result instanceof ClientError) {
     const { code, details } = result.response
     if (details?.applied === 'unknown') return { _tag: 'Unknown', identity }

@@ -11,25 +11,34 @@ pub fn size() -> Option<Capacity> {
 }
 
 /// What the seats outside lanes hold that the kernel cannot take back: the anonymous and kernel
-/// memory (`memory.stat`) of each seat scope directly in the user manager's `app.slice`. Page cache
-/// is left out, since it is reclaimed under pressure. A laned seat's scopes are in its lane, which
-/// counts at its declared size instead. `None` where there is no cgroup tree to read.
+/// memory (`memory.stat`) of the outermost seat scopes below the user manager's cgroup.
+/// Hierarchical counters already include nested scopes. Page cache is left out, since it is
+/// reclaimed under pressure. `app-lanes.slice` is excluded: its seats count at their declared size
+/// instead. `None` where there is no cgroup tree to read.
 pub fn unlaned_seat_memory() -> Option<u64> {
-    Some(scopes_memory(&crate::lane::app_slice_cgroup()?))
+    Some(scopes_memory(&crate::lane::user_manager_cgroup()?))
 }
 
-fn scopes_memory(app_slice: &std::path::Path) -> u64 {
-    std::fs::read_dir(app_slice)
+fn scopes_memory(cgroup: &std::path::Path) -> u64 {
+    std::fs::read_dir(cgroup)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|entry| {
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            name.starts_with("st3-") && name.ends_with(".scope")
+            if name == crate::lane::LANES_SLICE {
+                0
+            } else if name.starts_with("st3-") && name.ends_with(".scope") {
+                // memory.stat includes descendants: never charge a nested seat again.
+                std::fs::read_to_string(entry.path().join("memory.stat"))
+                    .map(|stat| unreclaimable(&stat))
+                    .unwrap_or(0)
+            } else {
+                scopes_memory(&entry.path())
+            }
         })
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("memory.stat")).ok())
-        .map(|stat| unreclaimable(&stat))
         .sum()
 }
 
@@ -112,6 +121,57 @@ mod tests {
         }
         assert_eq!(scopes_memory(&app), 1324);
         std::fs::remove_dir_all(&app).unwrap();
+    }
+
+    #[test]
+    fn nested_scopes_count_once_across_reparenting() {
+        let app = std::env::temp_dir().join(format!("host-nested-scopes-{}", std::process::id()));
+        for (scope, memory) in [
+            ("intermediary.slice/st3-parent.scope", 120),
+            ("intermediary.slice/st3-parent.scope/st3-child.scope", 20),
+            ("intermediary.slice/st3-sibling.scope", 30),
+            ("other.slice/st3-other.scope", 40),
+            ("app-lanes.slice/st3-laned.scope", 9000),
+            ("app-lanes.slice/app-lanes-seat.slice/st3-harness.scope", 8000),
+        ] {
+            let path = app.join(scope);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("memory.stat"), format!("anon {memory}\nkernel 0\n")).unwrap();
+        }
+        // Parent includes its child; siblings and seats below intermediary slices count too.
+        assert_eq!(scopes_memory(&app), 190);
+        std::fs::rename(
+            app.join("intermediary.slice/st3-parent.scope/st3-child.scope"),
+            app.join("other.slice/st3-child.scope"),
+        ).unwrap();
+        // After reparenting, the old parent's hierarchical total no longer includes the child.
+        std::fs::write(
+            app.join("intermediary.slice/st3-parent.scope/memory.stat"), "anon 100\nkernel 0\n",
+        ).unwrap();
+        assert_eq!(scopes_memory(&app), 190);
+        std::fs::remove_dir_all(&app).unwrap();
+    }
+
+    #[test]
+    fn app_and_interactive_seats_share_host_memory() {
+        let manager = std::env::temp_dir().join(format!("host-manager-scopes-{}", std::process::id()));
+        // Deployment snapshot shapes and counters, with scope identities anonymized.
+        for (scope, stat) in [
+            ("app.slice/st3-app.scope", "anon 100\nkernel 0\n"),
+            ("interactive.slice/interactive-control.slice/st3-control.scope",
+                "anon 6459392\nfile 12288\nkernel 335872\n"),
+            ("interactive.slice/interactive-seats.slice/st3-seat.scope",
+                "anon 1131495424\nfile 16973824\nkernel 14209024\n"),
+            ("interactive.slice/interactive-seats.slice/st3-other.scope",
+                "anon 436752384\nfile 9162752\nkernel 7929856\n"),
+            ("app.slice/app-lanes.slice/app-lanes-seat.slice/st3-laned.scope", "anon 9000\n"),
+        ] {
+            let path = manager.join(scope);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("memory.stat"), stat).unwrap();
+        }
+        assert_eq!(scopes_memory(&manager), 1_597_182_052);
+        std::fs::remove_dir_all(&manager).unwrap();
     }
 
     #[test]

@@ -235,3 +235,15 @@ The first characterization run failed only the four stale v14 trim expectations.
 `claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
+
+`claims-v18.json` captures the complete registry with `message.expired`, the durable,
+runtime-authored mail expiry outcome. Versions 1 through 17 stay frozen. Generate it
+from the merged expiry registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v18.json`;
+the example serializes `fractal_schema::registry().claims` with
+`serde_json::to_string_pretty`, followed by a newline. Do not hand-edit the snapshot.
+The simulation selects v18. Expiry draws select an existing sent message in stable
+subject order and use `daemon/runtime`; native admission still rejects mail with a
+terminal receipt. The focused expiry regression generates the outcome through the
+same path as random schedules and checks native admission and replication to the
+oracle, rather than treating corpus membership as write coverage.

@@ -350,32 +350,42 @@ impl WatchesStore for Store {
             return Ok(false);
         };
         let origin = self.origin.clone();
+        // The final wake goes where its recipient's host reads it, decided before the
+        // transaction: one routed to the stream is queued in the outbox, which drains to the shard.
+        let wake_message = final_wake
+            .map(|wake| -> Result<_, FractalError> {
+                let message = ClaimInput {
+                    subject: wake.subject.clone(),
+                    kind: "message.sent".into(),
+                    actor: None,
+                    fields: serde_json::from_value(json!({
+                        "from": format!("daemon/{origin}"),
+                        "to": spec.to,
+                        "title": wake.title,
+                        "content": wake.content,
+                        "status": "sent",
+                        "tags": wake.tags,
+                    }))
+                    .map_err(internal)?,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                };
+                let route = crate::store::message_routing::legacy_reason(self, &message).map_err(internal)?;
+                Ok((message, route))
+            })
+            .transpose()?;
         let ended = self
             .connection
             .batched(|transaction| -> Result<bool, FractalError> {
-                if let Some(wake) = final_wake
-                    && latest_claim_id_tx(transaction, &wake.subject)
+                if let Some((message, route)) = &wake_message
+                    && latest_claim_id_tx(transaction, &message.subject)
                         .map_err(internal)?
                         .is_none()
+                    && !crate::store::message_sent::message_sent_tx(transaction, &message.subject)
+                        .map_err(internal)?
                 {
-                    append_claim_tx(
-                        transaction,
-                        &origin,
-                        &wake.subject,
-                        "message.sent",
-                        None,
-                        &json!({"fields": {
-                            "from": format!("daemon/{origin}"),
-                            "to": spec.to,
-                            "title": wake.title,
-                            "content": wake.content,
-                            "status": "sent",
-                            "tags": wake.tags,
-                        }}),
-                        &[],
-                        None,
-                    )
-                    .map_err(claim_append_error)?;
+                    crate::store::message_routing::send_message_tx(transaction, &origin, message, *route)?;
                 }
                 end_watch_tx(
                     transaction,

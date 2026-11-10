@@ -95,3 +95,21 @@ fn the_ci_objectives_are_the_declared_durations_and_counts() {
         BTreeSet::from(["ci-critical-path/p95", "flakes", "merge-latency/p50", "merge-latency/p95"].map(String::from)),
     );
 }
+
+#[test]
+fn an_undeclared_explicit_reviewer_never_falls_back_to_the_fleet_fault_agent() {
+    let store = Store::open_memory("node").unwrap();
+    with_fault_agent(&store);
+    let result = check_with_response(
+        &store,
+        &[row("flakes", "missed")],
+        &objectives(),
+        Some(ObjectiveResponse {
+            reviewer: "agent/missing",
+            condition: "test-explicit-objective",
+            title: "Test",
+        }),
+    ).unwrap();
+    assert_eq!(result, ObjectiveFaults { unowned: 1, ..ObjectiveFaults::default() });
+    assert!(open(&store).is_empty());
+}

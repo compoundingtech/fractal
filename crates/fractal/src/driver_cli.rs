@@ -1,7 +1,103 @@
 use super::*;
 
+fn managed_declaration_result(
+    result: std::result::Result<Value, GeneratedClientError>,
+) -> Result<Value> {
+    match result {
+        Ok(tree) => Ok(tree),
+        Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => Ok(Value::Null),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) async fn prepare_managed_provider(
+    client: &Client,
+    subject: &str,
+    harness: &str,
+    argv: &mut [String],
+) -> Result<()> {
+    let actor = client.person.as_deref().unwrap_or(subject);
+    let declaration = retry_while_daemon_unreachable(subject, || async {
+        let gateway = generated_client(&client.endpoint, Some(actor))?;
+        managed_declaration_result(
+            gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
+        )
+    }).await?;
+    fractal_drivers::managed_launch::resolve(harness, argv, &declaration, subject)
+}
+
+#[cfg(test)]
+mod managed_declaration_tests {
+    use super::*;
+
+    fn api_error(code: ClientErrorCode) -> GeneratedClientError {
+        let envelope = fractal_client::ErrorEnvelope {
+            api_version: "st3.client.v0".into(),
+            error_version: "st3.client.error.v0".into(),
+            request_id: "test".into(),
+            code: code.clone(),
+            message: "declaration read failed".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: BTreeMap::new(),
+        };
+        GeneratedClientError::Api(code, envelope.message.clone(), Box::new(envelope))
+    }
+
+    #[test]
+    fn confirmed_not_found_allows_persona_fallback() {
+        assert_eq!(managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap(), Value::Null);
+        let spec = json!({"children": [{"name": "name", "arguments": ["Managed seat"]}]});
+        assert_eq!(managed_declaration_result(Ok(spec.clone())).unwrap(), spec);
+    }
+
+    #[test]
+    fn declaration_failures_do_not_become_missing_specs() {
+        for code in [ClientErrorCode::Forbidden, ClientErrorCode::Internal] {
+            assert!(managed_declaration_result(Err(api_error(code))).is_err());
+        }
+        assert!(managed_declaration_result(Err(GeneratedClientError::Transport("unavailable".into()))).is_err());
+        assert!(managed_declaration_result(Err(GeneratedClientError::Protocol("invalid JSON".into()))).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_resume_and_flagless_agent_calls_select_the_managed_wrapper() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("codex");
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = root.path().join("profile.json");
+        std::fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let environment = BTreeMap::from([
+            ("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string()),
+            ("PATH".into(), "/native/bin".into()),
+        ]);
+        for program in ["codex", "/native/bin/codex"] {
+            // Legacy re-exec preserves these flagless arguments from the previous image.
+            let Command::Driver(mut args) = Cli::try_parse_from([
+                "fractal", "driver", "codex", "--subject", "agent/example", "--", program,
+            ]).unwrap().command else { panic!("driver expected") };
+            let declaration = managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap();
+            fractal_drivers::managed_launch::resolve_with_environment(
+                &args.driver, &mut args.argv, &declaration, &environment, &|_| Ok(()),
+            ).unwrap();
+            assert_eq!(Path::new(&args.argv[0]), wrapper);
+        }
+    }
+}
+
 /// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
+    fractal_client::set_client_name(format!(
+        "fractal-driver-hook {}",
+        fractal_drivers::version::machine_version()
+    ));
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
@@ -146,10 +242,21 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
-        if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
+        let resume = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV);
+        // Fresh drivers keep the existing runtime wait across daemon restarts. Adopting
+        // drivers cannot wait on a new incarnation, but their declaration read retries outages.
+        let incarnation = if resume.is_none() {
+            Some(wait_for_agent_incarnation(client, subject).await?)
+        } else {
+            None
+        };
+        if matches!(args.driver.as_str(), "omp" | "claude" | "codex") {
+            prepare_managed_provider(client, subject, &args.driver, &mut argv).await?;
+        }
+        if let Some(state) = resume {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
         }
-        let incarnation = wait_for_agent_incarnation(client, subject).await?;
+        let incarnation = incarnation.context("fresh driver has no runtime incarnation")?;
         let paths = NativePaths::prepare(subject, &args.driver)?;
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = fractal_daemon::native_seed::first_launch(

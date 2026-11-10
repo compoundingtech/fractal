@@ -32,7 +32,9 @@ const decode = Schema.decodeUnknownSync(json, { onExcessProperty: 'error' })
 const encode = Schema.encodeSync(json, { onExcessProperty: 'error' })
 export type SidebarJournalState = typeof State.Type
 export type SidebarJournalRequest = typeof Request.Type
-export type SidebarJournalEffect = 'PersistPending' | 'PersistCompletion' | 'PersistRemoval' | 'Send' | 'ReadBase' | 'Replan'
+/** Per-send provenance is reducer-owned and never included in journal v1. */
+export type MembershipDelivery = 'First' | 'Replay'
+export type SidebarJournalEffect = 'PersistPending' | 'PersistCompletion' | 'PersistRemoval' | 'ReadBase' | 'Replan' | { readonly _tag: 'Send'; readonly delivery: MembershipDelivery }
 export type SidebarPersistenceFailure = { readonly _tag: 'StorageFailed'; readonly identity: SidebarJournalRequest['identity']; readonly phase: 'Pending' | 'Completion' | 'Removal' }
 export type SidebarJournalError =
   | { readonly _tag: 'Version'; readonly version: number }
@@ -40,7 +42,7 @@ export type SidebarJournalError =
   | { readonly _tag: 'ScopeMismatch' }
   | { readonly _tag: 'StorageFailed'; readonly operation: 'read' | 'write' | 'remove'; readonly cause: unknown; readonly event?: SidebarPersistenceFailure }
   | { readonly _tag: 'PersistenceRequired' }
-export type SidebarJournalResult = { readonly _tag: 'Applied'; readonly effects: readonly SidebarJournalEffect[]; readonly event?: { readonly _tag: 'Persisted' | 'CompletionPersisted'; readonly identity: typeof Identity.Type }; readonly request?: SidebarJournalRequest }
+export type SidebarJournalResult = { readonly _tag: 'Applied'; readonly effects: readonly SidebarJournalEffect[]; readonly event?: { readonly _tag: 'Persisted' | 'CompletionPersisted'; readonly identity: typeof Identity.Type }; readonly request?: SidebarJournalRequest; readonly delivery?: MembershipDelivery }
   | SidebarJournalError
 export type SidebarJournalRestore = { readonly _tag: 'Restored'; readonly state?: SidebarJournalState; readonly effects: readonly SidebarJournalEffect[] } | SidebarJournalError
 const sameScope = (a: MembershipScope, b: MembershipScope): boolean => a.owner === b.owner && a.container === b.container && a.endpoint === b.endpoint && a.host === b.host && a.projection === b.projection
@@ -81,9 +83,9 @@ export class SidebarJournal {
   run(effect: SidebarJournalEffect, state: SidebarJournalState): SidebarJournalResult {
     if (!sameScope(state.scope, this.scope) || (state.request && !sameScope(state.request.fence.scope, this.scope))) { this.#permit = undefined; return { _tag: 'ScopeMismatch' } }
     if (effect === 'ReadBase' || effect === 'Replan') return { _tag: 'Applied', effects: [effect] }
-    if (effect === 'Send') {
+    if (typeof effect === 'object') {
       if (!state.request || this.#permit !== JSON.stringify(state.request) || !['Sending', 'UnknownDelivery'].includes(state.status)) return { _tag: 'PersistenceRequired' }
-      return { _tag: 'Applied', effects: ['Send'], request: structuredClone(state.request) }
+      return { _tag: 'Applied', effects: [effect], request: structuredClone(state.request), delivery: effect.delivery }
     }
     this.#permit = undefined
     const event: SidebarPersistenceFailure | undefined = state.request ? { _tag: 'StorageFailed', identity: structuredClone(state.request.identity), phase: effect === 'PersistRemoval' ? 'Removal' : effect === 'PersistCompletion' ? 'Completion' : 'Pending' } : undefined

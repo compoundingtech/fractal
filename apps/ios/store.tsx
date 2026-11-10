@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { AppState } from 'react-native';
+import { AppState, unstable_batchedUpdates } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
@@ -8,7 +8,7 @@ import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutco
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
-import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
+import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
 import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
@@ -21,7 +21,7 @@ import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/fractal-collections';
-import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
+import { FabricCarrier, routeLabel, selectRoute, shouldRetryFabric, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
 import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
@@ -39,6 +39,8 @@ import { DiagnosticsConnection } from './DiagnosticsConnection';
 import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
+import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
+import { approveRenewal, pendingRenewals, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -60,7 +62,7 @@ const SIGNING_KEY = 'st3.device.signing';
 // signing key together. Old separate credential/signing entries remain readable until re-pair.
 const PROFILE_KEY = 'st3.device.profile';
 type PhoneSigning = DeviceKey & { handle?: string };
-type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string };
+type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string; routing?: PairingRouting };
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
 // Notifications: off by default, stored only on this phone. APNs tokens are never persisted here.
@@ -132,7 +134,7 @@ function useAppStore(proof?: FabricProfile) {
   const [order, setOrder] = useState<Tab[]>(tabOrder(null));
   const [url, setUrl] = useState(proof?.url ?? ''), [urlDraft, setUrlDraft] = useState('');
   const [credential, setCredential] = useState<string | null>(proof?.credential ?? null);
-  const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string } | null>(null);
+  const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string; scanned?: true } | null>(null);
   const [data, setData] = useState<Data>(emptyData);
   const [truncated, setTruncated] = useState<Partial<Record<keyof Data, boolean>>>({});
   const [loadErrors, setLoadErrors] = useState<Partial<Record<keyof Data, string>>>({});
@@ -153,6 +155,10 @@ function useAppStore(proof?: FabricProfile) {
   // Whether the missions window (followed only while a missions screen shows) has delivered its rows.
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
+  const [renewals, setRenewals] = useState<Array<{ profileKey: string; profile: PhoneProfile; offer: RenewalOffer }>>([]);
+  const [renewalIssue, setRenewalIssue] = useState('');
+  const [renewalBusy, setRenewalBusy] = useState(false);
+  const renewalWorking = useRef(false);
   const [historicalSessions, setHistoricalSessions] = useState<SessionView[]>([]);
   // The Agents list shows a list or a tree, as the Fractal terminal UI's `t` toggles.
   const [treeView, setTreeView] = useState(false);
@@ -376,19 +382,21 @@ function useAppStore(proof?: FabricProfile) {
     if (proof) return;
     let live = true;
     void (async () => {
-      const [available, choice, stored, storedList, fallback] = await Promise.all([
+      const [available, choice, stored, storedList, fallback, profile] = await Promise.all([
         fabricAvailable(),
         AsyncStorage.getItem(CARRIER_KEY).catch(() => null), AsyncStorage.getItem(FABRIC_TARGET_KEY).catch(() => null),
         AsyncStorage.getItem(FABRIC_MEMBERS_KEY).catch(() => null), AsyncStorage.getItem(FABRIC_FALLBACK_KEY).catch(() => null),
+        SecureStore.getItemAsync(PROFILE_KEY),
       ]);
       if (!live) return;
       const built = buildFabricDefault();
       setFabricBuilt(available);
       const saved = readFabricMembers(storedList, stored);
-      setFabricMemberList(saved.length ? saved : builtFabricMembers(built));
-      setCarrierChoice(choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale');
+      const routing = profile ? (JSON.parse(profile) as PhoneProfile).routing : undefined;
+      setFabricMemberList(routing?.members ?? (saved.length ? saved : builtFabricMembers(built)));
+      setCarrierChoice(routing?.carrier ?? (choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale'));
       setFallbackOn(fallback !== '0');
-    })();
+    })().catch(() => { if (live) setError('The saved pairing route could not be read.'); });
     return () => { live = false; };
   }, [proof]);
 
@@ -404,6 +412,62 @@ function useAppStore(proof?: FabricProfile) {
     return () => { live = false; };
   }, [proof, fabricMemberList]);
 
+  const renewalPorts: RenewalPorts = {
+    now: Date.now,
+    crypto: { hash: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))), verify: verifyGrantSignature },
+    sign: signWithDeviceKey, create: createRenewalKey, approve: approveWithDeviceKey, remove: removeDeviceKey,
+    read: async key => { const raw = await SecureStore.getItemAsync(key); return raw ? JSON.parse(raw) : undefined; },
+    save: (key, profile) => SecureStore.setItemAsync(key, JSON.stringify(profile), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY }),
+    post: async (base, path, body) => {
+      const response = await gatewayFetch()(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const text = await response.text();
+      if (!response.ok || text.length > 256 * 1024) throw new Error('Could not contact the renewal member. Your previous pairing was kept.');
+      const envelope: unknown = JSON.parse(text);
+      if (!envelope || typeof envelope !== 'object' || !('api_version' in envelope) || envelope.api_version !== API_VERSION || !('value' in envelope)) throw new Error('Invalid renewal response');
+      return envelope.value;
+    },
+  };
+  const renewalRoute = (profile: PhoneProfile): string | undefined => {
+    if (!isFabricGatewayId(profile.url)) return profile.url;
+    return fabricSnapshot.phase === 'ready' && fabricMember && fabricGatewayId(fabricMember) === profile.url ? fabricSnapshot.bridgeUrl : undefined;
+  };
+  const renewalRouteRef = useRef(renewalRoute);
+  renewalRouteRef.current = renewalRoute;
+  const currentRenewalRoute = async (profile: PhoneProfile, expires: number): Promise<string> => {
+    const until = Math.min(expires, Date.now() + 15_000);
+    do {
+      const route = renewalRouteRef.current(profile);
+      if (route) return route;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 100);
+      await promise;
+    } while (Date.now() < until);
+    throw new Error('The paired member is not connected.');
+  };
+  const pollRenewals = async () => {
+    if (proof || renewalWorking.current || !foreground.current.active) return;
+    renewalWorking.current = true;
+    try {
+      const keys = [PROFILE_KEY, ...fabricMemberList.filter(member => !member.device).map(memberProfileKey)];
+      const found: typeof renewals = [];
+      for (const profileKey of keys) {
+        const profile = await renewalPorts.read(profileKey).catch(() => undefined) as PhoneProfile | undefined;
+        if (!profile) continue;
+        const route = renewalRoute(profile);
+        if (!route) continue;
+        try {
+          for (const offer of await pendingRenewals(profile, route, API_VERSION, renewalPorts)) found.push({ profileKey, profile, offer });
+        } catch { /* An unavailable member must not hide another member's verified offer. */ }
+      }
+      setRenewals(found);
+    } finally { renewalWorking.current = false; }
+  };
+  const renewalPoll = useRef(pollRenewals); renewalPoll.current = pollRenewals;
+  useEffect(() => {
+    if (proof) return;
+    return watchRenewalForeground(foreground.current, () => renewalPoll.current());
+  }, [proof, fabricMemberList, fabricSnapshot.phase, fabricSnapshot.member, url]);
+
   useEffect(() => { if (proof) return; Promise.allSettled([AsyncStorage.getItem(URL_KEY), AsyncStorage.getItem(ORDER_KEY), SecureStore.getItemAsync(CREDENTIAL_KEY), AsyncStorage.getItem(PROJECTION_CACHE_KEY), SecureStore.getItemAsync(PROFILE_KEY)]).then(([u, o, c, p, saved]) => {
     let paired: PhoneProfile | undefined;
     if (saved.status === 'fulfilled' && saved.value) {
@@ -412,6 +476,10 @@ function useAppStore(proof?: FabricProfile) {
     if (saved.status === 'rejected') { setError('Secure credential storage is unavailable on this build.'); return; }
     const gateway = paired?.url ?? (u.status === 'fulfilled' ? u.value : null);
     const bearer = paired?.credential ?? (c.status === 'fulfilled' ? c.value : null);
+    if (paired?.routing) {
+      setFabricMemberList(paired.routing.members);
+      setCarrierChoice(paired.routing.carrier);
+    }
     if (gateway) { setUrl(gateway); setUrlDraft(gateway); }
     // Only the current four-tab order is read; old phone preferences are retired.
     if (o.status === 'fulfilled' && o.value) { try { setOrder(tabOrder(JSON.parse(o.value))); } catch { /* use default */ } }
@@ -520,7 +588,7 @@ function useAppStore(proof?: FabricProfile) {
         if (state !== 'live') { connection++; capsClient.current = null; setCaps(null); }
         if (state === 'live') {
           const epoch = connection;
-          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          void loadCapabilities(() => current() && epoch === connection);
           carrier.feedLive(); feedMisses.current = 0;
         }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
@@ -682,15 +750,21 @@ function useAppStore(proof?: FabricProfile) {
     const pin = validatePairingTrust(fingerprint, unpinned);
     if (!canVerifyPairing()) throw new Error('This build cannot verify pairing proofs; update the phone app.');
     const profileKey = member ? memberProfileKey(member) : PROFILE_KEY;
-    if (member && !(fabricSnapshot.phase === 'ready' && fabricSnapshot.member === member.name)) throw new Error(`Fabric is not connected to ${member.name} yet. Wait a moment and try again, or check ${member.name}'s fabric grant for this phone.`);
+    if (member && !(fabricSnapshot.phase === 'ready' && sameFabricTarget(fabricMember, member))) throw new Error(`Fabric is not connected to ${member.name} yet. Wait a moment and try again, or check ${member.name}'s fabric grant for this phone.`);
     const oldRaw = await SecureStore.getItemAsync(profileKey);
     const old: PhoneProfile | undefined = oldRaw ? JSON.parse(oldRaw) : undefined;
     // Anonymous discovery reveals no key material and never receives an old bearer.
     const requestFetch = gatewayFetch();
-    // With fabric chosen and its bridge open, the pairing requests go over fabric to the same member: the
-    // gateway typed (or saved) stays this device's identity and its fallback route.
-    const requestUrl = member ? fabricSnapshot.bridgeUrl : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
-    if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
+    // Both manual replacement and QR pairing bind URL requests to the explicit gateway, never an
+    // unrelated Fabric bridge. A scan authenticates no Fabric target and commits its own routing.
+    const overFabric = isFabricGatewayId(gateway);
+    if (!member && old && !pairDraft?.scanned && !overFabric && fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' && !fabricMember?.device) {
+      throw new Error('Another Fabric member is selected. Select this device’s paired member in Fleet, or switch to the saved gateway carrier before re-pairing. The code was not submitted; the previous profile was retained.');
+    }
+    if (overFabric && !(fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' && fabricMember && fabricGatewayId(fabricMember) === gateway)) {
+      throw new Error('Fabric is not connected to this pairing’s member and service. Select the matching member in Fleet and try again. The code was not submitted; the previous profile was retained.');
+    }
+    const requestUrl = overFabric ? fabricSnapshot.bridgeUrl : gateway;
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');
@@ -718,7 +792,9 @@ function useAppStore(proof?: FabricProfile) {
         verify: verifyGrantSignature,
       });
       const signs = result.value.scopes.includes('control.messages');
+      const routing = member ? undefined : pairingCommitRouting({ carrier: carrierChoice, members: fabricMemberList }, !!pairDraft?.scanned);
       const next: PhoneProfile = { url: gateway, credential: result.value.credential,
+        ...(!member && (pairDraft?.scanned || old?.routing) ? { routing } : {}),
         ...(pin ? { personRootFingerprint: pin } : {}),
         ...(signs ? { signing: { key: made.key, storage: made.storage, handle: made.handle, person: result.value.person_id, chain: result.value.device_key_chain! } } : {}),
       };
@@ -736,7 +812,13 @@ function useAppStore(proof?: FabricProfile) {
       await SecureStore.deleteItemAsync(CREDENTIAL_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(SIGNING_KEY).catch(() => {});
       await clearCachedProjection().catch(() => {});
-      setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
+      unstable_batchedUpdates(() => {
+        if (next.routing) {
+          setFabricMemberList(next.routing.members);
+          setCarrierChoice(next.routing.carrier);
+        }
+        setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
+      });
       // Paired over fabric alone: that member uses this device's own pairing.
       if (isFabricGatewayId(gateway) && fabricTarget && fabricGatewayId(fabricTarget) === gateway && !fabricTarget.device) {
         await saveFabricMembers(fabricMemberList.map(m => (sameFabricTarget(m, fabricTarget) ? { ...m, device: true as const } : m)));
@@ -766,9 +848,18 @@ function useAppStore(proof?: FabricProfile) {
     setOwnProfiles(held => { const next = new Map(held); next.delete(key); return next; });
     return true;
   }
+  /** Once present, route ownership lives with the credential, not in independently loaded preferences. */
+  async function saveProfileRouting(routing: PairingRouting): Promise<void> {
+    const raw = await SecureStore.getItemAsync(PROFILE_KEY);
+    if (!raw) return;
+    const profile: PhoneProfile = JSON.parse(raw);
+    if (profile.routing) await SecureStore.setItemAsync(PROFILE_KEY, JSON.stringify({ ...profile, routing }), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+  }
+
   /** Save the fabric members in the person's order: the list under its key, the device's member under the old key. */
   async function saveFabricMembers(next: FabricMember[]): Promise<void> {
     const list = fabricMembers(next);
+    await saveProfileRouting({ carrier: carrierChoice, members: list });
     const stored = storedFabricMembers(list);
     await Promise.all([
       stored.members ? AsyncStorage.setItem(FABRIC_MEMBERS_KEY, stored.members) : AsyncStorage.removeItem(FABRIC_MEMBERS_KEY),
@@ -786,13 +877,48 @@ function useAppStore(proof?: FabricProfile) {
       if (saved) await SecureStore.setItemAsync(PROFILE_KEY, JSON.stringify({ ...JSON.parse(saved), url: normalized }), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
       await AsyncStorage.setItem(URL_KEY, normalized); setUrl(normalized); setError('');
     },
+    async approveRenewal(): Promise<void> {
+      const renewal = renewals[0];
+      if (!renewal || renewalWorking.current) return;
+      const route = renewalRoute(renewal.profile);
+      if (!route) { setRenewalIssue('Reconnect to this member to approve renewal.'); return; }
+      renewalWorking.current = true; setRenewalBusy(true); setRenewalIssue('');
+      try {
+        if (!await push.forgetIssuer(renewal.profileKey)) throw new Error('Notification cleanup is incomplete.');
+        const next = await approveRenewal(renewal.profileKey, renewal.profile, () => currentRenewalRoute(renewal.profile, renewal.offer.expires_at_unix_ms), renewal.offer, API_VERSION, renewalPorts) as PhoneProfile;
+        if (renewal.profileKey === PROFILE_KEY) {
+          setCredential(next.credential); setCaps(null); setPairDraft(null); setPairingIssue('');
+        } else setOwnProfiles(held => new Map(held).set(renewal.profileKey, next));
+        setRenewals(held => held.filter(item => item.profileKey !== renewal.profileKey));
+        push.resume();
+      } catch { setRenewalIssue('Renewal was not saved. Your previous profile was kept. Reopen the app to refresh; if no request remains, ask the operator to stage a new replacement.'); }
+      finally { push.releaseIssuer(renewal.profileKey); renewalWorking.current = false; setRenewalBusy(false); }
+    },
     async pair(id: string, code: string, fingerprint: string, unpinned = false): Promise<boolean> {
+      if (!pairingTrustAllowed(!!pairDraft?.scanned, unpinned)) {
+        setError('A scanned pairing requires a separately verified fingerprint.');
+        return false;
+      }
       // With fabric chosen and a target saved, a device with no gateway pairs over fabric alone.
       const fabricOnly = !pairDraft && !url && fabricBuilt && carrierChoice === 'fabric' && fabricTarget ? fabricGatewayId(fabricTarget) : '';
       const gateway = pairDraft?.gateway ?? (url || fabricOnly);
       if (!gateway || !id.trim() || !code.trim()) return false;
       setBusy(true);
-      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) {
+        setError(pairDraft?.scanned ? 'Could not pair this device. The previous pairing was kept. Check the separately copied fingerprint and start a fresh pairing on the trusted machine; inspect its devices if the code was consumed.' : errorText(e));
+        return false;
+      } finally { setBusy(false); }
+    },
+    /** A QR proposes only a draft; saved routing, credential and root pin remain untouched. */
+    prefillScannedPairing(gateway: string, id: string, code: string) {
+      setPairDraft({ gateway, id, code, scanned: true });
+      setPairingIssue('Enter the fingerprint copied separately from the trusted machine before completing this pairing.');
+    },
+    /** Re-pair in Release without discarding the current profile or changing its gateway. */
+    repairDevice() {
+      if (!credential || !url || proof) return;
+      setPairDraft({ gateway: url, id: '', code: '' });
+      setPairingIssue('The current pairing stays in use until the new pairing is verified and saved. Enter the fingerprint copied separately from the trusted machine.');
     },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
@@ -805,7 +931,10 @@ function useAppStore(proof?: FabricProfile) {
     },
     cancelPairDraft() { setPairDraft(null); setPairingIssue(''); },
     /** Choose the carrier. Fabric is an opt-in and needs a saved target; the saved gateway stays as it is. */
-    async setCarrier(choice: CarrierChoice) { await AsyncStorage.setItem(CARRIER_KEY, choice).catch(() => {}); setCarrierChoice(choice); },
+    async setCarrier(choice: CarrierChoice) {
+      await saveProfileRouting({ carrier: choice, members: fabricMemberList });
+      await AsyncStorage.setItem(CARRIER_KEY, choice).catch(() => {}); setCarrierChoice(choice);
+    },
     /** Add a member to the end of the fabric list from pasted text (`node=…&service=…`, or a link carrying them) and a name. */
     async saveFabricTarget(text: string, name = ''): Promise<boolean> {
       const target = fabricTargetFromText(text);
@@ -814,10 +943,10 @@ function useAppStore(proof?: FabricProfile) {
       if (fabricMemberList.length >= MAX_FABRIC_MEMBERS) { setError(`The list holds at most ${MAX_FABRIC_MEMBERS} members. Remove one first.`); return false; }
       const named = memberName(name);
       if (named && fabricMemberList.some(existing => sameName(existing.name, named))) { setError(`A member is already named ${named}.`); return false; }
-      // The first member of a phone paired over a gateway is the member it is paired with, as with today's
-      // single target. A phone paired over fabric alone already knows its member. Any other member is
-      // paired on its own: this device's credential never goes to it.
-      const device = !fabricMemberList.some(m => m.device) && (isFabricGatewayId(url) ? url === fabricGatewayId(target) : !fabricMemberList.length);
+      // A QR proves no relationship to a Fabric node. Never infer one from the first added target.
+      const rawProfile = await SecureStore.getItemAsync(PROFILE_KEY);
+      const boundRouting = rawProfile ? (JSON.parse(rawProfile) as PhoneProfile).routing : undefined;
+      const device = !fabricMemberList.some(m => m.device) && (isFabricGatewayId(url) ? url === fabricGatewayId(target) : !boundRouting && !fabricMemberList.length);
       await saveFabricMembers([...fabricMemberList, { ...target, name: named || defaultMemberName(fabricMemberList.length), ...(device ? { device: true as const } : {}) }]);
       setError('');
       return true;
@@ -834,7 +963,7 @@ function useAppStore(proof?: FabricProfile) {
     startMemberPairing(index: number) {
       const member = fabricMemberList[index];
       if (!member || member.device) return;
-      setPairingMember(member); setError('');
+      setPairingMember(member);
       carrier.pick(member);
     },
     cancelMemberPairing() { setPairingMember(null); carrier.retry(); },
@@ -1025,14 +1154,15 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {
-      if (!client) return null;
+      if (!client) { setError('Could not create terminal: still connecting; try again in a moment.'); return null; }
       let created: string | null = null;
       const done = await runAction(async () => {
         const id = actionId();
         const result = await client.terminalCreate({ id, idempotency_key: id, fence: await fence(), parameters: { name } });
         created = result.value.affected_ids?.find(affected => affected.startsWith('terminal/')) ?? null;
       });
-      if (!done || !created) return null;
+      if (!done) { setError(issue => `Could not create terminal: ${issue}`); return null; }
+      if (!created) { setError('Could not create terminal: Fractal returned no terminal ID.'); return null; }
       // The shell starts a moment after Fractal declares it: open it once Fractal can show its screen.
       for (let tries = 0; tries < 30; tries++) {
         try { await client.terminalScreen(created); return created; } catch { await new Promise(resolve => setTimeout(resolve, 500)); }
@@ -1049,7 +1179,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     async variants(launchId: string): Promise<LaunchVariant[]> {
       if (!client || status !== 'online') return [];
-      try { const result = await client.launchVariantsList(launchId, { limit: Math.min(caps?.limits.max_page_items ?? 30, 30) }); setError(''); return items(result.value, 'launch-variant'); } catch (e) { setError(errorText(e)); return []; }
+      try { const result = await client.launchVariantsList(launchId, { limit: Math.min(caps?.limits.max_page_items ?? 30, 30) }); return items(result.value, 'launch-variant'); } catch (e) { setError(errorText(e)); return []; }
     },
     async preview(launch: Launch, variant: LaunchVariant) {
       if (!client) return false;
@@ -1122,7 +1252,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     async history() {
       if (!client || !caps) return;
-      try { setHistoricalSessions((await listSessionPages(options => client.sessionsList(options), Math.min(caps.limits.max_page_items, 30), true)).filter(s => ['completed', 'failed', 'cancelled'].includes(s.state))); setError(''); } catch (e) { if (!isSnapshotChurn(e)) setError(errorText(e)); }
+      try { setHistoricalSessions((await listSessionPages(options => client.sessionsList(options), Math.min(caps.limits.max_page_items, 30), true)).filter(s => ['completed', 'failed', 'cancelled'].includes(s.state))); } catch (e) { if (!isSnapshotChurn(e)) setError(errorText(e)); }
     },
     moveTab(tab: Tab, direction: -1 | 1) {
       const index = order.indexOf(tab), next = index + direction;
@@ -1132,7 +1262,10 @@ function useAppStore(proof?: FabricProfile) {
       setOrder(updated);
       if (!proof) void AsyncStorage.setItem(ORDER_KEY, JSON.stringify(updated));
     },
-    reconnect() { feed?.reconnect(); },
+    reconnect() {
+      if (shouldRetryFabric(carrierChoice, carrier.snapshot.phase)) carrier.retry();
+      feed?.reconnect();
+    },
     setSimpleOn(on: boolean) {
       setSimpleOn(on);
       if (!proof) void AsyncStorage.setItem(SIMPLE_KEY, on ? '1' : '0').catch(() => {});
@@ -1148,6 +1281,7 @@ function useAppStore(proof?: FabricProfile) {
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),

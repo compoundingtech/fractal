@@ -1,5 +1,5 @@
 import type { ArrangementOperation } from '../../clients/typescript/fractal-client';
-import type { JournalEffect, JournalPersistence, JournalReducer, JournalStatus } from './sidebarJournal';
+import type { JournalEffect, JournalPersistence, JournalReducer, JournalStatus, WriteDelivery } from './sidebarJournal';
 import type { MembershipScope } from './sidebarMemberships';
 import type { Intent } from './sidebarPlanning';
 
@@ -9,7 +9,8 @@ export type MembershipOperation = { op: 'place'; member: string; bucket: string 
 export type WritePlan = { folders: ArrangementOperation[]; memberships: MembershipOperation[] };
 export type WriteRequest = { identity: WriteIdentity; fence: WriteBase; operations: { Folders: ArrangementOperation[] } | { Memberships: MembershipOperation[] } };
 export type WriteRefusal = 'InvalidPlan' | 'StaleFence' | 'Unauthorized' | 'DestinationMissing' | 'Conflict' | 'Storage';
-export type WriteState = { scope: MembershipScope; intent: Intent; status: JournalStatus; refusal: WriteRefusal | null; request: WriteRequest | null; dependent: WriteIdentity | null; folder_completed: boolean; used: WriteIdentity[] };
+// next_delivery is transient: missing after journal decode means the identity may already have sent.
+export type WriteState = { scope: MembershipScope; intent: Intent; status: JournalStatus; refusal: WriteRefusal | null; request: WriteRequest | null; dependent: WriteIdentity | null; folder_completed: boolean; used: WriteIdentity[]; next_delivery?: WriteDelivery };
 export type WriteEvent = { type: 'Plan'; base: WriteBase; plan: WritePlan; folder: WriteIdentity; membership: WriteIdentity }
   | { type: 'Fresh'; base: WriteBase; operations: MembershipOperation[] | { error: WriteRefusal } }
   | { type: 'Persisted' | 'CompletionPersisted' | 'Ack' | 'Unknown' | 'Observed'; identity: WriteIdentity }
@@ -24,7 +25,7 @@ const unused = (s: WriteState, id: WriteIdentity): boolean => !!id.actor && !!id
 const refuse = (s: WriteState, reason: WriteRefusal): JournalEffect[] => { s.refusal = reason; s.status = s.folder_completed ? 'PartiallyApplied' : 'Refused'; return ['PersistPending', 'ReadBase']; };
 const stage = (s: WriteState, identity: WriteIdentity, fence: WriteBase, operations: WriteRequest['operations']): JournalEffect[] => {
   if (!unused(s, identity)) return refuse(s, 'InvalidPlan');
-  s.used.push(structuredClone(identity)); s.request = structuredClone({ identity, fence, operations }); s.status = 'AwaitingPersistence'; return ['PersistPending'];
+  s.used.push(structuredClone(identity)); s.request = structuredClone({ identity, fence, operations }); s.next_delivery = 'First'; s.status = 'AwaitingPersistence'; return ['PersistPending'];
 };
 const reduce = (s: WriteState, e: WriteEvent): JournalEffect[] => {
   if (e.type === 'Plan' && s.status === 'Intent') {
@@ -47,10 +48,10 @@ const reduce = (s: WriteState, e: WriteEvent): JournalEffect[] => {
     const identity = s.dependent!; s.dependent = null; return stage(s, identity, e.base, { Memberships: e.operations });
   }
   if (e.type === 'Retry' && (s.status === 'Refused' || s.status === 'PartiallyApplied')) { s.status = 'Intent'; s.refusal = null; s.dependent = null; return ['ReadBase', 'Replan']; }
-  if (e.type === 'Replay' && s.status === 'UnknownDelivery') { s.status = 'Sending'; return ['Send']; }
+  if (e.type === 'Replay' && s.status === 'UnknownDelivery') { s.status = 'Sending'; s.next_delivery = 'Replay'; return [{ type: 'Send', delivery: 'Replay' }]; }
   if (!('identity' in e) || !s.request || !sameId(s.request.identity, e.identity)) return [];
   if (e.type === 'StorageFailed' && (s.status === 'AwaitingPersistence' && e.phase === 'Pending' || s.status === 'AwaitingCompletionPersistence' && e.phase === 'Completion')) return refuse(s, 'Storage');
-  if (e.type === 'Persisted' && s.status === 'AwaitingPersistence') { s.status = 'Sending'; return ['Send']; }
+  if (e.type === 'Persisted' && s.status === 'AwaitingPersistence') { s.status = 'Sending'; const delivery = s.next_delivery ?? 'Replay'; s.next_delivery = 'Replay'; return [{ type: 'Send', delivery }]; }
   if (e.type === 'CompletionPersisted' && s.status === 'AwaitingCompletionPersistence') { s.status = s.dependent ? 'AwaitingFreshBase' : 'Observed'; return s.dependent ? ['ReadBase'] : ['PersistRemoval']; }
   if (e.type === 'Ack' && (s.status === 'Sending' || s.status === 'UnknownDelivery')) { s.status = 'AwaitingObservation'; return ['PersistPending', 'ReadBase']; }
   if (e.type === 'Unknown' && s.status === 'Sending') { s.status = 'UnknownDelivery'; return ['PersistPending']; }

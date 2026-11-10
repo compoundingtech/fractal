@@ -17,6 +17,7 @@ use crate::message_body::BodyAttachment as _;
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, ShardDigest, TableDigest, VERSION,
     VERSION_WITH_BODIES, VERSION_WITH_LEDGERS, VERSION_WITH_MARKS, VERSION_WITH_SHARDS,
+    VERSION_WITH_QUARANTINE,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -94,6 +95,7 @@ pub fn create_from_database(
     store.validate_replication_backlog()?;
     store.apply_replication_repairs()?;
     store.replay_replication_graph()?;
+    refuse_queued_mail(&store)?;
     // The messages shard beside the database, when there is one, as the daemon opens it. A copy
     // made without its `shards` directory is archived without stream items.
     let root = database
@@ -120,6 +122,24 @@ pub fn create_from_database(
     Ok(header)
 }
 
+/// How many waiting messages an offline export's refusal names.
+const QUEUED_NAMED: i64 = 8;
+
+/// Refuse a copy whose message outbox holds mail its member has not yet written to the messages
+/// shard. The exporter is not that member: a drain here would append the mail under the copy's
+/// writer, to the copy's shard or graph, and the archive would carry writes the member never
+/// made. The member's own daemon drains the outbox, after which a new copy exports.
+fn refuse_queued_mail(store: &Store) -> Result<()> {
+    let (subjects, count) = crate::store::message_outbox::queued(&store.readers.get(), QUEUED_NAMED)?;
+    ensure!(
+        count == 0,
+        "offline export refuses a copy whose message outbox holds {count} message(s) not yet in its messages shard ({}{}); start the member's daemon so it writes them, then copy the database again",
+        subjects.join(", "),
+        if count > subjects.len() as i64 { format!(" and {} more", count - subjects.len() as i64) } else { String::new() }
+    );
+    Ok(())
+}
+
 fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -141,12 +161,15 @@ fn check_header(header: &Header) -> Result<()> {
     // Builds before version 5 say only "unsupported claim backup format/version"; this one also
     // names what it found and what it restores.
     ensure!(
-        header.format == FORMAT && (VERSION..=VERSION_WITH_SHARDS).contains(&header.version),
+        header.format == FORMAT && (VERSION..=VERSION_WITH_QUARANTINE).contains(&header.version),
         "unsupported claim backup format/version: {:?} version {}; this build restores {FORMAT:?} \
-         versions {VERSION} to {VERSION_WITH_SHARDS}",
+         versions {VERSION} to {VERSION_WITH_QUARANTINE}",
         header.format,
         header.version
     );
+    ensure!(header.version >= VERSION_WITH_QUARANTINE
+        || !header.ledgers.contains_key("replica_restore_quarantine"),
+        "operation quarantine requires the current archive version");
     ensure!(
         header.version >= VERSION_WITH_SHARDS || header.shards.is_empty(),
         "shard digests in an archive that does not declare shards"
