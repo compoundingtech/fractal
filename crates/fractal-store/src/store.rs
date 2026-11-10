@@ -42,6 +42,8 @@ pub mod identities;
 pub(crate) mod agent_review_answer;
 #[allow(dead_code)]
 pub(crate) mod agent_review_decode;
+#[doc(hidden)]
+pub mod agent_review_transaction;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
