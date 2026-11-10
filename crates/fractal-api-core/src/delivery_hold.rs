@@ -19,6 +19,9 @@ pub struct HoldRequest {
     /// Used only when a replacement adopts an older provider's unexpired DND.
     #[serde(default)]
     pub legacy_adoption: bool,
+    /// Hold a member of an `enforce` owned set anyway, recording source debt with `reason`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -109,6 +112,7 @@ mod tests {
             reason: "quiet interval".into(),
             idempotency_key: key.into(),
             legacy_adoption: false,
+            force: false,
         }
     }
 

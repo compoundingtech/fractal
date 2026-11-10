@@ -1782,12 +1782,14 @@ pub trait MissionsStore {
     /// Retire a published mission: publish its current definition again as `retired`, so it
     /// leaves the mission lists and cannot start, while every revision and run stays in its
     /// history. The publication names who retired it. Publishing a ready revision brings the
-    /// mission back.
+    /// mission back. A member of an `enforce` owned set retires only with `force_reason`, which
+    /// records source debt in the same transaction.
     fn retire_mission(
             &self,
             mission: &str,
             actor: &str,
             idempotency_key: &str,
+            force_reason: Option<&str>,
         ) -> Result<MissionSpec, FractalError>;
     #[allow(clippy::too_many_arguments)]
     fn adopt_mission_revision_inner(
@@ -4390,6 +4392,7 @@ impl MissionsStore for Store {
             mission: &str,
             actor: &str,
             idempotency_key: &str,
+            force_reason: Option<&str>,
         ) -> Result<MissionSpec, FractalError> {
         if let Some(response) = self
             .cached_idempotency_response(idempotency_key)
@@ -4422,7 +4425,8 @@ impl MissionsStore for Store {
         if let Some(response) = smallclaims::store::idempotency::cached_response(&transaction,idempotency_key)? {
             return serde_json::from_str(&response).map_err(internal);
         }
-        owned_sets::refuse_unmanaged(&transaction, &format!("mission/{mission_id}"))?;
+        // A set member retires through its set, or forced as source debt.
+        let gate = owned_sets::gate(&transaction, &format!("mission/{mission_id}"), owned_sets::Verb::MissionRetire, force_reason)?;
         let active = transaction
             .query_row(
                 "SELECT id FROM mission_runs
@@ -4444,18 +4448,44 @@ impl MissionsStore for Store {
         let predecessors =
             mission_definition_token_tx(&transaction, mission_id).map_err(internal)?;
         let body = serde_json::to_value(&retired).map_err(internal)?;
-        let claim = append_receipt_claim_tx(
-            &transaction,
-            &self.origin,
-            &retired.subject,
-            "mission.published",
-            Some(&actor),
-            &body,
-            &predecessors,
-            None,
-            idempotency_key,
-        )
+        let claim = if matches!(gate, owned_sets::Gate::Force(_)) {
+            fractal_store::store::append_source_forced_receipt_claim_tx(
+                &transaction,
+                &self.origin,
+                &retired.subject,
+                "mission.published",
+                Some(&actor),
+                &body,
+                &predecessors,
+                idempotency_key,
+            )
+        } else {
+            append_receipt_claim_tx(
+                &transaction,
+                &self.origin,
+                &retired.subject,
+                "mission.published",
+                Some(&actor),
+                &body,
+                &predecessors,
+                None,
+                idempotency_key,
+            )
+        }
         .map_err(internal)?;
+        match gate {
+            owned_sets::Gate::Allow => {}
+            owned_sets::Gate::Force(view) => {
+                owned_sets::record_debt_tx(&transaction, &self.origin, &view, &retired.subject,
+                    owned_sets::Verb::MissionRetire,
+                    owned_sets::Forced::Declaration { claim: &claim.id, revision: &retired.revision },
+                    None, Some(&actor), force_reason.unwrap_or_default(), None)?;
+            }
+            owned_sets::Gate::Audit(view, refused) => {
+                owned_sets::record_audit_tx(&transaction, &self.origin, &view, &retired.subject,
+                    owned_sets::Verb::MissionRetire, Some(&actor), &refused, None)?;
+            }
+        }
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h778d64bc900e owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id, revision, state, body, claim_id, created_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

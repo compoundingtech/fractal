@@ -2262,6 +2262,7 @@ fn legacy_delivery_hold(
         reason: "Unexpired delivery hold adopted from the previous native driver".into(),
         idempotency_key: format!("delivery-hold-adoption:{subject}:{until_unix_ms}"),
         legacy_adoption: true,
+        force: false,
     })
 }
 
