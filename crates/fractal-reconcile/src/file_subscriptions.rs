@@ -91,7 +91,7 @@ impl Pool {
         let id = state.next;
         state.next += 1;
         lock(&state.users).insert(id, (paths.clone(), callback));
-        if let Err(error) = state.update(&paths, true) {
+        if let Err(error) = state.update(&paths, true, stamp) {
             state.remove(id);
             return Err(error);
         }
@@ -110,7 +110,7 @@ impl State {
     fn remove(&mut self, id: u64) {
         let removed = lock(&self.users).remove(&id);
         if let Some((paths, _)) = removed {
-            let _ = self.update(&paths, false);
+            let _ = self.update(&paths, false, stamp);
         }
     }
     fn install(&mut self, path: &Path, recursive: bool, post: Probe) -> Result<()> {
@@ -126,7 +126,7 @@ impl State {
             .insert(path.to_owned(), (recursive, identity, generation));
         Ok(())
     }
-    fn update(&mut self, paths: &Paths, add: bool) -> Result<()> {
+    fn update(&mut self, paths: &Paths, add: bool, post: Probe) -> Result<()> {
         for (path, recursive) in paths {
             let counts = self.requested.entry(path.clone()).or_default();
             counts[usize::from(*recursive)] += if add { 1 } else { -1 };
@@ -187,7 +187,35 @@ impl State {
                 }
             }
             for (path, mode) in pending {
-                self.install(&path, mode, stamp)?;
+                if let Err(error) = self.install(&path, mode, post) {
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                        && !(add && paths.iter().any(|(requested, _)| requested == &path))
+                    {
+                        // Retain a missing old request for recreation without
+                        // blocking acquisition of its existing ancestor.
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        if add {
+            for (path, _) in paths {
+                // Root collapse must not hide a vanished acquiring child.
+                // Exact roots were already validated during maintenance.
+                if !self.physical.contains_key(path) {
+                    stamp(path)?;
+                }
+                anyhow::ensure!(
+                    path.ancestors().any(|root| {
+                        self.physical
+                            .get(root)
+                            .is_some_and(|(recursive, _, _)| root == path || *recursive)
+                    }),
+                    "acquiring path has no physical watch coverage"
+                );
             }
         }
         Ok(())
@@ -280,6 +308,202 @@ mod tests {
             drop(lease);
             assert_eq!(STATS.get(), 0, "unrelated roots are not revalidated");
         }
+        assert!(lock(&pool.0).physical.is_empty());
+    }
+
+    #[test]
+    fn missing_root_does_not_block_acquisition_or_parent_replacement() {
+        for recursive in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let parent = root.path().canonicalize().unwrap();
+            let missing = parent.join("missing");
+            let unrelated = parent.join("unrelated");
+            std::fs::create_dir(&missing).unwrap();
+            std::fs::create_dir(&unrelated).unwrap();
+            let pool = Pool::new().unwrap();
+            let wakeups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let notified = wakeups.clone();
+            let stale = pool
+                .subscribe(
+                    vec![(missing.clone(), recursive)],
+                    Arc::new(move |_| {
+                        notified.fetch_add(1, Ordering::Relaxed);
+                    }),
+                )
+                .unwrap();
+            std::fs::remove_dir(&missing).unwrap();
+            let independent = pool
+                .subscribe(vec![(unrelated.clone(), false)], Arc::new(|_| {}))
+                .unwrap();
+            assert!(lock(&pool.0).physical.contains_key(&unrelated));
+
+            // ensure_file_watch acquires this lease before dropping the old one.
+            let replacement = pool
+                .subscribe(vec![(parent.clone(), false)], Arc::new(|_| {}))
+                .unwrap();
+            assert!(wakeups.load(Ordering::Relaxed) > 0);
+            assert!(!lock(&pool.0).physical.contains_key(&missing));
+            assert_eq!(lock(&pool.0).physical.len(), 2);
+            drop(stale);
+            assert_eq!(lock(&pool.0).physical.len(), 2);
+            assert!(pool
+                .subscribe(vec![(missing.clone(), recursive)], Arc::new(|_| {}))
+                .is_err());
+
+            std::fs::create_dir(&missing).unwrap();
+            let recreated = pool
+                .subscribe(vec![(missing.clone(), recursive)], Arc::new(|_| {}))
+                .unwrap();
+            assert_eq!(lock(&pool.0).physical[&missing].1, stamp(&missing).unwrap());
+            drop((recreated, replacement, independent));
+            assert!(lock(&pool.0).physical.is_empty());
+            assert!(lock(&lock(&pool.0).users).is_empty());
+        }
+    }
+
+    #[test]
+    fn recreated_root_survives_stale_lease_release_and_canonical_alias_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+        let path = parent.join("watched");
+        let retired = parent.join("retired");
+        let alias = parent.join("alias");
+        std::fs::create_dir(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        let pool = Pool::new().unwrap();
+        let stale = pool
+            .subscribe(vec![(alias.clone(), false)], Arc::new(|_| {}))
+            .unwrap();
+        let original = stamp(&path).unwrap();
+        std::fs::rename(&path, &retired).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_ne!(original, stamp(&path).unwrap());
+        let renewed = pool
+            .subscribe(vec![(alias.clone(), false)], Arc::new(|_| {}))
+            .unwrap();
+        assert_eq!(lock(&pool.0).physical[&path].1, stamp(&path).unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&retired, &alias).unwrap();
+        let redirected = pool
+            .subscribe(vec![(alias, false)], Arc::new(|_| {}))
+            .unwrap();
+        drop(stale);
+        assert_eq!(lock(&pool.0).physical.len(), 2);
+        assert_eq!(lock(&pool.0).physical[&path].1, stamp(&path).unwrap());
+        assert_eq!(lock(&pool.0).physical[&retired].1, original);
+        drop(renewed);
+        assert!(!lock(&pool.0).physical.contains_key(&path));
+        assert!(lock(&pool.0).physical.contains_key(&retired));
+        drop(redirected);
+        assert!(lock(&pool.0).physical.is_empty());
+    }
+
+    #[test]
+    fn missing_acquiring_root_and_other_stamp_errors_are_not_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+        let path = parent.join("watched");
+        std::fs::create_dir(&path).unwrap();
+        let pool = Pool::new().unwrap();
+        let lease = pool
+            .subscribe(vec![(path.clone(), false)], Arc::new(|_| {}))
+            .unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        // Deterministically exercise removal after acquisition canonicalized its paths.
+        let mut state = lock(&pool.0);
+        let paths = vec![(path.clone(), false)];
+        lock(&state.users).insert(u64::MAX, (paths.clone(), Arc::new(|_| {})));
+        let error = state.update(&paths, true, stamp).unwrap_err();
+        state.remove(u64::MAX);
+        drop(state);
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        let expected = stamp(&path).unwrap_err();
+        assert_ne!(expected.kind(), std::io::ErrorKind::NotFound);
+        let error = pool
+            .subscribe(vec![(parent, false)], Arc::new(|_| {}))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().raw_os_error(),
+            expected.raw_os_error()
+        );
+        assert_eq!(lock(&lock(&pool.0).users).len(), 1);
+        drop(lease);
+        assert!(lock(&pool.0).physical.is_empty());
+    }
+
+    #[test]
+    fn collapsed_acquiring_child_cannot_succeed_after_ancestor_disappears() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap().join("ancestor");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let pool = Pool::new().unwrap();
+        let retained = pool
+            .subscribe(vec![(parent.clone(), true)], Arc::new(|_| {}))
+            .unwrap();
+        let child = child.canonicalize().unwrap();
+        let mut state = lock(&pool.0);
+        let paths = vec![(child, false)];
+        lock(&state.users).insert(u64::MAX, (paths.clone(), Arc::new(|_| {})));
+        std::fs::remove_dir_all(&parent).unwrap();
+        let error = state.update(&paths, true, stamp).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        state.remove(u64::MAX);
+        assert_eq!(lock(&state.users).len(), 1);
+        assert!(state.physical.is_empty());
+        drop(state);
+        drop(retained);
+    }
+
+    #[test]
+    fn partial_install_rollback_restores_existing_subscriber_notifications() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+        let added = parent.join("a-new");
+        let existing = parent.join("m-existing");
+        let failed = parent.join("z-fail");
+        for path in [&added, &existing, &failed] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let pool = Pool::new().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let retained = pool.subscribe(vec![(existing.clone(), false)], Arc::new(move |event| {
+            let _ = send.send(event);
+        })).unwrap();
+        let mut state = lock(&pool.0);
+        let paths = vec![(added.clone(), false), (existing.clone(), true), (failed.clone(), false)];
+        lock(&state.users).insert(u64::MAX, (paths.clone(), Arc::new(|_| {})));
+        assert!(state.update(&paths, true, |path| {
+            if path.file_name().unwrap() == "z-fail" { Ok((0, 0)) } else { stamp(path) }
+        }).is_err());
+        assert!(state.physical.contains_key(&added));
+        assert!(state.physical[&existing].0);
+        assert!(receive.try_iter().any(|event| event.paths.is_empty()));
+        state.remove(u64::MAX);
+        assert_eq!(state.physical.len(), 1);
+        assert!(!state.physical[&existing].0);
+        assert!(state.watcher.unwatch(&added).is_err());
+        assert!(state.watcher.unwatch(&failed).is_err());
+        drop(state);
+        while receive.try_recv().is_ok() {}
+        let target = existing.join("after-rollback");
+        std::fs::write(&target, "still watched").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let event = receive.recv_timeout(
+                deadline.saturating_duration_since(std::time::Instant::now())
+            ).expect("retained subscriber must receive mutations after rollback");
+            if event.paths.contains(&target) { break; }
+        }
+        drop(retained);
         assert!(lock(&pool.0).physical.is_empty());
     }
 }

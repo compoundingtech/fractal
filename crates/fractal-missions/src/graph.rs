@@ -14,13 +14,13 @@ use crate::model::{
     NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation,
     PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec,
     ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
-    RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec,
+    RuntimeResetOperation, ScheduleSpec, FractalError, SubscriptionConditionSpec, SubscriptionSpec,
 };
 pub use fractal_delivery::graph::*;
 pub use fractal_delivery::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
 
 /// Empty membership is meaningful only on the owned-set route; apply still requires explicit intent.
-pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {
+pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, FractalError> {
     let intent = parse_intent_with_owner(source, default_host, None, true, true)?;
     validate_mission_runtimes(&intent, default_host)?;
     Ok(intent)
@@ -32,12 +32,12 @@ pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<Normal
 pub fn mission_declared_authority_blocks(
     mission: &crate::model::MissionSpec,
     default_host: &str,
-) -> Result<BTreeMap<String, Vec<&'static str>>, St3Error> {
+) -> Result<BTreeMap<String, Vec<&'static str>>, FractalError> {
     fn visit(
         mission: &crate::model::MissionSpec,
         default_host: &str,
         blocks: &mut BTreeMap<String, Vec<&'static str>>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         let variables = runtime_proof_variables(mission);
         let sources = mission.declarations_kdl.iter().chain(
             mission
@@ -70,10 +70,10 @@ pub fn mission_declared_authority_blocks(
 pub fn resolve_document_references(
     source: &str,
     bindings: &BTreeMap<String, String>,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     let mut document = source
         .parse::<KdlDocument>()
-        .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
+        .map_err(|error| FractalError::new("invalid-kdl", error.to_string()))?;
     for node in document.nodes_mut() {
         resolve_node_documents(node, bindings);
     }
@@ -162,7 +162,7 @@ pub fn lane_spec(value: &Value) -> Option<LaneSpec> {
 pub fn render_agent_desired_kdl(
     desired: &Value,
     uris: &BTreeMap<String, String>,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     let mut document = KdlDocument::new();
     let mut version = KdlNode::new("version");
     version.entries_mut().push(kdl::KdlEntry::new(2_i128));
@@ -177,9 +177,9 @@ pub fn render_agent_desired_kdl(
 pub fn render_agent_node(
     desired: &Value,
     uris: &BTreeMap<String, String>,
-) -> Result<KdlNode, St3Error> {
+) -> Result<KdlNode, FractalError> {
     if desired.get("name").and_then(Value::as_str) != Some("agent") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-declaration",
             "expected an agent root",
         ));
@@ -213,15 +213,15 @@ pub fn redact_agent_env_values(tree: &mut Value) {
 
 /// Render a desired tree, preserving agent resource edges as explicit subject references.
 /// Use [`render_agent_node`] when resource URI bindings are available.
-pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
+pub fn render_desired_node(tree: &Value) -> Result<KdlNode, FractalError> {
     render_desired_tree(tree, &BTreeMap::new())
 }
 
 fn render_desired_tree(
     tree: &Value,
     uris: &BTreeMap<String, String>,
-) -> Result<KdlNode, St3Error> {
-    let invalid = || St3Error::new("invalid-declaration", "malformed desired KDL node tree");
+) -> Result<KdlNode, FractalError> {
+    let invalid = || FractalError::new("invalid-declaration", "malformed desired KDL node tree");
     let object = tree.as_object().ok_or_else(invalid)?;
     let name = object
         .get("name")
@@ -280,7 +280,7 @@ fn render_desired_tree(
     Ok(node)
 }
 
-fn render_desired_value(value: &Value) -> Result<KdlValue, St3Error> {
+fn render_desired_value(value: &Value) -> Result<KdlValue, FractalError> {
     match value {
         Value::Null => Ok(KdlValue::Null),
         Value::Bool(value) => Ok(KdlValue::Bool(*value)),
@@ -291,13 +291,13 @@ fn render_desired_value(value: &Value) -> Result<KdlValue, St3Error> {
             } else if let Some(float) = value.as_f64() {
                 Ok(KdlValue::Float(float))
             } else {
-                Err(St3Error::new(
+                Err(FractalError::new(
                     "invalid-declaration",
                     "desired KDL number is outside the supported range",
                 ))
             }
         }
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "invalid-declaration",
             "desired KDL entries must be scalar",
         )),

@@ -66,7 +66,7 @@ pub trait AttentionStore {
             subject: &str,
             reason: &str,
             idempotency_key: &str,
-        ) -> Result<AttentionRequestView, St3Error>;
+        ) -> Result<AttentionRequestView, FractalError>;
     fn attention_requests(
             &self,
             person: Option<&str>,
@@ -208,7 +208,7 @@ impl AttentionStore for Store {
             subject: &str,
             reason: &str,
             idempotency_key: &str,
-        ) -> Result<AttentionRequestView, St3Error> {
+        ) -> Result<AttentionRequestView, FractalError> {
         let subject = if subject.starts_with("attention/") {
             subject.to_owned()
         } else {
@@ -218,7 +218,7 @@ impl AttentionStore for Store {
             .attention_request(&subject)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-attention-request",
                     format!("attention request `{subject}` does not exist"),
                 )
@@ -238,7 +238,7 @@ impl AttentionStore for Store {
         })?;
         self.attention_request(&subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention resolution was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention resolution was not stored"))
     }
 
     fn attention_requests(
@@ -900,6 +900,63 @@ mission "review-repair" state="ready" {
             .unwrap();
         target.validate_replication_backlog().unwrap();
         target.project_replication_backlog().unwrap();
+    }
+
+    #[test]
+    fn assignment_at_answer_permutations_preserve_first_valid_answer_after_repair() {
+        let (source, run) = fixture();
+        let request = request(&source, &run, "pending", "answer-cut", 0);
+        let birch = Store::open_memory("birch").unwrap();
+        let cedar = Store::open_memory("cedar").unwrap();
+        for replica in [&birch, &cedar] {
+            replica.project_replication_backlog().unwrap();
+            receive(&source, replica);
+            replica
+                .set_write_clock_at(request.accepted_at_unix_ms + 10)
+                .unwrap();
+        }
+        // Equal timestamps use the writer-origin tie break, not arrival order.
+        let first = answer(&birch, &request, OLD, "first-valid-answer");
+        let second = answer(&cedar, &request, OLD, "second-valid-answer");
+        assert_eq!(first.accepted_at_unix_ms, second.accepted_at_unix_ms);
+        source
+            .set_write_clock_at(request.accepted_at_unix_ms + 20)
+            .unwrap();
+        assert_eq!(
+            repair(&source, OLD, NEW, "repair-after-answer"),
+            vec![request.body["fields"]["owner"].as_str().unwrap().to_owned()],
+        );
+        source
+            .set_write_clock_at(request.accepted_at_unix_ms + 30)
+            .unwrap();
+        answer(&source, &request, NEW, "answer-after-repair");
+        let events = [&birch, &cedar, &source];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let target = Store::open_memory("target").unwrap();
+            target.project_replication_backlog().unwrap();
+            for index in order {
+                receive(events[index], &target);
+            }
+            for replay in [false, true] {
+                if replay {
+                    target.replay_replication_graph().unwrap();
+                }
+                assert_eq!(target.human_review_reviewer(&request).unwrap(), NEW);
+                assert_eq!(
+                    target.human_review_answer(&request.id).unwrap().unwrap().id,
+                    first.id,
+                    "arrival order {order:?}, replay {replay}",
+                );
+                assert!(target.pending_human_reviews(None).unwrap().is_empty());
+            }
+        }
     }
 
     #[test]

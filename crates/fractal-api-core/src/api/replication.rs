@@ -24,12 +24,35 @@ pub struct ReplicationRecordsQuery {
     unresolved: bool,
 }
 
+fn generic_replica_record_visible(record: &ReplicaRecordView) -> bool {
+    !record.subject.as_deref().is_some_and(fractal_schema::notice::is_reserved_subject)
+        && !record.kind.as_deref().is_some_and(fractal_schema::notice::is_reserved_kind)
+}
+
+#[test]
+fn notice_replication_diagnostics_hide_reserved_subject_or_kind() {
+    let mut record: ReplicaRecordView = serde_json::from_value(json!({
+        "record_ref":"record/example", "writer":"example", "sequence":1,
+        "envelope_hash":"example", "position":0, "state":"valid",
+        "subject":"custom/example/ordinary", "kind":"custom.example.created"
+    })).unwrap();
+    assert!(generic_replica_record_visible(&record));
+    record.subject = Some("custom/attention/source/legacy".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.subject = Some("custom/example/alternate".into());
+    record.kind = Some("custom.attention.notice-created".into());
+    assert!(!generic_replica_record_visible(&record));
+    record.kind = Some("attention.notice-source".into());
+    assert!(!generic_replica_record_visible(&record));
+}
+
 pub async fn replication_records(
     State(state): State<AppState>,
     Query(query): Query<ReplicationRecordsQuery>,
 ) -> Result<Json<Vec<ReplicaRecordView>>, ApiError> {
     let store = state.store.clone();
-    blocking_store(move || store.replica_records(query.unresolved))
+    blocking_store(move || Ok(store.replica_records(query.unresolved)?
+        .into_iter().filter(generic_replica_record_visible).collect()))
         .await
         .map(Json)
 }
@@ -47,6 +70,7 @@ pub async fn replication_record(
     let record_for_read = record.clone();
     blocking_store(move || store.replica_record(&record_for_read))
         .await?
+        .filter(generic_replica_record_visible)
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("replica record `{record}` does not exist")))
 }
@@ -89,7 +113,7 @@ pub(super) async fn plan_waiting_for_proof(
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "checkpoint-proof-in-progress",
                 "a checkpoint proof is running; retry shortly",
             )));
@@ -282,10 +306,10 @@ pub async fn replication_receive(
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let projection_was_healthy = !store
             .replication_projection_needs_recovery()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
@@ -300,20 +324,20 @@ pub async fn replication_receive(
         )?;
         if store
             .observes_transport_to(&request.peer)
-            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
         {
             store
                 .record_transport_observation(&request.peer, "up", None, None)
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
             let admission = store
                 .validate_replication_backlog()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             let repairs = store
                 .apply_replication_repairs()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -361,7 +385,7 @@ pub async fn replication_receive(
         let projected = projection.unwrap_or(false);
         let store_index = store
             .index()
-            .map_err(|error| St3Error::new("internal", error.to_string()))?;
+            .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
         let quiet_only = projection_was_healthy
@@ -371,7 +395,7 @@ pub async fn replication_receive(
             && admission.invalid == 0
             && store
                 .claims_since_only_quiet_notifications(before_index)
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         Ok((
             ReplicationReceiveResponse {
@@ -566,7 +590,7 @@ pub async fn shard_replication_receive(
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = replication_shard(&state, &shard)?;
     let response = blocking_action(move || {
-        let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
+        let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         let before_index = store.index().map_err(internal)?;
         let receipt = store.receive_replication_exchange_via(
             &request.peer,
@@ -636,13 +660,30 @@ pub async fn shard_replication_wake(
 pub async fn test_shard_append(
     State(state): State<AppState>,
     Json(input): Json<smallclaims::claim::ClaimInput>,
-) -> Result<Json<smallclaims::claim::ClaimRecord>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
-    let claim = blocking_action(move || store.append_claim(&input)).await?;
+    let (claim, appended) = blocking_action(move || store.append_claim_outcome(&input)).await?;
     // The dialers wake on the graph's replication file, as they do for a graph write.
     let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
     stream_admitted(&state).await;
-    Ok(Json(claim))
+    // The claim, and whether this append wrote it or replayed its idempotency key's send.
+    let mut answer = serde_json::to_value(claim).map_err(ApiError::internal)?;
+    answer["appended"] = serde_json::Value::Bool(appended);
+    Ok(Json(answer))
+}
+
+/// Test support: write a claim to the messages shard as a peer's replicated copy arrives, without
+/// the graph check a send makes, so a test can hold a stream item under a subject the graph has.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_copy(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let (claim, _) = blocking_action(move || crate::store::messages_shard::append_replicated_copy(&store, &input)).await?;
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
+    Ok(Json(serde_json::to_value(claim).map_err(ApiError::internal)?))
 }
 
 /// Test support: the claims the messages shard holds about one subject.

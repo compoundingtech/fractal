@@ -26,34 +26,34 @@ pub(super) async fn detail(
     Ok(Json(json!({"ref":notes.uri,"family":"private-notes","schema":"fractal.private-notes@1","data":notes,"actions":actions,"live":null})))
 }
 
-fn reuse_observation_transport(state: &AppState, input: &mut ClaimInput) -> Result<(), St3Error> {
+fn reuse_observation_transport(state: &AppState, input: &mut ClaimInput) -> Result<(), FractalError> {
     let key = input.idempotency_key.as_deref().expect("notes observations have stable keys");
     let existing = smallclaims::store::operation_tx(
         &state.store.readers.get(), &smallclaims::store::operation_id_for_key(key),
-    ).map_err(|_| St3Error::new("private-notes-indeterminate", "the notes audit metadata is unavailable"))?;
+    ).map_err(|_| FractalError::new("private-notes-indeterminate", "the notes audit metadata is unavailable"))?;
     let Some((_, claim_id, operation_state)) = existing else { return Ok(()) };
     if operation_state != "active" {
-        return Err(St3Error::new("private-notes-indeterminate", "the notes audit operation has conflicting authority"));
+        return Err(FractalError::new("private-notes-indeterminate", "the notes audit operation has conflicting authority"));
     }
-    let claim = state.store.claim_by_id(&claim_id).map_err(|_| St3Error::new("private-notes-indeterminate", "the notes audit metadata is unavailable"))?
-        .ok_or_else(|| St3Error::new("private-notes-indeterminate", "the original notes audit metadata is unavailable"))?;
+    let claim = state.store.claim_by_id(&claim_id).map_err(|_| FractalError::new("private-notes-indeterminate", "the notes audit metadata is unavailable"))?
+        .ok_or_else(|| FractalError::new("private-notes-indeterminate", "the original notes audit metadata is unavailable"))?;
     let fields = claim.body.get("fields").and_then(Value::as_object)
-        .ok_or_else(|| St3Error::new("private-notes-indeterminate", "the persisted notes observation has no fields"))?;
+        .ok_or_else(|| FractalError::new("private-notes-indeterminate", "the persisted notes observation has no fields"))?;
     if claim.subject != input.subject || claim.kind != input.kind || claim.actor != input.actor
         || fields.len() != input.fields.len()
         || input.fields.iter().any(|(key, value)| key != "transport" && fields.get(key) != Some(value)) {
-        return Err(St3Error::new("idempotency-conflict", "the notes key names a different attributed observation"));
+        return Err(FractalError::new("idempotency-conflict", "the notes key names a different attributed observation"));
     }
     let transport = fields.get("transport")
         .filter(|value| matches!(value.as_str(), Some("unix" | "fabric-loopback")))
-        .ok_or_else(|| St3Error::new("private-notes-indeterminate", "the persisted notes observation has no normal transport"))?;
+        .ok_or_else(|| FractalError::new("private-notes-indeterminate", "the persisted notes observation has no normal transport"))?;
     // The same ordinary paired session may retry through either listener.
     // Preserve the original durable intent's transport, not the recovery hop.
     input.fields.insert("transport".into(), transport.clone());
     Ok(())
 }
 
-fn publish_observation(state: &AppState, input: &mut ClaimInput) -> Result<(), St3Error> {
+fn publish_observation(state: &AppState, input: &mut ClaimInput) -> Result<(), FractalError> {
     reuse_observation_transport(state, input)?;
     if let Err(error) = state.store.append_claim(input) {
         if error.code != "idempotency-mismatch" { return Err(error); }
@@ -65,7 +65,7 @@ fn publish_observation(state: &AppState, input: &mut ClaimInput) -> Result<(), S
     Ok(())
 }
 
-fn reserve_key(state: &AppState, authority: &str, subject: &str, digest: &str) -> Result<(), St3Error> {
+fn reserve_key(state: &AppState, authority: &str, subject: &str, digest: &str) -> Result<(), FractalError> {
     let reservation = ClaimInput {
         subject: subject.into(),
         kind: "client.action-result".into(),
@@ -83,7 +83,7 @@ fn reserve_key(state: &AppState, authority: &str, subject: &str, digest: &str) -
         Ok(_) => Ok(()),
         Err(error) if error.code == "stale-subject" => {
             let receipt = state.store.observations_for(subject, "client.action-result")
-                .map_err(|_| St3Error::new("private-notes-indeterminate", "the shared action key reservation is unavailable"))?
+                .map_err(|_| FractalError::new("private-notes-indeterminate", "the shared action key reservation is unavailable"))?
                 .into_iter()
                 .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none());
             if receipt.as_ref().and_then(|receipt| receipt.body.pointer("/fields/request_digest"))
@@ -91,7 +91,7 @@ fn reserve_key(state: &AppState, authority: &str, subject: &str, digest: &str) -
             {
                 Ok(())
             } else {
-                Err(St3Error::new("idempotency-conflict", "the idempotency key was already used for a different action"))
+                Err(FractalError::new("idempotency-conflict", "the idempotency key was already used for a different action"))
             }
         }
         Err(error) => Err(error),

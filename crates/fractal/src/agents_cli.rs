@@ -727,7 +727,20 @@ pub(super) async fn run_agents(
                 args.actor,
             )
             .await?;
-            print_value(&response, json_output)
+            print_value(&response, json_output)?;
+            // The same stop was already declared: say why the seat still runs, if it does.
+            if !json_output && !response.changed
+                && let Ok(gateway) = generated_client(endpoint, None)
+                && let Ok(found) = gateway.agents_get(&subject).await
+                && let ClientResource::Agent(agent) = found.value
+                && let Some(stopping) = agent.stopping
+            {
+                match stopping.held {
+                    Some(held) => println!("{subject} is already stopping; it is held: {held}"),
+                    None => println!("{subject} is already stopping"),
+                }
+            }
+            Ok(())
         }
         command => run_agent_inspection(endpoint, command, json_output).await,
     }
@@ -754,14 +767,18 @@ pub(super) fn admission_start_message(subject: &str, admission: &Value) -> Strin
 }
 
 /// Holds an agent's lane burst while standard input stays open (docs/st3/seat-lanes.md, "Bursts"):
-/// one line per answer on standard output for the command that started it, then a renewal of its
-/// lease every half minute. Standard input closing, or a stop signal, gives it back. A daemon
-/// without bursts answers with an empty 404, which is `none`.
+/// one line per answer on standard output for the command that started it, then a renewal every
+/// third of the lease the daemon names. Standard input closing, or a stop signal, gives it back. A daemon
+/// without bursts answers with an empty 404, which is `none`. A renewal says the burst is held, so
+/// a daemon that restarted restores it; once granted, any other answer means the lane no longer
+/// holds it: the holder says `lost` and why, gives it back and fails, and never goes on as if it held.
+/// A held renewal that fails is tried again after `WAITING_POLL`, not a whole renewal later, so a
+/// daemon that restarted hears it well inside the lease it keeps a raise found at start for.
 async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
     const WAITING_POLL: std::time::Duration = std::time::Duration::from_secs(5);
-    const RENEW: std::time::Duration = std::time::Duration::from_secs(30);
     let subject = normalize_agent_subject(&args.subject);
-    let body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason});
+    let mut body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason,
+        "held": false});
     let (closed_tx, mut closed) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
@@ -776,16 +793,29 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
         Ok(())
     };
     let (mut told, mut granted) = (None::<String>, false);
+    // Renewed at a third of the lease the daemon names, so a renewal or two may fail and it still holds.
+    let mut renew = std::time::Duration::from_secs(30);
     loop {
+        let mut failed = false;
         match client.post::<_, Value>("/v1/agents/lane/burst", &body).await {
             Ok(answer) => {
                 let why = answer["why"].as_str().unwrap_or_default().to_owned();
+                if let Some(lease) = answer["lease_secs"].as_u64() {
+                    renew = std::time::Duration::from_secs((lease / 3).max(1));
+                }
                 match answer["state"].as_str() {
                     Some("granted") if !granted => {
                         say(format!("granted {} {}", args.cores, args.memory))?;
                         granted = true;
+                        body["held"] = json!(true);
                     }
                     Some("granted") => {}
+                    Some(state) if granted => {
+                        let why = if why.is_empty() { format!("this host's daemon answered {state}") } else { why };
+                        say(format!("lost {why}"))?;
+                        let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
+                        anyhow::bail!("lane burst lost: {why}");
+                    }
                     Some("waiting") if told.as_deref() != Some(why.as_str()) => {
                         say(format!("waiting {why}"))?;
                         told = Some(why);
@@ -813,14 +843,21 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
             }
             // Held, a renewal that fails (a daemon restarting) is tried again: the lease outlasts a
             // few, and the raised slice still counts meanwhile.
-            Err(error) if granted => eprintln!("fractal: WARN renewing the lane burst: {error:#}"),
+            Err(error) if granted => {
+                eprintln!("fractal: WARN renewing the lane burst: {error:#}");
+                failed = true;
+            }
             Err(error) => return Err(error),
         }
         tokio::select! {
             _ = &mut closed => break,
             _ = terminate.recv() => break,
             _ = tokio::signal::ctrl_c() => break,
-            () = tokio::time::sleep(if granted { RENEW } else { WAITING_POLL }) => {}
+            () = tokio::time::sleep(match (granted, failed) {
+                (false, _) => WAITING_POLL,
+                (true, false) => renew,
+                (true, true) => renew.min(WAITING_POLL),
+            }) => {}
         }
     }
     let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
@@ -909,7 +946,7 @@ async fn agent_start_declaration(
                 && matches!(suspension.phase.as_str(),
                     "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
             {
-                return Err(fractal_daemon::St3Error::new(
+                return Err(fractal_daemon::FractalError::new(
                     "start-suspended",
                     format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
                         suspension.phase),
@@ -1081,42 +1118,53 @@ async fn run_agent_new(
         eprintln!("Created {subject} in {workspace}; waiting for the agent to start.");
     }
     let mut latest = None;
-    let waiting = tokio::time::timeout(
-        timeout,
+    let deadline = tokio::time::Instant::now() + timeout;
+    let waiting = tokio::time::timeout_at(
+        deadline + AGENT_READY_READ_GRACE,
         wait_for_agent_harness(
             &client,
             &gateway,
             &subject,
             args.attach,
             json_output,
+            deadline,
             &mut latest,
         ),
     )
     .await;
     let agent = match waiting {
-        Ok(Ok(agent)) => agent,
+        Ok(Ok(Some(agent))) => agent,
         other => {
             if !json_output {
-                let state = latest.as_ref().map_or_else(
-                    || cli_help::agent_state("starting", None, None, "unknown"),
-                    |agent: &fractal_client::Agent| {
-                        cli_help::agent_state(
-                            &agent.state,
-                            agent.harness_state.as_deref(),
-                            agent.fault.as_deref(),
-                            &agent.reachability,
-                        )
-                    },
-                );
+                let state = if other.is_err() {
+                    "Unknown — the current agent state read exceeded its grace period.".to_owned()
+                } else {
+                    latest.as_ref().map_or_else(
+                        || cli_help::agent_state("starting", None, None, "unknown"),
+                        |agent: &fractal_client::Agent| {
+                            cli_help::agent_state(
+                                &agent.state,
+                                agent.harness_state.as_deref(),
+                                agent.fault.as_deref(),
+                                &agent.reachability,
+                            )
+                        },
+                    )
+                };
                 println!("{}", cli_help::agent_next_steps(&subject, &actor, &state));
             }
             return match other {
                 Ok(Err(error)) => Err(error),
-                Err(_) => anyhow::bail!(
+                Ok(Ok(None)) => anyhow::bail!(
                     "`{subject}` was created, but was not ready after {}; see `fractal agents show {subject}`",
                     args.timeout
                 ),
-                Ok(Ok(_)) => unreachable!(),
+                Err(_) => anyhow::bail!(
+                    "`{subject}` was created, but its current state is unknown after {} plus a {:?} state-read grace; see `fractal agents show {subject}`",
+                    args.timeout,
+                    AGENT_READY_READ_GRACE,
+                ),
+                Ok(Ok(Some(_))) => unreachable!(),
             };
         }
     };
@@ -1218,6 +1266,8 @@ async fn agent_new_workspace(
     Ok((workspace.to_owned(), true))
 }
 
+const AGENT_READY_READ_GRACE: Duration = Duration::from_secs(2);
+
 /// Wait until the agent's current harness is ready. A harness that waits on a person, such as at
 /// a login prompt, is ready enough to attach to, so `attach` accepts it.
 async fn wait_for_agent_harness(
@@ -1226,8 +1276,9 @@ async fn wait_for_agent_harness(
     subject: &str,
     attach: bool,
     json_output: bool,
+    deadline: tokio::time::Instant,
     latest: &mut Option<fractal_client::Agent>,
-) -> Result<fractal_client::Agent> {
+) -> Result<Option<fractal_client::Agent>> {
     let health: Value = client.get("/v1/health").await?;
     let mut cursor = health["store_index"]
         .as_u64()
@@ -1235,6 +1286,9 @@ async fn wait_for_agent_harness(
     let mut reported = String::new();
     let mut event_feed = LocalEventFeed::default();
     loop {
+        // Read the condition even when its wait budget has elapsed. Cancelling this read
+        // would turn an already-ready agent into an unknown state. The outer read grace
+        // bounds any overrun; cancel event waiting at the original readiness deadline.
         let agent = match gateway.agents_get(subject).await {
             Ok(response) => match response.value {
                 ClientResource::Agent(agent) => Some(agent),
@@ -1247,8 +1301,8 @@ async fn wait_for_agent_harness(
             *latest = Some(agent.clone());
             let harness = agent.harness_state.as_deref().unwrap_or("not ready");
             match agent.state.as_str() {
-                "running" => return Ok(agent),
-                "waiting" if attach && agent.reachability == "reachable" => return Ok(agent),
+                "running" => return Ok(Some(agent)),
+                "waiting" if attach && agent.reachability == "reachable" => return Ok(Some(agent)),
                 "waiting" if agent.reachability == "reachable" => anyhow::bail!(
                     "`{subject}` started and is waiting for your input; attach with `fractal terminals attach {subject}`"
                 ),
@@ -1269,15 +1323,26 @@ async fn wait_for_agent_harness(
                 reported = progress;
             }
         }
-        let page = event_feed
-            .read(
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let page = match tokio::time::timeout_at(
+            deadline,
+            event_feed.read(
                 client,
                 &format!(
                     "after={cursor}&subject={}&wait=true&timeout_ms=30000",
                     urlencoding::encode(subject),
                 ),
-            )
-            .await?;
+            ),
+        )
+        .await
+        {
+            Ok(page) => page?,
+            // Check the condition once after the wait expires. If it still is not ready,
+            // the deadline check above returns without starting another event wait.
+            Err(_) => continue,
+        };
         if let Some(scanned) = page.next_after {
             cursor = cursor.max(scanned);
         }

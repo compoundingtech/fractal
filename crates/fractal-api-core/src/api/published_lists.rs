@@ -21,13 +21,45 @@ use std::collections::HashMap;
 use smallclaims::store::now_ms;
 
 /// The shortest pause between two folds of one collection. A fold also pauses as long as it
-/// took, so a refresher never takes more than about half a core.
+/// took, so a refresher never takes more than about half a core. A fresh read cuts it short to
+/// [`FRESH_PAUSE`], and a claim this node commits that the fold reads to [`LOCAL_PAUSE`].
 const REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause when a fresh read waits: the rest of [`REFRESH_PAUSE`] is cut short for it,
-/// never this, so fresh reads however frequent fold at most this often, and a fold still pauses
-/// as long as it took.
+/// The shortest pause when a fresh read waits: the rest of [`REFRESH_PAUSE`] is cut short, never
+/// below this, so fresh reads however frequent fold at most this often. A fold still pauses as
+/// long as it took.
 const FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause when this node commits a claim the fold reads, as the agents roster's: a
+/// stream of local writes folds about every 400 ms plus the fold, not back to back. The pause
+/// still lasts twice the fold, so a fold of up to half a second takes at most a third of a core;
+/// a longer one keeps the full pause.
+const LOCAL_PAUSE: Duration = Duration::from_millis(400);
+
+/// The missions list's hold on the local-commit scanner: a claim this node wrote cuts its pause
+/// only when the fold's own check (`mission_list_changes`, asked about this node's claims)
+/// finds a mission it changes, or a change to which runs wait on a person.
+fn missions_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits("missions", Arc::new(move |after, through| {
+        let changes = reader.mission_list_changes(after, through, Some(reader.origin()))?;
+        Ok(changes.attention || !changes.missions.is_empty())
+    }))
+}
+
+/// The work list's hold on the local-commit scanner: a claim this node wrote cuts its pause only
+/// when the fold's own check (`work_list_changes`, asked about this node's claims, with the seats
+/// of the newest publication) finds a row, seat queue or run it changes.
+fn work_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits("work", Arc::new(move |after, through| {
+        let newest = reader.published_work_list().newest();
+        let empty = HashMap::new();
+        let seats = newest.as_ref().map_or(&empty, |newest| &newest.rows.seats);
+        let changes = reader.work_list_changes(after, through, seats, Some(reader.origin()))?;
+        Ok(!changes.steps.is_empty() || changes.reorder || !changes.runs.is_empty())
+    }))
+}
 
 /// The most rows one snapshot refolds. More changed rows refold in chunks, each at its own cut,
 /// and a last short snapshot completes the publication at one cut.
@@ -177,6 +209,10 @@ pub fn start_published_lists(state: &AppState) {
     super::mailbox_metrics::start(&state.store);
     client_v0::published_runtimes::register_metrics(&state.store);
     delivery_metrics::start(&state.store);
+    if population_metrics::enabled(&state.store) {
+        population_metrics::start(&state.store, state.store
+            .extension::<crate::config::AgentPopulationRepositories>().0.get().cloned().unwrap_or_default());
+    }
     spawn(
         state.store.clone(),
         |store| store.published_runtime_list(),
@@ -184,7 +220,9 @@ pub fn start_published_lists(state: &AppState) {
         "runtimes/refresh",
         fold_runtimes,
         true,
-        false,
+        // Its fold has no change check: it rebuilds whenever the cut moves, so a local claim
+        // keeps the full pause rather than fold it on every write.
+        Wakes { roster: false, local: None },
     );
     if !enabled() {
         return;
@@ -197,7 +235,7 @@ pub fn start_published_lists(state: &AppState) {
         "published_list.missions",
         fold_missions,
         true,
-        true,
+        Wakes { roster: true, local: Some(missions_local_commits) },
     );
     spawn(
         state.store.clone(),
@@ -206,7 +244,7 @@ pub fn start_published_lists(state: &AppState) {
         "published_list.work",
         fold_work,
         true,
-        false,
+        Wakes { roster: false, local: Some(work_local_commits) },
     );
 }
 
@@ -214,7 +252,8 @@ pub fn start_published_lists(state: &AppState) {
 /// directly.
 #[cfg(any(test, feature = "test-support"))]
 pub fn start_published_work(state: &AppState) {
-    spawn(state.store.clone(), |store| store.published_work_list(), "work", "published_list.work", fold_work, true, false);
+    let wakes = Wakes { roster: false, local: Some(work_local_commits) };
+    spawn(state.store.clone(), |store| store.published_work_list(), "work", "published_list.work", fold_work, true, wakes);
 }
 
 /// Fold and publish the work list once, as its refresher does, for tests that drive it.
@@ -266,6 +305,16 @@ fn fold_runtimes(
     })
 }
 
+/// What wakes a refresher besides its own commits, deadlines and fresh reads.
+#[derive(Clone, Copy)]
+struct Wakes {
+    /// A list whose rows read the agents roster also folds when a roster is published.
+    roster: bool,
+    /// Its hold on the local-commit scanner, when a claim this node writes that its fold reads
+    /// cuts its pause.
+    local: Option<fn(&Arc<Store>) -> local_commits::LocalCommits>,
+}
+
 /// Keep one collection published: fold after commits, when a row's deadline passes, and again
 /// shortly after a failed fold, never more than one fold at a time. A `governed` list is never
 /// folded on read while its refresher runs: its view stays held, so its windows wait for its
@@ -277,7 +326,7 @@ fn spawn<R: Send + Sync + 'static>(
     label: &'static str,
     fold: Fold<R>,
     governed: bool,
-    roster_wakes: bool,
+    wakes: Wakes,
 ) {
     // Held before it starts: from then on a reader refuses rather than reads the list directly,
     // and a window that finds it not ready waits for its next change. A second spawn holds
@@ -293,7 +342,7 @@ fn spawn<R: Send + Sync + 'static>(
         let commits = Arc::clone(&wake);
         let _observer = store.observe_commits(move |_| commits.notify_one());
         // A list whose rows read the agents roster also folds when a roster is published.
-        let _roster = roster_wakes.then(|| {
+        let _roster = wakes.roster.then(|| {
             let mut published = store.subscribe_agent_roster();
             let wake = Arc::clone(&wake);
             AbortOnDrop(tokio::spawn(async move {
@@ -306,12 +355,17 @@ fn spawn<R: Send + Sync + 'static>(
         // ungoverned list's windows fold on read and follow commits again.
         let _withdraw = Withdraw { store: Arc::clone(&store), list, name };
         let fresh = list(&store).fresh_requests();
+        // Whether a commit holds a claim this node wrote that the fold reads is read off the
+        // writer, once for every refresher that pauses on it.
+        let mut local = wakes.local.map(|hold| hold(&store));
         let mut failures = 0;
         loop {
             // A fresh request from before this fold is served by it: drop it, so it cannot cut
             // the next pause short. One made during the fold stays, and cuts that pause.
             let _ = futures_util::FutureExt::now_or_never(fresh.notified());
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the fold below or an earlier one.
+            let folded_through = store.index().unwrap_or(u64::MAX);
             list(&store).note_fold();
             let reader = store.clone();
             let folded = tokio::task::spawn_blocking(move || {
@@ -393,10 +447,11 @@ fn spawn<R: Send + Sync + 'static>(
                 }
             }
             // Pause as long as the fold took, and at least the fresh floor; then the rest of the
-            // full pause, unless a fresh read waits for the list. Commits keep the full pause.
-            let pause = started.elapsed().max(FRESH_PAUSE);
-            tokio::time::sleep(pause).await;
-            let _ = tokio::time::timeout(REFRESH_PAUSE.saturating_sub(pause), fresh.notified()).await;
+            // full pause, unless a fresh read waits for the list or this node commits a claim the
+            // fold reads and has not read yet. Claims other nodes wrote keep the full pause.
+            let pace = local_commits::Pace { floor: FRESH_PAUSE, local: LOCAL_PAUSE, full: REFRESH_PAUSE };
+            local_commits::pause_after_fold(local.as_mut(), fresh.notified(), pace, started.elapsed(), folded_through)
+                .await;
             let deadline = list(&store).newest().and_then(|newest| newest.valid_until_unix_ms);
             let mut wait = deadline.map(|deadline| {
                 Duration::from_millis(deadline.saturating_sub(now_ms()).min(u64::MAX as u128) as u64)
@@ -748,7 +803,7 @@ fn missions_since(
         let Some(from) = claims_from(base.cut, rows.frontier, cut, frontier) else {
             return Ok(Advance::Rebuild);
         };
-        let changes = store.mission_list_changes(from, cut)?;
+        let changes = store.mission_list_changes(from, cut, None)?;
         let mut missions = changes.missions;
         let (eta_generation, eta_missions) = store.mission_eta_changes(rows.eta_generation)?;
         missions.extend(eta_missions);
@@ -1030,7 +1085,7 @@ fn work_since(store: &Store, base: &Publication<WorkRows>) -> anyhow::Result<Adv
         if store.repaired_since(base.cut, cut)? {
             return Ok(Advance::Rebuild);
         }
-        let changes = store.work_list_changes(from, cut, &rows.seats)?;
+        let changes = store.work_list_changes(from, cut, &rows.seats, None)?;
         let mut steps = changes.steps;
         // Leases that ended by the new time show their steps ready again.
         steps.extend(store.steps_with_leases_ended(rows.time_unix_ms, time)?);

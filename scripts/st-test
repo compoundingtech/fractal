@@ -52,6 +52,11 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
+Runs selecting heavy checks take exactly one `gate-slot --class heavy` admission when gate-slot is
+on PATH. All checks share its capped scope until the run ends; host wait/refusal reasons reach the terminal.
+Without gate-slot (standalone use), the existing per-check caller/seat/builds.slice cap is used when available, otherwise checks
+run without a host cap. ST_EVIDENCE_GOVERN=off explicitly disables this wrapping.
+
 A run's TMPDIR (and TMP and TEMP), for itself and every check, is a directory of its own on disk, /var/tmp/st-test.XXXXXXXX (in
 ST_TEST_TMP when set), removed when the run ends; --keep keeps it and says where. Each `nix develop` leaves a nix-shell.* directory
 there, with whatever its check's tests wrote. A run that was killed leaves its directory behind, and the next run removes it.
@@ -166,7 +171,7 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 # The signer refuses an input longer than 500 characters (scripts/evidence-sign); a full run's filterset is longer than that.
 FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
-# (a builds.slice scope, the kept target below), which nobody has to ask for.
+# (gate-slot heavy admission when installed, otherwise a builds.slice scope, and the kept target below).
 BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web', RUST_TESTS})
 # rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
@@ -624,7 +629,7 @@ def run_base_copy(argv):
     changes are still tested by ci-script-tests (fractal-test-test runs from the tree), and that is what is signed. There is no opt-out.
     This copy runs only when the base's st-test is absent, empty or this file, or this already is the base's copy (ST_TEST_REEXEC).
     The human-facing fractal-test shim cannot be copied alone; retain st-test until every supported base permits contraction."""
-    if os.environ.get(REEXEC):
+    if os.environ.get(REEXEC) or os.environ.get(RUN_ADMITTED):
         return
     scrub_git_environment()
     parser = argparse.ArgumentParser(add_help=False)
@@ -792,6 +797,18 @@ def prepare_targets(target, owned=False):
         trim(path, owned=owned and in_pool(path), used_gb=used)
 
 
+def build_beside(environment, target, directory):
+    """Point a check that builds at `target` (when st-test chose one) and keep cargo's intermediates there too. A host whose cargo
+    config sets build-dir (for example /srv/build/cargo/{workspace-path-hash}) puts every unit's rmeta and dep-info outside the
+    target. Nothing holds that directory for the run: it was removed between a run's clippy build and its dep-info check, so the
+    check found no dep-info and linux-clippy was refused (2026-11-06). Beside the target, the intermediates are under the tree's lock
+    and the pool's cap, as on a host without build-dir. A build-dir the caller set is replaced: what the checks read must be where
+    they built."""
+    if target:
+        environment['CARGO_TARGET_DIR'] = str(target)
+    environment['CARGO_BUILD_BUILD_DIR'] = environment.get('CARGO_TARGET_DIR') or str(Path(directory) / 'target')
+
+
 def shared_target(tree_target=None):
     """The kept target for the checks that build and a lock held while they use it, or (None, None) when it is off or the caller set one.
 
@@ -907,16 +924,111 @@ def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     return lane, None
 
 
-def governed(argv, name, output=None):
-    """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
-    everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
-    memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
+def memory_caps(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """The cgroups whose memory limit can OOM-kill what a check that builds starts, each with how the summary names it: every cgroup
+    above this process that holds a memory.max (its own cap: a lane, builds.slice or a gate slot); the seat's capped lane when `governed`
+    puts the check in it (no cap of its own, a user bus to scope with: `seat_lane`); and the user manager's builds.slice, where a check
+    outside every cap runs and the host's sccache server compiles for every check. A kernel OOM kill leaves only a bare exit in the check (2026-11-05, on a build host:
+    a lane's compiles were OOM-killed at its memory limit, and the summary said only FAILED (1))."""
+    try:
+        parts = next((line[3:] for line in Path(cgroup_file).read_text().splitlines() if line.startswith('0::')), '').strip('/').split('/')
+    except OSError:
+        return {}
 
-    No heavy-slot ticket is held for a whole Rust check (`cargo --stage-slot`): those tests run under the test guardian
-    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
-    stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
-    stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+    def limited(cgroup):
+        try:
+            return cgroup.joinpath('memory.max').read_text().split()[0] != 'max'
+        except (OSError, IndexError):
+            return False
+
+    def named(part):
+        if part == 'builds.slice':
+            return "builds.slice's memory limit"
+        if part.startswith('app-lanes-') and part.endswith('.slice'):
+            return f"the lane's memory limit ({part})"
+        return f'the memory limit of {part}'
+
+    caps = {Path(root, *parts[:depth]): named(parts[depth - 1]) for depth in range(1, len(parts) + 1) if parts[0] and limited(Path(root, *parts[:depth]))}
+    manager = next((depth for depth, part in enumerate(parts) if re.fullmatch(r'user@\d+\.service', part)), None)
+    if manager is not None:
+        runtime = os.environ.get('XDG_RUNTIME_DIR')
+        scoped = (os.environ.get('ST_EVIDENCE_GOVERN') != 'off' and not own_cap(cgroup_file, root) and shutil.which('systemd-run')
+                  and runtime and Path(runtime, 'bus').exists())
+        if scoped:
+            lane, _ = seat_lane(cgroup_file, root)
+            if lane:
+                caps[Path(root, *parts[:manager + 1], 'app.slice', 'app-lanes.slice', lane)] = named(lane)
+        builds = Path(root, *parts[:manager + 1], 'builds.slice')
+        if limited(builds):
+            caps.setdefault(builds, named('builds.slice'))
+    return caps
+
+
+def oom_kills(caps):
+    """Each cap's `oom_kill` count (memory.events, which counts the kills in the cgroup and below it); a cap without one is left out."""
+    kills = {}
+    for cgroup in caps:
+        try:
+            kills[cgroup] = int(next(line.split()[1] for line in cgroup.joinpath('memory.events').read_text().splitlines()
+                                     if line.startswith('oom_kill ')))
+        except (OSError, StopIteration, ValueError, IndexError):
+            continue
+    return kills
+
+
+def oom_note(caps, before):
+    """What the summary row of a failed check adds when the kernel OOM-killed in one of its caps (memory_caps) while it ran, or ''. Only the
+    innermost cap that counted kills is named: the kills in a lane also count in every cgroup above it. A cap is shared with what else
+    runs in it (builds.slice with every run's compiles, a lane with the run's other checks and the seat's harness), so a kill there may
+    be theirs: the note says where and how many, not whose."""
+    after = oom_kills(caps)
+    grew = {cgroup: after[cgroup] - before[cgroup] for cgroup in after if cgroup in before and after[cgroup] > before[cgroup]}
+    inner = [cgroup for cgroup in grew if not any(other != cgroup and cgroup in other.parents for other in grew)]
+    if not inner:
+        return ''
+
+    def limit(cgroup):
+        try:
+            return f'{int(cgroup.joinpath("memory.max").read_text().split()[0]) / 2 ** 30:.1f}G'
+        except (OSError, IndexError, ValueError):
+            return 'unreadable'
+
+    return ''.join(f'; killed by {caps[cgroup]}: {grew[cgroup]} OOM kill{"s" if grew[cgroup] != 1 else ""} at memory.max {limit(cgroup)} while it ran'
+                   for cgroup in sorted(inner))
+
+
+def heavy_admission(argv, gate_slot):
+    """The host owns the capped scope; never duplicate its capacity probes here."""
+    return [gate_slot, '--class', 'heavy', '--'] + argv
+
+
+RUN_ADMITTED = 'ST_EVIDENCE_RUN_ADMITTED'
+
+
+def admit_run(argv, checks, environment):
+    """Re-enter this runner once inside the host scope, before it takes a pool tree or starts any check.
+
+    The continuation marker prevents recursion, including accepted-runner handovers. It is not proof of a cap: governed()
+    still checks the kernel before marking cargo as already capped. The existing explicit off switch remains the opt-out.
+    """
+    if environment.get('ST_EVIDENCE_GOVERN') == 'off' or environment.get(RUN_ADMITTED) or not BUILDS.intersection(checks):
+        return None
+    gate_slot = shutil.which('gate-slot')
+    if not gate_slot:
+        return None
+    print('fractal-test: run waits for gate-slot heavy admission; host wait/refusal reasons follow',
+          file=sys.stderr, flush=True)
+    child_environment = dict(environment, **{RUN_ADMITTED: '1'})
+    # Replace the outside process: gate-slot owns signals and the complete runner lifetime, with no waiting parent left outside its scope.
+    return os.execve(gate_slot, heavy_admission([sys.executable, str(Path(__file__).resolve()), *argv], gate_slot),
+                     child_environment)
+
+
+def governed(argv, name, output=None):
+    """Use the enclosing run's kernel-verified cap, or the existing standalone per-check cap selection.
+    No cargo stage ticket is held for a whole check: the test guardian detaches from its parents, so cargo beneath it cannot
+    reuse an ancestor's stage ticket and would queue behind that ticket. Run-wide gate-slot admission uses a separate semaphore.
+    A host without a user systemd bus runs as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
     A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
     gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
@@ -1085,6 +1197,26 @@ class Burst:
         except BaseException:
             self.abandon()
             raise
+
+    def lost(self):
+        """Why a granted burst is no longer held, read without waiting, else None. Once granted the holder says nothing more unless the lane
+        stops holding it: `lost` and why (a daemon that restarted could not restore it; an older holder says `waiting` instead), or it ends.
+        The run then built in a smaller lane than it asked for, and says so rather than going on as if it held it."""
+        if self.holder is None or self.granted is None:
+            return None
+        while '\n' not in self.pending:
+            if not select.select([self.holder.stdout], [], [], 0)[0]:
+                return None
+            chunk = os.read(self.holder.stdout.fileno(), 4096).decode(errors='replace')
+            if not chunk:
+                self.holder.wait()
+                self.errors.seek(0)
+                why = self.errors.read().decode(errors='replace').strip().splitlines()
+                return f'its holder ended: {(why or [f"exit {self.holder.returncode}"])[-1]}'
+            self.pending += chunk
+        line, self.pending = self.pending.split('\n', 1)
+        kind, _, detail = line.partition(' ')
+        return detail if kind == 'lost' else line
 
     def wait(self):
         """Ask, and wait in the host's order until the answer (poll), or fail past `limit_s`."""
@@ -2856,8 +2988,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
         environment.pop('BUILD_ADMISSION_CLASS', None)  # it builds: never a light start
-        if target:
-            environment['CARGO_TARGET_DIR'] = str(target)
+        build_beside(environment, target, directory)
         started = time.monotonic()
         limit = Limit(args.time_limit, Path(scratch) / 'rust-tests.queue', args.queue_limit)
         environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
@@ -3457,6 +3588,7 @@ def main(argv):
 
 def run_main(argv, cleanup):
     main_started = time.monotonic()
+    caller_environment = dict(os.environ)  # retain pool/handover switches across admission before the seat scrub drops them
     # Measurement-only callers may execute a candidate with REEXEC set. Such a run must never enter the accepted runner's SLOs.
     candidate = bool(os.environ.get(REEXEC) and not Path(__file__).parent.name.startswith('st-test-base-'))
     CLAIMED.clear()
@@ -3479,7 +3611,11 @@ def run_main(argv, cleanup):
     # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
     if not (HANDOVER and os.environ.get('ADMISSION_RUN')):  # a handed-over run keeps its place in the host's order too
         os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
-    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split('\n\n')[0],
+        epilog='Heavy runs take one gate-slot --class heavy admission for the entire run when gate-slot is '
+               'on PATH. Without gate-slot, standalone use retains the existing per-check host cap when available, otherwise no host cap. '
+               'ST_EVIDENCE_GOVERN=off explicitly disables wrapping.')
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
     publication = parser.add_mutually_exclusive_group()
@@ -3533,6 +3669,11 @@ def run_main(argv, cleanup):
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
         return 0
+    if not args.status:
+        # Publication can top up to the full suite after merging a newer base, even if its initial selection was light.
+        admitted = admit_run(argv, all_checks if args.push and not args.out and not TARGET else checks, caller_environment)
+        if admitted is not None:
+            return admitted  # refusal propagates without any pool preparation, checks, or signing in this process
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
@@ -3692,8 +3833,8 @@ def run_main(argv, cleanup):
                     if shell_report is not None:
                         environment['CI_WEB_SHELL_DIAGNOSTICS'] = str(shell_report)
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
-                    if target and name in BUILDS:
-                        environment['CARGO_TARGET_DIR'] = str(target)
+                    if name in BUILDS:
+                        build_beside(environment, target, directory)
                     if args.keep and name == WEB:
                         # scripts/ci-local-web removes its scratch (the kit play receipts, browser traces and screenshots) when it ends
                         # unless CI_LOCAL_KEEP is set, and writes where it is to that file: the run's end names it (run_tmpdir). It stays
@@ -3739,6 +3880,8 @@ def run_main(argv, cleanup):
                                                                           keyed=name in KEYED).items() for argument in ('--input', f'{key}={value}')]
                     if name == WEB:
                         wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
+                    caps = memory_caps() if name in BUILDS else {}
+                    kills = oom_kills(caps)  # read again once it ends: a check killed at a memory limit is named (oom_note)
                     started = time.monotonic()
                     streams = output is None and CI_LOCAL in LOCAL[name]
                     limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
@@ -3757,7 +3900,7 @@ def run_main(argv, cleanup):
                                                stdout=output, stderr=subprocess.STDOUT if output else None)
                             if code != 0:
                                 return (name, 'timed out' if code == 124 else f'FAILED ({code})', round(time.monotonic() - started),
-                                        f'the {stage} stage failed: nothing signed' + queue_note(limit)), True, False
+                                        f'the {stage} stage failed: nothing signed' + queue_note(limit) + oom_note(caps, kills)), True, False
                         environment[reader_variable] = str(report)
                         environment = report_environment(scratch, environment)
                         wrap += ['--input', f'run_command_sha256={run_sha}']
@@ -3794,7 +3937,8 @@ def run_main(argv, cleanup):
                         is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, base_commit, repository, lane_base)
                         if args.push and is_covered and record:
                             CLAIMED.extend(record_refs(directory, record))
-                    return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
+                    return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds,
+                            why + queue_note(limit) + ('' if ok else oom_note(caps, kills))), not ok, False
 
                 def run_one(name, output=None):
                     if name in ('typescript-client', WEB):
@@ -3867,6 +4011,12 @@ def run_main(argv, cleanup):
                     rows += row if isinstance(row, list) else [row]
                     failed = failed or check_failed
                     unsigned = unsigned or check_unsigned
+                lost = burst.lost()
+                if lost:
+                    # The checks ran, from some moment on, in the seat's own lane rather than the burst it was granted: a check killed by that
+                    # lane's memory limit fails for this, and the run says so (2026-11-05, on a build host: a daemon roll forgot a granted burst).
+                    rows.append(('lane-burst', 'LOST', 0, f'the lane burst {burst.granted[0]} cores/{burst.granted[1]} was lost while the run held it: {lost}'))
+                    failed = True
                 confirm = sorted(set(CLAIMED)) if args.push and not args.out else []
                 if confirm:
                     # "pushed" meant git said so at the time; this asks the remote now, once, before the summary says what is covered.

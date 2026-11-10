@@ -10,10 +10,10 @@ struct AgentReview {
     evidence_contract: EvidenceContract,
 }
 
-fn parse_agent_review(node: &KdlNode) -> Result<AgentReview, St3Error> {
+fn parse_agent_review(node: &KdlNode) -> Result<AgentReview, FractalError> {
     ensure_only_properties(node, &["type"])?;
     let name = one_string_with_children(node)?;
-    let invalid = |message| St3Error::new("invalid-agent-review", message);
+    let invalid = |message| FractalError::new("invalid-agent-review", message);
     if property_string(node, "type")?.as_deref() != Some("agent-review") {
         return Err(invalid("expected type=\"agent-review\""));
     }

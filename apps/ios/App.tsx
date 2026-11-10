@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
-import { Linking, View } from 'react-native';
+import { Button, Linking, ScrollView, Text, View } from 'react-native';
 import { DarkTheme, DefaultTheme, ThemeProvider, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import { createNativeBottomTabNavigator } from '@react-navigation/bottom-tabs/unstable';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useFonts } from 'expo-font';
 // Only the four weights the content uses, not the whole family.
 import { IBMPlexMono_400Regular } from '@expo-google-fonts/ibm-plex-mono/400Regular';
@@ -127,7 +127,7 @@ function subscribeRoute(notify: () => void) {
 }
 
 function Main({ proofSession = false }: { proofSession?: boolean }) {
-  const { pairDraft, credential, url, order, data, caps, actions, requestScroll, status } = useStore();
+  const { pairDraft, credential, url, order, data, caps, actions, requestScroll, status, renewal, renewalBusy, renewalIssue } = useStore();
   const shownRoute = useSyncExternalStore(subscribeRoute, currentRoute);
   const homeCount = openAlerts(data.attention, caps?.session_actor).length;
   const paired = !!url && !!credential;
@@ -173,6 +173,21 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
     const subscription = Linking.addEventListener('url', event => handle(event.url));
     return () => subscription.remove();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!proofSession && renewal) return <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+    <ScrollView contentContainerStyle={{ padding: 24, gap: 18 }}>
+      <Text accessibilityRole="header" style={{ color: colors.text, fontSize: 28, fontWeight: '600' }}>Renew this phone</Text>
+      <Text style={{ color: colors.text, fontSize: 17 }}>Your trusted member has prepared renewed access for this phone. Approve with Face ID, Touch ID, or your device passcode.</Text>
+      <Text selectable style={{ color: colors.text, fontSize: 17 }}>Member: {renewal.issuer_member}</Text>
+      <Text selectable style={{ color: colors.text, fontSize: 17 }}>Person: {renewal.person_id}</Text>
+      <Text selectable style={{ color: colors.text, fontSize: 17 }}>Requested by {renewal.requested_by}</Text>
+      <Text style={{ color: colors.text, fontSize: 17, fontWeight: '600' }}>Access</Text>
+      {renewal.scopes.map(scope => <Text key={scope} selectable style={{ color: colors.text, fontSize: 16 }}>{scope}</Text>)}
+      <Text style={{ color: colors.text, fontSize: 15 }}>Your saved trust pin verified this request. Your existing pairing stays saved until renewed access has been verified and securely stored.</Text>
+      {renewalIssue ? <Text accessibilityRole="alert" style={{ color: colors.attention, fontSize: 16 }}>{renewalIssue}</Text> : null}
+      <Button title={renewalBusy ? 'Approving…' : 'Approve'} disabled={renewalBusy} color={colors.action} onPress={() => void actions.approveRenewal()} />
+    </ScrollView>
+  </SafeAreaView>;
 
   if (!paired || pairDraft) {
     return <Stack.Navigator screenOptions={stackOptions}>

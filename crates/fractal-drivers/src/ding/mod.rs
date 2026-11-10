@@ -16,14 +16,14 @@ const SENDER_MAX_CHARS: usize = 80;
 /// Envelope identities are whole graph subjects, so they keep a larger bound than the PING header.
 const ADDRESS_MAX_CHARS: usize = 256;
 const FRACTAL_BODY_MAX_CHARS: usize = 2048;
-/// The one sentence wrapped around a message from a person. It is imperative and plain: a person
-/// has no inbox, so the agent answers by printing in the conversation. Views also recognize the
-/// older sentence, "The person reads replies in st, not in the agent's session."
+/// The rule wrapped around a message from a person: replies stay in the conversation,
+/// while new questions and decisions use native work asks, even when the person is present.
+/// Views also recognize earlier delivery notes in historical transcripts.
 pub const PERSON_REPLY_INSTRUCTION: &str =
-    "Answer the person in this conversation; people have no inbox, so do not reply with st.";
+    "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.";
 /// The `instructions` both Claude channel servers send at initialize, and the rule the st skill
 /// repeats in the same words (backticks aside).
-pub const CHANNEL_INSTRUCTIONS: &str = "A message from a person is answered in this conversation: people have no inbox, so do not reply with st. To reach a person, print in this conversation; only if the person asked for it, use work ask for a decision or work update for information. A message from an agent is answered with conversations reply.";
+pub const CHANNEL_INSTRUCTIONS: &str = "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask. This applies even when the person is present. Use work update only for information the person asked for. A message from an agent is answered with conversations reply.";
 /// The marker for a declared non-agent event source. A fixed st2-chosen literal — never
 /// producer-supplied text — so the bounded-notice proofs are unaffected.
 const SOURCE_MARKER: &str = "»";

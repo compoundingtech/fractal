@@ -4,12 +4,12 @@ use super::*;
 pub fn validate_actor(
     intent: &NormalizedIntent,
     actor: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if intent.direct_message_registrations.is_empty() {
         return Ok(());
     }
     let actor = actor.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "missing-publication-actor",
             "message subscription registration needs an actor",
         )
@@ -17,7 +17,7 @@ pub fn validate_actor(
     if !(actor.starts_with("person/") || actor.starts_with("agent/"))
         || fractal_schema::registry().validate_subject(actor).is_err()
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-registration-actor",
             "message subscription registration needs a person or agent actor",
         ));
@@ -25,7 +25,7 @@ pub fn validate_actor(
     for subject in &intent.direct_message_registrations {
         let spec = crate::graph::subscription_spec(&intent.subjects[subject].desired).unwrap();
         if spec.to != actor {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "foreign-registration-recipient",
                 "a public message subscription must be published by its recipient",
             ));
@@ -38,11 +38,11 @@ pub fn validate(
     connection: &Connection,
     intent: &NormalizedIntent,
     index: u64,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for subject in &intent.direct_message_registrations {
         let desired = &intent.subjects[subject];
         let subscription = crate::graph::subscription_spec(&desired.desired).ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-message-registration",
                 "message registration needs a subscription",
             )
@@ -60,13 +60,13 @@ pub fn validate(
             if kind != desired.kind
                 || crate::graph::subscription_spec(&body).as_ref() != Some(&subscription)
             {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "message-registration-conflict",
                     "an existing subscription cannot be replaced or retargeted by public registration",
                 ));
             }
         }
-        let declared = |subject: &str| -> Result<Option<(String, Value)>, St3Error> {
+        let declared = |subject: &str| -> Result<Option<(String, Value)>, FractalError> {
             connection.query_row(
                 "SELECT desired.kind, desired.body FROM desired JOIN claims ON claims.id=desired.claim_id
                  WHERE desired.subject=?1 AND claims.store_index<=?2",
@@ -78,7 +78,7 @@ pub fn validate(
             .filter(|(kind, _)| kind == "observer")
             .and_then(|(_, body)| crate::graph::observer_spec(&body));
         if observer.as_ref().is_none_or(|observer| observer.stopped) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-registration-observer",
                 format!(
                     "subscription `{subject}` needs an already-declared live observer `{}`",
@@ -90,7 +90,7 @@ pub fn validate(
             .as_ref()
             .is_some_and(|observer| observer.provider != "github.repository")
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-registration-observer",
                 "main Performance registration needs a github.repository observer",
             ));
@@ -100,7 +100,7 @@ pub fn validate(
                 .map_err(internal)?
                 .is_some()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "missing-registration-recipient",
                 format!(
                     "subscription `{subject}` needs an already-declared agent `{}`",
@@ -118,14 +118,14 @@ pub fn validate_publisher(
     connection: &Connection,
     intent: &NormalizedIntent,
     actor: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     validate_actor(intent, actor)?;
     for subject in &intent.direct_message_registrations {
         let existing_author: Option<Option<String>> = connection.query_row(
             "SELECT claims.actor FROM desired JOIN claims ON claims.id=desired.claim_id WHERE desired.subject=?1",
             [subject], |row| row.get(0)).optional().map_err(internal)?;
         if existing_author.is_some_and(|author| author.as_deref() != actor) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "message-registration-author",
                 "only the original author can re-register a public subscription",
             ));
@@ -138,7 +138,7 @@ pub fn validate_replicated(
     connection: &Transaction<'_>,
     claim: &ClaimRecord,
     desired: &DesiredSubject,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if desired.owner_run.is_some() || desired.kind != "subscription" {
         return Ok(());
     }
@@ -160,7 +160,7 @@ pub fn validate_replicated(
         || spec.owner_message
         || spec.stopped
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-message-registration",
             "unmanaged main Performance registrations must be simple direct messages",
         ));

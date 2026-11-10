@@ -73,6 +73,7 @@ pub use fractal_reconcile::native_seed;
 pub use fractal_store::node_identity;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
+pub use fractal_api_mailbox::readiness_slo;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -146,4 +147,4 @@ pub(crate) use fractal_store::checkout;
 pub(crate) use fractal_seats::external_sessions;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
-pub use model::{NormalizedIntent, St3Error};
+pub use model::{NormalizedIntent, FractalError};

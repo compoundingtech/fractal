@@ -11,5 +11,5 @@
     "lib": ["esnext", "dom"],
     "types": []
   },
-  "files": ["Schema.generated.ts"]
+  "files": ["Schema.generated.ts", "notice.types.test.ts"]
 }

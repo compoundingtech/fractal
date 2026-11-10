@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Wait for terminal readiness and Fleet focus in older-member integration tests",
+  "replay": { "status": "none", "detail": "Test harness changes only." },
+  "schema": { "status": "none", "detail": "No schema or migration changes." },
+  "rules": { "status": "none", "detail": "No rule, checkpoint or digest changes." },
+  "compatibility": { "status": "none", "detail": "The older-member terminal fixture waits for rendered startup and palette transitions before sending keys, uses the supported timing-log environment variable to observe inventory requests, and forcibly reaps its owned terminal process during teardown. Production behavior is unchanged." },
+  "downtime": { "status": "none", "detail": "No production restart change." },
+  "manual": { "status": "none", "detail": "No installation action." },
+  "recovery": { "status": "none", "detail": "No database or recovery change." }
+}

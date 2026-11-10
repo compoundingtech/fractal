@@ -10,7 +10,7 @@ import { within } from 'storybook/test'
 import { formatRelative } from '@fractal/ui/human-time/format'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { observed, unavailable, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable, type Feed } from '../data/source.ts'
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import type { ConversationPage } from '../data/source.ts'
@@ -174,6 +174,22 @@ describe('live header parity', () => {
     expect(reason?.textContent).toBe('Read access to agent resources has not been granted.')
     expect(reason?.hidden).toBe(true)
     expect(host.querySelector('[data-testid="thread-header"]')?.textContent).not.toMatch(/raw-denial-code|Unknown/)
+  })
+  it.each(['resources', 'queue'] as const)('requires pairing, not refresh, after a rejected %s read', async (target) => {
+    await click('Resources')
+    const denied = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+    await act(async () => {
+      if (target === 'resources') registry.set(resources, denied)
+      else {
+        const queueAtom = Atom.make<Feed<AgentQueue>>(denied)
+        const next = { ...source, subjectReads: { ...source.subjectReads, agentQueue: { ...source.subjectReads.agentQueue, feed: () => queueAtom } } }
+        root.render(<DataSourceProvider source={next} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>)
+      }
+    })
+    const panel = document.querySelector<HTMLElement>('aside[aria-label="Agent resources"]')!
+    expect(within(panel).getByRole('region', { name: target === 'queue' ? 'Agent queue' : 'Observed resources' }).textContent).toContain(credentialExpiredMessage)
+    expect(panel.textContent).not.toContain('private diagnostic')
+    expect(within(panel).queryByRole('button', { name: 'Refresh resources' })).toBeNull()
   })
   it('opens the agent canonical KDL from the header in a labelled dialog that Escape closes', async () => {
     await click('View KDL')

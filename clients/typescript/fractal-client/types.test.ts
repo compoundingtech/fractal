@@ -1,6 +1,15 @@
-import type { ActionOf, ConversationSearchHit, TimelineMessageBody } from './Models.generated.ts';
+import type { ActionOf, ActionRequest, ConversationSearchHit, NoticeSnapshot, Resource, TimelineMessageBody } from './Models.generated.ts';
 import type { ClientOptions, RequestOptions, FractalClient, TraceContext } from './Client.generated.ts';
 import type { FabricClientOptions, FabricTransport, FabricEndpoint } from './fabric.mjs';
+
+type InternalNoticeAssert<T extends true> = T;
+type InternalNoticeBoundary = [
+    InternalNoticeAssert<Extract<Resource, { kind: 'attention-notice' }> extends never ? true : false>,
+    InternalNoticeAssert<Extract<ActionRequest, { type: 'notice.seen' | 'notice.dismiss' | 'notice.snooze' }> extends never ? true : false>,
+    InternalNoticeAssert<NoticeSnapshot['kind'] extends 'attention-notice' ? true : false>,
+];
+declare const internalNoticeBoundary: InternalNoticeBoundary;
+void internalNoticeBoundary;
 
 const nativeOptions: FabricClientOptions = {
     endpoint: 'fabric://studio/st3-client-v0',

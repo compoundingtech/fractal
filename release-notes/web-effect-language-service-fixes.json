@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web app and SDK apply 11 Effect language-service fixes with no behavior change, and the objectives reader runs through an Effect atom with the same cancellation as before (a pending read aborts on unmount or refresh)",
+  "replay": { "status": "none", "detail": "Web and SDK client modules only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage or schema changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "No wire, API or client protocol changes. packages/fractal-sdk's submitAction names its result type ActionResult instead of typeof ActionResult.Type, the same type." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the previous code paths; no state is written differently." }
+}

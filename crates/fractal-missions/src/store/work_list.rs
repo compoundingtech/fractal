@@ -42,12 +42,14 @@ pub trait WorkListStore {
     /// it, revision proposals for that run, the person asks that block it, which their
     /// requesters' declarations and runtime decide, and the seats it owns with their usage. A
     /// claim about any other subject changes no row. `seats` names the step each seat shown on
-    /// a row belonged to when that row was folded.
+    /// a row belonged to when that row was folded. With `origin`, only the claims that node wrote
+    /// are read.
     fn work_list_changes(
             &self,
             after: u64,
             through: u64,
             seats: &HashMap<String, String>,
+            origin: Option<&str>,
         ) -> Result<WorkChanges>;
     /// The steps whose worker lease ended after `after` and by `through`: their rows show them
     /// ready again with no new claim.
@@ -92,6 +94,7 @@ impl WorkListStore for Store {
             after: u64,
             through: u64,
             seats: &HashMap<String, String>,
+            origin: Option<&str>,
         ) -> Result<WorkChanges> {
         let connection = self.readers.get();
         let mut steps = BTreeSet::new();
@@ -103,7 +106,7 @@ impl WorkListStore for Store {
         let mut tree_roots = BTreeSet::new();
         let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd9f7e7a219ce owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
         let claims = statement
-            .query_map(params![after, through], |row| {
+            .query_map(params![after, through, origin], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,

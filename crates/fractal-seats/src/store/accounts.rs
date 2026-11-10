@@ -218,7 +218,7 @@ pub trait AccountsStore {
             next: &str,
             episode: &str,
             now: u128,
-        ) -> Result<bool, St3Error>;
+        ) -> Result<bool, FractalError>;
 }
 
 impl AccountsStore for Store {
@@ -242,7 +242,7 @@ impl AccountsStore for Store {
     }
 
     fn candidates(&self, accounts: &[&AccountDecl], now: u128) -> Result<Vec<Candidate>> {
-        let limits = self.account_limits()?;
+        let limits = self.harness_account_limits()?;
         Ok(accounts
             .iter()
             .map(|account| {
@@ -421,9 +421,9 @@ impl AccountsStore for Store {
             next: &str,
             episode: &str,
             now: u128,
-        ) -> Result<bool, St3Error> {
+        ) -> Result<bool, FractalError> {
         let episode_account = super::limits::episode_account(limit);
-        self.connection.batched(|tx| -> Result<bool, St3Error> {
+        self.connection.batched(|tx| -> Result<bool, FractalError> {
             let handled: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM local_limit_stops WHERE account=?1 AND episode=?2 AND seat=?3)",
                 params![episode_account, episode, seat], |row| row.get(0),

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resize the TUI sidebar by dragging its right border or using Ctrl+Left/Right while the sidebar is focused; double-click the border or use Ctrl+Home to reset",
+  "replay": { "status": "none", "detail": "No replay or backfill." },
+  "schema": { "status": "none", "detail": "An optional sidebar_width preference is stored locally with the existing terminal UI preferences; no graph or storage schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint or admission changes." },
+  "compatibility": { "status": "none", "detail": "Older preference files and resets retain the original responsive default. Chosen widths are clamped to available space, reserving 82 columns when a terminal pane is open. A chosen width hides the sidebar when the terminal cannot fit both panes." },
+  "downtime": { "status": "none", "detail": "Normal restart." },
+  "manual": { "status": "none", "detail": "Drag the highlighted one-column right border to resize. Existing sidebar row dragging is unchanged. Keyboard shortcuts are listed in help." },
+  "recovery": { "status": "none", "detail": "Reset the width with a border double-click or Ctrl+Home while the sidebar is focused. Earlier binaries ignore the optional preference." }
+}

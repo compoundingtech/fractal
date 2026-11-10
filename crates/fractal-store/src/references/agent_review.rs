@@ -1,5 +1,5 @@
 //! Resolve declared reviewer identities in one caller-owned snapshot, without public gate dispatch.
-use super::{Scope, St3Error};
+use super::{Scope, FractalError};
 use crate::store::{ReferenceGraph, identities, retirements};
 use rusqlite::Connection;
 use std::collections::BTreeSet;
@@ -10,25 +10,25 @@ pub(crate) fn resolve_reviewer(
     scope: &Scope<'_>,
     connection: &Connection,
     reviewer: &str,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     fractal_schema::registry()
         .validate_subject(reviewer)
-        .map_err(|error| St3Error::new(error.code, error.message))?;
+        .map_err(|error| FractalError::new(error.code, error.message))?;
     if !reviewer.starts_with("agent/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-reviewer",
             "agent-review reviewer must be an agent identity",
         ));
     }
     let identity = identities::resolve_reference_conn(connection, reviewer)?;
     if !scope.declared_subject(&ReferenceGraph { connection }, &identity)? {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "reviewer-unknown",
             format!("agent-review reviewer `{reviewer}` is not declared"),
         ));
     }
     if retirements::record(connection, &identity, None)?.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "reviewer-retired",
             format!("agent-review reviewer `{reviewer}` is retired"),
         ));
@@ -42,9 +42,9 @@ pub(crate) fn resolve_reviewer(
 pub(crate) fn independent_reviewer(
     reviewer: &str,
     excluded: &BTreeSet<String>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if excluded.contains(reviewer) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "reviewer-not-independent",
             format!("agent-review reviewer `{reviewer}` is a known requester or work owner"),
         ));

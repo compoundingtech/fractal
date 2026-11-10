@@ -1,6 +1,6 @@
 //! Canonical gate nodes for declaration reads. Environment values never leave this renderer.
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
-use crate::model::{GateSpec, St3Error};
+use crate::model::{GateSpec, FractalError};
 
 pub(crate) fn node(name: &str, args: impl IntoIterator<Item = KdlValue>) -> KdlNode {
     let mut node = KdlNode::new(name);
@@ -27,7 +27,7 @@ pub(crate) fn duration(name: &str, ms: u64) -> KdlNode {
     text(name, &format!("{ms}ms"))
 }
 
-pub(crate) fn scalar(value: &serde_json::Value) -> Result<KdlValue, St3Error> {
+pub(crate) fn scalar(value: &serde_json::Value) -> Result<KdlValue, FractalError> {
     use serde_json::Value;
     Ok(match value {
         Value::Null => KdlValue::Null,
@@ -42,13 +42,13 @@ pub(crate) fn scalar(value: &serde_json::Value) -> Result<KdlValue, St3Error> {
     })
 }
 
-fn unsupported(field: &str) -> St3Error {
-    St3Error::new("unrenderable-mission", format!("canonical KDL cannot represent {field}"))
+fn unsupported(field: &str) -> FractalError {
+    FractalError::new("unrenderable-mission", format!("canonical KDL cannot represent {field}"))
 }
 
 /// Render every gate variant. Unsupported structured predicate values fail closed rather than
 /// disappearing or being coerced to strings. The result is normalized KDL, not authored bytes.
-pub fn render_gate_node(gate: &GateSpec) -> Result<KdlNode, St3Error> {
+pub fn render_gate_node(gate: &GateSpec) -> Result<KdlNode, FractalError> {
     use GateSpec::*;
     let mut root = text("gate", crate::gate_parse::gate_name(gate));
     let children = match gate {
@@ -64,7 +64,7 @@ pub fn render_gate_node(gate: &GateSpec) -> Result<KdlNode, St3Error> {
         Every { path, subject, fields, .. } | NotEvery { path, subject, fields, .. } => {
             let predicates = fields.iter().map(|field| Ok(node("field", [
                 field.path.as_str().into(), field.operator.as_str().into(), scalar(&field.value)?,
-            ]))).collect::<Result<Vec<_>, St3Error>>()?;
+            ]))).collect::<Result<Vec<_>, FractalError>>()?;
             vec![block(node(if matches!(gate, Every { .. }) { "every" } else { "not-every" },
                 [path.as_str().into(), subject.as_str().into()]), predicates)]
         }

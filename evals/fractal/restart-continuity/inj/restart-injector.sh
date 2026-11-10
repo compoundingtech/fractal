@@ -23,7 +23,7 @@ subject="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}/rc.dev"
 mkdir -p "$state"
 
 actual() {
-  st3 agents show "$subject" --all --json | jq -c '.value'
+  fractal agents show "$subject" --all --json | jq -c '.value'
 }
 
 old_actual="$(actual)"
@@ -31,7 +31,7 @@ old_incarnation="$(jq -r '.incarnation_id // empty' <<<"$old_actual")"
 [ -n "$old_incarnation" ]
 pre_head="$(git -C "$ledger" rev-parse HEAD)"
 
-st3 terminals signal "$subject" hangup >/dev/null
+fractal terminals signal "$subject" hangup >/dev/null
 
 new_incarnation=""
 for _ in $(seq 1 1200); do

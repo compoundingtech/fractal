@@ -63,26 +63,26 @@ pub struct RenameReceipt {
 }
 
 pub trait IdentityStore {
-    fn resolve_identity(&self, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, St3Error>;
-    fn rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenameReceipt, St3Error>;
+    fn resolve_identity(&self, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError>;
+    fn rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenameReceipt, FractalError>;
 }
 
-pub fn unavailable(id: &str, reason: &str) -> St3Error {
-    St3Error::new("lifecycle-unavailable", format!("identity `{id}` is unavailable: {reason}"))
+pub fn unavailable(id: &str, reason: &str) -> FractalError {
+    FractalError::new("lifecycle-unavailable", format!("identity `{id}` is unavailable: {reason}"))
         .with_detail("subject", id).with_detail("reason", reason).with_detail("applied", "none")
 }
-fn cross_kind(id: &str, kind: IdentityKind) -> St3Error {
-    St3Error::new("identity-cross-kind", format!("`{id}` is not a {} identity", kind.label()))
+fn cross_kind(id: &str, kind: IdentityKind) -> FractalError {
+    FractalError::new("identity-cross-kind", format!("`{id}` is not a {} identity", kind.label()))
         .with_detail("subject", id).with_detail("source_kind", kind.label())
 }
-fn validate_name(kind: IdentityKind, id: &str) -> Result<(), St3Error> {
+fn validate_name(kind: IdentityKind, id: &str) -> Result<(), FractalError> {
     if IdentityKind::of(id) != Some(kind) { return Err(cross_kind(id, kind)); }
-    fractal_schema::registry().validate_subject(id).map_err(|e| St3Error::new(e.code, e.message))?;
+    fractal_schema::registry().validate_subject(id).map_err(|e| FractalError::new(e.code, e.message))?;
     Ok(())
 }
 
 /// Resolve in the caller's snapshot; no nested reader or writer acquisition.
-pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, St3Error> {
+pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError> {
     validate_name(kind, id)?;
     let row: Option<(String, String, Option<String>, Option<String>)> = connection.query_row(
         "SELECT h.identity,h.canonical_id,h.naming_revision,h.unavailable FROM identity_names n JOIN identity_heads h ON h.identity=n.identity WHERE n.name=?1 AND h.kind=?2",
@@ -91,7 +91,7 @@ pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &s
     let (identity, canonical_id, naming_revision, blocked) = if let Some(row) = row { row } else {
         if let Some(reason) = pending(connection, id)? { return Err(unavailable(id, &reason)); }
         if declaration_token(connection, kind, id)?.is_none() {
-            return Err(St3Error::new("identity-unknown", format!("identity `{id}` is unknown")).with_detail("subject", id));
+            return Err(FractalError::new("identity-unknown", format!("identity `{id}` is unknown")).with_detail("subject", id));
         }
         (id.into(), id.into(), None, None)
     };
@@ -102,7 +102,7 @@ pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &s
 
 /// Normalize references without making previously permissible undeclared references invalid.
 /// A known alias with missing/conflicting lifecycle evidence is never allowed through.
-pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<String, St3Error> {
+pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<String, FractalError> {
     let Some(_) = IdentityKind::of(id) else { return Ok(id.into()); };
     // Reference readers also encounter historical storage keys that predate today's
     // declaration grammar. Admission validates new names; reading an old key must not.
@@ -120,7 +120,7 @@ pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<Strin
     Ok(identity)
 }
 
-pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput) -> Result<std::borrow::Cow<'a, ClaimInput>, St3Error> {
+pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput) -> Result<std::borrow::Cow<'a, ClaimInput>, FractalError> {
     let mut normalized = std::borrow::Cow::Borrowed(input);
     let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [&input.subject], |row|row.get(0)).optional().map_err(internal)?;
     if let Some(identity) = identity { normalized.to_mut().subject = identity; }
@@ -156,33 +156,33 @@ pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput)
 
 /// Admission-derived declaration/head evidence is not part of the caller's idempotency input.
 /// Hash the exact request, so two identical concurrent requests still identify one operation.
-pub fn claim_operation(input: &ClaimInput) -> Result<Option<(String,String)>, St3Error> {
+pub fn claim_operation(input: &ClaimInput) -> Result<Option<(String,String)>, FractalError> {
     if !KINDS.contains(&input.kind.as_str()) { return smallclaims::store::claim_operation(input); }
-    let key = input.idempotency_key.as_deref().ok_or_else(|| St3Error::new("invalid-rename", "identity rename requires an idempotency key"))?;
+    let key = input.idempotency_key.as_deref().ok_or_else(|| FractalError::new("invalid-rename", "identity rename requires an idempotency key"))?;
     if key.is_empty() || key.len() > 512 || key.chars().any(char::is_control) {
-        return Err(St3Error::new("invalid-idempotency-key", "an idempotency key must contain 1 through 512 non-control characters"));
+        return Err(FractalError::new("invalid-idempotency-key", "an idempotency key must contain 1 through 512 non-control characters"));
     }
-    let request = input.fields.get("request").ok_or_else(|| St3Error::new("invalid-rename", "naming claim is missing its request"))?;
+    let request = input.fields.get("request").ok_or_else(|| FractalError::new("invalid-rename", "naming claim is missing its request"))?;
     if request["idempotency_key"].as_str() != Some(key) {
-        return Err(St3Error::new("invalid-rename", "naming request and operation keys disagree"));
+        return Err(FractalError::new("invalid-rename", "naming request and operation keys disagree"));
     }
     Ok(Some((operation_id_for_key(key),request_digest(&input.kind, request)?)))
 }
 
-fn request_digest(kind: &str, request: &Value) -> Result<String, St3Error> {
+fn request_digest(kind: &str, request: &Value) -> Result<String, FractalError> {
     canonical_hash(&("st3.identity-rename-request.v1",kind,canonical_json_value(request))).map_err(internal)
 }
 
 /// Check immutable request/effect binding before a replicated fact enters the projection.
 /// Missing declaration/predecessor evidence is intentionally left to the fail-closed reducer.
-pub fn validate_replicated(claim: &ClaimRecord) -> Result<(), St3Error> {
+pub fn validate_replicated(claim: &ClaimRecord) -> Result<(), FractalError> {
     if !smallclaims::naming::admits_replicated(claim).map_err(internal)? {
-        return Err(St3Error::new("invalid-replicated-claim", "naming claim request, operation or owner evidence disagrees"));
+        return Err(FractalError::new("invalid-replicated-claim", "naming claim request, operation or owner evidence disagrees"));
     }
     Ok(())
 }
 
-pub(super) fn check_receipt(connection: &Connection, claim: &ClaimRecord) -> Result<(), St3Error> {
+pub(super) fn check_receipt(connection: &Connection, claim: &ClaimRecord) -> Result<(), FractalError> {
     if !KINDS.contains(&claim.kind.as_str()) { return Ok(()); }
     let repaired: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')", [&claim.id], |row|row.get(0)).map_err(internal)?;
     if repaired { return Err(unavailable(&claim.subject, "conflict")); }
@@ -192,7 +192,7 @@ pub(super) fn check_receipt(connection: &Connection, claim: &ClaimRecord) -> Res
 }
 
 /// Normalize only typed KDL reference arguments, never command/content/environment strings.
-fn normalize_node<'a>(connection: &Connection, node: &'a Value) -> Result<std::borrow::Cow<'a, Value>, St3Error> {
+fn normalize_node<'a>(connection: &Connection, node: &'a Value) -> Result<std::borrow::Cow<'a, Value>, FractalError> {
     let name = node["name"].as_str().unwrap_or("");
     let reference = matches!(name, "agent" | "mission" | "from" | "to" | "assignee" | "available-to" | "report-to" | "under" | "recipient");
     let mut normalized = std::borrow::Cow::Borrowed(node);
@@ -219,7 +219,7 @@ fn normalize_node<'a>(connection: &Connection, node: &'a Value) -> Result<std::b
     Ok(normalized)
 }
 
-pub fn normalize_desired<'a>(connection: &Connection, desired: &'a DesiredSubject) -> Result<std::borrow::Cow<'a, DesiredSubject>, St3Error> {
+pub fn normalize_desired<'a>(connection: &Connection, desired: &'a DesiredSubject) -> Result<std::borrow::Cow<'a, DesiredSubject>, FractalError> {
     let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [&desired.subject], |row| row.get(0)).optional().map_err(internal)?;
     let node = normalize_node(connection, &desired.desired)?;
     if identity.is_none() && matches!(&node, std::borrow::Cow::Borrowed(_)) {
@@ -241,7 +241,7 @@ pub fn normalize_desired<'a>(connection: &Connection, desired: &'a DesiredSubjec
     Ok(std::borrow::Cow::Owned(normalized))
 }
 
-pub fn normalize_intent<'a>(connection: &Connection, intent: &'a NormalizedIntent) -> Result<std::borrow::Cow<'a, NormalizedIntent>, St3Error> {
+pub fn normalize_intent<'a>(connection: &Connection, intent: &'a NormalizedIntent) -> Result<std::borrow::Cow<'a, NormalizedIntent>, FractalError> {
     for subject in intent.subjects.keys().chain(intent.missions.values().map(|mission| &mission.subject)) {
         resolve_reference_conn(connection, subject)?;
     }
@@ -252,7 +252,7 @@ pub fn normalize_intent<'a>(connection: &Connection, intent: &'a NormalizedInten
     for desired in intent.subjects.values() {
         let desired = normalize_desired(connection, desired)?.into_owned();
         if normalized.subjects.insert(desired.subject.clone(), desired).is_some() {
-            return Err(St3Error::new("identity-occupied", "declaration contains multiple spellings of one identity"));
+            return Err(FractalError::new("identity-occupied", "declaration contains multiple spellings of one identity"));
         }
     }
     missions::normalize_intent_missions(connection, &mut normalized)?;
@@ -264,13 +264,13 @@ pub fn normalize_intent<'a>(connection: &Connection, intent: &'a NormalizedInten
     Ok(std::borrow::Cow::Owned(normalized))
 }
 
-fn pending(connection: &Connection, identity: &str) -> Result<Option<String>, St3Error> {
+fn pending(connection: &Connection, identity: &str) -> Result<Option<String>, FractalError> {
     connection.query_row(
         "SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END FROM replica_records WHERE subject_hint=?1 AND state IN ('unknown','invalid') AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL)",
         [identity], |row| row.get(0),
     ).map_err(internal)
 }
-fn declaration_token(connection: &Connection, kind: IdentityKind, identity: &str) -> Result<Option<String>, St3Error> {
+fn declaration_token(connection: &Connection, kind: IdentityKind, identity: &str) -> Result<Option<String>, FractalError> {
     match kind {
         IdentityKind::Agent => connection.query_row("SELECT claim_id FROM desired WHERE subject=?1", [identity], |row| row.get(0)).optional().map_err(internal),
         IdentityKind::Mission => connection.query_row("SELECT claim_id FROM mission_definitions WHERE mission_id=?1", [identity.trim_start_matches("mission/")], |row| row.get(0)).optional().map_err(internal),
@@ -278,7 +278,7 @@ fn declaration_token(connection: &Connection, kind: IdentityKind, identity: &str
 }
 
 /// The same persisted registry/membership gate used for terminal retirement.
-pub fn check_fleet_registry_conn(connection: &Connection, origin: &str, configured_peers: &[String], digest: &str) -> Result<(), St3Error> {
+pub fn check_fleet_registry_conn(connection: &Connection, origin: &str, configured_peers: &[String], digest: &str) -> Result<(), FractalError> {
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     let peers = configured_peers.iter().cloned().chain(membership.incarnations().filter(|member| member.end.is_none()).map(|member| member.name.clone())).collect::<BTreeSet<_>>();
     for peer in peers.into_iter().filter(|peer| peer != origin) {
@@ -290,7 +290,7 @@ pub fn check_fleet_registry_conn(connection: &Connection, origin: &str, configur
     Ok(())
 }
 
-fn retired_source(connection: &Connection, kind: IdentityKind, identity: &str) -> Result<(), St3Error> {
+fn retired_source(connection: &Connection, kind: IdentityKind, identity: &str) -> Result<(), FractalError> {
     let retired = match kind {
         IdentityKind::Agent => retirements::record(connection, identity, None)?.map(|claim| claim.id),
         IdentityKind::Mission => {
@@ -299,19 +299,19 @@ fn retired_source(connection: &Connection, kind: IdentityKind, identity: &str) -
         }
     };
     if let Some(claim) = retired {
-        return Err(St3Error::new("identity-retired-source", format!("identity `{identity}` is retired"))
+        return Err(FractalError::new("identity-retired-source", format!("identity `{identity}` is retired"))
             .with_detail("source", identity).with_detail("retirement_claim", claim));
     }
     if kind == IdentityKind::Mission {
         owned_sets::guard_mission_start(connection, identity).map_err(|error| {
-            if error.code == "mission-retired" { St3Error::new("identity-retired-source", error.message).with_detail("source", identity) }
+            if error.code == "mission-retired" { FractalError::new("identity-retired-source", error.message).with_detail("source", identity) }
             else { unavailable(identity, "pending-replication") }
         })?;
     }
     Ok(())
 }
 
-fn owner_admission(connection: &Connection, kind: IdentityKind, identity: &str, declaration: &str, origin: &str) -> Result<(), St3Error> {
+fn owner_admission(connection: &Connection, kind: IdentityKind, identity: &str, declaration: &str, origin: &str) -> Result<(), FractalError> {
     let claim = claim_by_id_tx(connection, declaration).map_err(internal)?.ok_or_else(|| unavailable(identity, "missing"))?;
     let owner = match kind {
         IdentityKind::Agent => retirements::declaration(connection, identity, declaration)?.member.map(|member| member.host),
@@ -321,7 +321,7 @@ fn owner_admission(connection: &Connection, kind: IdentityKind, identity: &str, 
     Ok(())
 }
 
-fn occupied(connection: &Connection, kind: IdentityKind, source: &ResolvedIdentity, target: &str) -> Result<(), St3Error> {
+fn occupied(connection: &Connection, kind: IdentityKind, source: &ResolvedIdentity, target: &str) -> Result<(), FractalError> {
     let reserved: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1", [target], |row| row.get(0)).optional().map_err(internal)?;
     let reserved = if reserved.is_some() { reserved } else {
         let historical: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind IN ('intent.desired','mission.published'))", [target], |row| row.get(0)).map_err(internal)?;
@@ -329,10 +329,10 @@ fn occupied(connection: &Connection, kind: IdentityKind, source: &ResolvedIdenti
     };
     if let Some(identity) = reserved {
         if identity == source.identity {
-            return Err(St3Error::new("identity-cycle", "historical names cannot become canonical again")
+            return Err(FractalError::new("identity-cycle", "historical names cannot become canonical again")
                 .with_detail("from", source.canonical_id.as_str()).with_detail("to", target).with_detail("path", json!([source.canonical_id,target])));
         }
-        return Err(St3Error::new("identity-occupied", format!("name `{target}` is already reserved"))
+        return Err(FractalError::new("identity-occupied", format!("name `{target}` is already reserved"))
             .with_detail("target", target).with_detail("kind", kind.label()).with_detail("identity", identity));
     }
     if let Some(reason) = pending(connection, target)? { return Err(unavailable(target, &reason)); }
@@ -354,24 +354,24 @@ fn receipt(claim: &ClaimRecord, request: &RenameRequest, already: bool) -> Renam
 }
 
 impl IdentityStore for Store {
-    fn resolve_identity(&self, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, St3Error> {
+    fn resolve_identity(&self, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError> {
         resolve_identity_conn(&self.readers.get(), kind, id)
     }
 
-    fn rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenameReceipt, St3Error> {
+    fn rename_identity(&self, kind: IdentityKind, request: &RenameRequest, peers: &[String]) -> Result<RenameReceipt, FractalError> {
         validate_name(kind, &request.from)?;
         validate_name(kind, &request.to)?;
-        if request.reason.trim().is_empty() { return Err(St3Error::new("invalid-rename", "identity rename needs a reason")); }
+        if request.reason.trim().is_empty() { return Err(FractalError::new("invalid-rename", "identity rename needs a reason")); }
         if request.idempotency_key.is_empty() || request.idempotency_key.len() > 512 || request.idempotency_key.chars().any(char::is_control) {
-            return Err(St3Error::new("invalid-idempotency-key", "an idempotency key must contain 1 through 512 non-control characters"));
+            return Err(FractalError::new("invalid-idempotency-key", "an idempotency key must contain 1 through 512 non-control characters"));
         }
         let request_value = serde_json::to_value(request).map_err(internal)?;
         let connection = self.readers.get();
         if let Some((_, claim_id, state)) = operation_tx(&connection, &operation_id_for_key(&request.idempotency_key)).map_err(internal)? {
-            if state == "conflict" { return Err(St3Error::new("idempotency-conflict", "rename operation has conflicting requests")); }
+            if state == "conflict" { return Err(FractalError::new("idempotency-conflict", "rename operation has conflicting requests")); }
             let claim = claim_by_id_tx(&connection, &claim_id).map_err(internal)?.ok_or_else(|| unavailable(&request.from, "missing"))?;
             if claim.kind != kind.claim_kind() || claim.body["fields"]["request"] != request_value {
-                return Err(St3Error::new("idempotency-mismatch", "idempotency key identifies a different request"));
+                return Err(FractalError::new("idempotency-mismatch", "idempotency key identifies a different request"));
             }
             check_receipt(&connection, &claim)?;
             return Ok(receipt(&claim, request, true));
@@ -414,8 +414,8 @@ impl IdentityStore for Store {
     }
 }
 
-pub fn writer_required() -> St3Error {
-    St3Error::new("invalid-rename", "identity naming claims must be written through rename-id")
+pub fn writer_required() -> FractalError {
+    FractalError::new("invalid-rename", "identity naming claims must be written through rename-id")
 }
 
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h40ca3df48b16 owner=fractal_store::store::identities TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS identity_heads (

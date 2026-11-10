@@ -321,11 +321,12 @@ mod tests {
         ui.terminal = Some(view("agent/B"));
         let at = sentinel(&mut state, &mut ui);
         let (msg, mut peer) = success("agent/A", old);
+        // macOS may reject socket options after apply_fetched closes the other end.
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         state.apply_fetched(&mut ui, msg, &tx);
         unchanged(&state, &ui, &mut rx, at);
         assert!(ui.terminal_view("agent/A").unwrap().native.is_none());
         use std::io::Read;
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0, "cancelled late stream is closed");
     }
 
@@ -350,9 +351,9 @@ mod tests {
         assert_ne!(old, state.generation);
         let at = sentinel(&mut state, &mut ui);
         let (msg, mut peer) = success("agent/A", old);
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         state.apply_fetched(&mut ui, msg, &tx);
         use std::io::Read;
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0, "discarded stream is explicitly closed");
         state.apply_fetched(&mut ui, Fetched::NativeFailed { agent: "agent/A".into(), generation: old, runtime_ids: vec!["runtime/A".into()], reason: "refused".into() }, &tx);
         state.apply_fetched(&mut ui, Fetched::AttachWaiting { agent: "agent/A".into(), generation: old, reason: "old wait".into() }, &tx);

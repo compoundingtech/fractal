@@ -299,6 +299,9 @@ class WebShellKeyTest(unittest.TestCase):
                     self.assertIn(f'shellHook=finished status={status}', snapshot)
                     self.assertIn(f'PATH={tools}', snapshot)
                     self.assertIn(f'BASH_ENV={startup}', snapshot)
+                    self.assertIn(f'declare -x PATH="{tools}"', snapshot)
+                    self.assertRegex(snapshot, r'shell=.* pid=\d+ bashpid=\d+ ppid=\d+')
+                    self.assertIn('declare -fx command_not_found_handle', snapshot)
                     resolution = str(tools / 'pnpm') if has_pnpm else '<not found>'
                     self.assertIn(f'command -v pnpm: {resolution}', snapshot)
 
@@ -480,6 +483,160 @@ printf '%s\\n' "$NIX_TEST_IDENTITY"
         self.assertTrue(cache_steps, 'No generated web-shell cache steps were checked')
         self.assertTrue(key_steps, 'No generated web-shell key steps were checked')
         self.assertEqual(publishers, ['main-upkeep.yml'], 'Only protected-main upkeep may publish')
+
+
+class ChildShellDiagnosticsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='web-child-diagnostics-')
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.tools = self.root / 'bin'
+        self.tools.mkdir()
+        self.bash = shutil.which('bash')
+        for name in ('mkdir', 'ln'):
+            (self.tools / name).symlink_to(shutil.which(name))
+        for name in ('bash', 'sh'):
+            (self.tools / name).symlink_to(self.bash)
+        for name in ('python3', 'nix'):
+            self.tool(name, 'exit 0\n')
+        (self.root / 'repos/effect-utils').mkdir(parents=True)
+        self.record = self.root / 'commands'
+        (self.root / 'probe-client').write_text('printf "client\\n" >> "$PROBE_RECORD"\n')
+        self.report = self.root / 'hook-report'
+        source = (REPO / 'nix/web-shell.nix').read_text()
+        hook = source.split("  shellHook = ''\n", 1)[1].rsplit("  '';", 1)[0]
+        self.hook = hook.replace('${buckRoot}', str(self.root / 'buck')) \
+            .replace('${effect-utils}', str(self.root / 'provider')).replace("''${", '${')
+        self.environment = {
+            'PATH': str(self.tools), 'LC_ALL': 'C', 'PROBE_RECORD': str(self.record),
+            'PROBE_PREPEND': str(self.tools), 'PROBE_BASH': self.bash,
+            'CI_WEB_SHELL_DIAGNOSTICS': str(self.report),
+            'PROBE_COMMAND': 'pnpm install --frozen-lockfile && bash ./probe-client',
+        }
+
+    def tool(self, name, body):
+        path = self.tools / name
+        path.write_text(f'#!{self.bash}\n' + body)
+        path.chmod(0o755)
+
+    def child_argv(self):
+        # The installed wrapper's exact sh/exec hop, with the requested Bash child.
+        hop = r'''exec sh -c 'PATH=$1:$PATH; export PATH; shift; exec "$@"' sh \
+          "$PROBE_PREPEND" "$PROBE_BASH" -c "$PROBE_COMMAND"'''
+        return [self.bash, '-c', self.hook + '\n' + hop]
+
+    def run_child(self, **changes):
+        return subprocess.run(self.child_argv(), cwd=self.root, env=dict(self.environment, **changes),
+                              capture_output=True, text=True)
+
+    def test_missing_pnpm_handler_reaches_the_child_and_redacts_other_values(self):
+        done = self.run_child(GH_TOKEN='fixture-private-value', NIX_CONFIG='fixture-nix-auth-value',
+                              OTHER_SECRET='fixture-other-value\ndeclare -x FORGED_ENV=do-not-report\nsecond line', BUILD_ADMISSION_CLASS='light')
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertFalse(self.record.exists())
+        self.assertIn(f'PATH={self.tools}:{self.tools}', done.stderr)
+        self.assertIn(f'declare -x PATH="{self.tools}:{self.tools}"', done.stderr)
+        self.assertRegex(done.stderr, r'shell=.* version=.* pid=\d+ bashpid=\d+ ppid=\d+')
+        self.assertIn(f'child PATH first entry={self.tools} empty=false', done.stderr)
+        self.assertIn(f'expected wrapper prepend (selected nix directory)={self.tools} empty=false', done.stderr)
+        self.assertIn('BUILD_ADMISSION_CLASS=light', done.stderr)
+        self.assertNotIn('FORGED_ENV', done.stderr)
+        for name, value in [('GH_TOKEN', 'fixture-private-value'), ('NIX_CONFIG', 'fixture-nix-auth-value'),
+                            ('OTHER_SECRET', 'fixture-other-value')]:
+            self.assertIn(f'{name}=<redacted>', done.stderr)
+            self.assertNotIn(value, done.stderr)
+        snapshot = done.stderr.split('child environment (other values redacted):\n', 1)[1].split(
+            'fractal-test: end typescript-client child diagnostics', 1)[0]
+        names = [line.split('=', 1)[0] for line in snapshot.splitlines()]
+        self.assertEqual(names, sorted(names))
+        self.assertIn('declare -fx command_not_found_handle', self.report.read_text())
+        self.assertEqual(done.stdout, '')
+
+    def test_success_runs_install_and_client_once_without_child_diagnostics(self):
+        self.tool('pnpm', 'printf "pnpm\\n" >> "$PROBE_RECORD"\n')
+        done = self.run_child()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.record.read_text().splitlines(), ['pnpm', 'client'])
+        self.assertEqual(done.stderr, '')
+
+    def test_diagnostic_lookup_success_after_hash_clear_never_retries_pnpm(self):
+        command = 'hash() { pnpm() { printf "unexpected\\n" >> "$PROBE_RECORD"; }; }\n'
+        done = self.run_child(PROBE_COMMAND=command + self.environment['PROBE_COMMAND'])
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('pnpm is a function', done.stderr)
+        self.assertFalse(self.record.exists())
+
+    def test_environment_names_do_not_require_completion_builtins_or_assigned_exports(self):
+        prefix = 'enable -n compgen 2>/dev/null || :; set -u; export NIX_BUILD_TOP; '
+        done = self.run_child(PROBE_COMMAND=prefix + self.environment['PROBE_COMMAND'], BUILD_ADMISSION_CLASS='light')
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('BUILD_ADMISSION_CLASS=light', done.stderr)
+        self.assertIn(r'NIX_BUILD_TOP=\<unset\>', done.stderr)
+        self.assertIn('end typescript-client child diagnostics', done.stderr)
+
+    def test_empty_first_entry_and_unexported_path_are_reported_without_external_tools(self):
+        # Bash 5.2 bypasses command_not_found_handle when PATH is wholly empty.
+        # ':' keeps the current-directory-only search while exercising the real
+        # missing-command dispatch on both 5.2 and 5.3.
+        for prefix, prepend, declaration in [
+                ('PATH=:; export PATH; ', '', 'declare -x PATH=":"'),
+                ('', '', f'declare -x PATH=":{self.tools}"'),
+                ('export -n PATH; ', str(self.tools), f'declare -- PATH="{self.tools}:{self.tools}"')]:
+            with self.subTest(prefix=prefix):
+                done = self.run_child(PROBE_PREPEND=prepend, PROBE_COMMAND=prefix + self.environment['PROBE_COMMAND'])
+                self.assertEqual(done.returncode, 127, done.stderr)
+                self.assertIn(declaration, done.stderr)
+                self.assertIn(f'empty={str(not prepend).lower()}', done.stderr)
+                self.assertIn('end typescript-client child diagnostics', done.stderr)
+
+    def test_empty_path_reporter_uses_only_builtins(self):
+        # Test the reporter's zero-length PATH independently of that dispatch
+        # difference, still through the exported function in the child shell.
+        done = self.run_child(PROBE_PREPEND='',
+                              PROBE_COMMAND='PATH=; export PATH; command_not_found_handle pnpm')
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('declare -x PATH=""', done.stderr)
+        self.assertIn("child PATH first entry='' empty=true", done.stderr)
+        self.assertIn('end typescript-client child diagnostics', done.stderr)
+        self.assertFalse(self.record.exists())
+        self.assertEqual(done.stdout, '')
+
+    def test_handler_is_not_installed_without_the_runner_opt_in(self):
+        env = dict(self.environment)
+        del env['CI_WEB_SHELL_DIAGNOSTICS']
+        done = subprocess.run(self.child_argv(), cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertNotIn('child pnpm lookup failed', done.stderr)
+        self.assertFalse(self.report.exists())
+
+    def test_other_missing_commands_keep_status_without_pnpm_diagnostics(self):
+        done = self.run_child(PROBE_COMMAND='missing-fixture-command')
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('missing-fixture-command: command not found', done.stderr)
+        self.assertNotIn('child pnpm lookup failed', done.stderr)
+
+    def test_lost_handler_remains_a_failed_command_with_an_exported_hook_snapshot(self):
+        done = self.run_child(PROBE_COMMAND='unset -f command_not_found_handle; ' + self.environment['PROBE_COMMAND'])
+        self.assertEqual(done.returncode, 127, done.stderr)
+        self.assertIn('pnpm: command not found', done.stderr)
+        self.assertNotIn('child pnpm lookup failed', done.stderr)
+        self.assertIn('declare -fx command_not_found_handle', self.report.read_text())
+        self.assertFalse(self.record.exists())
+
+    def test_simultaneous_children_keep_distinct_hook_reports_and_prepend_values(self):
+        children = []
+        for label in ('left', 'right'):
+            env = dict(self.environment, CI_WEB_SHELL_DIAGNOSTICS=str(self.root / label),
+                       PROBE_PREPEND=str(self.root / label))
+            children.append(subprocess.Popen(self.child_argv(), cwd=self.root, env=env,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        for label, other, child in zip(('left', 'right'), ('right', 'left'), children):
+            out, err = child.communicate(timeout=10)
+            self.assertEqual(child.returncode, 127, err)
+            self.assertIn(f'child PATH first entry={self.root}/{label} empty=false', err)
+            self.assertNotIn(f'child PATH first entry={self.root}/{other}', err)
+            self.assertIn('shellHook=finished status=0', (self.root / label).read_text())
+            self.assertEqual(out, '')
 
 
 if __name__ == '__main__':

@@ -13,6 +13,159 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn incomplete_linux_environment_is_unavailable() {
+    for (case, environment, expected) in [
+        ("empty environ", b"".as_slice(), HarnessAncestry::Unavailable),
+        ("truncated environ", b"PATH=/bin".as_slice(), HarnessAncestry::Unavailable),
+        ("complete environment without markers", b"PATH=/bin\0".as_slice(), HarnessAncestry::Person),
+        ("complete environment with marker", b"ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Bound("agent/fixture/worker".into())),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn empty_process_environment_is_unavailable() {
+    let mut child = std::process::Command::new("sleep").arg("10").env_clear().spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let identity = local_harness_identity(pid);
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(identity, Err(AncestryUnavailableReason::EmptyEnvironment), "empty environ local identity");
+    assert_eq!(ancestry, HarnessAncestry::Unavailable, "empty environ ancestry walk");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
+        for (ancestor, expected) in [
+            (Ok(HarnessProcess { uid: 0, generation: None, generation_error: None }), HarnessAncestry::Person),
+            (Ok(HarnessProcess { uid: 1000, generation: None, generation_error: None }), HarnessAncestry::Unavailable),
+            (Err(AncestryUnavailableReason::ProcessMetadataInvalid("fixture")), HarnessAncestry::Unavailable),
+        ] {
+            let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer), |candidate| {
+                if candidate == pid {
+                    Ok(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)), generation_error: None })
+                } else {
+                    ancestor.clone()
+                }
+            }, |candidate| {
+                assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
+                Ok(HarnessAncestry::Person)
+            }), |_| {});
+            assert_eq!(result, expected);
+        }
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> HarnessAncestry {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        ancestry_or_record(walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+            let mut current = process.clone();
+            if changed_at == Some(inspection) {
+                current.generation.as_mut().unwrap().1 =
+                    current.generation.unwrap().1.wrapping_add(1);
+            }
+            inspection += 1;
+            Ok(current)
+        }, |_| Ok(HarnessAncestry::Bound("agent/fixture/worker".into()))), |_| {})
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_connector_generation_mismatch_is_unavailable() {
+    for inspection in [0, 1, 2] {
+        assert_eq!(captured_connector_case(true, Some(inspection)), HarnessAncestry::Unavailable);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_failed_connector_capture_is_unavailable() {
+    assert_eq!(captured_connector_case(false, None), HarnessAncestry::Unavailable);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_matching_connector_capture_binds() {
+    assert_eq!(captured_connector_case(true, None),
+        HarnessAncestry::Bound("agent/fixture/worker".into()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_records_environment_read_failure() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let ancestor = pid + 1;
+        let mut recorded = Vec::new();
+        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+            |_| {
+                let mut current = process.clone();
+                current.generation.as_mut().unwrap().0 = ancestor;
+                Ok(current)
+            },
+            |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+                Err(AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+                })
+            }),
+            |cause| recorded.push((cause.pid, cause.reason.clone())));
+        assert_eq!(result, HarnessAncestry::Unavailable);
+        assert_eq!(recorded, vec![(Some(ancestor), AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+        })]);
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_records_generation_change() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        let mut recorded = Vec::new();
+        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer), |_| {
+            let mut current = process.clone();
+            if inspection == 1 {
+                current.generation.as_mut().unwrap().1 += 1;
+            }
+            inspection += 1;
+            Ok(current)
+        }, |_| Ok(HarnessAncestry::Bound("agent/fixture/worker".into()))),
+            |cause| recorded.push((cause.pid, cause.reason.clone())));
+        assert_eq!(result, HarnessAncestry::Unavailable);
+        assert_eq!(recorded, vec![(Some(pid), AncestryUnavailableReason::AncestorGenerationChanged)]);
+    });
+}
+
+// A real serving-boundary probe for manual person-CLI integration checks.
+#[tokio::test]
+async fn person_cli_probe_server() {
+    let Ok(socket) = std::env::var("FRACTAL_PERSON_CLI_PROBE_SOCKET") else { return; };
+    let socket = PathBuf::from(socket);
+    let state = state(socket.parent().unwrap());
+    let app = Router::new().fallback(|| async { Json(json!({"person_admitted": true})) });
+    serve_unix_with_ancestor_ready(&socket, None, app, Some(state.store), harness_ancestor,
+        || println!("PERSON_CLI_PROBE_READY")).await.unwrap();
+}
+
 #[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let root = tempfile::tempdir().unwrap();
@@ -22,7 +175,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        reserved, router(state), Some(store.clone()), None, |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -42,6 +195,201 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
         assert_eq!(store.index().unwrap(), before);
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
+    use http_body_util::BodyExt as _;
+    for (ancestry, worker) in [(HarnessAncestry::Unavailable, false),
+        (HarnessAncestry::Unavailable, true), (HarnessAncestry::Person, false)] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let socket = root.path().join("bound.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+            -> Result<HarnessAncestry, AncestryUnavailableCause> = if ancestry == HarnessAncestry::Unavailable {
+            |pid, _| Err(AncestryUnavailableCause { pid: Some(pid + 1),
+                reason: AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied (os error 13)".into(),
+                } })
+        } else {
+            |_, _| Ok(HarnessAncestry::Person)
+        };
+        let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
+        let authority: Option<WorkerAuthority> = worker.then(|| {
+            Arc::new(|| Ok(std::process::id())) as WorkerAuthority
+        });
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+            reserved, app, Some(state.store), authority, lookup,
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        tokio::spawn(connection);
+        for (method, path, person, body, sensitive) in [
+            ("GET", "/v1/health", false, "{}", false),
+            ("POST", "/v1/example", false, "{}", false),
+            ("GET", "/v1/backup", false, "{}", true),
+            ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/internal/example", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", true, "{}", true),
+            ("GET", "/v1/client/session", true, "{}", true),
+            ("POST", "/v1/internal/replication-wake", false, "{}", true),
+            ("GET", "/v1/internal/fleet/membership", false, "{}", true),
+            ("GET", "/v1/client/capabilities", true, "{}", true),
+            ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
+            ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
+        ] {
+            let mut request = Request::builder().method(method).uri(path).header("host", "local")
+                .header("x-verified-worker-fallback", "true");
+            if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+            let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
+            let refused = sensitive && ancestry == HarnessAncestry::Unavailable && !worker;
+            assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
+            response.into_body().collect().await.unwrap();
+        }
+        server.abort();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person() {
+    use tower::ServiceExt as _;
+    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let process = local_harness_process(pid).unwrap();
+    let parent = pid + 1;
+    let ancestry = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+        |_| {
+            let mut process = process.clone();
+            process.generation.as_mut().unwrap().0 = parent;
+            Ok(process)
+        },
+        |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+            // Model a same-uid, non-dumpable service manager: metadata remains readable,
+            // but its environment does not.
+            Err(AncestryUnavailableReason::ProcessReadFailed {
+                operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+            })
+        }), |_| {});
+    assert_eq!(ancestry, HarnessAncestry::Unavailable);
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    for verified in [false, true] {
+        let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
+        let app = Router::new().fallback(|| async { "accepted" })
+            .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
+        for (method, path, header) in [
+            ("POST", "/v1/internal/replication/receive", None),
+            ("POST", "/v1/internal/seat-freshness", None),
+            ("POST", "/v1/internal/seat-freshness/reads", None),
+            ("POST", "/v1/internal/seat-snapshot", None),
+            ("POST", crate::peer::CLIENT_READ_FORWARD_PATH, None),
+            ("POST", "/v1/internal/replication-wake", None),
+            ("GET", "/v1/internal/fleet/membership", None),
+            ("POST", "/v1/internal/fleet/endpoints", None),
+            ("POST", "/v1/internal/fleet/redeem", None),
+            ("POST", "/v1/internal/fleet/invites", None),
+            ("GET", "/v1/client/capabilities", Some(client_v0::LOCAL_PERSON_HEADER)),
+            ("GET", "/v1/client/capabilities", Some(wire_names::LOCAL_PERSON_HEADER_ALIAS)),
+        ] {
+            let mut request = Request::builder().method(method).uri(path);
+            if let Some(header) = header { request = request.header(header, "person/operator"); }
+            let mut request = request.body(Body::from(r#"{"actor":"person/operator"}"#)).unwrap();
+            request.extensions_mut().insert(ancestry.clone());
+            request.extensions_mut().insert(LocalPeer { pid, ancestor: None, peer_process: Some(peer.clone()) });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), if verified {
+                StatusCode::OK
+            } else { StatusCode::UNPROCESSABLE_ENTITY }, "{verified} {method} {path} {header:?}");
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn with_process_fixture<T>(command: &mut std::process::Command, inspect: impl FnOnce(u32) -> T) -> T {
+    use std::io::{BufRead as _, Write as _};
+    let mut child = command
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut pid = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+    let pid: u32 = pid.trim().parse().unwrap();
+    let result = inspect(pid);
+    // The child announces readiness after exec, then stays alive until inspection ends.
+    child.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    child.wait().unwrap();
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inspect_ancestry_fixture(command: &mut std::process::Command) -> HarnessAncestry {
+    with_process_fixture(command, |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        harness_ancestor(pid, Some(&peer))
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, body: Value) {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (primary, legacy) in [
+        (Some(""), None),
+        (None, Some("")),
+        (Some(""), Some("agent/fixture/worker")),
+        (Some("agent/fixture/worker"), Some("")),
+        (Some("person/example"), None),
+        (Some("agent/"), None),
+        (Some("agent/fixture/worker"), Some("agent/fixture/other")),
+    ] {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo $$; read answer"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
+        if let Some(value) = primary { command.env("ST_AGENT", value); }
+        if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
+        let ancestry = inspect_ancestry_fixture(&mut command);
+        assert_eq!(ancestry, HarnessAncestry::Unavailable, "{path}: {primary:?} {legacy:?}");
+        let mut request = Request::builder().method(method).uri(path);
+        if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+        let mut request = request.body(Body::from(body.to_string())).unwrap();
+        request.extensions_mut().insert(ancestry);
+        let error = guard_bound_request(request, None, &state.store).await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{path}: {primary:?} {legacy:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_backup_export() {
+    assert_masked_identity_refused("GET", "/v1/backup", false, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_person_session() {
+    assert_masked_identity_refused("GET", "/v1/client/session", true, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_foreign_actor() {
+    assert_masked_identity_refused("POST", "/v1/fleet/transports", false, json!({"actor": "agent/other"})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_harness_descendant_without_agent_environment_is_bound() {
+    let ancestry = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sh -c 'echo $$; read answer'; :"])
+        .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent"));
+    assert_eq!(ancestry, HarnessAncestry::Bound("agent/fixture/parent".into()));
 }
 
 #[tokio::test]
@@ -285,6 +633,23 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
@@ -793,28 +1158,16 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_unix_peer_is_bound_to_its_harness_environment() {
     // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
     // with this fixture's identity and bind nothing.
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
+    let bound = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "echo $$; read answer"])
         .env_remove("FRACTAL_AGENT")
-        .env("ST_AGENT", "agent/fixture/worker")
-        .spawn()
-        .unwrap();
-    let mut bound = None;
-    for _ in 0..50 {
-        bound = harness_ancestor(child.id());
-        if bound.is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(bound.as_deref(), Some("agent/fixture/worker"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+        .env("ST_AGENT", "agent/fixture/worker"));
+    assert_eq!(bound.agent(), Some("agent/fixture/worker"));
 }
 
 #[tokio::test]
@@ -1926,6 +2279,23 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+#[test]
+fn doctor_reports_work_wake_copy_progress_and_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for complete in [false, true] {
+        state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-he79e179dc71c owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_wake_backfill SET cursor=12, ceiling=34, complete=?1 WHERE singleton=1",
+            [complete],
+        ).unwrap();
+        let check = work_wake_index_check(&state);
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains(&format!("cursor=12 ceiling=34 done={complete}")));
+        assert_eq!(check.message.contains("indexed tags only"), complete);
+        assert_eq!(check.message.contains("unindexed historical tail"), !complete);
+    }
+}
+
 /// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
 /// what holds them off: here a configured peer whose start has not reached it.
 #[test]
@@ -2080,7 +2450,7 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let root = tempfile::tempdir().unwrap();
-    let app = AppState { store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
+    let app = AppState { browser_pairing_login: None, store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
     let store = app.store.clone();
     let send = |id: &str, from: &str, recipient: &str, tags: &[&str]| {
         store
@@ -2851,9 +3221,9 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     use http_body_util::{BodyExt as _, Empty};
     use hyper::client::conn::http1::SendRequest;
 
-    fn slow_ancestor(_pid: u32) -> Option<String> {
+    fn slow_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
         std::thread::sleep(Duration::from_millis(500));
-        None
+        HarnessAncestry::Person
     }
 
     async fn health(sender: &mut SendRequest<Empty<axum::body::Bytes>>) {
@@ -2910,8 +3280,8 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
 async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
     use http_body_util::{BodyExt as _, Full};
 
-    fn ancestor(_pid: u32) -> Option<String> {
-        Some("agent/example-bound-original/worker".into())
+    fn ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+        HarnessAncestry::Bound("agent/example-bound-original/worker".into())
     }
 
     let root = tempfile::tempdir().unwrap();
@@ -3768,7 +4138,7 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
 async fn a_bound_harness_cannot_record_seat_freshness() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let received = crate::peer::ReceivedSeatFreshness {
         from: "another-member".into(),
         seats: vec![crate::peer::SeatHeard {
@@ -3861,7 +4231,7 @@ async fn internal_routes_refuse_seat_callers() {
 async fn a_seat_reads_fleet_views_through_public_routes_only() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let call = |method: &str, route: &str, bound: bool| {
         let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
         if bound {
@@ -3888,7 +4258,7 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let declarations = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, &state.node).unwrap();
     state.store.apply_internal(&declarations, "workflow-registration-fixture").unwrap();
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let request = apply_request(&state, PERFORMANCE_REGISTRATION, "agent/foreign", "forged-workflow-register");
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/intent/apply")
         .header("content-type", "application/json").extension(BoundAgent("agent/own".into()))
@@ -3925,7 +4295,7 @@ async fn repair_actor_bound_router_refuses_foreign_agent_and_person_before_token
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/foreign", "person/operator"] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -3944,7 +4314,7 @@ async fn repair_actor_bound_router_requires_present_nonempty_actor() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for body in [
         json!({"token":"not-a-repair-token"}),
         json!({"token":"not-a-repair-token","actor":null}),
@@ -3965,7 +4335,7 @@ async fn repair_actor_bound_router_own_actor_reaches_token_validation_and_daemon
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, refusal) = repair_actor_apply_request(
         app.clone(),
@@ -3996,7 +4366,7 @@ async fn repair_actor_unbound_router_supports_legacy_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -4020,7 +4390,7 @@ async fn repair_actor_bound_router_refuses_legacy_apply_with_or_without_actor() 
     // Both the handler and the daemon's outer binding guard must close the legacy path.
     for app in [
         app.clone(),
-        app.layer(from_fn_with_state(state.store.clone(), guard_bound_actor)),
+        app.layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor)),
     ] {
         for body in [
             json!({"token":token}),
@@ -4048,7 +4418,7 @@ async fn repair_actor_unbound_router_refuses_supplied_actor_without_daemon_bindi
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/own", "person/operator", ""] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -4065,7 +4435,7 @@ async fn repair_actor_unbound_router_refuses_attributed_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -5072,6 +5442,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     .await
     .unwrap()
     .0;
+    let appended: smallclaims::claim::ClaimRecord = serde_json::from_value(appended).unwrap();
     let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
         .await
         .expect("a stream item did not wake the waiter")
@@ -6957,6 +7328,73 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     }
 }
 
+/// #4500: a seat whose declaration is a stop while its process still runs says it is stopping,
+/// and once the stop is deferred, what holds it.
+#[test]
+fn a_stop_declared_seat_that_still_runs_is_stopping_and_says_what_holds_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let seat = "agent/example-held/worker";
+    let declare = parse_intent(
+        "version 2\nagent \"example-held/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&declare, "held-card-declaration").unwrap();
+    let observe = |status: &str, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: seat.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!(status)),
+                ("runtime_id".into(), json!("held-runtime")),
+                ("incarnation_id".into(), json!("held-incarnation")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    observe("running", "held-running");
+    let card = |store: &Store| {
+        client_agent_resources_uncached(store, true, store.index().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|card| card["id"] == seat)
+            .unwrap()
+    };
+    assert_eq!(card(&store)["stopping"], Value::Null, "a declared seat is not stopping");
+
+    let stop = parse_intent("version 2\nstop \"agent/example-held/worker\"\n", store.origin()).unwrap();
+    store.apply_internal(&stop, "held-card-stop").unwrap();
+    assert_eq!(card(&store)["stopping"], json!({"held": null}));
+
+    let token = store.selected_desired_token(seat).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: seat.into(),
+        kind: "harness.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("warning")),
+            ("status".into(), json!("waiting")),
+            ("code".into(), json!("stop-deferred")),
+            ("reason".into(), json!("the seat holds a message nobody has read")),
+            ("observed_since_ms".into(), json!(1)),
+            ("incarnation_id".into(), json!("held-incarnation")),
+        ]),
+        evidence: vec![token],
+        expected_subject: None,
+        idempotency_key: Some("held-diagnostic".into()),
+    }).unwrap();
+    assert_eq!(
+        card(&store)["stopping"],
+        json!({"held": "the seat holds a message nobody has read"})
+    );
+
+    observe("stopped", "held-stopped");
+    assert_eq!(card(&store)["stopping"], Value::Null, "a stopped seat is no longer stopping");
+}
+
 #[test]
 fn client_work_projection_includes_agentless_mission_steps() {
     let root = tempfile::tempdir().unwrap();
@@ -7666,6 +8104,133 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
 }
 
 #[tokio::test]
+async fn replying_settles_stream_routed_parents_and_replays_without_another_send() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/receiver\" {{ host {:?}; command \"true\"; workspace {:?} }}",
+        state.store.origin(),
+        root.path().display().to_string(),
+    );
+    let intent = crate::graph::parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-stream-recipient").unwrap();
+    let app = router(state.clone());
+    for initial in ["sent", "delivered", "read", "closed"] {
+        let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": format!("stream-parent-{initial}"),
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Please answer."
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{original}");
+        let parent = original["subject"].as_str().unwrap();
+        assert!(state.store.message(parent).unwrap().unwrap().created_index
+            >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(state.store.claims_for(parent, Some("message.sent")).unwrap().is_empty());
+        for lifecycle in ["delivered", "read", "closed"] {
+            if initial == "sent" {
+                break;
+            }
+            crate::store::messages_shard::record_lifecycle(
+                &state.store, parent, &format!("message.{lifecycle}"),
+                Some("agent/example/receiver"),
+                &BTreeMap::from([("status".into(), json!(lifecycle))]),
+            ).unwrap();
+            if lifecycle == initial {
+                break;
+            }
+        }
+        let reply = json!({
+            "idempotency_key": format!("stream-reply-{initial}"),
+            "from": "agent/example/receiver",
+            "to": "agent/example/sender",
+            "content": "Answered.",
+            "in_reply_to": parent
+        });
+        let (status, sent) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["already_sent"], false);
+        assert_eq!(state.store.message(parent).unwrap().unwrap().status, "closed");
+        let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+            .unwrap().unwrap();
+        assert_eq!(marks.iter().filter(|(kind, _, _)| kind == "message.closed").count(), 1);
+        assert!(state.store.claims_for(parent, Some("message.closed")).unwrap().is_empty());
+
+        let (status, repeated) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["already_sent"], true);
+        assert_eq!(repeated["subject"], sent["subject"]);
+        assert_eq!(repeated["sent_at"], sent["sent_at"]);
+        let reply_subject = sent["subject"].as_str().unwrap();
+        assert_eq!(state.store.claims_for(reply_subject, Some("message.sent")).unwrap().len(), 1);
+
+        // A changed request under the same key fails before another send, even after closure.
+        let mut changed = reply;
+        changed["content"] = json!("Different answer.");
+        let (status, error) = json_request(app.clone(), "/v1/messages", changed).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(state.store.claims_for(reply_subject, Some("message.sent")).unwrap().len(), 1);
+        assert_eq!(state.store.message(parent).unwrap().unwrap().status, "closed");
+    }
+}
+
+#[tokio::test]
+async fn a_retired_recipient_cannot_reply_or_settle_its_successors_stream_mail() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/old\" {{ host {:?}; command \"true\"; workspace \"/tmp\" }}\nagent \"example/new\" {{ command \"true\"; workspace \"/tmp\" }}",
+        state.store.origin(),
+    );
+    let intent = parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-retirement-fixture").unwrap();
+    let app = router(state.clone());
+    let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+        "idempotency_key": "reply-retired-parent",
+        "from": "agent/example/sender",
+        "to": "agent/example/old",
+        "content": "Keep this for the successor."
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let parent = original["subject"].as_str().unwrap();
+    assert!(state.store.message(parent).unwrap().unwrap().created_index
+        >= crate::store::messages_shard::STREAM_INDEX_BASE);
+    for lifecycle in ["delivered", "read"] {
+        crate::store::messages_shard::record_lifecycle(
+            &state.store, parent, &format!("message.{lifecycle}"),
+            Some("agent/example/old"),
+            &BTreeMap::from([("status".into(), json!(lifecycle))]),
+        ).unwrap();
+    }
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "reply-retired-custody", &[], Some("agent/example/new"), None,
+    ).unwrap();
+    let (status, refused) = json_request(app, "/v1/messages", json!({
+        "idempotency_key": "reply-retired-refused",
+        "from": "agent/example/old",
+        "to": "agent/example/sender",
+        "content": "A stale process answered.",
+        "in_reply_to": parent
+    })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(state.store.operation_claim("reply-retired-refused").unwrap().is_none());
+    // Also exercise settlement's own admission, independently of the pre-send check.
+    let refused = settle_answered_message(
+        &state.store, parent, "agent/example/old", "agent/example/sender",
+        "message/stale-reply", "claim/stale-reply",
+    ).unwrap_err();
+    assert_eq!(refused.code, "wrong-message-recipient");
+    assert_eq!(state.store.message(parent).unwrap().unwrap().status, "read");
+    let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+        .unwrap().unwrap();
+    assert!(!marks.iter().any(|(kind, _, _)| kind == "message.closed"));
+}
+
+#[tokio::test]
 async fn reading_a_persons_message_says_who_signed_it_and_an_agents_says_nothing() {
     // Nathan, 2026-10-06: signatures existed but nothing showed them.
     let root = tempfile::tempdir().unwrap();
@@ -7784,9 +8349,10 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
         assert_eq!(body["code"], "person-has-no-inbox", "{key}");
         let text = body["message"].as_str().unwrap();
         assert!(text.starts_with("people do not have inboxes: print your answer in the chat"), "{text}");
-        let chat = text.find("print in the chat").unwrap();
+        let chat = text.find("print your answer in the chat").unwrap();
         assert!(chat < text.find("work ask").unwrap() && chat < text.find("work update").unwrap());
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     assert_eq!(
         state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
@@ -10079,6 +10645,9 @@ async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
         State(state.clone()), Extension(new_client_snapshot(&state)),
         Query(ClientListQuery { history, ..ClientListQuery::default() }),
     ).await.unwrap();
+    assert!(before.items[0]["delivery"]["reason"].as_str().unwrap()
+        .contains("daemon started 5s ago"),
+        "blocking assessments must retain the fixture's frozen uptime");
     let mut first_other_cut = None;
     for marker in 1..=12 {
         advance(marker);
@@ -12144,6 +12713,514 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
     );
 }
 
+async fn writer_binding_request(
+    app: Router,
+    path: &str,
+    bound: Option<&str>,
+    credential: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(bound) = bound {
+        request = request.extension(BoundAgent(bound.into()));
+    }
+    if let Some(credential) = credential {
+        request = request.header("authorization", format!("Bearer {credential}"));
+    }
+    let response = app
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
+}
+
+fn writer_binding_pairing(state: &AppState, credential: &str, scopes: &[&str]) {
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject: "custom/client/writer-binding".into(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some("person/example".into()),
+        fields: serde_json::from_value(json!({
+            "credential_hash": client_v0::credential_digest(credential),
+            "session_actor": "person/example/session/phone",
+            "person_id": "person/example",
+            "device_id": "device/writer-binding",
+            "scopes": scopes,
+            "expires_at_unix_ms": u64::MAX,
+            "pairing_operation_version": 1
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn writer_binding_local_claims_preserve_optional_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (name, actor) in [("person", Some("person/example")), ("missing", None)] {
+        let subject = format!("custom/example/local-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = json!(actor);
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), actor);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_bound_claim_actor_matches_and_omissions_are_attributed() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (name, actor) in [
+        ("explicit", Some(json!("agent/own"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/writer-{name}");
+        let mut body = json!({
+            "subject": subject, "kind": "custom.example.recorded", "fields": {}
+        });
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"), "{name}");
+    }
+    for actor in ["agent/other", "person/example"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None,
+            json!({"subject":"custom/example/other-writer", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for sender in ["agent/other", "person/example"] {
+        for path in ["/v1/claims", "/v1/messages"] {
+            let before = state.store.index().unwrap();
+            let body = if path == "/v1/claims" {
+                json!({"subject":"message/writer-binding-other", "kind":"message.sent",
+                    "actor":"agent/own", "fields":{
+                        "from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"
+                    }})
+            } else {
+                json!({"from":sender, "to":"agent/receiver", "content":"hello",
+                    "idempotency_key":"writer-binding-other"})
+            };
+            let (status, refusal) = writer_binding_request(
+                app.clone(), path, Some("agent/own"), None, body,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {sender}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    for path in ["/v1/claims", "/v1/messages"] {
+        let body = if path == "/v1/claims" {
+            json!({"subject":"message/writer-binding-own", "kind":"message.sent",
+                "fields":{"from":"agent/own", "to":"agent/receiver", "content":"hello", "status":"sent"}})
+        } else {
+            json!({"from":"agent/own", "to":"agent/receiver", "content":"hello",
+                "idempotency_key":"writer-binding-own"})
+        };
+        let (status, receipt) = writer_binding_request(
+            app.clone(), path, Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {receipt}");
+        let subject = receipt["subject"].as_str().unwrap();
+        let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"));
+        assert_eq!(claims[0].body["fields"]["from"], "agent/own");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_read_only_pairing_reads_and_refuses_generic_posts() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-read-only";
+    writer_binding_pairing(&state, credential, &["read.projections"]);
+    let app = router(state.clone());
+    let response = app.clone().oneshot(Request::builder()
+        .uri("/v1/claims")
+        .header("authorization", format!("Bearer {credential}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for (path, body) in [
+        ("/v1/claims", json!({"subject":"custom/example/paired-read", "kind":"custom.example.recorded",
+            "actor":"person/example", "fields":{}})),
+        ("/v1/claims", json!({"subject":"message/paired-read", "kind":"message.sent",
+            "actor":"person/example", "fields":{
+                "from":"person/example", "to":"agent/receiver", "content":"hello", "status":"sent"}})),
+        ("/v1/messages", json!({"from":"person/example", "to":"agent/receiver",
+            "content":"hello", "idempotency_key":"paired-read"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-control";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work", "control.messages"]);
+    let app = router(state.clone());
+    for (name, actor) in [
+        ("explicit", Some(json!("person/example"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/paired-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+    }
+    for actor in ["person/example/session/phone", "person/other", "agent/other"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":"custom/example/paired-other", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    for sender in ["person/example", "person/other", "person/example/session/phone"] {
+        let before = state.store.index().unwrap();
+        let subject = "message/writer-binding-paired";
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":subject, "kind":"message.sent", "actor":"person/example",
+                "fields":{"from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"}}),
+        ).await;
+        if sender == "person/example" {
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+            assert_eq!(claims[0].body["fields"]["from"], sender);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{sender}: {receipt}");
+            assert_eq!(receipt["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-reserved-records";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    let app = router(state.clone());
+    for bound in [false, true] {
+        let actor = if bound { "agent/own" } else { "person/example" };
+        for (subject, kind) in [
+            ("custom/client/writer-binding-reserved", "custom.client.pairing-completed"),
+            ("custom/client/pairing-writer-binding", "custom.example.recorded"),
+        ] {
+            let before = state.store.index().unwrap();
+            let (status, response) = writer_binding_request(
+                app.clone(), "/v1/claims", bound.then_some(actor),
+                (!bound).then_some(credential),
+                json!({"subject":subject, "kind":kind, "actor":actor,
+                    "fields":{"credential_hash":client_v0::credential_digest("reserved-record"),
+                        "session_actor":"person/example/session/other",
+                        "person_id":"person/example", "device_id":"device/other",
+                        "scopes":["control.work"], "expires_at_unix_ms":u64::MAX,
+                        "pairing_operation_version":1}}),
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bound}/{kind}: {response}");
+            assert_eq!(response["code"], "claim-write-forbidden");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_legacy_attention_operations_require_attention_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "scope-api-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let (status, ask) = json_request(app.clone(), "/v1/work/ask", json!({
+        "person":"person/example", "title":"Choose a date", "reason":"A date",
+        "actor":actor, "new_run":"scope-date", "idempotency_key":"scope-ask"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{ask}");
+    let subject = ask["subject"].as_str().unwrap();
+    let episode = state.store.claims_for(subject, Some("work.person-asked")).unwrap()[0].id.clone();
+    let credential = "writer-binding-work-only";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    for (path, body) in [
+        ("/v1/work/done", json!({"subject":subject, "actor":"person/example",
+            "summary":"Friday", "episode":episode, "evidence":[], "idempotency_key":"scope-done"})),
+        ("/v1/custom/reply", json!({"subject":"custom/example/reply",
+            "registration":"custom/example/registration", "revision":"revision/one",
+            "episode":"episode/one", "fields":{}, "actor":"person/example",
+            "idempotency_key":"scope-reply"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, response) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let projection = state.store.step_run(subject).unwrap().unwrap();
+    assert!(projection.person_answers.is_empty());
+}
+
+#[tokio::test]
+async fn writer_binding_native_sessions_and_internal_routes_retain_their_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let peer = NativeDeliveryPeer {
+        agent: "agent/native".into(), transport: "claude-hook", pid: 37, archives_inbox: false,
+    };
+    for actor in ["agent/native", "agent/other", "person/example"] {
+        let request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(peer.clone())
+            .extension(client_v0::ClientSession::for_tests(actor, actor, "unix"))
+            .body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        let result = super::write_principal::bind_request(&state, request).await;
+        assert_eq!(result.is_ok(), actor == "agent/native", "{actor}");
+    }
+    let app = router(state.clone()).layer(axum::Extension(peer.clone()));
+    let before = state.store.index().unwrap();
+    let (status, response) = writer_binding_request(
+        app, "/v1/agents/restart", None, None,
+        json!({"subject":"agent/native","actor":"agent/other","idempotency_key":"native-restart"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
+    for path in ["/v1/internal/replication/receive", "/v1/repair/apply"] {
+        for native in [false, true] {
+            let mut request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json");
+            if native { request = request.extension(peer.clone()); }
+            let result = super::write_principal::bind_request(
+                &state, request.body(Body::from("{}")).unwrap(),
+            ).await;
+            assert_eq!(result.is_ok(), !native, "{path}/{native}");
+        }
+    }
+    for native in [false, true] {
+        let mut request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(HarnessAncestry::Unavailable);
+        if native { request = request.extension(peer.clone()); }
+        let request = request.body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        assert!(super::write_principal::bind_request(&state, request).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_dedicated_optional_fields_use_the_connected_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (path, key) in [
+        ("/v1/launches", "requester"),
+        ("/v1/intent/apply", "actor"),
+        ("/v1/reviews/mission/example", "actor"),
+        ("/v1/messages/example/claims", "actor"),
+        ("/v1/delivery/hold", "actor"),
+    ] {
+        for body in [json!({}), json!({(key): null})] {
+            let request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(body.to_string())).unwrap();
+            let bound = super::write_principal::bind_request(&state, request).await.unwrap();
+            let bytes = to_bytes(bound.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value[key], "agent/own", "{path}: {value}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_native_receipts_and_tracking_retain_seat_attribution() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for transport in ["app-server", "claude-channel", "claude-hook", "omp-channel", "pi-channel", "exec"] {
+        let app = router(state.clone()).layer(axum::Extension(NativeDeliveryPeer {
+            agent: "agent/native".into(), transport, pid: 37, archives_inbox: false,
+        }));
+        for (kind, subject, fields) in [
+            ("custom.agent.initial-message", format!("custom/agent/initial-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","from":"person/example"})),
+            ("custom.agent.first-native-launch", format!("custom/agent/seed-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","outcome":"fresh"})),
+            ("subagent.appeared", "agent/native".into(),
+                json!({"subagent_id":format!("child-{transport}"),"driver":transport,
+                    "incarnation_id":"one","lease_expires_at_unix_ms":u64::MAX})),
+            ("runtime.observed", "agent/native".into(), json!({"status":"running"})),
+        ] {
+            let (status, receipt) = writer_binding_request(app.clone(), "/v1/claims", None, None,
+                json!({"subject":subject,"kind":kind,"fields":fields})).await;
+            assert_eq!(status, StatusCode::OK, "{transport}/{kind}: {receipt}");
+            assert_eq!(receipt["actor"], "agent/native");
+            if kind == "custom.agent.initial-message" {
+                assert_eq!(receipt["body"]["fields"]["from"], "person/example");
+            }
+        }
+        let (status, receipt) = writer_binding_request(app, "/v1/claims", None, None,
+            json!({"subject":"custom/example/native-other","kind":"custom.example.recorded",
+                "actor":"person/example","fields":{}})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{receipt}");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_json_media_types_and_missing_message_sender() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (media_type, sender, expected) in [
+        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("application/vnd.fractal+json; charset=utf-8", None, StatusCode::OK),
+    ] {
+        let mut fields = json!({"to":"agent/receiver","content":"hello","status":"sent"});
+        if let Some(sender) = sender { fields["from"] = json!(sender); }
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/claims")
+            .header("content-type", media_type)
+            .extension(BoundAgent("agent/own".into()))
+            .body(Body::from(json!({"subject":"message/writer-binding-media",
+                "kind":"message.sent","fields":fields}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, expected, "{}", String::from_utf8_lossy(&bytes));
+    }
+    let claim = state.store.claims_for("message/writer-binding-media", Some("message.sent")).unwrap();
+    assert_eq!(claim[0].actor.as_deref(), Some("agent/own"));
+    assert_eq!(claim[0].body["fields"]["from"], "agent/own");
+}
+
+#[tokio::test]
+async fn ordinary_claim_writes_cannot_create_pairing_records() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for kind in [
+        "custom.client.pairing-begun",
+        "custom.client.pairing-completed",
+        "custom.client.pairing-revoked",
+        "custom.client.pairing.device-grant",
+        "custom.client.pairing-future",
+    ] {
+        for subject in ["custom/client/example", "custom/client/pairing-example"] {
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": kind, "actor": "person/alex",
+                "fields": {"pairing_operation_version": 1, "person_id": "person/alex"}
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {body}");
+            assert_eq!(body["code"], "claim-write-forbidden");
+        }
+    }
+    for subject in ["custom/client/pairing-example", "custom/client/pairing.browser"] {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": subject, "kind": "custom.example.note", "fields": {}
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{subject}: {body}");
+        assert_eq!(body["code"], "claim-write-forbidden");
+    }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject":"custom/client/operation-example", "kind":"client.operation-authorized",
+        "actor":"person/alex", "fields":{"record_id":"example","record_hash":"example"}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
+    assert!(state.store.claims_for_kind_at(
+        "custom.client.pairing-completed", None, true, 10,
+    ).unwrap().claims.is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_claim_writes_cannot_create_terminal_records() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(state(root.path()));
+    for kind in [
+        "custom.client.terminal-attached",
+        "custom.client.terminal-consumed",
+        "custom.client.terminal-detached",
+    ] {
+        for subject in ["custom/client/example", "custom/client/terminal-attachment-example"] {
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": kind, "actor": "person/alex",
+                "fields": {"terminal_operation_version": 1}
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {body}");
+            assert_eq!(body["code"], "claim-write-forbidden");
+        }
+    }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject": "custom/client/terminal-attachment-example", "kind": "custom.example.note",
+        "fields": {}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
+}
+
 #[tokio::test]
 async fn public_claim_admission_and_idempotency_use_the_exported_schema() {
     let root = tempfile::tempdir().unwrap();
@@ -13286,13 +14363,13 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
 #[test]
 fn identity_rename_refusals_keep_typed_http_statuses() {
     for code in ["identity-cycle", "identity-occupied", "identity-retired-source", "lifecycle-unavailable"] {
-        let error = ApiError::bad(St3Error::new(code, "rename refused"));
+        let error = ApiError::bad(FractalError::new(code, "rename refused"));
         assert_eq!(error.status, StatusCode::CONFLICT, "{code}");
         assert_eq!(error.code, code);
     }
-    assert_eq!(ApiError::bad(St3Error::new("identity-cross-kind", "wrong kind")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-cross-kind", "wrong kind")).status,
         StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(ApiError::bad(St3Error::new("identity-unknown", "missing")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-unknown", "missing")).status,
         StatusCode::NOT_FOUND);
 }
 
@@ -13353,6 +14430,238 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
     assert_eq!(sent["recipient"], "agent/example-renamed/worker");
     assert_eq!(sent["recipient_identity"], "agent/example-original/worker");
 }
+
+/// A driver reads a seat's incarnation with `summary=true`: the declaration and the runtime's status
+/// and incarnation as a full read shows them, without the claim list a full read carries.
+#[tokio::test]
+async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    let seat = "agent/example-summary/worker";
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-summary/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "summary-declare").unwrap();
+    for index in 0..20 {
+        roster_fixture_append(&owner.store, seat, "runtime.observed", json!({
+            "status":"running", "runtime_id":seat, "host":owner.node,
+            "incarnation_id":format!("summary-incarnation-{index}")
+        }));
+    }
+    // A newer observation without an incarnation leaves the earlier one current.
+    roster_fixture_append(&owner.store, seat, "runtime.observed", json!({"status":"stopped"}));
+    let app = router(owner.clone());
+    let (status, full) = get_request(app.clone(), &format!("/v1/status?subject={seat}")).await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    let (status, summary) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true")).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let (full, summary) = (&full["subjects"][0], &summary["subjects"][0]);
+    assert!(!full["claims"].as_array().unwrap().is_empty(), "{full}");
+    assert_eq!(summary["claims"], json!([]), "{summary}");
+    assert_eq!(summary["actual"]["incarnation_id"], "summary-incarnation-19", "{summary}");
+    for field in ["incarnation_id", "status"] {
+        assert_eq!(summary["actual"][field], full["actual"][field], "{field}");
+    }
+    assert_eq!(summary["desired"], full["desired"]);
+    assert_eq!(summary["subject"], seat);
+    // Other subjects, and reads by owner, are answered in full.
+    roster_fixture_append(&owner.store, "exec/example-summary", "runtime.observed", json!({"status":"running", "incarnation_id":"exec-incarnation"}));
+    let (_, host) = get_request(app.clone(), "/v1/status?subject=exec/example-summary&summary=true").await;
+    assert!(!host["subjects"][0]["claims"].as_array().unwrap().is_empty(), "{host}");
+    // A read by owner keeps its filter: this seat belongs to no run, so it is left out.
+    let (status, owned) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true&owner_run=mission-run/example-other")).await;
+    assert_eq!(status, StatusCode::OK, "{owned}");
+    assert_eq!(owned["subjects"], json!([]), "{owned}");
+    // A seat carrying a reserved notice fact is refused, as the full read refuses it.
+    owner.store.connection.write().execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-h18ab046ede43 owner=fractal_api_core::api::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('summary-notice','node',9000,'fixture','1700000000000');
+         INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+         VALUES ('summary-notice-claim','summary-notice','{seat}','attention.notice','node','{{\"fields\":{{}}}}','[]','1700000000000');"
+    )).unwrap();
+    for path in [format!("/v1/status?subject={seat}"), format!("/v1/status?subject={seat}&summary=true")] {
+        let (status, refused) = get_request(app.clone(), &path).await;
+        assert_ne!(status, StatusCode::OK, "{path}: {refused}");
+        assert!(refused.to_string().contains("notices-unavailable"), "{path}: {refused}");
+    }
+}
+
+#[tokio::test]
+async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot_pin() {
+    for exact in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let owner = state(root.path());
+        let store = owner.store.clone();
+        let subject = "agent/example-owner/worker";
+        for incarnation in ["before", "after"] {
+            roster_fixture_append(&store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":owner.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let through = store.index().unwrap();
+        let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+            .subjects.remove(0).actual_claim.unwrap();
+        assert_eq!(store.conversation_owners_at(through).unwrap()[subject].incarnation.as_deref(), Some("after"));
+        let repair_store = store.clone();
+        MANAGED_OWNER_AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    // Repair changes retained-prefix meaning without advancing its claim cut.
+                    repair_store.connection.write().execute(
+                        /* sqlite-large-value: allow-for-now lv-h7dc166900806 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
+                        [&repaired],
+                    ).unwrap();
+                    smallclaims::Runtime::forget_views(repair_store.fractal.as_ref());
+                    let rebuilt = repair_store.conversation_owners_at(through).unwrap();
+                    assert_eq!(rebuilt[subject].incarnation.as_deref(), Some("before"));
+                }).join().unwrap();
+            }));
+        });
+        let session = managed_session_id(subject, "after");
+        let found = if exact {
+            managed_session_owner_for_subject_at(&store, through, &session, subject)
+        } else {
+            managed_session_owner_at(&store, through, &session)
+        }.unwrap().expect("the pinned prefix still contains the unrepaired incarnation");
+        assert!(MANAGED_OWNER_AFTER_PIN.with(|hook| hook.borrow().is_none()));
+        assert_eq!(found.1.as_deref(), Some("after"));
+        assert!(managed_session_owner_at(&store, through, &session).unwrap().is_none());
+        assert!(managed_session_owner_for_subject_at(&store, through, &session, subject).unwrap().is_none());
+    }
+}
+
+#[test]
+fn managed_owner_collision_keeps_the_first_visible_subject_and_exact_path_equivalence() {
+    for hide_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let first = "agent/collision/a";
+        let second = "agent/collision/a:b";
+        for (subject, incarnation) in [(first, "b:c"), (second, "c")] {
+            roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":state.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let id = managed_session_id(first, "b:c");
+        assert_eq!(id, managed_session_id(second, "c"));
+        if hide_first {
+            // A retained reserved fact hides the subject without changing its routing ID.
+            state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hc075bae4b26b owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                 SELECT 'collision-notice',batch_id,subject,'attention.notice',origin,
+                        '{\"fields\":{}}','[]',accepted_at_unix_ms
+                 FROM claims WHERE subject=?1 LIMIT 1", [first],
+            ).unwrap();
+        }
+        state.store.read_snapshot(|cut| {
+            assert_eq!(state.store.generic_status_subject_visible_at(first, cut)?, !hide_first);
+            let generic = managed_session_owner_at(&state.store, cut, &id)?;
+            assert_eq!(generic.as_ref().unwrap().0, if hide_first { second } else { first });
+            for hint in [first, second, "agent/missing"] {
+                assert_eq!(
+                    managed_session_owner_for_timeline_at(&state.store, cut, &id, hint)?,
+                    generic,
+                    "hide_first={hide_first}, hint={hint}",
+                );
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn managed_owner_map_is_built_once_for_many_timeline_pages_in_one_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subjects: Vec<_> = (0..4).map(|i| format!("agent/owner-memo/worker-{i}")).collect();
+    for subject in &subjects {
+        roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":"current",
+        }));
+    }
+    let session = client_v0::ClientSession::for_tests_scoped(
+        "person/alex", "person/alex", &["read.projections"],
+    );
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    state.store.read_snapshot(|_| {
+        let snapshot = new_client_snapshot(&state);
+        for subject in &subjects {
+            let id = managed_session_id(subject, "current");
+            assert_eq!(managed_session_owner_for_timeline_at(
+                &state.store, snapshot.store_index, &id, subject,
+            )?.unwrap().0, *subject);
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 0);
+        // First pages perform authorization too: repeating them must not fold the fleet.
+        for _ in 0..5 {
+            for subject in &subjects {
+                let id = managed_session_id(subject, "current");
+                let Json(page) = client_v0::timeline_value(
+                    &state, &snapshot, &session, &id,
+                    &ClientListQuery { limit: Some(1), ..Default::default() },
+                ).unwrap();
+                assert!(page["items"].is_array(), "{page}");
+                assert_eq!(managed_session_owner_at(&state.store, snapshot.store_index, &id)?.unwrap().0, *subject);
+                assert_eq!(managed_session_owner_for_timeline_at(
+                    &state.store, snapshot.store_index, &id, subject,
+                )?, managed_session_owner_at(&state.store, snapshot.store_index, &id)?);
+            }
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn managed_owner_memo_expires_before_a_same_cut_repair_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    let subject = "agent/owner-memo/repair";
+    for incarnation in ["before", "after"] {
+        roster_fixture_append(store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":incarnation,
+        }));
+    }
+    let through = store.index().unwrap();
+    let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+        .subjects.remove(0).actual_claim.unwrap();
+    let after = managed_session_id(subject, "after");
+    let before = managed_session_id(subject, "before");
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_some());
+        assert!(managed_session_owner_at(store, through, &before)?.is_none());
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-he543d968a9fa owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
+    ).unwrap();
+    smallclaims::Runtime::forget_views(store.fractal.as_ref());
+    assert_eq!(store.index().unwrap(), through);
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_none());
+        // The inventory's old session must be re-resolved after repair on this new pin.
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &before, subject)?,
+            managed_session_owner_at(store, through, &before)?);
+        assert_eq!(managed_session_owner_at(store, through, &before)?.unwrap().1.as_deref(), Some("before"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 2);
+}
+
 
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
@@ -13825,7 +15134,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     let preview = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
     state.store.apply(&intent, &preview.subject_tokens, "signature-resume-owner").unwrap();
     let fault_agent = state.store.fleet_fault_agent().unwrap().unwrap();
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let fault = || state.store.signature_migration().unwrap().fault;
 
     state.store.fail_signature_migration("fixture stopped page").unwrap();
@@ -13861,7 +15170,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
 async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let dismiss = |bound: Option<&'static str>, actor: &'static str| {
         let mut request = Request::builder()
             .method("POST")
@@ -13918,7 +15227,7 @@ async fn checkpoint_actor_request(
 async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
         for actor in ["person/operator", "agent/other"] {
             let before = state.store.index().unwrap();
@@ -13955,7 +15264,7 @@ async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
     state.store.trim_locally(true).unwrap();
     *state.store.extension::<crate::store::answers_check::TrimSettings>()
         .notify.lock().unwrap() = Some("agent/helper".into());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let (status, resumed) = checkpoint_actor_request(
         app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
     ).await;
@@ -14426,4 +15735,115 @@ async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked
         "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
     })).await;
     assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
+}
+
+#[test]
+fn population_repository_observations_require_current_host_and_workspace() {
+    let store = Store::open_memory("node").unwrap();
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "workspace-overlay").unwrap();
+    let subject = "agent/example/workspace";
+    for (host, workspace, repository, expected) in [
+        ("node", "/tmp", Some("example/current"), Some(json!("example/current"))),
+        ("remote", "/tmp", Some("example/wrong-host"), None),
+        ("node", "/previous", Some("example/wrong-workspace"), None),
+        ("node", "/tmp", None, Some(Value::Null)),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("host".into(), json!(host)),
+            ("workspace".into(), json!(workspace)),
+        ]);
+        if let Some(repository) = repository {
+            fields.insert("repository".into(), json!(repository));
+        }
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "workspace.observed".into(), actor: None,
+            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        assert!(rows.iter().all(|card| card.get("observed_repository").is_none()));
+        overlay_population_repositories(&store, &mut rows).unwrap();
+        let card = rows.iter().find(|card| card["id"] == subject).unwrap();
+        assert_eq!(card.get("observed_repository"), expected.as_ref(), "{host} {workspace}");
+    }
+    // Reusing a presented card must erase evidence that no longer matches its location.
+    let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    rows[0]["workspace"] = json!("/moved");
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert!(rows[0].get("observed_repository").is_none());
+}
+
+#[test]
+fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
+    for (count, enabled) in [(1, false), (32, false), (1, true), (32, true)] {
+        let store = Store::open_memory("node").unwrap();
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(enabled).unwrap();
+        let mut source = String::from("version 2\n");
+        for i in 0..count {
+            source.push_str(&format!(
+                "agent \"example/seat-{i}\" {{ workspace \"/tmp\"; command \"true\" }}\n"
+            ));
+        }
+        store.apply_internal(&parse_intent(&source, "node").unwrap(), "workspace-query-growth").unwrap();
+        for i in 0..count {
+            store.append_claim(&ClaimInput {
+                subject: format!("agent/example/seat-{i}"), kind: "workspace.observed".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("host".into(), json!("node")),
+                    ("workspace".into(), json!("/tmp")),
+                    ("repository".into(), json!("example/current")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        let rows = client_agent_resources(&store, false, "warm", index).unwrap();
+        assert_eq!(rows.len(), count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let rows = client_agent_resources(&store, false, "again", index).unwrap();
+        let work = scope.finish();
+        assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|card| ["runtime_state", "_runtime_state", "observed_repository"]
+            .iter().all(|field| card.get(*field).is_none())),
+            "population-only evidence leaked into ordinary agent resources");
+        // The identical fixture at pinned base b0bbc6dc uses six statements
+        // for both cardinalities: population evidence must add no request reads.
+        assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
+    }
+}
+
+#[test]
+fn population_repository_normalizes_production_shaped_checkout_paths() {
+    let store = Store::open_memory("node").unwrap();
+    let mut rows = vec![json!({
+        "id":"agent/example.workspace", "workspace":"/work/tree", "host_id":"host/node",
+        "checkout":{"repository":"/srv/checkouts/github.com/Example/Repo/refs/heads/main"}
+    })];
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert_eq!(rows[0]["checkout"]["repository"], "example/repo");
+    for (raw, expected) in [
+        ("/srv/checkouts/github.com/example/repo", Some("example/repo")),
+        ("/srv/checkouts/github.com/example/repo/refs/heads/feature/topic", Some("example/repo")),
+        ("example/repo", Some("example/repo")),
+        ("/srv/work/repo", None),
+        ("/srv/github.com/example/repo/../other", None),
+        ("/srv/github.com/example/repo/arbitrary", None),
+        ("example/repo/extra", None),
+        ("https://github.com/example/repo", None),
+    ] {
+        assert_eq!(canonical_population_repository(raw).as_deref(), expected, "{raw}");
+    }
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "population-repository-path").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"agent/example/workspace".into(), kind:"workspace.observed".into(), actor:None,
+        fields:BTreeMap::from([
+            ("host".into(), json!("node")), ("workspace".into(), json!("/tmp")),
+            ("repository".into(), json!("/srv/checkouts/github.com/example/repo/refs/heads/main")),
+        ]),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    overlay_population_repositories(&store, &mut cards).unwrap();
+    assert_eq!(cards[0]["observed_repository"], "example/repo");
 }

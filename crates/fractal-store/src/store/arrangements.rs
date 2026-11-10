@@ -83,6 +83,7 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
     let mut writes = Vec::new();
     let mut legacy_authority = false;
     let mut created_v2 = false;
+    let mut migrating = false;
     for operation in operations {
         match operation {
             Operation::Create { name } => {
@@ -106,6 +107,10 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
                 writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key})));
             }
             Operation::Retire {} => { transaction.execute(/* sqlite-large-value: allow-for-now lv-hcd2673f57bfc owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
+            Operation::MembershipMigrate {} => {
+                migrating = true;
+                writes.push(("membership-authority".into(), json!(true)));
+            }
         }
     }
     for (register,value) in writes {
@@ -121,6 +126,11 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
         // only an existing register leaves pure legacy projections unchanged.
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h40e8b57085c3 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangement_registers SET value='1'
             WHERE subject=?1 AND register='version' AND value!='1'", [&claim.subject])?;
+    }
+    if migrating {
+        ordered_membership::backfill_legacy(transaction, &claim.subject, claim.store_index)?;
+    } else if legacy_authority {
+        ordered_membership::project_legacy_claim(transaction, claim)?;
     }
     ordered_membership::container_changed(transaction, &claim.subject, claim.store_index, membership_before)?;
     Ok(owner)
@@ -216,8 +226,16 @@ fn retained_legacy_authority(connection: &Connection, subject: &str) -> Result<b
         [subject], |row| row.get(0),
     )?)
 }
+/// The retained authority marker is monotone, independent of create/version claim ordering.
+pub(super) fn migrated(connection: &Connection, subject: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM arrangement_registers WHERE subject=?1 AND register='membership-authority')",
+        [subject], |row| row.get(0),
+    )?)
+}
 
 pub fn version(connection: &Connection, subject: &str) -> Result<u8> {
+    if migrated(connection, subject)? { return Ok(2); }
     Ok(connection.query_row(
         "SELECT CAST(value AS INTEGER) FROM arrangement_registers WHERE subject=?1 AND register='version'",
         [subject], |row| row.get(0),
@@ -287,10 +305,11 @@ pub fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &
             && let Some(position) = heads.get(&format!("folder/{id}/position")) {
             folders.insert(id.into(),json!({"name":register(head),"position":register(position),"tombstone":heads.get(&format!("folder/{id}/tombstone")).map(register)}));
         }
-        if let Some(subject) = key.strip_prefix("placement/") { placements.insert(subject.into(),register(head)); }
+        if version == 1 && let Some(subject) = key.strip_prefix("placement/") { placements.insert(subject.into(),register(head)); }
     }
     let mut body = json!({"version":version,"name":register(heads.get("name").context("created arrangement name")?),"folders":folders});
-    let resolved = resolved(heads);
+    let resolved = if version == 1 { resolved(heads) }
+        else { json!({"parents":live_ancestors(heads).0,"folders":{}}) };
     if version == 1 { body["placements"] = json!(placements); }
     Ok(json!({"id":subject,"kind":"arrangement","owner":owner,"revision":revision,"deleted":false,
         "body":body,"resolved":resolved,
@@ -304,27 +323,28 @@ pub fn arrangements_at(connection: &Connection, person: &str, through: u64) -> R
     subjects.into_iter().filter_map(|subject| arrangement_at(connection,&subject,through).transpose()).collect()
 }
 
-pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), St3Error> {
+pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), FractalError> {
     if input.kind != "arrangement.edited" { return Ok(()); }
-    let operations = schema::operations(&input.subject,&input.fields).map_err(|e| St3Error::new(e.code,e.message))?;
+    let operations = schema::operations(&input.subject,&input.fields).map_err(|e| FractalError::new(e.code,e.message))?;
     let state = transaction.query_row("SELECT created,retired FROM arrangements WHERE subject=?1", [&input.subject], |row| Ok((row.get::<_,bool>(0)?,row.get::<_,bool>(1)?))).optional().map_err(internal)?;
-    if state.is_some_and(|(_,retired)| retired) { return Err(St3Error::new("arrangement-retired","a retired arrangement ID cannot be reused")); }
+    if state.is_some_and(|(_,retired)| retired) { return Err(FractalError::new("arrangement-retired","a retired arrangement ID cannot be reused")); }
     let creating = operations.iter().any(|op| matches!(op,Operation::Create { .. }));
-    if creating == state.is_some_and(|(created,_)| created) { return Err(St3Error::new(if creating { "arrangement-exists" } else { "not-found" }, "creation requires a new arrangement; other edits require an existing arrangement")); }
+    if creating == state.is_some_and(|(created,_)| created) { return Err(FractalError::new(if creating { "arrangement-exists" } else { "not-found" }, "creation requires a new arrangement; other edits require an existing arrangement")); }
     if !creating {
         let version = version(transaction, &input.subject).map_err(internal)?;
         if input.fields.contains_key("version") {
-            return Err(St3Error::new("invalid-arrangement-operations", "an arrangement version may only be supplied on creation"));
+            return Err(FractalError::new("invalid-arrangement-operations", "an arrangement version may only be supplied on creation"));
         }
         if version == 2 && operations.iter().any(|operation| matches!(operation, Operation::SubjectPlace { .. })) {
-            return Err(St3Error::new("invalid-arrangement-operations", "version-2 placements require ordered membership actions"));
+            return Err(FractalError::new("invalid-arrangement-operations", "version-2 placements require ordered membership actions"));
         }
     }
     if creating {
-        let count: usize = transaction.query_row("SELECT COUNT(*) FROM arrangements WHERE owner=?1 AND created=1 AND retired=0", [schema::owner(&input.subject).map_err(|e| St3Error::new(e.code,e.message))?], |row| row.get(0)).map_err(internal)?;
-        if count >= schema::MAX_ARRANGEMENTS { return Err(St3Error::new("arrangement-limit","at most 100 arrangements may be live locally")); }
+        let count: usize = transaction.query_row("SELECT COUNT(*) FROM arrangements WHERE owner=?1 AND created=1 AND retired=0", [schema::owner(&input.subject).map_err(|e| FractalError::new(e.code,e.message))?], |row| row.get(0)).map_err(internal)?;
+        if count >= schema::MAX_ARRANGEMENTS { return Err(FractalError::new("arrangement-limit","at most 100 arrangements may be live locally")); }
     }
     if matches!(operations.as_slice(), [Operation::Retire {}]) { return Ok(()); }
+    if matches!(operations.as_slice(), [Operation::MembershipMigrate {}]) { return Ok(()); }
     let prepared_head = |value| (value, "0".repeat(64), Vec::new());
     let mut heads = heads(transaction,&input.subject).map_err(internal)?;
     let known_ids: BTreeSet<_> = heads.keys().filter_map(|key| key.strip_prefix("folder/").and_then(|tail| tail.split_once('/')).map(|(id,_)| id.to_owned())).collect();
@@ -340,13 +360,13 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             }
             Operation::Rename { name } => { heads.insert("name".into(), prepared_head(json!(name))); }
             Operation::FolderCreate { id,name,parent,key } => {
-                if known_ids.contains(id) { return Err(St3Error::new("arrangement-folder-exists","folder IDs cannot be reused")); }
+                if known_ids.contains(id) { return Err(FractalError::new("arrangement-folder-exists","folder IDs cannot be reused")); }
                 heads.insert(format!("folder/{id}/name"),prepared_head(json!(name)));
                 heads.insert(format!("folder/{id}/position"),prepared_head(json!({"parent":parent,"key":key})));
             }
             Operation::FolderRename { id,.. } | Operation::FolderMove { id,.. } | Operation::FolderDelete { id } => {
-                if !known_ids.contains(id) && !created_ids.contains(id.as_str()) { return Err(St3Error::new("not-found","the folder does not exist")); }
-                if initial_deleted.contains(id) { return Err(St3Error::new("arrangement-folder-deleted","a deleted folder ID cannot be edited or reused")); }
+                if !known_ids.contains(id) && !created_ids.contains(id.as_str()) { return Err(FractalError::new("not-found","the folder does not exist")); }
+                if initial_deleted.contains(id) { return Err(FractalError::new("arrangement-folder-deleted","a deleted folder ID cannot be edited or reused")); }
                 match op {
                     Operation::FolderRename { name,.. } => { heads.insert(format!("folder/{id}/name"),prepared_head(json!(name))); }
                     Operation::FolderMove { parent,key,.. } => { heads.insert(format!("folder/{id}/position"),prepared_head(json!({"parent":parent,"key":key}))); }
@@ -357,7 +377,7 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             Operation::SubjectPlace { subject,folder,key } => {
                 let identity = super::identities::resolve_reference_conn(transaction, subject)?;
                 if identity != *subject {
-                    return Err(St3Error::new("invalid-arrangement-operations",
+                    return Err(FractalError::new("invalid-arrangement-operations",
                         "signed placement targets must use immutable identities"));
                 }
                 heads.insert(format!("placement/{identity}"),prepared_head(json!({"folder":folder,"key":key})));
@@ -370,20 +390,23 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
             let mut cursor = parent.as_deref();
             let mut seen = BTreeSet::new();
             while let Some(ancestor) = cursor {
-                if ancestor == id { return Err(St3Error::new("arrangement-cycle","a folder cannot move into itself or its descendants")); }
+                if ancestor == id { return Err(FractalError::new("arrangement-cycle","a folder cannot move into itself or its descendants")); }
                 if !seen.insert(ancestor) { break; }
                 cursor = heads.get(&format!("folder/{ancestor}/position")).and_then(|h| h.0["parent"].as_str());
             }
         }
     }
-    let folders = heads.keys().filter(|k| k.starts_with("folder/") && k.ends_with("/name")).count();
-    let placements = heads.keys().filter(|k| k.starts_with("placement/")).count();
-    if folders > schema::MAX_FOLDERS || placements > schema::MAX_PLACEMENTS { return Err(St3Error::new("arrangement-limit","arrangement folder or placement count exceeds its admission bound")); }
     let layout_version = if creating {
         u8::try_from(input.fields.get("version").and_then(Value::as_u64).unwrap_or(1)).expect("validated arrangement version")
     } else { version(transaction, &input.subject).map_err(internal)? };
+    let folders = heads.keys().filter(|k| k.starts_with("folder/") && k.ends_with("/name")).count();
+    let legacy_placements_exceed_limit = layout_version == 1
+        && heads.keys().filter(|k| k.starts_with("placement/")).count() > schema::MAX_PLACEMENTS;
+    if folders > schema::MAX_FOLDERS || legacy_placements_exceed_limit {
+        return Err(FractalError::new("arrangement-limit","arrangement folder or placement count exceeds its admission bound"));
+    }
     let projected = resource(&input.subject, input.fields["owner"].as_str().expect("validated owner"), &"0".repeat(64), now_ms(), &heads, layout_version).map_err(internal)?;
-    if serde_json::to_vec(&projected).map_err(internal)?.len() > schema::MAX_RESOURCE_BYTES { return Err(St3Error::new("arrangement-body-too-large","projected arrangement resource exceeds 512 KiB")); }
+    if serde_json::to_vec(&projected).map_err(internal)?.len() > schema::MAX_RESOURCE_BYTES { return Err(FractalError::new("arrangement-body-too-large","projected arrangement resource exceeds 512 KiB")); }
     Ok(())
 }
 

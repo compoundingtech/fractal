@@ -336,6 +336,44 @@ pub(crate) fn joined(unit: &str, pid: u32) -> bool {
     })
 }
 
+/// How long `systemd-run --scope` gets to join its scope. Its request to start the scope gives up
+/// sooner, at the bus's 25s method timeout, but its wait for the start job to run has no limit.
+pub(crate) const SCOPE_JOIN_LIMIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Join {
+    Joined,
+    Exited,
+    TimedOut,
+}
+
+/// Waits until `pid` has joined the scope `unit`, or `alive` says it has exited, for up to `limit`.
+/// Until it joins, `systemd-run` is in the cgroup of the process that started it, and a kill of
+/// that cgroup ends it.
+pub(crate) fn await_join(
+    unit: &str,
+    pid: u32,
+    limit: Duration,
+    alive: impl Fn() -> Result<bool>,
+) -> Result<Join> {
+    let started = Instant::now();
+    // A join usually takes a few milliseconds, so look often at first.
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if joined(unit, pid) {
+            return Ok(Join::Joined);
+        }
+        if !alive()? {
+            return Ok(Join::Exited);
+        }
+        if started.elapsed() >= limit {
+            return Ok(Join::TimedOut);
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(10));
+    }
+}
+
 /// Whether this process has seen the work scope `unit` empty.
 pub(crate) fn has_ended(unit: &str) -> bool {
     ENDED
@@ -662,7 +700,6 @@ mod tests {
 
     #[test]
     fn instance_isolation_probe_uses_the_host_runtime_directory() {
-        use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
         let environment = std::collections::BTreeMap::from([
             ("PATH".into(), root.path().display().to_string()),
@@ -674,12 +711,11 @@ mod tests {
             ),
         ]);
         for program in ["systemd-run", "systemctl"] {
-            let path = root.path().join(program);
-            std::fs::write(
-                &path,
+            crate::test_executable::fake_executable(
+                root.path(),
+                program,
                 "#!/bin/sh\n[ \"$XDG_RUNTIME_DIR\" = /run/user/1000 ] || exit 1\nprintf 'systemd 260\\n'\n",
-            ).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            );
         }
         assert_eq!(systemd_scope_in(&environment), Some(true));
         let mut without_instance = environment.clone();
@@ -730,7 +766,7 @@ mod tests {
 
     #[test]
     fn isolation_probe_resolves_tools_from_the_captured_path() {
-        use std::os::unix::fs::PermissionsExt as _;
+        use crate::test_executable::fake_executable;
         let root = tempfile::tempdir().unwrap();
         let environment = std::collections::BTreeMap::from([
             ("PATH".into(), root.path().display().to_string()),
@@ -739,19 +775,16 @@ mod tests {
         ]);
         assert_eq!(systemd_scope_in(&environment), None);
         for program in ["systemd-run", "systemctl"] {
-            let path = root.path().join(program);
-            std::fs::write(&path, "#!/bin/sh\n[ \"$ORCHID_CONTROL\" = captured ] || exit 1\nprintf 'systemd 249 (249.11)\\n'\n").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            fake_executable(root.path(), program, "#!/bin/sh\n[ \"$ORCHID_CONTROL\" = captured ] || exit 1\nprintf 'systemd 249 (249.11)\\n'\n");
         }
         assert_eq!(systemd_scope_in(&environment), Some(false));
-        let systemd_run = root.path().join("systemd-run");
-        std::fs::write(
-            &systemd_run,
+        fake_executable(
+            root.path(),
+            "systemd-run",
             "#!/bin/sh\n[ \"$ORCHID_CONTROL\" = captured ] || exit 1\nprintf 'systemd 260\\n'\n",
-        )
-        .unwrap();
+        );
         assert_eq!(systemd_scope_in(&environment), Some(true));
-        std::fs::write(root.path().join("systemctl"), "#!/bin/sh\nexit 1\n").unwrap();
+        fake_executable(root.path(), "systemctl", "#!/bin/sh\nexit 1\n");
         assert_eq!(systemd_scope_in(&environment), None);
     }
 

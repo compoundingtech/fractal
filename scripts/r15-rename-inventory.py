@@ -106,7 +106,7 @@ def main():
             raise ValueError(f'{current_path}:{flow["function"]}: flow changed beyond the rename')
         flow['fingerprint'] = actual['fingerprint']
         changed += 1
-    path.write_text(json.dumps(manifest, indent=2) + '\n')
+    path.write_text(slv.manifest_text(manifest))
     print(f'Proved {changed} source-only inventory fingerprint transitions')
     subprocess.run([sys.executable, 'scripts/crate_cut.py', 'inventory'], cwd=ROOT, check=True)
 

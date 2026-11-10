@@ -5,6 +5,7 @@ use tokio::sync::{Notify, watch};
 
 fn state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("presence-test").unwrap()),

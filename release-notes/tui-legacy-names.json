@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal UI reports itself as fractal-tui and uses FRACTAL_TUI_* names for unbridged test and diagnostic settings.",
+  "replay": {"status": "none", "detail": "No graph replay changes."},
+  "schema": {"status": "none", "detail": "No persisted schema or wire identifier changes."},
+  "rules": {"status": "none", "detail": "No authority or permission changes."},
+  "compatibility": {"status": "changed", "detail": "Existing client-name readers accept fractal-tui. Legacy state paths and bridged STUI_CLIENT_LABEL and STUI_FEED_TIMER_CAP_MS remain unchanged."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "changed", "detail": "Use FRACTAL_TUI_ instead of STUI_ for UPDATE_CONTRACT, UPDATE_GOLDEN, TIMING_LOG, OFFLINE_GRACE_MS, OPEN_TRACE_FILE, OPEN_TRACE_CONVERSATION, TEST_PANIC_AFTER_ENTER, BENCH_ALERT and PROBE_* settings."},
+  "recovery": {"status": "none", "detail": "No durable state changes to recover."}
+}

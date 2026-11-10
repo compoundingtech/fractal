@@ -12,7 +12,7 @@ mod voice;
 pub use ui::screens::{HOME_IDLE_TEXT, HOME_UNKNOWN_TEXT};
 pub use ui::checklist;
 pub use ui::playback;
-pub use version::{display_version, set_build_stamps};
+pub use version::{client_name, display_version, set_build_stamps};
 
 #[cfg(test)]
 use fractal_daemon::EvidenceStore;
@@ -160,7 +160,7 @@ fn terminal_closed(revents: libc::c_short) -> bool {
     false
 }
 /// How many looks, a tenth of a second apart, a terminal must keep looking closed before the
-/// watch below ends stui. A terminal that is really gone stays gone; the macOS test in
+/// watch below ends the TUI. A terminal that is really gone stays gone; the macOS test in
 /// `terminal_closed` (readable with nothing queued) can also hold for an instant while another
 /// thread of this process drains the keys that made it readable.
 const HANGUP_LOOKS: u32 = 10;
@@ -183,11 +183,11 @@ fn watch_terminal_hangup() {
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
     //
-    // Nathan, 2026-10-17: stui on a macOS laptop ended again and again with no panic, no signal and no
+    // Nathan, 2026-10-17: the TUI on a macOS laptop ended again and again with no panic, no signal and no
     // line in exits.log (`silent_exits` in its counters, a draft restored as unclean). This
     // thread was the one place that ends the process without a trace, and on macOS a single
     // look at "readable, nothing queued" was enough. It now needs the look to hold for a
-    // second, and says so in exits.log when it does end stui.
+    // second, and says so in exits.log when it does end the TUI.
     std::thread::spawn(|| {
         let mut run = 0;
         loop {
@@ -410,24 +410,18 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
     }
 }
 
-/// The typed answer for a person step: the named answer chosen, or the person's own words where
-/// the request takes them. Words alone on a structured request were refused (`answer-required`),
-/// so an answer typed into a custom choice left the item on Home (Nathan, 2026-10-03).
+/// Named answers carry optional notes. Words alone answer only feedback or a custom choice;
+/// the server validates required text, including the changes on a request-changes answer.
 fn person_answer(
     request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
     words: &str,
 ) -> Result<Option<fractal_client::PersonAnswerInput>> {
     if let Some(id) = chosen {
-        // Requesting changes carries the changes, in the person's words.
-        let changes = request.is_some_and(|request| {
-            request.answers.iter().any(|answer| {
-                answer.id == id && answer.outcome.as_deref() == Some("request_changes")
-            })
-        });
+        let text = words.trim();
         return Ok(Some(fractal_client::PersonAnswerInput {
             id: Some(id),
-            text: changes.then(|| words.trim().to_owned()),
+            text: (!text.is_empty()).then(|| text.to_owned()),
         }));
     }
     let Some(request) = request else {
@@ -437,19 +431,28 @@ fn person_answer(
     match request.entry_type.as_str() {
         "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
         "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
-        // A decision takes words as its request for changes, when it offers one.
-        _ => match request
-            .answers
-            .iter()
-            .find(|answer| answer.outcome.as_deref() == Some("request_changes"))
-        {
-            Some(changes) => Ok(Some(fractal_client::PersonAnswerInput {
-                id: Some(changes.id.clone()),
-                text,
-            })),
-            None => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
-        },
+        _ => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
     }
+}
+
+/// The action requires a summary even when a named answer has no optional note.
+fn person_step_response(
+    request: Option<&fractal_client::StructuredRequest>,
+    chosen: Option<String>,
+    note: Option<String>,
+) -> Result<(String, Option<fractal_client::PersonAnswerInput>)> {
+    let words = note.as_deref().unwrap_or("");
+    let summary = if !words.trim().is_empty() {
+        words.to_owned()
+    } else {
+        chosen.as_ref().and_then(|id| {
+            request.and_then(|request| request.answers.iter().find(|answer| &answer.id == id))
+        }).map(|answer| answer.label.clone())
+            .filter(|label| !label.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?
+    };
+    let answer = person_answer(request, chosen, words)?;
+    Ok((summary, answer))
 }
 
 /// Perform `action` on `current`, a card as st showed it, fenced on that card.
@@ -515,10 +518,8 @@ async fn act_on_card(
             client.custom_reply(id, idem, fence, parameters).await?
         }
         "work.done" => {
-            let summary = reason
-                .filter(|summary| !summary.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?;
-            let answer = person_answer(attention.request.as_ref(), answer, &summary)?;
+            let (summary, answer) =
+                person_step_response(attention.request.as_ref(), answer, reason)?;
             client
                 .work_done(
                     id,
@@ -927,7 +928,7 @@ pub fn run(mut options: Args) -> Result<()> {
     let open_timing = ui::open_timing::Trace::from_env(process_started);
     fractal_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
-    if let Some(path) = std::env::var_os("STUI_TIMING_LOG") {
+    if let Some(path) = std::env::var_os("FRACTAL_TUI_TIMING_LOG") {
         install_timing_log(path.into());
     }
     let args = options.render_args();
@@ -1127,48 +1128,20 @@ mod tests {
         assert_eq!(line["epoch_ms"], 1_791_443_946_902_u64);
     }
 
-    #[test]
-    fn words_answer_a_structured_request_the_way_it_takes_them() {
-        let request = |kind: &str,
-                       custom: bool,
-                       answers: serde_json::Value|
-         -> fractal_client::StructuredRequest {
-            serde_json::from_value(serde_json::json!({
-                "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
-                "custom": custom, "answers": answers
-            }))
-            .unwrap()
-        };
-        let options = serde_json::json!([
-            {"id": "works", "label": "Works", "consequence": "Done."},
-            {"id": "broken", "label": "Broken", "consequence": "Fixed."}
-        ]);
-        // Nathan, 2026-10-03: words on a custom choice were sent as a bare summary and refused.
-        let custom = request("choice", true, options.clone());
-        let answer = person_answer(Some(&custom), None, " found it, works ")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (answer.id, answer.text.as_deref()),
-            (None, Some("found it, works"))
-        );
-        // A chosen answer goes by its id.
-        let chosen = person_answer(Some(&custom), Some("works".into()), "Works")
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.id.as_deref(), Some("works"));
-        // Feedback takes words; a free-text ask takes the summary alone.
-        let feedback = request("feedback", false, serde_json::json!([]));
-        assert!(
-            person_answer(Some(&feedback), None, "notes")
-                .unwrap()
-                .unwrap()
-                .text
-                .is_some()
-        );
-        assert!(person_answer(None, None, "notes").unwrap().is_none());
-        // A decision takes words as its request for changes; a fixed choice cannot take words.
-        let decision = request(
+    fn person_request(
+        kind: &str,
+        custom: bool,
+        answers: serde_json::Value,
+    ) -> fractal_client::StructuredRequest {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
+            "custom": custom, "answers": answers
+        }))
+        .unwrap()
+    }
+
+    fn decision_request() -> fractal_client::StructuredRequest {
+        person_request(
             "decision",
             false,
             serde_json::json!([
@@ -1176,23 +1149,109 @@ mod tests {
                 {"id": "hold", "label": "Hold", "consequence": "Nothing.", "outcome": "decline"},
                 {"id": "change", "label": "Change", "consequence": "Revised.", "outcome": "request_changes"}
             ]),
-        );
-        let chosen = person_answer(Some(&decision), Some("change".into()), "rename it")
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.text.as_deref(), Some("rename it"));
-        let changes = person_answer(Some(&decision), None, "rename it")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (changes.id.as_deref(), changes.text.as_deref()),
-            (Some("change"), Some("rename it"))
-        );
-        assert!(person_answer(Some(&request("choice", false, options)), None, "words").is_err());
+        )
+    }
+
+    #[test]
+    fn work_done_transport_has_a_summary_without_inventing_a_named_note() {
+        let request = decision_request();
+        for (id, label) in [("land", "Land"), ("hold", "Hold")] {
+            for note in [None, Some(String::new()), Some("  ".into())] {
+                let (summary, answer) =
+                    person_step_response(Some(&request), Some(id.into()), note).unwrap();
+                let parameters = PersonStepParameters {
+                    target_id: "step-run/example".into(),
+                    episode: "episode/example".into(),
+                    summary,
+                    evidence: vec![],
+                    answer,
+                };
+                assert_eq!(parameters.summary, label);
+                let answer = parameters.answer.unwrap();
+                assert_eq!(answer.id.as_deref(), Some(id));
+                assert_eq!(answer.text, None, "the summary is not an answer note");
+            }
+        }
+        let (summary, answer) = person_step_response(
+            Some(&request), Some("land".into()), Some("ship today".into())
+        ).unwrap();
+        assert_eq!(summary, "ship today");
+        assert_eq!(answer.unwrap().text.as_deref(), Some("ship today"));
+        assert!(person_step_response(None, None, None).is_err());
+    }
+
+    #[test]
+    fn named_decision_answers_preserve_notes_for_every_outcome() {
+        let request = decision_request();
+        for id in ["land", "hold", "change"] {
+            let answer = person_answer(Some(&request), Some(id.into()), "  Keep the scope small.\n ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some(id));
+            assert_eq!(answer.text.as_deref(), Some("Keep the scope small."));
+        }
+    }
+
+    #[test]
+    fn named_choice_answers_preserve_notes_without_enabling_custom_answers() {
+        for custom in [false, true] {
+            let request = person_request(
+                "choice",
+                custom,
+                serde_json::json!([
+                    {"id": "works", "label": "Works", "consequence": "Done."}
+                ]),
+            );
+            let answer = person_answer(Some(&request), Some("works".into()), " found it, works ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some("works"));
+            assert_eq!(answer.text.as_deref(), Some("found it, works"));
+        }
+    }
+
+    #[test]
+    fn words_alone_do_not_infer_a_request_changes_answer() {
+        let request = decision_request();
+        assert!(person_answer(Some(&request), None, "rename it").is_err());
+        assert!(person_answer(Some(&request), None, "").is_err());
+    }
+
+    #[test]
+    fn blank_named_answer_notes_remain_absent_for_server_validation() {
+        let request = decision_request();
+        for id in ["land", "hold", "change"] {
+            let answer = person_answer(Some(&request), Some(id.into()), " \n\t ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some(id));
+            // The server, not the transport, rejects request_changes without text.
+            assert!(answer.text.is_none());
+        }
+    }
+
+    #[test]
+    fn words_alone_answer_only_feedback_or_a_custom_choice() {
+        let options = serde_json::json!([
+            {"id": "works", "label": "Works", "consequence": "Done."}
+        ]);
+        for request in [
+            person_request("choice", true, options.clone()),
+            person_request("feedback", false, serde_json::json!([])),
+        ] {
+            let answer = person_answer(Some(&request), None, " found it, works ")
+                .unwrap()
+                .unwrap();
+            assert!(answer.id.is_none());
+            assert_eq!(answer.text.as_deref(), Some("found it, works"));
+        }
+        let fixed = person_request("choice", false, options);
+        assert!(person_answer(Some(&fixed), None, "words").is_err());
+        assert!(person_answer(None, None, "notes").unwrap().is_none());
     }
     #[test]
     fn regression_person_falls_back_to_local_config() {
-        let dir = std::env::temp_dir().join(format!("stui-person-{}", uuid::Uuid::now_v7()));
+        let dir = std::env::temp_dir().join(format!("fractal-tui-person-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "person = \"person/alex\"\n").unwrap();
@@ -1237,7 +1296,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::os::unix::net::UnixListener;
 
-        let path = std::env::temp_dir().join(format!("stui-{}.sock", uuid::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("fractal-tui-{}.sock", uuid::Uuid::now_v7()));
         let listener = UnixListener::bind(&path).unwrap();
         let client = Client::unix_as(&path, "person/test");
         let server = std::thread::spawn(move || {
@@ -1395,7 +1454,7 @@ mission "release" state="ready" {
         /// st serving a run of the `release` mission in `source`, before any reconcile pass.
         async fn serve(source: &str) -> Self {
             let root = tempfile::tempdir().unwrap();
-            let node = "stui-gate";
+            let node = "fractal-tui-gate";
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), node).unwrap());
             let intent = fractal_daemon::graph::parse_intent(source, node).unwrap();
@@ -1423,6 +1482,7 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
@@ -1477,7 +1537,7 @@ mission "release" state="ready" {
             let _ = (&mut self.server).await;
             std::fs::remove_file(&self.socket).unwrap();
             self.store = Arc::new(
-                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "stui-gate").unwrap(),
+                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "fractal-tui-gate").unwrap(),
             );
             self.state.store = self.store.clone();
             self.state.notify = Arc::new(tokio::sync::Notify::new());
@@ -1485,7 +1545,7 @@ mission "release" state="ready" {
             self.reconciler = fractal_daemon::reconcile::Reconciler::new(
                 self.store.clone(),
                 Arc::new(NoRuntime),
-                "stui-gate".into(),
+                "fractal-tui-gate".into(),
                 self.state.notify.clone(),
             );
             let state = self.state.clone();

@@ -12,20 +12,20 @@ runs=()
 cleanup() {
   for run in "${runs[@]}"; do
     printf 'version 2\nmission-run "%s" { cancellation "eval-finished" { reason "the free mode eval finished" } }\n' "$run" \
-      | st3 publish - --as person/eval-requester >/dev/null 2>&1 || true
+      | fractal publish - --as person/eval-requester >/dev/null 2>&1 || true
   done
 }
 
 trap cleanup EXIT HUP INT TERM
 
-st3 trace wait "$PLANNER" --for running --timeout 1m >/dev/null
-st3 work claim "$PRODUCE" --as "$PLANNER" >/dev/null
-st3 work publish-mission "$PRODUCE" produced.kdl --as "$PLANNER" > published.txt
+fractal trace wait "$PLANNER" --for running --timeout 1m >/dev/null
+fractal work claim "$PRODUCE" --as "$PLANNER" >/dev/null
+fractal work publish-mission "$PRODUCE" produced.kdl --as "$PLANNER" > published.txt
 grep -Fq 'mission/eval/free-mode/produced@' published.txt
-st3 work complete "$PRODUCE" --as "$PLANNER" --summary "the mission was published" >/dev/null
+fractal work complete "$PRODUCE" --as "$PLANNER" --summary "the mission was published" >/dev/null
 
 # Free mode: generic publication by an ungranted agent succeeds too.
-st3 apply produced.kdl --as "$PLANNER" > direct.out
+fractal apply produced.kdl --as "$PLANNER" > direct.out
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/free-mode/produced \
@@ -37,17 +37,17 @@ runs+=("$produced_run")
 jq -e --arg planner "$PLANNER" '.mission_run.requester == $planner' started.json >/dev/null
 produced_run_id=${produced_run#mission-run/}
 readonly REVISER="agent/${produced_run_id}/reviser"
-st3 trace wait "$REVISER" --for running --timeout 1m >/dev/null
-st3 trace wait "$produced_run" --for standing --timeout 1m >/dev/null
+fractal trace wait "$REVISER" --for running --timeout 1m >/dev/null
+fractal trace wait "$produced_run" --for standing --timeout 1m >/dev/null
 
-st3 --json work revise "$produced_run" revised.kdl \
+fractal --json work revise "$produced_run" revised.kdl \
   --as "$REVISER" \
   --reason "clarify the standing mission goal" > revised.json
 jq -e '
   .status == "applied"
   and .mission_run.initial_revision != .mission_run.revision
 ' revised.json >/dev/null
-st3 trace wait "$produced_run" --for standing --timeout 1m >/dev/null
+fractal trace wait "$produced_run" --for standing --timeout 1m >/dev/null
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/free-mode/produced \

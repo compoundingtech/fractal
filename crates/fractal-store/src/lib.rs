@@ -32,6 +32,7 @@ pub mod render;
 pub mod client_values;
 pub mod graph;
 pub mod maintenance;
+pub mod pairing;
 pub mod owner_indexes;
 pub mod references;
 pub mod private_notes;
@@ -44,4 +45,5 @@ pub mod suspension;
 pub mod work_eta;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
-pub use model::{NormalizedIntent, St3Error};
+pub use model::{NormalizedIntent, FractalError};
+

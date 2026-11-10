@@ -13,6 +13,7 @@ ratatui = { workspace = true }
 smallclaims = { path = "../smallclaims" }
 fractal-client = { path = "../fractal-client" }
 fractal-schema = { path = "../fractal-schema" }
+fractal-sidebar = { path = "../fractal-sidebar", features = ["ratatui", "client"] }
 fractal-terminal-direct = { path = "../fractal-terminal-direct" }
 fractal-feed = { path = "../fractal-feed" }
 fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ratatui"] }
@@ -46,7 +47,7 @@ name = "phone_client"
 test = true
 
 [dev-dependencies]
-fractal-daemon = { path = "../fractal-daemon" }
+fractal-daemon = { path = "../fractal-daemon", features = ["test-support"] }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }
 portable-pty = "0.9"

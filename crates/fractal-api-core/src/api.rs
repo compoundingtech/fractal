@@ -17,6 +17,7 @@ use crate::SeatStatusStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::SubagentsStore;
+use crate::StopDeferralStore;
 use crate::EvidenceStore;
 use crate::OwnedSetsStore;
 use crate::PublicationFactsStore;
@@ -28,6 +29,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -83,13 +85,14 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
 use crate::store::Store;
+use crate::store::local_commits;
 
 pub mod wire_names;
 pub mod seat_freshness;
@@ -107,6 +110,7 @@ pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
+mod agents_request_slo;
 #[cfg(test)]
 mod harness_health_controls;
 #[cfg(test)]
@@ -126,6 +130,8 @@ pub mod mail_backlog;
 pub mod message_reads;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
+pub mod population_metrics;
+pub mod population_attention;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -180,6 +186,8 @@ pub mod launches;
 pub mod messages;
 pub mod operations;
 pub mod records;
+mod write_principal;
+mod native_delivery;
 pub mod replication;
 mod runs;
 pub mod sessions;
@@ -240,6 +248,8 @@ pub fn claude_channel_attachment(
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    pub browser_pairing_login: Option<String>,
     pub store: Arc<Store>,
     /// Process-local seat admission observations, never replicated as graph claims.
     pub seat_admission: Arc<fractal_runtime::seat_admission_status::Status>,
@@ -362,6 +372,10 @@ pub struct ClientPageCursor {
     pub items_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_index: Option<u64>,
+    /// The stream items the first page could see: the shard index the stream mirror had passed
+    /// (fractal-store stream_mirror.rs), as `before_index` is for graph messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_stream_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_key: Option<(u128, String)>,
     pub expires_at_unix_ms: u128,
@@ -454,7 +468,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn bad(error: St3Error) -> Self {
+    pub fn bad(error: FractalError) -> Self {
         let status = match error.code {
             "recipient-retired"
             | "identity-cycle"
@@ -514,15 +528,15 @@ impl ApiError {
             return error;
         }
         if smallclaims::read_budget::check().is_err() {
-            return Self::bad(St3Error::new("read-deadline", "the read exceeded its deadline or was cancelled"));
+            return Self::bad(FractalError::new("read-deadline", "the read exceeded its deadline or was cancelled"));
         }
-        let store_error = typed.downcast_ref::<St3Error>().or_else(|| {
+        let store_error = typed.downcast_ref::<FractalError>().or_else(|| {
             typed
                 .downcast_ref::<anyhow::Error>()
-                .and_then(|error| error.downcast_ref::<St3Error>())
+                .and_then(|error| error.downcast_ref::<FractalError>())
         });
         if let Some(error) = store_error {
-            return Self::bad(St3Error {
+            return Self::bad(FractalError {
                 code: error.code,
                 message: error.message.clone(),
                 details: error.details.clone(),
@@ -550,6 +564,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier") {
+            body["applied"] = json!("none");
+        }
         if let Some(applied) = body["details"].get("applied").cloned() {
             body["applied"] = applied;
         }
@@ -676,6 +693,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/launches/{id}", get(client_reads::client_launches_detail))
         .route("/v1/client/work", get(client_reads::client_work))
+        .route(
+            "/v1/client/ready-work",
+            // Axum otherwise runs GET for HEAD, which does not pass the paired GET scope gate.
+            get(client_reads::client_ready_work).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
         .route("/v1/client/changes", get(changes::list))
         .route("/v1/client/changes/sync", post(changes::sync))
         .route("/v1/client/change", get(changes::show))
@@ -701,6 +723,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/custom/reply", post(custom::reply))
         .route("/v1/custom/basis", get(custom::basis))
+        .route("/v1/custom/decision-inputs", get(custom::decision_inputs))
         .route("/v1/client/custom-subjects", get(custom::list))
         .route("/v1/client/custom-subjects/{*id}", get(custom::read))
         .route("/v1/intent/mission", post(launches::mission))
@@ -1024,6 +1047,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
         .route("/v1/internal/test/message-marks", post(test_record_message_mark));
@@ -1059,8 +1083,10 @@ struct RequestDuration<'a> {
 
 impl Drop for RequestDuration<'_> {
     fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        agents_request_slo::record(self.method, self.route, self.outcome, elapsed);
         crate::otel::record_http_request_duration(
-            self.method, self.route, self.client_class, self.outcome, self.started.elapsed(),
+            self.method, self.route, self.client_class, self.outcome, elapsed,
         );
     }
 }
@@ -1296,6 +1322,17 @@ async fn response_envelope_unbounded(
         roster: request_route == "/v1/client/agents",
     };
     request.extensions_mut().insert(envelope_context.clone());
+    let (request, write_error) = if fabric_boundary_error.is_none() && client_authentication.is_ok() {
+        match write_principal::bind_request(&state, request).await {
+            Ok(request) => (Some(request), None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (Some(request), None)
+    };
+    let fabric_boundary_error = fabric_boundary_error.or(write_error);
+    // A refused request never reaches a handler; retain an empty body for response dispatch.
+    let request = request.unwrap_or_else(|| Request::new(Body::empty()));
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1655,6 +1692,8 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     }
 }
 
+pub use agents_request_slo::{AgentsRequestSloServing, start_agents_request_slo, stop_before_listener_drop};
+
 pub use crate::peer::track_remote_reads;
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
@@ -1937,6 +1976,9 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-membership-member" | "invalid-membership-bucket"
         | "invalid-membership-key" | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor" | "membership-collection-changed"
+        | "membership-frontier-reset" | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
     )) { return false; }
     matches!(
         code,
@@ -1978,6 +2020,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "custody-pending"
         | "not-found"
         | "forbidden"
+        | "pairing-origin-required"
+        | "pairing-restart-required"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"
@@ -2013,6 +2057,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-membership-key"
         | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor"
+        | "membership-collection-changed"
+        | "membership-frontier-reset"
+        | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
@@ -2020,6 +2069,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "cursor-gap"
         | "page-cursor-expired"
         | "agent-roster-not-ready"
+        | "ready-work-unavailable"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -2054,6 +2104,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "response-budget-exceeded"
         | "content-not-text"
         | "invalid-document-reference"
+        | "invalid-declared-admission"
+        | "declared-admission-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
@@ -2379,6 +2431,7 @@ fn client_page_read_projected(
                 native_only: query.native_only,
                 items_digest: items_digest.clone(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })?)
@@ -3123,7 +3176,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
@@ -3292,6 +3345,53 @@ pub fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow
     })
 }
 
+/// Repository evidence belongs to the off-request population fold, not card presentation.
+/// Only positively identified canonical names enter the deployment allowlist comparison.
+fn overlay_population_repositories(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
+    let subjects = items.iter().filter_map(|item| item["id"].as_str()).collect::<Vec<_>>();
+    let observations = store.latest_workspace_observations(&subjects)?;
+    for item in items {
+        if let Some(repository) = item["checkout"]["repository"].as_str() {
+            item["checkout"]["repository"] = canonical_population_repository(repository)
+                .map_or(Value::Null, Value::String);
+        }
+        item.as_object_mut().expect("agent resource").remove("observed_repository");
+        if let Some(observation) = observations.get(item["id"].as_str().unwrap_or_default()) {
+            let fields = &observation.body["fields"];
+            if fields["workspace"] == item["workspace"]
+                && fields["host"].as_str().map(client_host_id).as_deref() == item["host_id"].as_str()
+            {
+                // A matching observation without an identifiable repository explicitly
+                // clears declaration-only attribution, rather than guessing a checkout.
+                item["observed_repository"] = fields["repository"].as_str()
+                    .and_then(canonical_population_repository).map_or(Value::Null, Value::String);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_population_repository(value: &str) -> Option<String> {
+    let name = if value.starts_with('/') {
+        if value.split('/').any(|part| matches!(part, "." | "..")) { return None; }
+        let (_, tail) = value.split_once("/github.com/")?;
+        let (owner, tail) = tail.split_once('/')?;
+        let (repository, suffix) = tail.split_once('/').unwrap_or((tail, ""));
+        if !suffix.is_empty() && suffix != "refs" && !suffix.starts_with("refs/") { return None; }
+        [owner, repository]
+    } else {
+        let (owner, repository) = value.split_once('/')?;
+        [owner, repository]
+    };
+    if name.iter().any(|part| part.is_empty() || *part == "." || *part == ".."
+        || part.ends_with(".git")
+        || !part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    {
+        return None;
+    }
+    Some(format!("{}/{}", name[0].to_ascii_lowercase(), name[1].to_ascii_lowercase()))
+}
+
 /// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
 /// clients may print it as it is.
 pub const AUTHORITY_INDETERMINATE_REASON: &str =
@@ -3313,11 +3413,14 @@ fn overlay_agent_resources_at(
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let heard = HeardSeats::read(store, &subjects.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let subject_refs = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subject_refs)?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
             }
+            // Raw runtime evidence is an internal input, never a client-v0 agent field.
+            item.as_object_mut().expect("agent resource").remove("_runtime_state");
             let source = item
                 .as_object_mut()
                 .unwrap()
@@ -3334,7 +3437,7 @@ fn overlay_agent_resources_at(
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
-                Some(age) if age > 90_000 => "stale",
+                Some(age) if u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis() => "stale",
                 Some(_) => "current",
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
@@ -3415,9 +3518,9 @@ fn overlay_declaration_restart(item: &mut Value, now: u128) {
 /// How long a declared seat may take to show a running session before it is called down.
 pub const LAUNCH_WINDOW_MS: u64 = 120_000;
 
-/// How old a harness report may be and still show that the seat's driver is alive. A driver at an
-/// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
-/// for most of every interval; two intervals and a minute of slack never call such a seat down.
+/// How old a harness report may be and still show that the seat's driver is alive. This is a
+/// liveness grace period, not observation freshness: two five-minute refresh intervals and
+/// a minute of slack avoid calling a seat down after one missed report.
 pub const HEARTBEAT_MS: u64 = 661_000;
 
 /// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
@@ -3443,7 +3546,7 @@ pub fn overlay_down(
     if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
         && !matches!(reported, None | Some("starting" | "ended" | "failed"))
     {
-        let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
+        let lapsed = report_age_ms.is_some_and(|age| u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis());
         item["state"] = json!(match reported {
             Some("working") => "running",
             Some("ready" | "idle") if !lapsed => "running",
@@ -3595,7 +3698,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3612,7 +3715,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -3721,7 +3824,7 @@ fn client_agent_cards_presented(
     )?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.code == "read-deadline") => None,
         Err(error) => return Err(error),
     };
     store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), selected);
@@ -3940,6 +4043,20 @@ fn client_agent_cards_presented(
             let state = if terminal_subjects.contains(&subject.subject) {
                 "retired"
             } else { state };
+            // A stop is declared but the process still runs: it ends once the mail and other
+            // runs' work it held at the stop are gone (#4500). Say why it is still running.
+            let stopping = (subject.kind.as_deref() == Some("stop")
+                && matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| -> anyhow::Result<Value> {
+                let incarnation = fields.and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+                let held = store.latest_stop_deferral(&subject.subject)?.filter(|diagnostic| {
+                    diagnostic.body["fields"]["code"] == "stop-deferred"
+                        && diagnostic.body["evidence"][0].as_str() == subject.desired_token.as_deref()
+                        && diagnostic.body["fields"]["incarnation_id"].as_str() == incarnation
+                }).and_then(|diagnostic| diagnostic.body["fields"]["reason"].as_str().map(str::to_owned));
+                Ok(json!({"held": held}))
+            })
+            .transpose()?;
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -4009,6 +4126,7 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "_runtime_state": observed,
                 "_restart_underlying_state": restart_underlying_state,
                 "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
@@ -4055,12 +4173,16 @@ fn client_agent_cards_presented(
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
+                "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
                     crate::rollout::status(store, &subject.subject)?
                 } else {
                     None
                 },
             });
+            if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
+                value["declared_admission"] = serde_json::to_value(admission)?;
+            }
             // Fold the point read into a cached card. Presentation of a warm roster page
             // must not repeat one retirement query for every retired row.
             if state == "retired"
@@ -4092,6 +4214,141 @@ fn client_agent_cards_presented(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(agents.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Project already-normalized declaration data without revalidating future enum strings.
+pub fn client_declared_admission(desired: &Value) -> Option<crate::model::DeclaredAdmission> {
+    fn child<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+        node.get("children")?.as_array()?.iter()
+            .find(|child| child.get("name").and_then(Value::as_str) == Some(name))
+    }
+    fn argument(node: &Value) -> Option<&Value> {
+        node.get("arguments")?.as_array()?.first()
+    }
+    let priority = child(desired, "declared-priority").and_then(argument)
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "background" => crate::model::DeclaredPriority::Background,
+            "normal" => crate::model::DeclaredPriority::Normal,
+            raw => crate::model::DeclaredPriority::Unknown(raw.to_owned()),
+        });
+    let lane = child(desired, "declared-lane").and_then(argument)
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "check" => crate::model::DeclaredLane::Check,
+            "build" => crate::model::DeclaredLane::Build,
+            raw => crate::model::DeclaredLane::Unknown(raw.to_owned()),
+        });
+    let budgets = child(desired, "declared-budgets").map(|node| crate::model::DeclaredBudgets {
+        cpu_seconds: child(node, "cpu-seconds").and_then(argument).and_then(Value::as_u64),
+        memory_max: child(node, "memory-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
+        disk_max: child(node, "disk-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
+        token_budget: child(node, "token-budget").and_then(argument).and_then(Value::as_u64),
+        attention: node.get("children").and_then(Value::as_array).into_iter().flatten()
+            .filter(|child| child.get("name").and_then(Value::as_str) == Some("attention"))
+            .filter_map(|node| Some(crate::model::DeclaredAttentionBudget {
+                person: argument(node)?.as_str()?.to_owned(),
+                asks: node.get("properties")?.get("asks")?.as_u64()?,
+            })).collect(),
+    });
+    crate::model::DeclaredAdmission::from_declaration(priority.as_ref(), lane.as_ref(), budgets.as_ref())
+}
+
+#[cfg(test)]
+mod declared_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn declared_admission_barrier_refusal_has_no_write_envelope() {
+        let response = ApiError::bad(FractalError::new(
+            "declared-admission-feature-barrier",
+            "upgrade every active member before publication",
+        )).into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "declared-admission-feature-barrier");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["applied"], "none");
+    }
+
+    #[tokio::test]
+    async fn declared_admission_refusal_keeps_stable_envelope_fields() {
+        let error = ApiError::bad(FractalError::new(
+            "invalid-declared-admission",
+            "agent 'agent/example' declared_budgets.cpu_seconds cpu-seconds is allowed on missions only",
+        ).with_detail("subject", "agent/example")
+            .with_detail("field", "declared_budgets.cpu_seconds"));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let response = error.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "invalid-declared-admission");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["applied"], "none");
+        assert_eq!(envelope["details"]["subject"], "agent/example");
+        assert_eq!(envelope["details"]["field"], "declared_budgets.cpu_seconds");
+    }
+
+    #[test]
+    fn desired_projection_omits_empty_and_retains_future_enums() {
+        assert!(client_declared_admission(&json!({})).is_none());
+        assert!(client_declared_admission(&json!({"children": [
+            {"name": "declared-budgets", "children": []}
+        ]})).is_none());
+        // Read projection must retain historical agent numeric budgets, even though
+        // new agent declarations can no longer author these mission-only fields.
+        let desired = json!({"children": [
+            {"name": "declared-priority", "arguments": ["future-level"]},
+            {"name": "declared-lane", "arguments": ["future-lane"]},
+            {"name": "declared-budgets", "children": [
+                {"name": "cpu-seconds", "arguments": [300]},
+                {"name": "memory-max", "arguments": ["8G"]},
+                {"name": "disk-max", "arguments": ["20G"]},
+                {"name": "token-budget", "arguments": [100000]}
+            ]}
+        ]});
+        let admission = client_declared_admission(&desired).unwrap();
+        assert_eq!(admission.priority, Some(crate::model::DeclaredPriority::Unknown("future-level".into())));
+        assert_eq!(admission.lane, Some(crate::model::DeclaredLane::Unknown("future-lane".into())));
+        assert_eq!(serde_json::to_value(admission).unwrap(), json!({
+            "priority": "future-level", "lane": "future-lane",
+            "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
+        }));
+        assert_eq!(serde_json::to_value(client_declared_admission(&json!({"children": [
+            {"name": "declared-priority", "arguments": ["background"]},
+            {"name": "declared-lane", "arguments": ["build"]},
+            {"name": "declared-budgets", "children": []}
+        ]})).unwrap()).unwrap(), json!({"priority": "background", "lane": "build"}));
+    }
+
+    #[test]
+    fn attention_projection_preserves_authored_order_and_round_trips() {
+        let admission = client_declared_admission(&json!({"children": [
+            {"name": "declared-budgets", "children": [
+                {"name": "attention", "arguments": ["person/reviewer"], "properties": {"asks": 3}},
+                {"name": "attention", "arguments": ["person/owner"], "properties": {"asks": 1}}
+            ]}
+        ]})).unwrap();
+        let value = serde_json::to_value(&admission).unwrap();
+        assert_eq!(value, json!({"budgets": {"attention": [
+            {"person": "person/reviewer", "asks": 3},
+            {"person": "person/owner", "asks": 1}
+        ]}}));
+        assert_eq!(serde_json::from_value::<crate::model::DeclaredAdmission>(value.clone()).unwrap(), admission);
+        let wire: fractal_client::DeclaredAdmission = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(wire).unwrap(), value);
+        let empty: fractal_client::DeclaredBudgets = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.attention.is_empty());
+        assert_eq!(serde_json::to_value(empty).unwrap(), json!({}));
+        for invalid in [
+            json!({"attention": [{"person": "person/owner", "asks": 1, "extra": true}]}),
+            json!({"unknown": 1}),
+        ] {
+            assert!(serde_json::from_value::<fractal_client::DeclaredBudgets>(invalid).is_err());
+        }
+    }
 }
 
 /// Read-only edges with an explicit authored kind and URI resolution state.
@@ -4144,22 +4401,94 @@ pub fn managed_session_id(owner: &str, identity: &str) -> String {
 
 pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 
+#[cfg(test)]
+thread_local! {
+    static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static MANAGED_OWNER_MAP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static MANAGED_OWNER_MAP_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Process-wide counter for the isolated daemon cost harness, including index workers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn managed_owner_map_build_count_for_test() -> usize {
+    MANAGED_OWNER_MAP_BUILD_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+fn managed_owner_after_pin() {
+    MANAGED_OWNER_AFTER_PIN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() { hook(); }
+    });
+}
+
 pub fn managed_session_owner_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
-        let owners = store.conversation_owners_at(snapshot_index)?;
-        for owner in owners.values() {
-            let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
-                continue;
-            };
-            if managed_session_id(&owner.subject, identity) == session_id {
-                return Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())));
+    // Pin identity/repair state; the memo belongs to this SQLite snapshot, not its cut
+    // or pooled connection. A repair may rebuild a shared logical-cut cache concurrently.
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        let owners = store.readers.pinned_memo(snapshot_index, || {
+            #[cfg(test)]
+            MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(count.get() + 1));
+            #[cfg(any(test, feature = "test-support"))]
+            MANAGED_OWNER_MAP_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let connection = store.readers.get();
+            let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
+            let mut sessions = std::collections::HashMap::with_capacity(owners.len());
+            for (_, owner) in owners {
+                let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
+                    continue;
+                };
+                // Preserve subject order for ambiguous owner:identity concatenations.
+                sessions.entry(managed_session_id(&owner.subject, identity))
+                    .or_insert_with(Vec::new)
+                    .push((owner.subject, owner.incarnation, owner.origin));
+            }
+            Ok(sessions)
+        })?;
+        let Some(candidates) = owners.get(session_id) else {
+            return Ok(None);
+        };
+        for owner in candidates {
+            // Visibility belongs to the lookup, not the snapshot's shared routing memo.
+            if store.generic_status_subject_visible_at(&owner.0, snapshot_index)? {
+                return Ok(Some(owner.clone()));
             }
         }
         Ok(None)
+    }))
+}
+
+/// Resolve an inventory's subject again on the page reader's own snapshot. Only an
+/// unambiguous owner:incarnation encoding may bypass the generic candidate scan.
+pub fn managed_session_owner_for_timeline_at(
+    store: &Store,
+    snapshot_index: u64,
+    session_id: &str,
+    subject: &str,
+) -> anyhow::Result<Option<ManagedSessionOwner>> {
+    store.read_snapshot(|_| {
+        if let Some(owner) = managed_session_owner_for_subject_at(
+            store, snapshot_index, session_id, subject,
+        )? {
+            // More than one ':' admits alternative owner/identity splits. Runtime-only
+            // owners also use the generic path because the tuple omits their runtime ID.
+            if !owner.0.contains(':')
+                && owner.1.as_deref().is_some_and(|identity| !identity.contains(':'))
+            {
+                return Ok(Some(owner));
+            }
+        }
+        // Missing, hidden, stale or ambiguous subjects cannot shortcut authorization.
+        managed_session_owner_at(store, snapshot_index, session_id)
     })
 }
 
@@ -4169,7 +4498,12 @@ pub fn managed_session_owner_for_subject_at(
     session_id: &str,
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4181,7 +4515,7 @@ pub fn managed_session_owner_for_subject_at(
             return Ok(None);
         }
         Ok(Some((owner.subject, owner.incarnation, owner.origin)))
-    })
+    }))
 }
 
 
@@ -4310,7 +4644,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -4852,10 +5186,14 @@ pub async fn relay_client_message_items(
             let Some(message) = store.message(&id)? else {
                 continue;
             };
-            let sent_at = store
-                .latest_claim(&id, Some("message.sent"))?
-                .map(|claim| claim.accepted_at_unix_ms)
-                .unwrap_or_default();
+            let sent_at = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+                stream_sent_at(&store, &id)?
+            } else {
+                store
+                    .latest_claim(&id, Some("message.sent"))?
+                    .map(|claim| claim.accepted_at_unix_ms)
+                    .unwrap_or_default()
+            };
             views.push((message, sent_at));
         }
         Ok(views)
@@ -4866,6 +5204,14 @@ pub async fn relay_client_message_items(
         items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
     }
     Ok(())
+}
+
+/// A stream item's sent time, as its client metadata reads it.
+fn stream_sent_at(store: &Store, subject: &str) -> anyhow::Result<u128> {
+    Ok(store
+        .stream_message_metadata(subject)?
+        .and_then(|metadata| metadata["sent_at"].as_str().and_then(|at| at.parse().ok()))
+        .unwrap_or_default())
 }
 
 pub fn client_message_resources(
@@ -4899,32 +5245,43 @@ fn client_message_resources_at(
         if peer.is_some_and(|peer| message.from != peer && message.to != peer) {
             continue;
         }
-        let claims = store.claims_for(&message.subject, None)?;
-        let first = claims.first();
-        let last = claims.last();
-        let sent_at = first
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        let mut updated_at = last
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or(sent_at);
-        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
-        // A seat this member hosts moves its message by a local mark, which no claim records.
-        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
-            && at >= updated_at
-        {
-            (revision, updated_at) = (receipt, at);
-        }
-        let session_id = first
-            .and_then(|claim| {
-                claim
-                    .body
-                    .get("fields")
-                    .unwrap_or(&claim.body)
-                    .get("session_id")
-            })
-            .cloned()
-            .unwrap_or(Value::Null);
+        let (sent_at, updated_at, revision, session_id) = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+            // A stream item has no graph claims: the mirror and the shard carry what they would.
+            let Some(metadata) = store.stream_message_metadata(&message.subject)? else {
+                continue;
+            };
+            let at = |field: &str| metadata[field].as_str().unwrap_or("0").parse::<u128>();
+            (at("sent_at")?, at("updated_at")?, metadata["revision"].as_str().unwrap_or("message/unknown").to_owned(),
+             metadata["session_id"].clone())
+        } else {
+            let claims = store.claims_for(&message.subject, None)?;
+            let first = claims.first();
+            let last = claims.last();
+            let sent_at = first
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let mut updated_at = last
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or(sent_at);
+            let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+            // A seat this member hosts moves its message by a local mark, which no claim records.
+            if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+                && at >= updated_at
+            {
+                (revision, updated_at) = (receipt, at);
+            }
+            let session_id = first
+                .and_then(|claim| {
+                    claim
+                        .body
+                        .get("fields")
+                        .unwrap_or(&claim.body)
+                        .get("session_id")
+                })
+                .cloned()
+                .unwrap_or(Value::Null);
+            (sent_at, updated_at, revision, session_id)
+        };
         let mut reasons = Vec::new();
         if message.status == "closed"
             || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
@@ -5839,6 +6196,7 @@ fn published_work_cursor(
         native_only: query.native_only,
         items_digest,
         before_index: None,
+        before_stream_index: None,
         after_key: None,
         expires_at_unix_ms,
     }
@@ -5894,7 +6252,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
@@ -6489,7 +6847,11 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    #[cfg(any(test, feature = "test-support"))]
+    let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let _uptime = uptime.enter();
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
@@ -6503,7 +6865,7 @@ where
 pub async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, St3Error> + Send + 'static,
+    F: FnOnce() -> Result<T, FractalError> + Send + 'static,
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
@@ -6591,11 +6953,9 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
 /// request path. Until it is made, the collection says so instead of making a read wait for it.
-/// A newly started report returns its operation audit for the delayed startup repair to consume;
-/// later doctor calls and diagnostic refreshes always audit the current store themselves.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// The report reads the last operation audit; the daemon makes its first audit only after the
+/// reconnect window. Return whether this call started the report.
+pub fn start_operation_report(state: &AppState) -> bool {
     client_v0::start_operation_report(state)
 }
 
@@ -6609,12 +6969,21 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to the refresh's own length.
+/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
+/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so
-/// that a very cheap fold cannot turn fresh reads into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
+/// a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
+const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
@@ -6632,11 +7001,16 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
+        // the writer, once for every refresher that pauses on it.
+        let mut local = agent_roster_local_commits(&store);
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the fold below or an earlier one.
+            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -6647,15 +7021,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            // Pause as long as the refresh took, so refreshing stays under about half a core
-            // however often readers ask, and at least the minimum pause unless a reader waits
-            // for a fresh roster: that read then waits for one fold, not the rest of the pause.
-            let pause = started.elapsed().max(AGENT_ROSTER_FRESH_PAUSE);
-            tokio::time::sleep(pause).await;
-            tokio::select! {
-                () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
-                () = store.fresh_agent_roster_wanted() => {}
-            }
+            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
             if store.agent_roster_refresh_failed() {
@@ -6664,6 +7030,47 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// Why the refresher's pause between two refreshes ended.
+type AgentRosterPauseEnd = local_commits::PauseEnd;
+
+/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
+/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
+/// roster's incremental fold reads).
+fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
+}
+
+/// The name the roster's check has on the scanner.
+const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
+
+/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
+/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
+/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
+/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
+/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
+/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
+/// fold, so a person waiting to see their own write is not left waiting up to a second for the
+/// next timed fold, while a stream of local writes folds no more than about twice a second and
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often. See
+/// [`local_commits::pause_after_fold`].
+async fn agent_roster_pause(
+    store: &Arc<Store>,
+    local: &mut local_commits::LocalCommits,
+    folded: Duration,
+    through: u64,
+) -> AgentRosterPauseEnd {
+    let pace = local_commits::Pace {
+        floor: AGENT_ROSTER_FRESH_PAUSE,
+        local: AGENT_ROSTER_LOCAL_PAUSE,
+        full: AGENT_ROSTER_REFRESH_PAUSE,
+    };
+    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -6708,7 +7115,7 @@ async fn refresh_agent_roster_admitted(
         let submitted = crate::otel::export_enabled().then(Instant::now);
         match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
             roster_worker(true, submitted, None, || {
-                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                let result = crate::task_cpu::profiled_blocking("startup.warmup", || warm_agent_roster(&reader));
                 (result, crate::otel::take_roster_attributes())
             })
         })).await {
@@ -6796,15 +7203,8 @@ pub async fn serve_unix_bound_with_ready(
     store: Arc<Store>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(
-        socket,
-        Some(state_socket),
-        app,
-        Some(store),
-        harness_ancestor,
-        ready,
-    )
-    .await
+    let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
+    serve_reserved_unix_with_ready(reserved, app, Some(store), None, ready).await
 }
 
 /// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
@@ -6814,7 +7214,7 @@ pub async fn serve_unix_with_ancestor(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
 ) -> anyhow::Result<()> {
     serve_unix_with_ancestor_ready(socket, state_socket, app, bound_store, ancestor, || {}).await
 }
@@ -6824,11 +7224,12 @@ async fn serve_unix_with_ancestor_ready(
     state_socket: Option<&Path>,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, ancestor, ready).await
+    // Generic/injected-ancestry servers have no daemon supervisor authority.
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -6908,21 +7309,36 @@ pub async fn reserve_unix_socket(
 /// Only a fully initialized router may turn the reservation into a listener.
 /// `Some(store)` binds local harness ancestry and guards every router before route effects;
 /// `None` selects the unbound listener used by the paired gateway.
+/// `worker` supplies the supervisor's generation authority for otherwise unavailable ancestry.
 pub async fn serve_reserved_unix_with_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, harness_ancestor, ready)
-        .await
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, observed_harness_ancestor, ready).await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
-    ancestor: fn(u32) -> Option<String>,
+    worker: Option<WorkerAuthority>,
+    ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker,
+        move |pid, peer| Ok(ancestor(pid, peer)), ready).await
+}
+
+async fn serve_reserved_unix_with_lookup_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
+    ancestor: impl Fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+        -> Result<HarnessAncestry, AncestryUnavailableCause> + Copy + Send + Sync + 'static,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let ReservedUnixSocket {
@@ -6933,7 +7349,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     // Install it here so directly constructed routers cannot bypass the guard.
     let bind_harness = bound_store.is_some();
     let app = match bound_store {
-        Some(store) => app.layer(from_fn_with_state(store, guard_bound_actor)),
+        Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
         None => app,
     };
     let listener = socket.listen(1024)?;
@@ -6970,7 +7386,10 @@ async fn serve_reserved_unix_with_ancestor_ready(
         let peer_pid = local_peer_pid(&stream);
         // This must precede dispatch: the numeric peer PID can be recycled while
         // a descendant continues using the connector's inherited socket.
-        let peer_process = local_peer_process(&stream).ok();
+        let (peer_process, peer_capture_error) = match local_peer_process(&stream) {
+            Ok(peer) => (Some(peer), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -6981,34 +7400,63 @@ async fn serve_reserved_unix_with_ancestor_ready(
             if let Some(connection) = &mut diagnostic_connection {
                 connection.queued();
             }
-            let (bound_agent, caller, delivery_peer, diagnostic_connection) = match peer_pid {
+            let ancestry_peer = peer_process.clone();
+            let (ancestry_result, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.started();
                     }
-                    let bound_agent = bind_ancestry.then(|| ancestor(pid)).flatten();
+                    let ancestry = if !bind_ancestry {
+                        Ok(HarnessAncestry::Person)
+                    } else if ancestry_peer.is_none() {
+                        Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: peer_capture_error.map_or(AncestryUnavailableReason::WitnessMissing,
+                                AncestryUnavailableReason::WitnessCaptureFailed) })
+                    } else {
+                        ancestor(pid, ancestry_peer.as_ref())
+                    };
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
-                        bound_agent.as_deref(),
+                        ancestry.as_ref().ok().and_then(HarnessAncestry::agent),
                     ));
                     let delivery_peer = bind_harness.then(|| native_delivery_peer(pid)).flatten();
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.finished();
                     }
-                    (bound_agent, caller, delivery_peer, diagnostic_connection)
+                    (ancestry, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
-                .unwrap_or_default(),
-                None => (None, None, None, diagnostic_connection),
+                .unwrap_or_else(|error| {
+                    let ancestry = if bind_ancestry {
+                        Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: AncestryUnavailableReason::LookupTaskFailed(error.to_string()) })
+                    } else { Ok(HarnessAncestry::Unavailable) };
+                    (ancestry, None, None, None)
+                }),
+                None => {
+                    let ancestry = if bind_ancestry {
+                        Err(AncestryUnavailableCause { pid: None,
+                            reason: AncestryUnavailableReason::PeerPidUnavailable })
+                    } else { Ok(HarnessAncestry::Person) };
+                    (ancestry, None, None, diagnostic_connection)
+                }
+            };
+            let (ancestry, ancestry_cause) = match ancestry_result {
+                Ok(ancestry) => (ancestry, None),
+                Err(cause) => (HarnessAncestry::Unavailable, Some(Arc::new(cause))),
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
-                let bound_agent = bound_agent.clone();
+                let ancestry = ancestry.clone();
+                let ancestry_cause = ancestry_cause.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
                 let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
+                    if let Some(cause) = ancestry_cause {
+                        request.extensions_mut().insert(cause);
+                    }
                     if let Some(connection) = diagnostic_connection {
                         request.extensions_mut().insert(connection);
                     }
@@ -7016,7 +7464,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                         request.extensions_mut().insert(LocalPeer {
                             pid,
                             peer_process,
-                            ancestor: bound_agent.clone(),
+                            ancestor: ancestry.agent().map(str::to_owned),
                         });
                     }
                     if let Some(peer) = delivery_peer {
@@ -7025,8 +7473,11 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(caller) = caller {
                         request.extensions_mut().insert(caller);
                     }
-                    if let Some(agent) = &bound_agent {
-                        request.extensions_mut().insert(BoundAgent(agent.clone()));
+                    if let Some(agent) = ancestry.agent() {
+                        request.extensions_mut().insert(BoundAgent(agent.to_owned()));
+                    }
+                    if matches!(ancestry, HarnessAncestry::Unavailable) {
+                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
                     app.oneshot(request).await
                 }
@@ -7064,38 +7515,272 @@ fn publish_state_socket(socket: &Path, state_socket: &Path) -> anyhow::Result<()
 #[cfg(test)]
 mod gateway_listener_tests;
 
-#[cfg(target_os = "linux")]
-fn harness_ancestor(mut pid: u32) -> Option<String> {
-    use std::collections::BTreeSet;
-    let mut seen = BTreeSet::new();
-    while pid > 1 && pid != std::process::id() && seen.insert(pid) {
-        let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-        let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
-            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        });
-        // A masked/conflicting child identity must not inherit an ancestor's authority.
-        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            return fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
-                .filter(|value| value.starts_with("agent/"));
-        }
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        pid = stat
-            .rsplit_once(") ")?
-            .1
-            .split_whitespace()
-            .nth(1)?
-            .parse()
-            .ok()?;
-    }
-    None
+/// A completed walk without a harness is different from an unverifiable caller.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HarnessAncestry {
+    Bound(String),
+    Person,
+    #[default]
+    Unavailable,
 }
 
-#[cfg(not(target_os = "linux"))]
-fn harness_ancestor(_pid: u32) -> Option<String> {
-    None
+impl HarnessAncestry {
+    fn agent(&self) -> Option<&str> {
+        match self { Self::Bound(agent) => Some(agent), _ => None }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn of_linux_environment(environment: &[u8]) -> Self {
+        // An empty or unterminated read cannot establish absence of agent markers.
+        // Fork-only children may legitimately retain a complete parent environment.
+        if environment.is_empty() || !environment.ends_with(&[0]) {
+            return Self::Unavailable;
+        }
+        Self::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then_some(value)
+        }))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
+        let primary = lookup("ST_AGENT");
+        let legacy = lookup("FRACTAL_AGENT");
+        if primary.is_none() && legacy.is_none() {
+            return Self::Person;
+        }
+        if primary.is_some_and(str::is_empty)
+            || legacy.is_some_and(str::is_empty)
+        {
+            return Self::Unavailable;
+        }
+        fractal_drivers::contracts::env_with("ST_AGENT", &|name| lookup(name).map(str::to_owned))
+            .filter(|value| value.starts_with("agent/") && fractal_schema::registry().validate_subject(value).is_ok())
+            .map_or(Self::Unavailable, Self::Bound)
+    }
+}
+
+mod ancestry_diagnostics;
+
+/// Preserve pending diagnostic counts before the daemon exits.
+pub fn flush_ancestry_diagnostics() {
+    ancestry_diagnostics::flush();
+}
+
+/// Diagnostic data is deliberately limited to operation names, PIDs and OS errors.
+/// In particular, identity parsing must never attach environment values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AncestryUnavailableCause {
+    pid: Option<u32>,
+    reason: AncestryUnavailableReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AncestryUnavailableReason {
+    PeerPidUnavailable,
+    WitnessCaptureFailed(String),
+    WitnessMissing,
+    LookupTaskFailed(String),
+    ProcessReadFailed { operation: &'static str, os_error: Option<i32>, error: String },
+    ProcessMetadataInvalid(&'static str),
+    ProcessTerminal,
+    EmptyEnvironment,
+    TruncatedEnvironment,
+    InvalidIdentity,
+    GenerationUnavailable,
+    WitnessRejected(String),
+    AncestorCycle,
+    AncestorGenerationChanged,
+    ConnectorGenerationChanged(String),
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    UnsupportedPlatform,
+}
+
+impl AncestryUnavailableCause {
+    fn reason_code(&self) -> &'static str {
+        match &self.reason {
+            AncestryUnavailableReason::PeerPidUnavailable => "peer-pid-unavailable",
+            AncestryUnavailableReason::WitnessCaptureFailed(_) => "witness-capture-failed",
+            AncestryUnavailableReason::WitnessMissing => "witness-missing",
+            AncestryUnavailableReason::LookupTaskFailed(_) => "lookup-task-failed",
+            AncestryUnavailableReason::ProcessReadFailed { operation, .. } => operation,
+            AncestryUnavailableReason::ProcessMetadataInvalid(_) => "process-metadata-invalid",
+            AncestryUnavailableReason::ProcessTerminal => "process-terminal",
+            AncestryUnavailableReason::EmptyEnvironment => "empty-environment",
+            AncestryUnavailableReason::TruncatedEnvironment => "truncated-environment",
+            AncestryUnavailableReason::InvalidIdentity => "invalid-or-conflicting-identity",
+            AncestryUnavailableReason::GenerationUnavailable => "generation-unavailable",
+            AncestryUnavailableReason::WitnessRejected(_) => "initial-witness-rejected",
+            AncestryUnavailableReason::AncestorCycle => "ancestor-cycle",
+            AncestryUnavailableReason::AncestorGenerationChanged => "ancestor-generation-changed",
+            AncestryUnavailableReason::ConnectorGenerationChanged(_) => "connector-generation-changed",
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            AncestryUnavailableReason::UnsupportedPlatform => "unsupported-platform",
+        }
+    }
+
+}
+
+
+#[cfg(test)]
+fn ancestry_or_record(
+    result: Result<HarnessAncestry, AncestryUnavailableCause>,
+    mut record: impl FnMut(&AncestryUnavailableCause),
+) -> HarnessAncestry {
+    result.unwrap_or_else(|cause| {
+        record(&cause);
+        HarnessAncestry::Unavailable
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone)]
+struct HarnessProcess {
+    uid: u32,
+    generation: Option<(u32, u64)>,
+    generation_error: Option<AncestryUnavailableReason>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn walk_harness_ancestry(
+    mut pid: u32,
+    peer: Option<&fractal_runtime::PeerProcessIdentity>,
+    mut inspect: impl FnMut(u32) -> Result<HarnessProcess, AncestryUnavailableReason>,
+    identity: impl Fn(u32) -> Result<HarnessAncestry, AncestryUnavailableReason>,
+) -> Result<HarnessAncestry, AncestryUnavailableCause> {
+    let cause = |pid, reason| AncestryUnavailableCause { pid: Some(pid), reason };
+    let first = inspect(pid).map_err(|reason| cause(pid, reason))?;
+    let peer = peer.ok_or_else(|| cause(pid, AncestryUnavailableReason::WitnessMissing))?;
+    let (_, birth) = first.generation.ok_or_else(|| cause(pid, first.generation_error.clone()
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(pid, birth)
+        .map_err(|error| cause(pid, AncestryUnavailableReason::WitnessRejected(error.to_string())))?;
+    let connector = pid;
+    let uid = first.uid;
+    let mut first = Some(first);
+    let mut observed = std::collections::BTreeMap::new();
+    let mut binding = HarnessAncestry::Person;
+    while pid > 1 && pid != std::process::id() {
+        let process = match first.take() {
+            Some(process) => process,
+            None => inspect(pid).map_err(|reason| cause(pid, reason))?,
+        };
+        // An observed ownership transition ends this caller's cooperative ancestry.
+        if process.uid != uid { break; }
+        let (parent, birth) = process.generation.ok_or_else(|| cause(pid, process.generation_error
+            .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+        if observed.insert(pid, birth).is_some() {
+            return Err(cause(pid, AncestryUnavailableReason::AncestorCycle));
+        }
+        match identity(pid).map_err(|reason| cause(pid, reason))? {
+            HarnessAncestry::Person => {}
+            HarnessAncestry::Unavailable => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
+            ancestry => { binding = ancestry; break; }
+        }
+        pid = parent;
+    }
+    for (pid, birth) in observed {
+        let current = inspect(pid).map_err(|reason| cause(pid, reason))?;
+        if current.uid != uid || !current.generation.is_some_and(|(_, token)| token == birth) {
+            return Err(cause(pid, current.generation_error
+                .unwrap_or(AncestryUnavailableReason::AncestorGenerationChanged)));
+        }
+    }
+    let current = inspect(connector).map_err(|reason| cause(connector, reason))?;
+    let (_, token) = current.generation.ok_or_else(|| cause(connector, current.generation_error
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(connector, token).map_err(|error| cause(connector,
+        AncestryUnavailableReason::ConnectorGenerationChanged(error.to_string())))?;
+    Ok(binding)
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
+    let read = |file, operation| fs::read_to_string(format!("/proc/{pid}/{file}"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation, os_error: error.raw_os_error(), error: error.to_string(),
+        });
+    let invalid = AncestryUnavailableReason::ProcessMetadataInvalid;
+    let status = read("status", "proc-status-read")?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok()).ok_or_else(|| invalid("effective-uid"))?;
+    let generation = (|| {
+        let stat = read("stat", "proc-stat-read")?;
+        let mut fields = stat.rsplit_once(") ").ok_or_else(|| invalid("stat-fields"))?.1.split_whitespace();
+        if matches!(fields.next().ok_or_else(|| invalid("state"))?, "Z" | "X" | "x") {
+            return Err(AncestryUnavailableReason::ProcessTerminal);
+        }
+        let parent = fields.next().and_then(|value| value.parse().ok()).ok_or_else(|| invalid("parent-pid"))?;
+        let birth = fields.nth(17).and_then(|value| value.parse().ok()).ok_or_else(|| invalid("start-time"))?;
+        Ok((parent, birth))
+    })();
+    let (generation, generation_error) = match generation {
+        Ok(generation) => (Some(generation), None),
+        Err(error) => (None, Some(error)),
+    };
+    Ok(HarnessProcess { uid, generation, generation_error })
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
+    match fractal_runtime::macos_process_identity(pid) {
+        Ok((parent, birth, uid)) => Ok(HarnessProcess { uid, generation: Some((parent, birth)), generation_error: None }),
+        Err(error) => {
+            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, os_error: None, error };
+            let uid = fractal_runtime::macos_process_owner(pid)
+                .map_err(|error| failure("process-owner-read", error.to_string()))?;
+            Ok(HarnessProcess { uid, generation: None,
+                generation_error: Some(failure("process-identity-read", error.to_string())) })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let environment = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", os_error: error.raw_os_error(), error: error.to_string(),
+        })?;
+    if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
+    if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }
+    match HarnessAncestry::of_linux_environment(&environment) {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let (_, environment) = local_process_arguments(pid)
+        .ok_or(AncestryUnavailableReason::ProcessMetadataInvalid("argument-environment"))?;
+    let ancestry = HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        (key == name).then_some(value)
+    }));
+    match ancestry {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
+}
+
+fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    observed_harness_ancestor(pid, peer).unwrap_or(HarnessAncestry::Unavailable)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observed_harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>)
+    -> Result<HarnessAncestry, AncestryUnavailableCause>
+{
+    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn observed_harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>)
+    -> Result<HarnessAncestry, AncestryUnavailableCause>
+{
+    Err(AncestryUnavailableCause { pid: Some(pid),
+        reason: AncestryUnavailableReason::UnsupportedPlatform })
 }
 
 #[derive(Clone)]
@@ -7116,34 +7801,7 @@ fn native_delivery_identity(
     args: &[String],
     env: &[String],
 ) -> Option<NativeDeliveryPeer> {
-    let (transport, archives_inbox) = args.windows(2).find_map(|pair| {
-        if pair[0] != "driver" {
-            return None;
-        }
-        match pair[1].as_str() {
-            "omp-channel" | "omp" => Some(("omp-channel", false)),
-            "pi-channel" | "pi" => Some(("pi-channel", false)),
-            "claude-mcp" => Some(("claude-channel", false)),
-            "claude" => Some(("claude-channel", true)),
-            "codex" => Some(("app-server", true)),
-            "opencode" => Some(("opencode-server", true)),
-            _ => None,
-        }
-    })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
-        env.iter().find_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
-    }).filter(|agent| agent.starts_with("agent/"))?;
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    Some(NativeDeliveryPeer {
-        agent,
-        transport,
-        pid,
-        archives_inbox,
-    })
+    native_delivery::identity(pid, args, env)
 }
 /// Capture the kernel connector generation, independently of generic local auth.
 pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
@@ -7175,7 +7833,12 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        fractal_runtime::PeerProcessIdentity::capture_pid(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
@@ -7308,6 +7971,26 @@ fn record_legacy_poll(
     }
 }
 
+/// Generation authority supplied by the replication worker's supervisor.
+pub type WorkerAuthority = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+
+pub fn worker_route(path: &str) -> bool {
+    path.starts_with("/v1/internal/replication/")
+        || matches!(path, "/v1/internal/seat-freshness" | "/v1/internal/seat-freshness/reads" | "/v1/internal/seat-snapshot")
+        || path == crate::peer::CLIENT_READ_FORWARD_PATH
+}
+
+pub fn authorize_worker(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::Result<u32>) -> anyhow::Result<()> {
+    let peer = peer.ok_or_else(|| anyhow::anyhow!("worker socket credentials missing"))?;
+    anyhow::ensure!(peer.ancestor.is_none(), "seat callers cannot act as the worker");
+    let generation = peer.peer_process.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("worker process generation unavailable"))?;
+    generation.validate()?;
+    anyhow::ensure!(generation.pid() == peer.pid && observe()? == peer.pid,
+        "socket connector is not the supervised replication worker");
+    generation.validate()
+}
+
 /// The agent whose harness a local request comes from, when it comes from one.
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
@@ -7315,13 +7998,33 @@ pub struct BoundAgent(pub String);
 // The serving boundary supplies the immutable ancestry binding and its identity store before
 // any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(
-    State(store): State<Arc<Store>>,
-    request: Request<Body>,
+    State((store, worker)): State<(Arc<Store>, Option<WorkerAuthority>)>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
+    let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
     let client_request = request.uri().path().starts_with("/v1/client/");
-    match guard_bound_request(request, bound_agent.as_deref(), &store).await {
+    // This guard is outside all router layers. Authenticate here, before ancestry admission,
+    // independently of the ingress observe/enforce rollout.
+    if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+        && let Some(worker) = worker
+    {
+        let peer = request.extensions().get::<LocalPeer>().cloned();
+        if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
+            // The supervised worker runs in no harness. Its live generation is stronger
+            // evidence than an unreadable service-manager environment.
+            request.extensions_mut().insert(HarnessAncestry::Person);
+            request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
+        }
+    }
+    let verified_worker = request.extensions().get::<ancestry_diagnostics::VerifiedWorkerFallback>().is_some();
+    let result = guard_bound_request(request, bound_agent.as_deref(), &store).await;
+    if let Some(diagnostic) = ancestry_diagnostic {
+        diagnostic.record(result.as_ref().err().map(|error| error.status), verified_worker);
+    }
+    match result {
         Ok(request) => next.run(request).await,
         Err(error) if client_request => {
             let status = error.status;
@@ -7360,12 +8063,22 @@ pub async fn guard_bound_request(
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
     let Some(bound_agent) = bound_agent else {
-        return Ok(request);
+        return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
+            guard_unverifiable_request(request).await
+        } else {
+            Ok(request)
+        };
     };
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+    {
+        return Err(custom::notices_unavailable());
+    }
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
         )));
@@ -7379,20 +8092,19 @@ pub async fn guard_bound_request(
     )?.identity;
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
-    if let Some(person) = request
-        .headers()
-        .get(client_v0::LOCAL_PERSON_HEADER)
-        .and_then(|value| value.to_str().ok())
-        && !is_bound_actor(store, person, &bound_identity)?
+    for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
+        .into_iter().flat_map(|name| request.headers().get_all(name))
+        .filter_map(|value| value.to_str().ok())
     {
-        return Err(ApiError::bad(St3Error::new(
+        if is_bound_actor(store, person, &bound_identity)? { continue; }
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot act as `{person}`"),
         )));
     }
     let path = request.uri().path();
     if path == "/v1/repair/apply" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             "bound harnesses must use the attributed repair apply route",
         )));
@@ -7400,7 +8112,7 @@ pub async fn guard_bound_request(
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
@@ -7455,7 +8167,7 @@ pub async fn guard_bound_request(
         if parts.uri.path() == "/v1/repair/apply-attributed"
             && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "foreign-agent-actor",
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
@@ -7464,12 +8176,37 @@ pub async fn guard_bound_request(
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
                 )));
             }
         }
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
+}
+
+async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
+    let refuse = || ApiError::bad(FractalError::new(
+        "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
+    ));
+    let path = request.uri().path();
+    if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+        || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
+        || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
+    {
+        return Err(refuse());
+    }
+    if matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
+        return Ok(request);
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.map_err(ApiError::internal)?;
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+        && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
+    {
+        return Err(refuse());
     }
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
@@ -7512,7 +8249,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -8017,8 +8754,10 @@ pub fn relayed_held_mail(
             .get()
             .prepare_cached(
                 "SELECT held.subject, held.sent_ms FROM coordination_sends held
-                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
-                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
                  LIMIT ?3",
             )?
             .query_map(
@@ -8061,6 +8800,23 @@ pub fn relayed_held_mail(
                 .map(|(count, oldest)| (seat, count, oldest))
         })
         .collect())
+}
+
+/// A constant-size progress read: no message history is read to report the migration.
+fn work_wake_index_check(state: &AppState) -> DoctorCheck {
+    let name = "work-wake-index".into();
+    match crate::store::wake_lookup::status(&state.store.readers.get()) {
+        Ok((cursor, ceiling, complete)) => DoctorCheck {
+            name,
+            status: "pass".into(),
+            message: format!(
+                "cursor={cursor} ceiling={ceiling} done={complete}; {}",
+                if complete { "wake lookups seek indexed tags only" }
+                else { "legacy recipient reads remain only for the unindexed historical tail" },
+            ),
+        },
+        Err(error) => DoctorCheck { name, status: "warn".into(), message: error.to_string() },
+    }
 }
 
 /// Whether this member records its seats' lifecycle as local marks (store/marks_switch.rs), and,
@@ -8668,7 +9424,8 @@ pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
 }
 
 /// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
-/// every operation, about 14 s on a 56 GB store. The daemon audits at startup and then every
+/// every operation, about 14 s on a 56 GB store. The daemon audits
+/// [`crate::store::STARTUP_MAINTENANCE_DELAY`] after it starts and then every
 /// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
 pub(crate) fn operation_projection_check(
     audit: Option<crate::store::OperationAuditRecord>,
@@ -8682,7 +9439,8 @@ pub(crate) fn operation_projection_check(
     };
     let Some(audit) = audit else {
         return check("warn", format!(
-            "no operation audit has finished since the daemon started; it audits at startup and then every {} min",
+            "no operation audit has finished since the daemon started; it audits {} min after it starts and then every {} min",
+            crate::store::STARTUP_MAINTENANCE_DELAY.as_secs() / 60,
             period.as_secs() / 60
         ));
     };
@@ -9491,6 +10249,7 @@ fn doctor_report_within(
     checks.check("message-marks", || {
         Ok([message_marks_check(state)].into_iter().chain(message_staging_check(state, client_now_ms())).collect())
     });
+    checks.check("work-wake-index", || Ok(vec![work_wake_index_check(state)]));
     checks.check("held-mail", || {
         Ok(vec![held_mail_check(state, client_now_ms(), runtime.as_ref())])
     });
@@ -9553,6 +10312,7 @@ fn doctor_report_within(
     let report_status = doctor_status(&checks);
     let mut performance = crate::performance::snapshot();
     performance["seatAdmission"] = admission;
+    performance["agentsRequestSloShadow"] = json!(agents_request_slo::read());
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),
@@ -9590,11 +10350,11 @@ mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
-fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, St3Error> {
+fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, FractalError> {
     match result {
         Ok(projected) => Ok(projected),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
-        Err(error) => Err(St3Error::new("internal", error.to_string())),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
+        Err(error) => Err(FractalError::new("internal", error.to_string())),
     }
 }
 
@@ -9708,7 +10468,7 @@ fn concrete_person(person: &str) -> Result<(), ApiError> {
     if person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7 {
         Ok(())
     } else {
-        Err(ApiError::bad(St3Error::new(
+        Err(ApiError::bad(FractalError::new(
             "person-required",
             "fleet operations need a concrete person/NAME",
         )))
@@ -9757,7 +10517,7 @@ async fn refuse_while_leaving(
         // closes the connection under it, and the client then reports a broken pipe instead
         // of this refusal.
         let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
-        return ApiError::bad(St3Error::new(
+        return ApiError::bad(FractalError::new(
             "fleet-leaving",
             "this node is leaving its fleet and accepts no new writes; `st fleet leave --cancel` stops the leave",
         ))
@@ -9793,9 +10553,9 @@ fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
-) -> Result<&'a crate::model::MissionSpec, St3Error> {
+) -> Result<&'a crate::model::MissionSpec, FractalError> {
     let Some(mission) = intent.missions.get(expected) else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}` and no immediate desired state"
@@ -9805,7 +10565,7 @@ fn launch_candidate_mission<'a>(
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
     if !mission_only_subjects(intent) || published != published_closure {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}`, its implicit mission graphs, and no immediate desired state"
@@ -9936,7 +10696,7 @@ struct PublicationRefusals {
 
 impl PublicationRefusals {
     /// The error that refuses the publication, if anything does.
-    fn error(self) -> Option<St3Error> {
+    fn error(self) -> Option<FractalError> {
         let (code, refusals) = if !self.references.is_empty() {
             ("unresolved-reference", self.references)
         } else if !self.renders.is_empty() {
@@ -9944,7 +10704,7 @@ impl PublicationRefusals {
         } else {
             return None;
         };
-        Some(St3Error::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
+        Some(FractalError::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
     }
 
     /// Lists the refusals as the preview's blockers, where each replaces a warning of the same
@@ -9979,7 +10739,7 @@ async fn publication_refusals(
         let renders = if publication.iter().any(|subject| subject.member.is_some()) {
             let current = store
                 .desired_subjects()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             crate::render::publication_refusals(&store, &publication, &current, &node)
         } else {
             Vec::new()
@@ -10026,7 +10786,7 @@ fn suspension_target(
         .map_err(ApiError::bad)?
         .is_some_and(|o| o.holds_seat())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -10040,13 +10800,13 @@ fn suspension_target(
         .into_iter()
         .find(|item| item.subject == subject)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-agent",
                 format!("no seat `{subject}`"),
             ))
         })?;
     if !current.conflicts.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "suspend-conflict",
             "resolve the seat's conflicting declarations first",
         )));
@@ -10060,7 +10820,7 @@ fn suspension_target(
         .and_then(|desired| desired.member)
         .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-declared",
                 "only a declared, started seat can be suspended or resumed",
             ))
@@ -10071,7 +10831,7 @@ fn suspension_target(
         member = incumbent;
     }
     let token = current.desired_token.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "suspend-not-declared",
             "the seat has no selected declaration",
         ))
@@ -10138,7 +10898,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -10149,7 +10909,7 @@ pub fn request_suspend(
         && suspension.holds_seat()
     {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "already-suspended",
                 format!("the seat is already {}", suspension.phase),
             )
@@ -10165,7 +10925,7 @@ pub fn request_suspend(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-running",
                 "only a running seat can be suspended",
             ))
@@ -10173,7 +10933,7 @@ pub fn request_suspend(
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
     if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-authored-session-selection",
                 format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
             )
@@ -10184,7 +10944,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-blocked",
                 format!("the seat is not quiet: {}", blocking.join(", ")),
             )
@@ -10240,14 +11000,14 @@ pub fn request_resume(
         .map_err(ApiError::internal)?
         .filter(|suspension| suspension.phase == "suspended")
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new("not-suspended", "the seat is not suspended"))
+            ApiError::bad(FractalError::new("not-suspended", "the seat is not suspended"))
         })?;
     let suspend = suspension.suspend_operation_id.clone().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("a suspension without its suspend request"))
     })?;
     let host = request.host.unwrap_or_else(|| member.host.clone());
     if host.is_empty() || host.contains('/') {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
         )));
@@ -10256,7 +11016,7 @@ pub fn request_resume(
         crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
     {
         if host != old.host {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "rollout-in-progress",
                 "resume on the current host before applying the pending manual rollout",
             )));
@@ -10281,13 +11041,13 @@ pub fn request_resume(
                 crate::fleet::MemberState::Current(_)
             )
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "unknown-host",
                 "the resume target is not a current fleet member",
             )));
         }
         if !matches!(suspension.harness.as_deref(), Some("pi" | "omp")) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "snapshot-harness-unsupported",
                 "cross-host resume currently supports pi and omp portable transcripts",
             )));
@@ -10324,7 +11084,7 @@ async fn apply_with_authority(
     bound: Option<&str>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let actor = request.actor.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-publication-actor",
             "publication needs an explicit actor",
         ))
@@ -10333,13 +11093,13 @@ async fn apply_with_authority(
     if !intent.direct_message_registrations.is_empty()
         && bound.is_some_and(|bound| normalized_agent_actor(actor).as_deref() != Some(bound))
     {
-        return Err(ApiError::bad(St3Error::new("foreign-agent-actor",
+        return Err(ApiError::bad(FractalError::new("foreign-agent-actor",
             "a bound harness registers a message subscription only as itself")));
     }
     for declaration in intent.mission_runs.values() {
         if let Some(creation) = &declaration.creation {
             if creation.requester == "person/requester" {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "placeholder-run-requester",
                     "a mission run needs a concrete requester, not `person/requester`",
                 )));
@@ -10347,7 +11107,7 @@ async fn apply_with_authority(
             if let Some(agent) = normalized_agent_actor(actor)
                 && creation.requester != agent
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "run-requester-actor-mismatch",
                     format!(
                         "`{actor}` cannot create a run for requester `{}`",
@@ -10404,7 +11164,7 @@ async fn get_delivery_hold(
 ) -> Result<Json<crate::delivery_hold::HoldView>, ApiError> {
     fractal_schema::registry()
         .validate_subject(&query.subject)
-        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
+        .map_err(|error| ApiError::bad(FractalError::new(error.code, error.message)))?;
     let store = state.store.clone();
     blocking_store(move || {
         crate::delivery_hold::view(&store, &query.subject, client_now_ms() as u64)
@@ -10426,13 +11186,13 @@ async fn post_delivery_hold(
         {
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             let driver = subjects
                 .first()
                 .and_then(|subject| subject.member.as_ref())
                 .and_then(|member| member.driver.as_deref());
             if !matches!(driver, Some("codex" | "opencode")) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unsupported-delivery-hold",
                     "delivery holds currently require a declared Codex or OpenCode seat",
                 ));
@@ -10512,12 +11272,15 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         .and_then(|reloaded| reloaded.ok())
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    let now = client_now_ms() as u64;
     let mut rows = crate::objectives::rows(
         &request_latency_target_windows(),
         &limits,
-        client_now_ms() as u64,
+        now,
         fresh_ms,
     );
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::credit_objectives::rows(store, now, fresh_ms)?));
     if let Some(open) = store.open_divergences_at_last_check() {
         // Objectives come before budgets.
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
@@ -10583,7 +11346,7 @@ pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
 
 fn device_signature_error(code: &'static str, message: impl Into<String>) -> ApiError {
-    ApiError::bad(St3Error::new(code, message.into()))
+    ApiError::bad(FractalError::new(code, message.into()))
 }
 
 /// Check a device's signature on the message this daemon is about to write, before writing it.
@@ -10713,7 +11476,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let requested_recipient = normalize_message_party(&request.to);
     let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "external sender imports require the enrolled adapter endpoint",
         )));
@@ -10721,7 +11484,7 @@ pub fn accept_message_receipt_with_upload_owner(
     crate::model::refuse_person_recipient(&normalize_message_party(&request.to))
         .map_err(ApiError::bad)?;
     if request.content.trim().is_empty() && request.attachments.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-message",
             "a message needs nonempty content",
         )));
@@ -10729,7 +11492,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
         && !request.content.starts_with("doc/");
     if long_body && request.content.len() > message_body::MAX_BYTES {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "message-too-large",
             format!(
                 "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
@@ -10740,13 +11503,13 @@ pub fn accept_message_receipt_with_upload_owner(
     }
     if request.content.starts_with("doc/") {
         let (name, hash) = request.content.rsplit_once('@').ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "unpinned-document-reference",
                 "a message document reference needs `doc/NAME@HASH`",
             ))
         })?;
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-document-reference",
                 "a message document reference has an invalid hash",
             )));
@@ -10757,7 +11520,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .map_err(ApiError::internal)?
             .is_none()
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "missing-document",
                 format!("message document `{}` is not stored", request.content),
             )));
@@ -10777,7 +11540,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::reserved_event_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "daemon event tags cannot be asserted by conversation senders",
         )));
@@ -10788,7 +11551,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::is_remaining_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "remaining-count tags are delivery metadata",
         )));
@@ -10811,6 +11574,26 @@ pub fn accept_message_receipt_with_upload_owner(
         .transpose()
         .map_err(ApiError::internal)?
         .flatten();
+    // Refuse stale recipient custody before recording its reply. Settlement checks again
+    // with the accepted reply's evidence, since retirement may change during the send.
+    if let Some(parent) = parent.as_ref()
+        && parent.to == from && parent.from == to && parent.status != "closed"
+    {
+        crate::store::retirements::admit_mail_claim_to(
+            &state.store.readers.get(),
+            &ClaimInput {
+                subject: parent.subject.clone(),
+                kind: "message.closed".into(),
+                actor: Some(from.clone()),
+                fields: BTreeMap::from([("status".into(), json!("closed"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+            parent,
+        )
+        .map_err(ApiError::bad)?;
+    }
     // A signed message stores exactly the tags its device signed; only a person signs, and a
     // person's message always wakes.
     let tags = if let Some(previous) = previous
@@ -10832,7 +11615,7 @@ pub fn accept_message_receipt_with_upload_owner(
                 == crate::silent::stored_tags(&from, &stored)
         };
         if !same_tags {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "idempotency-mismatch",
                 "the idempotency key already identifies different message tags",
             )));
@@ -10917,7 +11700,7 @@ pub fn accept_message_receipt_with_upload_owner(
             let mut names = signature.signed_fields.clone();
             names.sort();
             if names == SIGNED_MESSAGE_FIELDS {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "long-message-signature-unsupported",
                     format!(
                         "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
@@ -10952,7 +11735,10 @@ pub fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => match assistant_authorization {
             Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
-            None => state.store.append_claim_outcome(&input),
+            // A reply settles its parent citing the reply's claim, so it stays on the graph until
+            // 4c-3; any other send goes where its recipient's host reads it (message_routing).
+            None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
+            None => crate::store::message_routing::send_message(&state.store, &input),
         },
     }
     .map_err(|error| {
@@ -10981,12 +11767,18 @@ pub fn accept_message_receipt_with_upload_owner(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut work_wake = is_work_wake(&tags);
+    // A send routed to the messages shard, or a repeat replaying a stream item an earlier send of
+    // this key wrote, lists past the graph's indexes; the send that wrote it settled its parent.
+    let (created_index, stream_item) =
+        crate::store::message_sent::listed_index(&state.store, &record).map_err(ApiError::internal)?;
     if let Some(reference) = request.in_reply_to.as_deref() {
         // Settling the parent writes its lifecycle claims too.
         work_wake |= parent
             .as_ref()
             .is_none_or(|message| is_work_wake(&message.tags));
-        settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        if !stream_item {
+            settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        }
     }
     signal_message_changed(state, "message.sent", work_wake);
     let kind = if tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
@@ -11014,7 +11806,7 @@ pub fn accept_message_receipt_with_upload_owner(
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
-            created_index: record.store_index,
+            created_index,
             status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
@@ -11089,16 +11881,34 @@ fn settle_answered_message(
         if !needed {
             continue;
         }
+        let input = ClaimInput {
+            subject: parent.clone(),
+            kind: format!("message.{lifecycle}"),
+            actor: Some(from.into()),
+            fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
+            evidence: vec![reply_claim.into()],
+            expected_subject: None,
+            idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
+        };
+        if current.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            // The parent lives in the stream even though its reply cites a graph claim.
+            // The shard writer validates the step and makes a concurrent/repeated step a no-op.
+            crate::store::retirements::admit_mail_claim_to(
+                &store.readers.get(), &input, &current,
+            )
+            .map_err(ApiError::bad)?;
+            crate::store::messages_shard::record_lifecycle(
+                store,
+                &input.subject,
+                &input.kind,
+                input.actor.as_deref(),
+                &input.fields,
+            )
+            .map_err(ApiError::bad)?;
+            continue;
+        }
         store
-            .append_claim(&ClaimInput {
-                subject: parent.clone(),
-                kind: format!("message.{lifecycle}"),
-                actor: Some(from.into()),
-                fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
-                evidence: vec![reply_claim.into()],
-                expected_subject: None,
-                idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
-            })
+            .append_claim(&input)
             .map_err(ApiError::bad)?;
     }
     Ok(())
@@ -11166,7 +11976,7 @@ struct EventPage {
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
     let limit = query.limit.unwrap_or(200);
     if !(1..=200).contains(&limit) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-event-limit",
             "event page limit must be 1 through 200",
         )));
@@ -11197,8 +12007,13 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     ])),
                 }));
             }
-            let (items, next_after, has_more) =
+            let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Events retain their bounded last-inspected cursor contract, even when hidden.
+            items.retain(|event| {
+                !fractal_schema::notice::is_reserved_subject(&event.subject)
+                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
+            });
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11211,6 +12026,10 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .filter(|event| {
+                        !fractal_schema::notice::is_reserved_subject(&event.subject)
+                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    })
                     .cloned()
                     .collect()
             });
@@ -11298,7 +12117,7 @@ async fn quick_agent(
         .cached_idempotency_response::<crate::model::ApplyResponse>(&request.idempotency_key)
         .map_err(ApiError::internal)?;
     if selected_token != request.expected_subject && historical_apply.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-subject",
             format!("the desired state for `{agent_subject}` changed"),
         )));
@@ -11378,7 +12197,7 @@ fn scope_eval_desired_subjects(
     intent: &mut crate::model::NormalizedIntent,
     current: &[crate::model::DesiredSubject],
     owner_run: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let selected = current
         .iter()
         .map(|subject| (subject.subject.as_str(), subject))
@@ -11395,7 +12214,7 @@ fn scope_eval_desired_subjects(
             shared.push(subject.clone());
             continue;
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "eval-desired-conflict",
             format!(
                 "eval declaration `{subject}` conflicts with the selected desired state; use a run-owned declaration or an isolated daemon"
@@ -11413,13 +12232,13 @@ pub async fn start_mission_run_action(
     Json(request): Json<MissionRunRequest>,
 ) -> Result<Json<MissionRunView>, ApiError> {
     let requester = request.requester.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-run-requester",
             "a mission run needs an explicit requester",
         ))
     })?;
     if requester == "person/requester" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "placeholder-run-requester",
             "a mission run needs a concrete requester, not `person/requester`",
         )));
@@ -11585,7 +12404,7 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
         return Ok(actor.to_owned());
     }
     normalized_agent_actor(actor).ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             code,
             format!("`{actor}` is neither a person nor an agent"),
         ))
@@ -11641,13 +12460,13 @@ async fn work_action_response_viewing(
         .as_deref()
         .and_then(normalized_agent_actor)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-work-actor",
                 "a work action needs an exact agent actor",
             ))
         })?;
     let incarnation = request.incarnation.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-work-incarnation",
             "a work action must be fenced to one exact live agent incarnation",
         ))
@@ -11674,7 +12493,7 @@ async fn work_action_response_viewing(
                 } else {
                     store.enrich_work_wake(&mut response, None)
                 };
-                filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
+                filled.map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
                 Ok(response)
             })
             .await?;
@@ -11688,7 +12507,7 @@ async fn work_action_response_viewing(
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "inactive-work-incarnation",
             format!("`{incarnation}` is not the current live incarnation of `{actor}`"),
         )));
@@ -11739,7 +12558,7 @@ pub fn live_session(
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-authority-indeterminate",
             format!("subject `{subject}` has indeterminate runtime authority"),
         )));
@@ -11750,7 +12569,7 @@ pub fn live_session(
         ))
     })?;
     if origin != state.store.origin() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-not-local",
             format!(
                 "subject `{subject}` is owned by `{}` and cannot be controlled through `{}`",
@@ -11778,7 +12597,7 @@ pub fn live_session(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no incarnation")))?;
     if expected_incarnation.is_some_and(|expected| incarnation_id != expected) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-incarnation",
             format!("subject `{subject}` changed incarnation"),
         )));
@@ -11829,7 +12648,7 @@ pub async fn input_session_as(
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)
             .map_err(|error| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "invalid-session-input",
                     format!("raw terminal input is not valid base64: {error}"),
                 ))
@@ -11938,7 +12757,7 @@ pub async fn signal_session_as(
         "user-1" => libc::SIGUSR1,
         "user-2" => libc::SIGUSR2,
         other => {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-session-signal",
                 format!("session signal `{other}` is not registered"),
             )));
@@ -12094,7 +12913,7 @@ fn finish_session_control(
         } else {
             "control-action-failed"
         };
-        return Err(ApiError::bad(St3Error::new(code, reason)));
+        return Err(ApiError::bad(FractalError::new(code, reason)));
     }
     Ok(Json(SessionControlResponse {
         subject: subject.into(),
@@ -12135,7 +12954,7 @@ async fn host_agent_workspace(
     if host_id == client_host_id(&state.node) {
         let workspace =
             crate::config::default_agent_workspace(&query.identity).map_err(|error| {
-                ApiError::bad(St3Error::new("validation-failed", error.to_string()))
+                ApiError::bad(FractalError::new("validation-failed", error.to_string()))
             })?;
         return Ok(Json(json!({ "host_id": host_id, "workspace": workspace })));
     }
@@ -12144,7 +12963,7 @@ async fn host_agent_workspace(
         .and_then(|value| value.to_str().ok())
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-person",
                 format!("asking {host_id} for a workspace needs a concrete person"),
             ))
@@ -12185,6 +13004,8 @@ pub fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ready_work_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared;
 

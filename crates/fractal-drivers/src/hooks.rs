@@ -303,18 +303,6 @@ pub fn versioned_hooks_dir_at(root: &Path) -> PathBuf {
     root.join(expected_manifest().directory)
 }
 
-/// Whether this host has a Codex agent whose rendered settings and next launch need this hook set.
-/// Direct programs are expanded exactly as the execution backends expand them.
-pub fn required_by_codex(
-    specs: &[agent_spec::spec::AgentSpec],
-    this_host: &str,
-    catalog_root: &Path,
-) -> bool {
-    specs
-        .iter()
-        .any(|spec| required_by_codex_agent(spec, this_host, catalog_root))
-}
-
 /// Whether one local declaration owns a Codex agent launch.
 pub fn required_by_codex_agent(
     spec: &agent_spec::spec::AgentSpec,
@@ -336,21 +324,6 @@ pub fn required_by_codex_agent(
         }))
 }
 
-/// Whether this host has a pi agent whose next launch needs this hook set.
-///
-/// pi differs from Codex in where the set is needed: nothing pi renders references `$ST_HOOKS`, but
-/// the launch cannot proceed without `pi-channel.ts`, so an unverified set must hold the launch
-/// rather than let the wrapper start and fail.
-pub fn required_by_pi(
-    specs: &[agent_spec::spec::AgentSpec],
-    this_host: &str,
-    catalog_root: &Path,
-) -> bool {
-    specs
-        .iter()
-        .any(|spec| required_by_pi_agent(spec, this_host, catalog_root))
-}
-
 /// Whether one local declaration owns a pi agent launch.
 pub fn required_by_pi_agent(
     spec: &agent_spec::spec::AgentSpec,
@@ -370,19 +343,6 @@ pub fn required_by_pi_agent(
             }))
 }
 
-
-/// Whether this host has an omp agent whose next launch needs this hook set — same shape as pi:
-/// nothing omp renders references `$ST_HOOKS`, but the launch cannot proceed without
-/// `omp-channel.ts`.
-pub fn required_by_omp(
-    specs: &[agent_spec::spec::AgentSpec],
-    this_host: &str,
-    catalog_root: &Path,
-) -> bool {
-    specs
-        .iter()
-        .any(|spec| required_by_omp_agent(spec, this_host, catalog_root))
-}
 
 /// Whether one local declaration owns an omp agent launch.
 pub fn required_by_omp_agent(

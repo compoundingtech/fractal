@@ -47,10 +47,10 @@ fn current(tx: &Connection, seat: &str, seal: &Seal) -> Result<bool> {
 }
 
 /// Called inside the work action's writer transaction, never from a preceding reader.
-pub fn admit_claim_tx(tx: &Connection, seat: &str) -> Result<(), St3Error> {
+pub fn admit_claim_tx(tx: &Connection, seat: &str) -> Result<(), FractalError> {
     let mut state = load(tx, seat).map_err(internal)?;
     if state.sealed {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "refresh-intake-sealed",
             "refresh holds new work and mutation intake",
         ));

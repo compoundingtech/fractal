@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A mailbox channel that reconnects with the lease and binding it already holds is admitted on a fresh read transaction, without the writer. Every seat's channel does this when the daemon restarts, and each one used to take the writer to rewrite an identical lease row, holding it while it read the seat's declaration and runtime cold. That queued the restart's harness events and claim writes behind it",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The admission runs the same checks, through the same functions in the same order, on a read transaction begun after the request arrived, so every commit before it is seen. It skips the writer only when the stored lease is already exactly what it would record (same incarnation, token, epoch and authority, not revoked) and the argv binding is already stored. A new binding, a first lease, a refusal under the writer, or anything that would change a row still goes through the writer as before."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version safe: no wire, client or stored-format change. A reconnect gets the same answer as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back takes the writer on every reconnect again."
+  }
+}

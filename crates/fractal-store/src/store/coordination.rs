@@ -161,7 +161,8 @@ pub fn sync(
             "SELECT NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1
          AND kind IN ('message.staged','message.delivered','message.read','message.closed'))
          AND NOT EXISTS(SELECT 1 FROM local_message_marks WHERE message=?1)
-         AND NOT EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)",
+         AND NOT EXISTS(SELECT 1 FROM local_message_staged WHERE message=?1)
+         AND NOT EXISTS(SELECT 1 FROM local_stream_lifecycle WHERE subject=?1)",
             [subject],
             |row| row.get::<_, bool>(0),
         )?;

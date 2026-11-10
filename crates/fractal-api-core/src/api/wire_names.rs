@@ -6,8 +6,10 @@ use super::{ApiError, client_v0::validation};
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 // Sunset: 60 days after the first release shipping this bridge. Switch senders only
 // after every fleet member accepts the new names; remove old readers at contraction.
+pub(super) const LOCAL_PERSON_HEADER_ALIAS: &str = "x-fractal-person";
+
 const HEADERS: &[(&str, &str)] = &[
-    ("x-st3-person", "x-fractal-person"),
+    (super::client_v0::LOCAL_PERSON_HEADER, LOCAL_PERSON_HEADER_ALIAS),
     ("x-st3-client", "x-fractal-client"),
     ("x-st3-features", "x-fractal-features"),
     ("x-st3-raw-origin", "x-fractal-raw-origin"),

@@ -215,7 +215,7 @@ Every answer names the `repository`, its `resource`, `observer` and `poller` (`h
 
   A graph answer has no head history: `heads` is null, which means unknown.
 
-A repository no member polls is `404 not-found`. `st gh watch OWNER/REPO#N` declares its observer.
+A repository no member polls is `404 not-found`. `fractal gh watch OWNER/REPO#N` declares its observer.
 
 A member relays only to a poller that advertises the plugin, and each hop checks that the next one
 grants the operation's capability:
@@ -227,9 +227,9 @@ grants the operation's capability:
 
 ### The CLI
 
-- `st gh prs OWNER/REPO [--state open|closed|all] [--limit N]`
-- `st gh pr OWNER/REPO#N`
-- `st gh checks OWNER/REPO#N`
+- `fractal gh prs OWNER/REPO [--state open|closed|all] [--limit N]`
+- `fractal gh pr OWNER/REPO#N`
+- `fractal gh checks OWNER/REPO#N`
 
 Each reads as `--as` (or `ST_AGENT`, or the configured person), which a relayed read needs. Each
 prints where its answer came from. `--json` prints the whole answer.

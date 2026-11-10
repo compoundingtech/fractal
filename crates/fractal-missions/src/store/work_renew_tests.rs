@@ -541,6 +541,60 @@ fn a_claim_and_a_completion_hold_the_writer_for_the_same_work_whatever_the_assig
 }
 
 #[test]
+fn a_claim_holds_the_writer_for_the_same_work_whatever_the_seats_queue_history() {
+    let mut costs = Vec::new();
+    for history in [0, 400] {
+        let step = ready_step_with_mail(0);
+        // Moves among runs that have since finished, as a seat that reorders its queue every
+        // day collects: none of them places a queued run, so none can change today's order.
+        for index in 0..history {
+            let (placement, anchor) = match index % 3 {
+                0 => ("top", None),
+                1 => ("after", Some(format!("mission-run/finished-{}", index - 1))),
+                _ => ("before", Some(format!("mission-run/finished-{}", index / 2))),
+            };
+            let mut fields = BTreeMap::from([
+                ("run".to_owned(), json!(format!("mission-run/finished-{index}"))),
+                ("placement".to_owned(), json!(placement)),
+            ]);
+            if let Some(anchor) = anchor {
+                fields.insert("anchor".into(), json!(anchor));
+            }
+            step.store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.worker".into(),
+                    kind: seat_queue::MOVED_CLAIM.into(),
+                    actor: Some("person/operator".into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("history-move-{index}")),
+                })
+                .unwrap();
+        }
+        let claim = format!("history-claim-{history}");
+        step.store.work_action(&step.subject, "claim", &request(&claim, None)).unwrap();
+        let claim = writer_work(&claim);
+        eprintln!(
+            "work writer queue moves={history} claim: statements={} vm_steps={}",
+            claim.statements, claim.vm_steps,
+        );
+        costs.push(claim);
+    }
+    let (short, long) = (costs[0], costs[1]);
+    // Each named-run probe is a statement: probing every run the moves name made 400 more.
+    assert_eq!(long.statements, short.statements, "a claim probed runs no queued run is placed against");
+    // The one moves read still reads each move in canonical order, about 70 VM steps a move
+    // (#5215 follow-up); a per-move query or probe costs more than this bound.
+    assert!(
+        long.vm_steps <= short.vm_steps + 80 * 400,
+        "a claim's writer work per queue move grew: {} to {} VM steps over 400 moves",
+        short.vm_steps,
+        long.vm_steps,
+    );
+}
+
+#[test]
 fn a_claim_and_a_completion_answer_the_wake_the_writer_answered_when_it_read_it() {
     let step = ready_step_with_mail(20);
     let (store, subject) = (&step.store, step.subject.as_str());

@@ -43,7 +43,7 @@ pub async fn logs_session(
     Query(query): Query<SessionLogQuery>,
 ) -> Result<Json<SessionLogChunk>, ApiError> {
     if query.limit == 0 || query.limit > 64 * 1024 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-log-limit",
             "a log chunk limit must be between 1 and 65536 bytes",
         )));
@@ -57,7 +57,7 @@ pub async fn logs_session(
         subject
     };
     if session.terminal {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-capability",
             "terminal sessions expose a screen instead of an exec log",
         )));
@@ -90,7 +90,7 @@ pub async fn logs_session(
             ))
         })?;
         if !query.previous && generation.generation_id != session.incarnation_id {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "stale-incarnation",
                 format!("subject `{subject}` changed exec generation"),
             )));
@@ -149,7 +149,7 @@ pub async fn screen_session(
 ) -> Result<Json<SessionScreen>, ApiError> {
     let session = live_session(&state, &subject, None)?;
     if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-capability",
             "an exec session has a log instead of a terminal screen",
         )));
@@ -197,7 +197,7 @@ pub async fn clear_context(
     }
     let session = live_session(&state, &subject, Some(&request.expected_incarnation))?;
     if !session.terminal || session.driver.as_deref() != Some("claude") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-capability",
             "context clear requires a terminal Claude driver in st v1",
         )));
@@ -274,7 +274,7 @@ pub async fn attach_session(
     let subject = session_storage_subject(&state, &subject)?;
     let session = live_session(&state, &subject, None)?;
     if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-capability",
             "terminal attachment requires a terminal session",
         )));
@@ -321,7 +321,7 @@ pub async fn local_terminal(
         .await
         .map_err(ApiError::internal)??;
     if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-capability",
             "terminal attachment requires a terminal session",
         )));
@@ -358,7 +358,7 @@ pub async fn terminal_session(
     let secret = query.capability;
     let capability = blocking_action(move || store.consume_capability(&secret, "terminal")).await?;
     if capability.used || capability.subject != subject {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-capability",
             "the terminal capability is used or names another subject",
         )));
@@ -383,7 +383,7 @@ pub async fn terminal_session(
         .and_then(Value::as_str)
         .map(str::to_owned);
     if capability.incarnation_id != current_incarnation {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-incarnation",
             "the terminal incarnation changed before attachment",
         )));

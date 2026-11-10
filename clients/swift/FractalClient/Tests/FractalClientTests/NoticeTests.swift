@@ -51,14 +51,31 @@ final class NoticeTests: XCTestCase {
         XCTAssertThrowsError(try NoticeCreatedLinks(Array(repeating: try NoticeLink(label: NoticeLinkLabel("label"), url: NoticeLinkUrl("https://example.test")), count: 11)))
         XCTAssertThrowsError(try NoticeSnapshotCreationClaims([]))
         XCTAssertThrowsError(try NoticeCreatedIntent("unknown"))
-        for value in ["2026-02-30T10:00:00Z", "2026-01-01T10:00:60Z", "2026-01-01T23:59:60+00:00"] {
+        let fixture = try fixtures()
+        for value in try XCTUnwrap(fixture["invalid_timestamps"] as? [String]) {
             XCTAssertThrowsError(try NoticeTimestamp(value), value)
             XCTAssertThrowsError(try JSONDecoder().decode(NoticeTimestamp.self, from: data(value)), value)
         }
-        for value in ["2026-01-01T10:00:59Z", "2026-01-01T23:59:60Z", "2026-01-01T23:59:60.5Z"] {
+        for value in try XCTUnwrap(fixture["valid_timestamps"] as? [String]) {
             XCTAssertNoThrow(try NoticeTimestamp(value)); try roundTrip(NoticeTimestamp.self, value)
+            let nested = try replace(try XCTUnwrap(fixture["snapshot"]), ["input", "created_at"][...], value)
+            try roundTrip(NoticeSnapshot.self, nested)
         }
         for value in ["relative/path", "https://bad host", "https://example.test/%xy", "https://example.test\n"] { XCTAssertThrowsError(try NoticeLinkUrl(value), value) }
         XCTAssertNoThrow(try NoticeLinkUrl("https://[::1]/a?b=c#fragment"))
+    }
+    func testNullableControlsAndParameters() throws {
+        let fixture = try fixtures(), snapshot = try XCTUnwrap(fixture["snapshot"] as? [String: Any])
+        let id = try XCTUnwrap(snapshot["id"])
+        let timestamp = try XCTUnwrap((fixture["valid_timestamps"] as? [String])?.first)
+        try roundTrip(NoticeSeenParameters.self, ["notice_id": id])
+        try roundTrip(NoticeDismissParameters.self, ["notice_id": id])
+        for until in [NSNull(), timestamp] as [Any] {
+            try roundTrip(NoticeSnoozeParameters.self, ["notice_id": id, "until": until])
+            let seen = try replace(snapshot, ["seen_at"][...], until)
+            try roundTrip(NoticeSnapshot.self, seen)
+        }
+        try roundTrip(NoticeFence.self, ["notice_id": id, "source_revision": "v1", "control_revision": NSNull()])
+        try roundTrip(NoticeFence.self, ["notice_id": id, "source_revision": "v1", "control_revision": "control-v1"])
     }
 }

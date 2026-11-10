@@ -98,10 +98,13 @@ macro_rules! unread_cte {
          WHERE subject NOT IN (SELECT subject FROM unread_mail_pending)
          UNION
          SELECT pending.subject FROM unread_mail_pending pending
-         WHERE EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject AND kind='message.sent')
+         WHERE (EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject AND kind='message.sent')
+                OR EXISTS (SELECT 1 FROM local_stream_sent WHERE subject=pending.subject))
            AND NOT EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject
                            AND kind IN ('message.read','message.closed'))
            AND NOT EXISTS (SELECT 1 FROM local_message_marks WHERE message=pending.subject
+                           AND kind IN ('message.read','message.closed'))
+           AND NOT EXISTS (SELECT 1 FROM local_stream_lifecycle WHERE subject=pending.subject
                            AND kind IN ('message.read','message.closed')))
 "
     };

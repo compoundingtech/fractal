@@ -120,10 +120,22 @@ server = servers["st3"] if "st3" in servers else servers.get("fractal")
 # Fault injection belongs to this private workspace, never to a shared provider setting.
 channel_mode = Path.cwd() / "claude-channel-mode"
 mode = channel_mode.read_text().strip() if channel_mode.exists() else ""
-if mode in ("missing", "missing-once"):
+if mode in ("missing", "missing-once", "missing-new-cause"):
     server = None
     if mode == "missing-once":
         channel_mode.write_text("healthy")
+    if mode == "missing-new-cause":
+        # Channel recovery charges its budget only for a new failure (#4789, fixed by #4801): the cause names whether
+        # the project declares its own `st` server, which the driver read before this launch. Flip it
+        # for the next launch, so each one fails for another cause than the last.
+        project = Path.cwd() / ".mcp.json"
+        config = json.loads(project.read_text()) if project.exists() else {}
+        servers = config.setdefault("mcpServers", {})
+        if "st" in servers:
+            del servers["st"]
+        else:
+            servers["st"] = {"command": "true"}
+        project.write_text(json.dumps(config))
 channel = None
 if server:
     channel = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE,

@@ -10,7 +10,8 @@
     },
     "NoticeClaimId": {
       "pattern": "^[0-9a-f]{64}$",
-      "type": "string"
+      "type": "string",
+      "x-st-brand": "NoticeClaimId"
     },
     "NoticeCreated": {
       "additionalProperties": false,
@@ -260,7 +261,8 @@
     },
     "NoticeId": {
       "pattern": "^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-      "type": "string"
+      "type": "string",
+      "x-st-brand": "NoticeId"
     },
     "NoticeIntegrity": {
       "description": "Unavailable/conflicted is never an actionable empty-success substitute. Manifest projection state remains explicit.",
@@ -595,14 +597,15 @@
     },
     "NoticeSourceId": {
       "pattern": "^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-      "type": "string"
+      "type": "string",
+      "x-st-brand": "NoticeSourceId"
     },
     "NoticeTimestamp": {
       "description": "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission.",
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
       "type": "string",
-      "x-st-codec": "timestamp"
+      "x-st-codec": "lossless-timestamp"
     },
     "Revision": {
       "description": "Opaque per-subject revision; compare for equality, echo in fences.",

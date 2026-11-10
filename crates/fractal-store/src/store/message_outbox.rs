@@ -43,20 +43,20 @@ CREATE INDEX IF NOT EXISTS local_message_outbox_order ON local_message_outbox(qu
 /// the write that sends it. A sender calls this instead of appending to the shard while it holds
 /// a graph transaction; the daemon's drainer sees the row when the transaction commits. A repeat with the same
 /// subject changes nothing. Nothing calls this yet: the daemon's senders move to it in 4c-3.
-pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, St3Error> {
+pub fn enqueue_tx(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<bool, FractalError> {
     if input.kind != "message.sent" {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-outbox-message",
             format!("the outbox holds only message.sent claims, not `{}`", input.kind),
         ));
     }
     if !input.subject.starts_with("message/") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-outbox-message",
             format!("`{}` is not a message subject", input.subject),
         ));
     }
-    let claim = serde_json::to_string(input).map_err(|error| St3Error::new("internal", error.to_string()))?;
+    let claim = serde_json::to_string(input).map_err(|error| FractalError::new("internal", error.to_string()))?;
     let inserted = transaction
         .execute(
             /* sqlite-large-value: allow-for-now lv-he8a78b8d9e13 owner=fractal_store::store::message_outbox TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_outbox(subject, claim, queued_at_unix_ms) VALUES (?1, ?2, ?3)",
@@ -83,6 +83,22 @@ pub fn oldest(connection: &Connection) -> Result<Option<(String, i64, Option<Str
         )?
         .query_row(/* sqlite-large-value: allow-for-now lv-h21a97f532ef5 owner=fractal_store::store::message_outbox TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .optional()?)
+}
+
+/// The first `limit` messages waiting, oldest first, and how many wait in all, which an offline
+/// export names when it refuses a copy.
+pub fn queued(connection: &Connection, limit: i64) -> Result<(Vec<String>, i64)> {
+    let subjects = connection
+        .prepare_cached(
+            "SELECT subject FROM local_message_outbox
+             ORDER BY queued_at_unix_ms, subject LIMIT ?1",
+        )?
+        .query_map([limit], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    let count = connection
+        .prepare_cached("SELECT COUNT(*) FROM local_message_outbox")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h99f662904dfd owner=fractal_store::store::message_outbox TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
+    Ok((subjects, count))
 }
 
 /// Whether a message waits that no drain has tried yet, and whether any waits at all: the
@@ -164,7 +180,7 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
     };
     // A drain that appended and stopped before the delete, or a peer's copy, already put it there.
     if super::messages_shard::holds(graph, subject)? || graph_holds()? {
-        remove(graph, subject)?;
+        mirrored_remove(graph, subject)?;
         return Ok(true);
     }
     let input = match serde_json::from_str::<ClaimInput>(claim) {
@@ -175,14 +191,18 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
             return Ok(false);
         }
     };
+    // Routed again now: the recipient's host may have stopped advertising its inbox since the
+    // sender queued it (message_routing).
+    let routed = super::message_routing::legacy_reason(graph, &input)?.is_none();
     let appended = match shard {
-        Some(shard) if attempts < ATTEMPTS => shard.append_claim(&input).map(|_| ()),
-        // Refused too often, or no shard: the graph takes it, as every message before the shard.
+        Some(shard) if routed && attempts < ATTEMPTS => shard.append_claim(&input).map(|_| ()),
+        // Not routed, refused too often, or no shard: the graph takes it, as every message
+        // before the shard.
         _ => graph.append_claim(&input).map(|_| ()),
     };
     match appended {
         Ok(()) => {
-            remove(graph, subject)?;
+            mirrored_remove(graph, subject)?;
             Ok(true)
         }
         Err(error) => {
@@ -190,6 +210,14 @@ fn drain_one(graph: &Store, shard: Option<&GraphStore>, subject: &str, claim: &s
             Ok(false)
         }
     }
+}
+
+/// Remove a row whose message a store now holds, once the graph's mirror of the shard has it, so
+/// a sender checking the graph file ([`super::message_sent::message_sent_tx`]) finds the
+/// message in the outbox or the mirror at every moment, never in neither.
+fn mirrored_remove(graph: &Store, subject: &str) -> Result<()> {
+    super::stream_mirror::mirror(graph)?;
+    remove(graph, subject)
 }
 
 fn remove(graph: &Store, subject: &str) -> Result<()> {

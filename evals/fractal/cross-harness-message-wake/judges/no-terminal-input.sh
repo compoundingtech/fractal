@@ -15,7 +15,7 @@ fi
 
 for name in "${names[@]}"; do
   agent="${agents[$name]}"
-  count="$(st3 trace show "$agent" --json --limit 200 \
+  count="$(fractal trace show "$agent" --json --limit 200 \
     | jq -s '[.[] | select(.kind == "terminal.input.requested")] | length')"
   test "$count" -eq 0
 done

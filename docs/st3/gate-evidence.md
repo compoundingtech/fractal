@@ -1,6 +1,6 @@
 # Gate evidence
 
-`st evidence put`, `show`, and `verify` run offline. They require Git with SSH
+`fractal evidence put`, `show`, and `verify` run offline. They require Git with SSH
 signing support, OpenSSH, repository objects, and an operator-supplied allowed
 signers file. They do not load daemon configuration or contact a Fractal instance.
 
@@ -152,7 +152,7 @@ verifier still reads it, with a pattern that matches only names exactly one obje
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
 refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
 Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
-`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `fractal evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
 the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
 removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
 
@@ -378,12 +378,12 @@ unreachable remote reports the fetch failure without rebuilding; a fetch timeout
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
-through `st sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
+through `fractal sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
 log key list is main's `.st/evidence-log-key` (`~/.config/evidence-log/log-keys` on a host whose main has none), and a
 pull never extends a head that list does not sign. The signer starts without the caller's loader variables.
 
 **The log key's custody (interim).** The pinned key (principal `log/evidence`) is a plain file on the log host, readable by
-any process running as the account that runs the timer, until a `st sekrets` profile holds it. The log is shadow only
+any process running as the account that runs the timer, until a `fractal sekrets` profile holds it. The log is shadow only
 until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
 replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
 
@@ -444,9 +444,9 @@ already-constructed observation: full/test must be signed; degraded must be
 explicitly unsigned with a null signer. Fetch its objects before importing:
 
 ```sh
-st evidence put --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
-st evidence show --repo . --record RECORD_ID
-st evidence verify --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
+fractal evidence put --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
+fractal evidence show --repo . --record RECORD_ID
+fractal evidence verify --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
 ```
 
 `show` prints data and asserts no trust. `verify --record` checks the format,
@@ -487,7 +487,7 @@ version. The file affects this verifier only; it does not activate
 curator enforcement or alter the merge queue.
 
 ```sh
-st evidence verify --repo . --revision HEAD --base BASE_COMMIT \
+fractal evidence verify --repo . --revision HEAD --base BASE_COMMIT \
   --change-id CHANGE_ID --trusted-signers /tmp/allowed-signers
 ```
 
@@ -592,7 +592,7 @@ Test mode requires a throwaway key and `expires_at`, no more than 15 minutes
 ahead. Use a separate scratch repository for the test service. Production key
 files and configuration are never stored in a change checkout or this repository.
 
-The protected PATH supplies operator-installed st3, Git, OpenSSH, gh, Python and
+The protected PATH supplies operator-installed Fractal, Git, OpenSSH, gh, Python and
 GNU timeout. gh receives only the profile's read-only GitHub credential. The
 observer fetches attempt-specific run metadata and every page of jobs; it checks
 the configured repository, Workspace CI workflow, completed state and required
@@ -636,7 +636,7 @@ Test services emit test tier; production policy rejects those records even when
 their signatures verify. An expired test service refuses to produce records.
 
 The response contains record IDs, explicit tiers, and an object-only base64 pack
-with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `st evidence put` with its external allowed-signers file.
+with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `fractal evidence put` with its external allowed-signers file.
 No key, configuration, ref or executable is exported. The caller retains/fetches
 source parent history before pushing evidence refs to peers.
 
@@ -953,11 +953,11 @@ a policy input, until deadlines and the production controller are decided.
 
 ## Standalone verifier
 
-`scripts/evidence-verify` answers one question without a built st: does a trusted,
+`scripts/evidence-verify` answers one question without a built Fractal binary: does a trusted,
 signed note exist for this exact tree and this check? It needs only `git`,
 `ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<tree>/<record-id>` notes
 (one SSH-signed commit per record), and finishes in well under a second on a
-repository with hundreds of records. `st evidence verify` stays the reference
+repository with hundreds of records. `fractal evidence verify` stays the reference
 implementation; the script's tests use real Git repositories and real SSH
 signatures.
 
@@ -977,7 +977,7 @@ its principal before the first slash (`machine/ci1` is level `machine`); it is n
 read from the record. Removing a line revokes every note that key signed.
 
 `kind` comes from the record's `runner`: `nix`, `wrapper` (a command run once and signed by the wrapper) and `sekrets` name themselves, and a runner that starts with `github:` is kind
-`observed`, the central observer's record of a finished GitHub job (`st evidence observe-ci`).
+`observed`, the central observer's record of a finished GitHub job (`fractal evidence observe-ci`).
 Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is never evidence
 and is reported as `degraded`, not as a signature fault, because it is what the observer writes
 when its signer is unreachable. The latest
@@ -1284,6 +1284,26 @@ is a reviewed change to the list (policy, `.st/required-lanes.json`, and the lis
 licenses and `genie --check`; its key is still the whole tree and its run is about a minute. Both scripts run their tests in parallel
 (`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/fractal-test` entry and the
 same levels as `genie-freshness`; it is **not a required context of its own** (a head from before the check existed has no run of it, and a required context would block every such head): the `linux-gate` job, which every head reports and which always waits for the long stages, needs it and fails the gate when it failed or was cancelled (`skipped` counts only when its own gate decided to skip), so new heads enforce it and old heads are unaffected.
+
+Daily iOS delivery's Python integration suite also runs in this sparse lane.
+`scripts/ios-release-delivery-test` executes
+`apps/ios/scripts/test_release_delivery.py` unchanged; its two declared app inputs
+are that suite and `apps/ios/scripts/release_delivery.py`. It uses real temporary
+Git repositories and executable tool fixtures, not Apple tools or a device.
+The entrypoint is first in the six-process parallel pool so its runtime overlaps
+the other self-tests instead of adding a serial tail. There is no per-suite
+timeout in `parallel_tests`; the hosted `ci-script-tests` job has a 20-minute
+budget including setup. Hosted Ubuntu runners use ordinary Git, not the local
+agent push wrapper, so this lane does not rename fixture branches or use an adapter.
+
+The devnet helper Python suites run via
+`TMPDIR=/tmp python3 -m unittest discover -s apps/fractal-web/scripts/devnet -p '*_test.py'`
+in the same hosted lane. The entire devnet script directory is declared in the
+sparse projection, evidence inputs and lane definition, covering helper imports
+and future discovered suites. The five pinned bubblewrap isolation smoke tests
+remain opt-in (`candidate_sandbox_test.py --real`); discovery runs their unit coverage.
+The short temporary root keeps Unix socket fixtures within the platform's path
+limit even when `nix develop` provides a longer `TMPDIR`.
 
 `isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
 run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
@@ -1929,8 +1949,12 @@ PATHs differ would otherwise rebuild nearly the whole workspace in the same pool
 All the repositories' pools together are kept under `ST_TEST_POOL_MAX_GB` (default 60; `0` or `off` for no cap): before a run starts, with its own
 tree already held, `fractal-test` removes the least recently used trees and both their workspace and fleet-compat targets whose lock is free, oldest first, until the pool directory
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
-compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. Where cargo's
-`build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+compilation, which the checks now turn off as CI does), so allow about 80 GB for one run (the earlier shared build estimate of 60 GB plus up to about 20 GB for compatibility), and size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus that allowance. A build host's
+cargo config may point `build-dir` elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`). Every check that builds runs with
+`CARGO_BUILD_BUILD_DIR` set to its own target, so the intermediates stay in the pool, under the tree's lock and the cap. That includes each
+unit's dep-info, which the keyed checks read after the build. The fleet-compat stage moves its build-dir with its own target. Left on the
+build disk, nothing held them for the run: one host's were removed between a run's clippy build and its dep-info check, so the check found no
+dep-info and linux-clippy was refused (2026-11-06).
 A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
 `/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
 a kept one). A host's `/tmp` can be a small tmpfs that swaps, and `nix develop -c` never removes the `nix-shell.*` directory it makes its
@@ -2154,7 +2178,7 @@ Clippy and fleet compatibility each run in a buffered lane beside tests. Clippy 
 fleet compatibility uses its own target, so its compiles can overlap the tests build; every Cargo command still takes host build admission. Their logs are printed after foreground stages, in the requested stage order, and the first
 failure in that order is returned, including a lane that leaves no result. `CI_LOCAL_SERIAL=1` restores sequential stages while keeping
 the separate targets. HOME and the XDG state, config, data
-and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
+and cache directories are a scratch directory that is removed afterwards, and no Fractal variable (`ST_*`, `ST2_*`, `ST3_*` and,
 since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
 configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and

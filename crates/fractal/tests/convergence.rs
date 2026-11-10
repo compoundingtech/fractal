@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v16.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -397,6 +397,7 @@ impl World {
     fn new(seed: u64, sabotage: Sabotage) -> Self {
         let root = scratch_dir();
         let oracle = Store::open(&root.path().join("oracle.sqlite3"), "oracle").unwrap();
+        oracle.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         oracle.bind_fleet(FLEET).unwrap();
         let mut world = Self {
             seed,
@@ -439,6 +440,7 @@ impl World {
         let path = self.root.path().join(format!("{name}.sqlite3"));
         let scratch = self.root.path().join(format!("{name}-scratch"));
         let store = Store::open(&path, name.clone()).unwrap();
+        store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         store.bind_fleet(FLEET).unwrap();
         let skew_ms = if self.rng.chance(30) {
             (self.rng.below(6 * 24) as i64 - 3 * 24) * DAY_MS / 24
@@ -519,6 +521,7 @@ impl World {
         let placeholder = Store::open_memory(format!("{name}-closed")).unwrap();
         drop(std::mem::replace(&mut self.nodes[index].store, placeholder));
         self.nodes[index].store = Store::open(&path, name).unwrap();
+        self.nodes[index].store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         self.nodes[index].store.bind_fleet(FLEET).unwrap();
         self.set_clock(index);
         self.check_index(index);
@@ -990,6 +993,32 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == fractal_schema::usage_limits::KIND {
+            return Some(ClaimInput {
+                subject: "agent/sample/usage-producer".into(),
+                kind: spec.kind.clone(),
+                actor: Some("agent/sample/usage-producer".into()),
+                fields: BTreeMap::from([
+                    ("readings".into(), json!([])),
+                    ("credit_readings".into(), json!([{
+                        "account": "digest",
+                        "account_ref": "account/example-0",
+                        "provider": "anthropic",
+                        "credit_id": "durable-convergence-credit",
+                        "expires_at": "2100-01-08T12:30:00Z",
+                        "measured_at": "2100-01-01T12:30:00Z",
+                        "state": "available",
+                        "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                        "coverage": "reported",
+                        "source": "omp-usage",
+                        "host": self.nodes[index].name
+                    }])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("usage")),
+            });
+        }
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
         let deployment = deployment_fields(&spec.kind);
@@ -1627,7 +1656,7 @@ fn admit(store: &Store) -> anyhow::Result<()> {
 fn append_generated_claim(
     store: &Store,
     input: &ClaimInput,
-) -> Result<ClaimRecord, fractal_daemon::St3Error> {
+) -> Result<ClaimRecord, fractal_daemon::FractalError> {
     // A fleet's checkpoints still trim the diagnostics its older builds replicated.
     if input.kind == "daemon.diagnostic" {
         return store.append_as_older_build_for_test(input);
@@ -1778,14 +1807,14 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v16 shifts shared RNG draws through kind selection and optional action fields.
-/// All 32 fixed seeds converge; 30 trim. Preserve exact equality with the measured never-trim set.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Corpus v17 adds operation receipts to kind selection, shifting the shared RNG schedule.
+/// Hosted run 42507264532 observed seed 2 converge without trimming; the other fixed seeds trim.
+const NEVER_TRIMS: &[u64] = &[2];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v16 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }

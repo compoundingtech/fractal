@@ -7,13 +7,13 @@ pub async fn start_planning_session(
     Json(request): Json<PlanningSessionStartRequest>,
 ) -> Result<Json<PlanningSessionView>, ApiError> {
     let request_text = std::str::from_utf8(&request.request).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-request-not-text",
             "a launch request must contain valid UTF-8",
         ))
     })?;
     if request_text.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-launch-request",
             "a launch request cannot be empty",
         )));
@@ -31,7 +31,7 @@ pub async fn start_planning_session(
     if let Some(run) = &target_run
         && (!matches!(run.status.as_str(), "running" | "blocked") || run.phase != "normal")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "mission-run-not-revisable",
             format!(
                 "mission run `{}` is {} in its {} phase",
@@ -76,7 +76,7 @@ pub async fn start_planning_session(
         provider.as_str(),
         "codex" | "claude" | "pi" | "omp" | "opencode"
     ) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-planner",
             "the planner must use an eligible typed harness driver",
         )));
@@ -96,7 +96,7 @@ pub async fn start_planning_session(
         }),
     };
     if planner_config.provider == "opencode" && planner_config.effort.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-planner-effort",
             "the OpenCode harness does not accept an effort override",
         )));
@@ -247,19 +247,19 @@ async fn submit_planning_variant(
     validate_planning_variant(&variant)?;
     let session = required_planning_session(&state, &id)?;
     let markdown = std::str::from_utf8(&request.markdown).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-markdown-not-text",
             "planning Markdown must contain valid UTF-8",
         ))
     })?;
     if markdown.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-launch-markdown",
             "planning Markdown cannot be empty",
         )));
     }
     let kdl = std::str::from_utf8(&request.kdl).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-kdl-not-text",
             "planning KDL must contain valid UTF-8",
         ))
@@ -267,7 +267,7 @@ async fn submit_planning_variant(
     let (intent, _) = mission_source(&state, kdl, None)?;
     let mission = launch_candidate_mission(&intent, &session.mission).map_err(ApiError::bad)?;
     if mission.state != crate::model::MissionState::Ready {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-mission-not-ready",
             "a planning candidate must contain a ready mission",
         )));
@@ -365,7 +365,7 @@ async fn preview_planning_variant(
     validate_planning_variant(&variant)?;
     let session = required_planning_session(&state, &id)?;
     if session.status != "review" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-not-reviewable",
             format!("launch `{}` is {}", session.id, session.status),
         )));
@@ -376,7 +376,7 @@ async fn preview_planning_variant(
         .find(|candidate| candidate.name == variant)
         .map(|variant| &variant.candidate)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-launch-candidate",
                 "the launch has no candidate",
             ))
@@ -496,7 +496,7 @@ pub async fn propose_planning_variant(
     }
     let session = required_planning_session(&state, &id)?;
     let run_subject = session.target_mission_run.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-has-no-run",
             "this launch creates a new mission and cannot propose a run revision",
         ))
@@ -507,7 +507,7 @@ pub async fn propose_planning_variant(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("the target mission run does not exist"))?;
     if session.source_generation.as_deref() != Some(current.generation.as_str()) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-launch-generation",
             "the launch variants target a superseded generation",
         )));
@@ -518,13 +518,13 @@ pub async fn propose_planning_variant(
         .find(|candidate| candidate.name == variant)
         .ok_or_else(|| ApiError::not_found(format!("launch variant `{variant}` does not exist")))?;
     let preview = variant.preview.as_ref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-launch-preview",
             "preview the named variant before proposal",
         ))
     })?;
     if !preview.mission.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-preview-blocked",
             preview.mission.blockers.join("; "),
         )));
@@ -607,7 +607,7 @@ fn validate_planning_variant(variant: &str) -> Result<(), ApiError> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-variant",
             "a launch variant must use 1 through 80 letters, digits, dots, dashes, or underscores",
         )));
@@ -623,13 +623,13 @@ pub async fn revise_planning_session(
     let session = required_planning_session(&state, &id)?;
     authorize_planning_reviewer(&session, &request.actor)?;
     if request.feedback.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-launch-feedback",
             "launch feedback cannot be empty",
         )));
     }
     std::str::from_utf8(&request.feedback).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-feedback-not-text",
             "launch feedback must contain valid UTF-8",
         ))
@@ -680,19 +680,19 @@ pub async fn approve_planning_session(
     let session = required_planning_session(&state, &id)?;
     authorize_planning_reviewer(&session, &request.actor)?;
     if session.status != "review" && session.status != "approved" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-not-reviewable",
             format!("launch `{}` is {}", session.id, session.status),
         )));
     }
     let candidate = session.candidate.as_ref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-launch-candidate",
             "the launch has no candidate",
         ))
     })?;
     let preview = session.preview.as_ref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-launch-preview",
             "preview the candidate before approval",
         ))
@@ -714,7 +714,7 @@ pub async fn approve_planning_session(
     if (preview.hash != request.preview_hash && approval_token != request.preview_hash)
         || preview.candidate_revision != candidate.revision
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-launch-preview",
             "the approval does not name the current preview",
         )));
@@ -732,7 +732,7 @@ pub async fn approve_planning_session(
         )));
     }
     if !preview.mission.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-preview-blocked",
             preview.mission.blockers.join("; "),
         )));
@@ -744,7 +744,7 @@ pub async fn approve_planning_session(
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::not_found("the target mission run does not exist"))?;
         if session.source_generation.as_deref() != Some(current.generation.as_str()) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "stale-launch-generation",
                 "the launch approval targets a superseded generation",
             )));
@@ -861,13 +861,13 @@ pub async fn start_approved_launch(
     let session = required_planning_session(&state, &id)?;
     authorize_planning_reviewer(&session, &request.actor)?;
     if session.status != "approved" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-not-approved",
             format!("launch `{}` is {}", session.id, session.status),
         )));
     }
     if session.target_mission_run.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-target-already-running",
             "a launch targeting an existing run is applied in place and cannot start another run",
         )));
@@ -937,14 +937,14 @@ pub async fn request_launch_decision(
 ) -> Result<Json<Value>, ApiError> {
     let session = required_planning_session(&state, &id)?;
     if normalize_message_party(&request.actor) != session.planner {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-decision-not-authorized",
             "only the launch planner can request a decision",
         )));
     }
     let question = request.question.trim();
     if question.is_empty() || question.len() > 2_000 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-question",
             "a launch question must contain 1 through 2000 bytes",
         )));
@@ -976,7 +976,7 @@ pub async fn request_launch_decision(
             .any(|option| option.id.is_empty() || option.label.is_empty())
         || unique.len() != options.len()
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-options",
             "boolean questions have no options; choice and rank questions need 1 through 20 options with distinct non-empty IDs and labels",
         )));
@@ -1043,7 +1043,7 @@ pub async fn answer_launch_decision(
             ApiError::not_found(format!("launch decision `{decision_id}` does not exist"))
         })?;
     if request.expected_revision != 1 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-launch-decision",
             "the launch decision revision changed",
         )));
@@ -1062,7 +1062,7 @@ pub async fn answer_launch_decision(
         {
             return Ok(Json(current.clone()));
         }
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-decision-immutable",
             "a launch decision answer is immutable",
         )));
@@ -1074,7 +1074,7 @@ pub async fn answer_launch_decision(
         .map_err(|_| ApiError::internal("launch decision has invalid options"))?;
     let valid = valid_launch_decision_response(&decision_type, &options, &request.response);
     if !valid {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-answer",
             "the structured response must match the decision type and contain unique option IDs from the offered options; rank responses must include every option exactly once",
         )));
@@ -1192,7 +1192,7 @@ fn authorize_planning_reviewer(session: &PlanningSessionView, actor: &str) -> Re
     if normalize_planning_reviewer(actor) == session.requester {
         return Ok(());
     }
-    Err(ApiError::bad(St3Error::new(
+    Err(ApiError::bad(FractalError::new(
         "launch-review-not-authorized",
         format!("`{actor}` cannot review launch `{}`", session.id),
     )))
@@ -1402,7 +1402,7 @@ pub async fn mission(
 fn ignored_authority_warnings(
     intent: &crate::model::NormalizedIntent,
     node: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut ignored = intent
         .subjects
         .values()
