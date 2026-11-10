@@ -2,6 +2,58 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { C6Recorder, C6_LIMIT, nearestRank } from './c6Recorder.ts';
 import { ForegroundGate } from './foreground.ts';
+import { createRequire } from 'node:module';
+import { FractalClient } from '../../clients/typescript/fractal-client/Client.generated.ts';
+
+const require = createRequire(import.meta.url);
+const { AbortController: RNAbortController } = require('abort-controller/dist/abort-controller');
+const capabilities = require('../../docs/st3/client-v0/fixtures/capabilities.json');
+
+test('C6 status under the React Native AbortSignal polyfill', async t => {
+  const original = globalThis.AbortController;
+  globalThis.AbortController = RNAbortController;
+  t.after(() => { globalThis.AbortController = original; });
+  let fetches = 0, id = 0;
+  const errors = [];
+  const identity = new FractalClient({
+    baseUrl: 'http://100.101.102.103:8790',
+    credential: () => 'test-credential',
+    fetchImpl: async () => {
+      fetches++;
+      return new Response(JSON.stringify({ ...capabilities, request_id: `request/c6-${fetches}` }), { headers: { 'Content-Type': 'application/json' } });
+    },
+  });
+  const recorder = new C6Recorder({
+    now: () => 0, id: () => `c6-${++id}`, version: 'test', changed: () => {},
+    snapshot: () => ({ identity, context: { route: 'tailscale', path: 'unknown' } }),
+    readFabricPath: async () => assert.fail('Fabric is off'),
+  });
+  await recorder.run('status', async (_, hooks, sample) => {
+    try {
+      if (!sample.identity) throw new Error('C6 disconnected');
+      const reply = await sample.identity.capabilities({ signal: hooks.signal });
+      hooks.request(reply.request_id);
+      hooks.ack();
+    } catch (error) {
+      errors.push(error);
+      throw error;
+    }
+  });
+  t.diagnostic(JSON.stringify({
+    rows: recorder.rows.map(({ status, errorCode, requestId, start, end }) => ({ status, errorCode, requestId, start, end })),
+    fetches, errors: errors.map(error => ({ name: error.name, message: error.message })),
+  }));
+  assert.equal(recorder.rows.length, 10);
+  if (errors.length) {
+    assert.equal(fetches, 0);
+    assert.equal(errors.length, 10);
+    assert(errors.every(error => error instanceof TypeError && /throwIfAborted/.test(error.message)));
+    assert(recorder.rows.every(row => row.status === 'failed' && row.errorCode === 'request-failed' && row.requestId === null && row.start.route === 'tailscale' && row.end.route === 'tailscale'));
+  }
+  assert.deepEqual(recorder.rows.map(row => row.status), Array(10).fill('ok'));
+  assert.deepEqual(recorder.rows.map(row => row.requestId), Array.from({ length: 10 }, (_, index) => `request/c6-${index + 1}`));
+  assert.equal(fetches, 10);
+});
 
 const fixture = (timeoutMs = 20) => {
   let time = 0, id = 0;
