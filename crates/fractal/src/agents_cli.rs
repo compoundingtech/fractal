@@ -194,6 +194,7 @@ pub(super) async fn run_agents(
                                 .context("setting or releasing a hold needs --reason")?,
                             idempotency_key: format!("delivery-hold:{}", uuid::Uuid::now_v7()),
                             legacy_adoption: false,
+                            force: args.force,
                         },
                     )
                     .await?;
@@ -331,6 +332,7 @@ pub(super) async fn run_agents(
                     no_gate_check: true,
                     check: false,
                     inputs: vec![],
+                    force_reason: None,
                 },
                 json_output,
             )
@@ -406,6 +408,7 @@ pub(super) async fn run_agents(
                     format!("st agents start {}", args.identity),
                     args.actor.clone(),
                     Some((&subject, &tokens)),
+                    args.force.then(|| args.reason.clone()).flatten(),
                 )
                 .await?
             };
@@ -498,6 +501,7 @@ pub(super) async fn run_agents(
                 &args.actor,
                 args.reason.as_deref(),
                 None,
+                args.force,
                 &args.timeout,
             )
             .await?;
@@ -524,8 +528,9 @@ pub(super) async fn run_agents(
                 "/v1/agents/resume",
                 &subject,
                 &args.actor,
-                None,
+                args.reason.as_deref(),
                 args.host.as_deref(),
+                args.force,
                 &args.timeout,
             )
             .await?;
@@ -720,11 +725,13 @@ pub(super) async fn run_agents(
                 print!("{kdl}");
                 return Ok(());
             }
-            let response = publish_text(
+            let response = publish_text_with_expected(
                 &cli_client(endpoint),
                 kdl,
                 format!("st agents stop {subject}"),
                 args.actor,
+                None,
+                args.force.then(|| args.reason.clone()).flatten(),
             )
             .await?;
             print_value(&response, json_output)?;
@@ -1597,6 +1604,7 @@ async fn request_suspension(
     actor: &str,
     reason: Option<&str>,
     host: Option<&str>,
+    force: bool,
     timeout_text: &str,
 ) -> Result<fractal_client::Agent> {
     let timeout = fractal_daemon::graph::parse_duration(timeout_text, false)?;
@@ -1609,6 +1617,7 @@ async fn request_suspension(
                 "actor": actor,
                 "reason": reason,
                 "host": host,
+                "force": force,
                 "idempotency_key": uuid::Uuid::now_v7().to_string(),
             }),
         )
