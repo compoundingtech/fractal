@@ -2941,11 +2941,13 @@ fn client_work_values(
                     .into_iter()
                     .flat_map(|summaries| summaries.iter().copied()),
             );
+            let spec = work
+                .agentless
+                .then(|| step_specs.get(&work.run).and_then(|steps| steps.get(&work.step)))
+                .flatten();
             let gate_kind = if work.agentless {
-                let spec = step_specs
-                    .get(&work.run)
-                    .and_then(|steps| steps.get(&work.step));
                 match spec {
+                    Some(spec) if spec.program.is_some() => Some("program"),
                     Some(spec) if spec.after_run.is_some() => Some("run"),
                     Some(spec) if spec.gates.is_empty() => Some("watch"),
                     Some(spec)
@@ -2989,6 +2991,21 @@ fn client_work_values(
             } else {
                 None
             };
+            // What a program step runs now: its innermost open key, from the newest entries.
+            let program = spec
+                .and_then(|spec| spec.program.as_ref())
+                .map(|program| -> anyhow::Result<Value> {
+                    let journal = store.program_journal(&work.subject, work.attempt, crate::program_journal::SUMMARY_ENTRIES)?;
+                    let open = journal.innermost();
+                    Ok(json!({
+                        "open_key": open.map(|entry| &entry.key),
+                        "open_since_unix_ms": open.and_then(|entry| entry.started_at_unix_ms),
+                        "child": open.and_then(|entry| entry.child.as_ref()),
+                        "last_entry_at_unix_ms": journal.last_entry_at_unix_ms,
+                        "stalled_after_ms": crate::program_journal::stalled_after_ms(program),
+                    }))
+                })
+                .transpose()?;
             Ok(json!({
                 "id": work.subject,
                 "kind": "work",
@@ -3006,6 +3023,7 @@ fn client_work_values(
                 "state": state,
                 "agentless": work.agentless,
                 "gate_kind": gate_kind,
+                "program": program,
                 "attempt": work.attempt,
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant,
