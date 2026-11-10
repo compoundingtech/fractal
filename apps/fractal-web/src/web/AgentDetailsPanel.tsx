@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import { RegistryContext, useAtom } from '@effect/atom-react'
+import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
+import * as Atom from 'effect/reactivity/Atom'
 import { DetailsPane, DetailsWhy } from '@fractal/ui/assistant-ui'
 import type { DetailsLayoutIntent, DetailsVariants } from '@fractal/ui/assistant-ui'
 import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
@@ -10,7 +11,7 @@ import { colorVars as c, geometryVars as g, interactionVars as interaction, radi
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { PaneHeaderAccessoryHost } from '../../../../packages/fractal-ui/src/assistant-ui/workbench/PaneLayer.tsx'
 import { CountPill } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
-import { useClockDeadline, useConversation, useDataSource, useGatewaySync, useNowSnapshot } from '../data/react.tsx'
+import { useClockDeadline, useDataSource, useGatewaySync, useNowSnapshot } from '../data/react.tsx'
 import { syncLineNextChange } from '@fractal/ui/assistant-ui/sync-status'
 import { earliestChange, formatRelative, nextRelativeChange } from '@fractal/ui/human-time/format'
 import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts'
@@ -106,10 +107,14 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
   </aside>
 }
 
-/** Read off the conversation feed the panel already shares; a feed nothing has loaded yet shows no count. */
+/** Project before subscribing: unrelated conversation frames must not rerender the whole inspector. */
 const useChangesCount = (agentRef: string): number => {
-  const feed = useConversation(agentRef)
-  return React.useMemo(() => feed._tag === 'Observed' ? capturedChanges(feed.value).length : 0, [feed])
+  const source = useDataSource()
+  const count = React.useMemo(() => Atom.make(get => {
+    const feed = get(source.conversation(agentRef))
+    return feed._tag === 'Observed' ? capturedChanges(feed.value).length : 0
+  }), [source, agentRef])
+  return useAtomValue(count)
 }
 
 /** Plain reasons for a refused or failed subagent-activity read; the source's own detail is diagnostic only. */
