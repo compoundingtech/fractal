@@ -55,8 +55,22 @@ pub fn intersect(left: &[AuthorityGrant], right: &[AuthorityGrant]) -> Vec<Autho
     both.into_iter().collect()
 }
 
-/// The grant one claim needs, or none for the run's own journal.
-fn needed_tx(
+/// The run a run-owned subject belongs to: `mission-run/RUN`, its generations and their step runs.
+fn owning_run_tx(transaction: &Transaction<'_>, subject: &str) -> Result<Option<String>, FractalError> {
+    if let Some(run) = subject.strip_prefix("mission-run/") {
+        return Ok(Some(run.to_owned()));
+    }
+    let generation = subject.strip_prefix("run-generation/")
+        .or_else(|| subject.strip_prefix("step-run/").and_then(|rest| rest.split('/').next()));
+    let Some(generation) = generation else { return Ok(None) };
+    transaction.query_row("SELECT run_id FROM run_generations WHERE id=?1", [generation], |row| row.get(0))
+        .optional().map_err(internal)
+}
+
+/// The grant one claim needs, or none for the run's own journal. A start or a revision writes
+/// several claims as one operation; each names the operation's grant on the mission of the run
+/// it changes, never a `write`, so the operation's verb alone admits it.
+pub(super) fn needed_tx(
     transaction: &Transaction<'_>,
     run: &str,
     kind: &str,
@@ -72,31 +86,42 @@ fn needed_tx(
             "run-authority-denied", format!("{run} is not a mission run this host holds"),
         ))
     };
-    let field = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or_default();
+    let field = |name: &str| fields.get(name).and_then(Value::as_str);
     let grant = |verb, pattern: String| Ok(Some(AuthorityGrant { verb, pattern }));
+    let revise = |owner: Option<String>| match owner {
+        Some(owner) => grant(AuthorityVerb::Revise, mission_of(&owner)?),
+        None => grant(AuthorityVerb::Write, subject.into()),
+    };
     match kind {
         // A run always journals its own program steps.
         "program.step" => {
-            let generation = subject.strip_prefix("step-run/").and_then(|rest| rest.split('/').next());
-            let owner: Option<String> = match generation {
-                Some(generation) => transaction.query_row(
-                    "SELECT run_id FROM run_generations WHERE id=?1", [generation], |row| row.get(0),
-                ).optional().map_err(internal)?,
-                None => None,
-            };
-            if owner.as_deref() == Some(run) { Ok(None) } else { grant(AuthorityVerb::Write, subject.into()) }
+            if owning_run_tx(transaction, subject)?.as_deref() == Some(run) {
+                Ok(None)
+            } else {
+                grant(AuthorityVerb::Write, subject.into())
+            }
         }
         "mission.published" => grant(AuthorityVerb::Publish, subject.trim_start_matches("mission/").into()),
-        "mission-run.created" => grant(AuthorityVerb::Start, field("mission").trim_start_matches("mission/").into()),
+        "mission-run.created" => grant(AuthorityVerb::Start, field("mission").unwrap_or_default().trim_start_matches("mission/").into()),
+        // Only a revision's generation has a predecessor; its free-text reason decides nothing.
         "run-generation.created" => {
-            let verb = if field("reason") == "initial mission run" { AuthorityVerb::Start } else { AuthorityVerb::Revise };
-            grant(verb, mission_of(field("run"))?)
+            let verb = if field("predecessor").is_some() { AuthorityVerb::Revise } else { AuthorityVerb::Start };
+            grant(verb, mission_of(field("run").unwrap_or_default())?)
+        }
+        // What a revision writes on the runs it changes: its proposal, carried and terminalized
+        // steps, the superseded generation, the run's and its descendants' states.
+        "step-run.carried" | "step-run.state" | "run-generation.superseded" | "run-generation.state"
+        | "mission-run.state" => revise(owning_run_tx(transaction, subject)?),
+        "revision-proposal.created" => revise(owning_run_tx(transaction, field("run").unwrap_or_default())?),
+        "revision-proposal.applied" => {
+            revise(owning_run_tx(transaction, field("successor_generation").unwrap_or_default())?)
         }
         _ => grant(AuthorityVerb::Write, subject.into()),
     }
 }
 
-/// A run's effective authority, and the first starter in its chain that is not a run.
+/// A run's effective authority, and the first starter in its chain that is not a run. Each level
+/// reads only the revision's `authority` member, not the whole mission spec.
 fn effective_tx(
     transaction: &Transaction<'_>,
     run: &str,
@@ -104,26 +129,27 @@ fn effective_tx(
     let mut granted: Option<Vec<AuthorityGrant>> = None;
     let mut current = run.to_owned();
     for _ in 0..MAX_STARTERS {
-        let Some((mission, revision, requester)) = transaction.query_row(
-            "SELECT r.mission_id, g.revision, r.requester FROM mission_runs r
-             JOIN run_generations g ON g.id=r.current_generation_id WHERE r.id=?1",
+        let Some((declared, requester, starter)) = transaction.query_row(
+            "SELECT json_extract(m.body, '$.authority'), r.requester,
+                    (SELECT actor FROM claims WHERE subject='mission-run/'||r.id AND kind='mission-run.created' LIMIT 1)
+             FROM mission_runs r
+             JOIN run_generations g ON g.id=r.current_generation_id
+             LEFT JOIN mission_revisions m ON m.mission_id=r.mission_id AND m.revision=g.revision
+             WHERE r.id=?1",
             [&current],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
         ).optional().map_err(internal)? else {
             return Ok((Vec::new(), None));
         };
-        let declared = super::missions::mission_revision_spec_tx(transaction, &mission, &revision)?
-            .map(|mission| mission.authority)
+        let declared: Vec<AuthorityGrant> = declared
+            .map(|declared| serde_json::from_str(&declared))
+            .transpose()
+            .map_err(internal)?
             .unwrap_or_default();
         granted = Some(match granted {
             Some(granted) => intersect(&granted, &declared),
             None => declared,
         });
-        let starter: Option<String> = transaction.query_row(
-            "SELECT actor FROM claims WHERE subject=?1 AND kind='mission-run.created' LIMIT 1",
-            [format!("mission-run/{current}")],
-            |row| row.get(0),
-        ).optional().map_err(internal)?.flatten();
         let starter = starter.unwrap_or(requester);
         match starter.strip_prefix("mission-run/") {
             Some(parent) => current = parent.to_owned(),

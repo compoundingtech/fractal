@@ -69,7 +69,7 @@ fn missions() -> Store {
     publish_mission(&store, r#"version 2
 mission "land" state="ready" {
   goal "Land one change."
-  authority { write "custom/factory/*"; start "check"; }
+  authority { write "custom/factory/*"; write "doc/factory/*"; start "check"; revise "check"; }
   step "program" { agentless }
 }"#, "land");
     publish_mission(&store, r#"version 2
@@ -84,6 +84,59 @@ mission "other" state="ready" {
   step "work" { agentless }
 }"#, "other");
     store
+}
+
+/// The grant a claim needs follows the operation it belongs to, decided by fields its writer
+/// cannot choose.
+#[test]
+fn a_claims_needed_grant_follows_its_operation() {
+    use super::run_authority::needed_tx;
+    let store = missions();
+    let land = start(&store, "land", "land-needs", None).unwrap();
+    let check = start(&store, "check", "check-needs", None).unwrap();
+    let other = start(&store, "other", "other-needs", None).unwrap();
+    let run = land.subject.trim_start_matches("mission-run/");
+    let generation = |view: &MissionRunView| view.steps[0].subject.split('/').nth(1).unwrap().to_owned();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    let needs = |kind: &str, subject: &str, fields: Value| {
+        let fields = fields.as_object().unwrap().clone().into_iter().collect::<BTreeMap<_, _>>();
+        needed_tx(&transaction, run, kind, subject, &fields).unwrap()
+            .map(|grant| format!("{} {}", grant.verb.as_str(), grant.pattern))
+    };
+    let next = "run-generation/next";
+    // A revision's generation names its predecessor, whatever its reason says.
+    assert_eq!(needs("run-generation.created", next,
+        json!({"run": check.subject, "predecessor": format!("run-generation/{}", generation(&check)), "reason": "initial mission run"})),
+        Some("revise check".into()));
+    assert_eq!(needs("run-generation.created", next, json!({"run": check.subject, "reason": "anything"})), Some("start check".into()));
+    // What a revision writes on the runs it changes needs `revise` on their missions.
+    assert_eq!(needs("step-run.carried", &check.steps[0].subject, json!({})), Some("revise check".into()));
+    assert_eq!(needs("run-generation.superseded", &format!("run-generation/{}", generation(&check)), json!({})), Some("revise check".into()));
+    assert_eq!(needs("step-run.state", &other.steps[0].subject, json!({})), Some("revise other".into()));
+    assert_eq!(needs("mission-run.state", &other.subject, json!({})), Some("revise other".into()));
+    assert_eq!(needs("revision-proposal.created", "revision-proposal/one", json!({"run": check.subject})), Some("revise check".into()));
+    // A run journals its own steps freely; another run's journal is a write like any other.
+    assert_eq!(needs("program.step", &land.steps[0].subject, json!({})), None);
+    assert_eq!(needs("program.step", &check.steps[0].subject, json!({})), Some(format!("write {}", check.steps[0].subject)));
+    assert_eq!(needs("custom.test.observed", "custom/factory/x", json!({})), Some("write custom/factory/x".into()));
+}
+
+/// A document a run binds is decided by its run authority, as its claims are.
+#[test]
+fn a_runs_document_writes_are_decided_by_its_authority() {
+    let _mode = MODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    set_run_authority_mode(RunAuthorityMode::Enforce);
+    let store = missions();
+    let land = start(&store, "land", "land-docs", None).unwrap();
+    let put = |name: &str| store.put_document_as(name, b"notes", &None, name, Some(&land.subject));
+    put("doc/factory/notes").unwrap();
+    assert_eq!(code(put("doc/elsewhere/notes")), "run-authority-denied");
+    set_run_authority_mode(RunAuthorityMode::Audit);
+    put("doc/elsewhere/audited").unwrap();
+    let audits = store.rule_audits(Some("run-authority"), 10).unwrap();
+    assert_eq!(audits[0].body["fields"]["target"], "doc/elsewhere/audited");
+    assert_eq!(audits[0].body["fields"]["action"], "doc.bound");
 }
 
 #[test]
