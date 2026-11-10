@@ -353,10 +353,20 @@ The key stops command execution locally before requesting revocation; a failed
 network request remains visibly pending and does not resume control. Re-enrollment
 requires fresh consent and a new launch. Grant expiry, ended/revoked lifecycle
 events and a disconnected control subscription stop execution/signing. Only
-`phone.inspect` and `phone.navigate` to `NowRoot` or an agent `Conversation` are
-supported; explicit historical `sessionId` navigation produces no result.
+`phone.inspect` and `phone.navigate` to `NowRoot` and a native ask's `Attention`
+screen are supported. Conversation and all answer/mutation commands produce no result.
 Read receipts are disabled for the entire isolated control session, not just
 while a grant is active.
+The shared journey opens an open native ask (`person-step`, presentation kind
+`request`) whose question carries the seeded content. The ask title and question
+body are independently captured on its Attention card. Never press answer,
+Yes/No, Nothing to do, close, Mark read or send controls during this journey;
+navigation and inspection never invoke them.
+The approved title and question are each printable ASCII, at most 60 characters,
+one paragraph, with no Markdown syntax, JSON, leading/trailing whitespace or
+repeated whitespace. The body digest is lowercase hex SHA-256 of the exact
+question bytes. A grant's optional `item_id` binds Attention navigation and
+signed inspection to that ask; another ask produces no result.
 
 ### Independent terminal observation
 

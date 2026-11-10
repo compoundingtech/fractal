@@ -55,8 +55,8 @@ impl super::Ui {
         if self.help || self.popover.is_some() || self.glasses.palette_open() { return ""; }
         if self.home_open() { return "NowRoot"; }
         match self.focused_pane() {
-            Some(super::pane::Pane::List(0) | super::pane::Pane::Home(_)) => "NowRoot",
-            Some(super::pane::Pane::Agent(Some(_))) if !self.terminal_focused() => "Conversation",
+            Some(super::pane::Pane::List(0)) => "NowRoot",
+            Some(super::pane::Pane::Home(Some(_))) => "Attention",
             _ => "",
         }
     }
@@ -66,44 +66,43 @@ impl super::Ui {
         if command["command_kind"] == "phone.inspect" { return true; }
         match command["args"]["screen"].as_str() {
             Some("NowRoot") => { self.open_home(); true }
-            Some("Conversation") => {
-                if command["args"]["params"].get("sessionId").is_some() { return false; }
-                let Some(target) = command["args"]["params"]["target"].as_str() else { return false; };
-                if !self.world.agents.items().iter().any(|agent| agent.id == target) { return false; }
-                self.open_in_glass(super::pane::Pane::Agent(Some(target.into())), super::glass::Open::Tab);
+            Some("Attention") => {
+                let Some(id) = command["args"]["params"]["id"].as_str() else { return false; };
+                if !self.world.attention.items().iter().any(|item| item.id == id
+                    && matches!(item.kind, super::view::AttentionKind::Request { .. })) { return false; }
+                self.open_in_glass(super::pane::Pane::Home(Some(id.into())), super::glass::Open::Tab);
                 true
             }
             _ => false,
         }
     }
 
-    /// Called only after the terminal draw, using the renderer's visible-body inventory.
+    /// Called only after the terminal draw; ask content comes from the shipped card model.
     pub(crate) fn control_visible(&self) -> fractal_schema::client_control::ClientVisibleState {
         use fractal_schema::client_control::{ClientVisibleItem, ClientVisibleState};
         let screen = self.control_screen();
-        let visible = self.visible_messages();
-        let target = match self.focused_pane() {
-            Some(super::pane::Pane::Agent(Some(target))) if screen == "Conversation" => Some(target),
-            _ => None,
-        };
-        let entries = target.as_ref().and_then(|target| self.world.conversations.get(target));
-        let opened_item = entries.into_iter().flat_map(|items| items.items())
-            .find_map(|entry| match &entry.body {
-                super::view::Body::Mail { subject, body, .. } if visible.contains(&entry.id) =>
-                    Some(ClientVisibleItem { id: entry.id.clone(), title: subject.clone(), body: body.clone() }),
-                _ => None,
-            });
-        let mut visible_item_ids: Vec<_> = entries.into_iter().flat_map(|items| items.items())
-            .filter(|entry| visible.contains(&entry.id)).map(|entry| entry.id.clone()).collect();
-        if screen == "NowRoot" {
-            visible_item_ids = self.frame.borrow().context_rows.iter()
+        let pane = self.focused_pane();
+        let route = pane.as_ref().map_or_else(String::new, |pane| pane.key());
+        let drawn = self.frame.borrow().panes.iter().any(|pane|
+            pane.key == route && pane.rect.width > 0 && pane.rect.height > 0);
+        let opened_item = if drawn && screen == "Attention" {
+            let id = match &pane { Some(super::pane::Pane::Home(Some(id))) => Some(id), _ => None };
+            id.and_then(|id| self.world.attention.items().iter().find(|item| item.id == *id))
+                .and_then(|item| match &item.kind {
+                    super::view::AttentionKind::Request { question, structured, .. } =>
+                        Some(ClientVisibleItem { id: item.id.clone(), title: item.title.clone(),
+                            body: structured.as_ref().map_or(question, |request| &request.question).clone() }),
+                    _ => None,
+                })
+        } else { None };
+        let mut visible_item_ids = if screen == "NowRoot" {
+            self.frame.borrow().context_rows.iter()
                 .filter(|(_, id, _)| self.world.attention.items().iter().any(|item| item.id == *id))
-                .map(|(_, id, _)| id.clone()).collect();
-        }
+                .map(|(_, id, _)| id.clone()).collect::<Vec<_>>()
+        } else { opened_item.iter().map(|item| item.id.clone()).collect() };
         visible_item_ids.sort();
         visible_item_ids.dedup();
-        ClientVisibleState { route: self.focused_pane().map_or_else(String::new, |pane| pane.key()),
-            screen: screen.into(), visible_item_ids, opened_item }
+        ClientVisibleState { route, screen: screen.into(), visible_item_ids, opened_item }
     }
 }
 
@@ -157,5 +156,46 @@ mod tests {
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL | KeyModifiers::ALT));
         assert!(ui.client_control.revoke_requested);
         assert!(ui.effects.is_empty(), "the revoke chord must not type into or submit a draft");
+    }
+
+    #[test]
+    fn ascii_seed_renders_exactly_one_line_and_navigation_sends_no_answer_key() {
+        use super::super::{Effect, Ui, demo, screens, view::{AttentionKind, Load}};
+        use ratatui::{Terminal, backend::TestBackend};
+        for (title, question) in [
+            ("client control fixture request".to_owned(), "Seeded request body for terminal verification".to_owned()),
+            ("T".repeat(60), "Q".repeat(60)),
+        ] {
+            let mut world = demo::test_world();
+            let Load::Ready(items) = &mut world.attention else { panic!("demo attention must be loaded"); };
+            let item = items.first_mut().unwrap();
+            item.title = title.clone();
+            item.kind = AttentionKind::Request { from: "Fixture producer".into(),
+                from_id: "agent/fixture".into(), question: question.clone(), structured: None, images: Vec::new() };
+            let id = item.id.clone();
+            let mut ui = Ui::new(world);
+            assert!(ui.control_navigate(&serde_json::json!({
+                "command_kind":"phone.navigate","args":{"screen":"Attention","params":{"id":id}}
+            })));
+            assert!(ui.effects.iter().all(|effect| !matches!(effect,
+                Effect::TerminalKey(_) | Effect::Attention { .. } | Effect::Send { .. }
+                | Effect::Reply { .. } | Effect::Discuss { .. })),
+                "navigation must never synthesize an answer action or terminal key");
+            let drafts = ui.drafts_for(&id, 100);
+            let doc = screens::home_detail(&ui.world, Some(&id), 100, &drafts);
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            terminal.draw(|frame| {
+                let area = frame.area();
+                ui.pane(frame.buffer_mut(), &format!("home:{id}"), area, doc.clone(), false);
+            }).unwrap();
+            let lines: Vec<String> = terminal.backend().buffer().content.chunks(100)
+                .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+                .map(|row| row.trim().trim_matches(['│', '┃']).trim().to_owned()).collect();
+            for expected in [&title, &question] {
+                assert!(expected.is_ascii() && expected.len() <= 60);
+                assert_eq!(lines.iter().filter(|line| *line == expected).count(), 1,
+                    "seed text must occupy one exact terminal line: {expected:?}");
+            }
+        }
     }
 }

@@ -2052,7 +2052,7 @@ pub fn run(context: Context) -> Result<()> {
         // A message just sent is on screen from this draw on: the time from pressing send to it.
         if let (Some(control), Some(command)) = (&mut control, &control_pending) {
             let state = ui.control_visible();
-            if ui.control_foreground() && (command["args"]["screen"] != "Conversation" || state.opened_item.is_some()) {
+            if ui.control_foreground() && (state.screen != "Attention" || state.opened_item.is_some()) {
                 match control.result(command, state) {
                     Ok(Some(result)) => {
                         let client = client.clone();

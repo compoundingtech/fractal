@@ -87,7 +87,7 @@ impl Control {
         let screen = if verb == "phone.inspect" { current_screen }
             else if verb == "phone.navigate" { command["args"]["screen"].as_str().unwrap_or("") }
             else { return false; };
-        matches!(screen, "NowRoot" | "Conversation")
+        matches!(screen, "NowRoot" | "Attention")
             && command["device_id"] == self.device.session.device_id
             && command["session_actor"] == self.device.session.session_actor
             && command["grant_id"] == grant["grant_id"]
@@ -97,6 +97,8 @@ impl Control {
             && fresh(&command["expires_at"])
             && grant["verbs"].as_array().is_some_and(|verbs| verbs.iter().any(|v| v == verb))
             && grant["screens"].as_array().is_some_and(|screens| screens.iter().any(|s| s == screen))
+            && (screen != "Attention" || verb == "phone.inspect"
+                || grant.get("item_id").is_none_or(|id| command["args"]["params"]["id"] == *id))
             && grant["max_commands"].as_u64().is_some_and(|max| self.used.len() < max as usize)
             && !self.used.contains(id)
     }
@@ -105,12 +107,16 @@ impl Control {
         if !self.allows(command, &visible_state.screen) { return Ok(None); }
         if command["command_kind"] == "phone.navigate"
             && (command["args"]["screen"] != visible_state.screen
-                || (visible_state.screen == "Conversation"
-                    && visible_state.route != format!("agent:{}", command["args"]["params"]["target"].as_str().unwrap_or(""))))
+                || (visible_state.screen == "Attention"
+                    && visible_state.route != format!("home:{}", command["args"]["params"]["id"].as_str().unwrap_or(""))))
         {
             return Ok(None);
         }
         let Some(grant) = self.active() else { return Ok(None); };
+        if visible_state.screen == "Attention" && grant.get("item_id").is_some_and(|id|
+            visible_state.opened_item.as_ref().is_none_or(|item| id.as_str() != Some(item.id.as_str()))) {
+            return Ok(None);
+        }
         let binding = ClientResultBinding {
             purpose: "client.device-result.v1".into(),
             command_kind: command["command_kind"].as_str().unwrap().into(),
@@ -165,7 +171,7 @@ mod tests {
         control.update_grant(json!({"kind":"client-control-grant","grant_id":"grant/one","run_id":"run/one",
             "device":control.device.session.device_id,"session":control.device.session.session_actor,
             "actor_agent":"agent/fixture","verbs":["phone.inspect","phone.navigate"],
-            "screens":["NowRoot","Conversation"],"max_commands":50,"expires_at":"2099-01-01T00:00:00Z","state":"active"}));
+            "screens":["NowRoot","Attention"],"max_commands":50,"expires_at":"2099-01-01T00:00:00Z","state":"active"}));
         let command = json!({"id":"device-command/one","kind":"device-command",
             "device_id":control.device.session.device_id,"session_actor":control.device.session.session_actor,
             "issued_by":"agent/fixture","grant_id":"grant/one","run_id":"run/one",
@@ -182,7 +188,8 @@ mod tests {
     #[test]
     fn refusals_never_navigate_construct_results_or_sign() {
         for case in ["no grant", "wrong run", "wrong device", "wrong session", "wrong actor",
-            "verb", "screen", "expired grant", "expired command", "budget", "read mutation"] {
+            "verb", "screen", "expired grant", "expired command", "budget", "read mutation",
+            "conversation", "answer", "close", "wrong item"] {
             let (mut control, mut command) = fixture();
             match case {
                 "no grant" => control.grant = None,
@@ -191,11 +198,18 @@ mod tests {
                 "wrong session" => command["session_actor"] = json!("session/other"),
                 "wrong actor" => command["issued_by"] = json!("agent/other"),
                 "verb" => control.grant.as_mut().unwrap()["verbs"] = json!(["phone.inspect"]),
-                "screen" => control.grant.as_mut().unwrap()["screens"] = json!(["Conversation"]),
+                "screen" => control.grant.as_mut().unwrap()["screens"] = json!(["Attention"]),
                 "expired grant" => control.grant.as_mut().unwrap()["expires_at"] = json!("2000-01-01T00:00:00Z"),
                 "expired command" => command["expires_at"] = json!("2000-01-01T00:00:00Z"),
                 "budget" => control.grant.as_mut().unwrap()["max_commands"] = json!(0),
                 "read mutation" => command["command_kind"] = json!("phone.message.read"),
+                "conversation" => command["args"] = json!({"screen":"Conversation","params":{"target":"agent/fixture"}}),
+                "answer" => command["command_kind"] = json!("work.answer"),
+                "close" => command["command_kind"] = json!("work.close"),
+                "wrong item" => {
+                    control.grant.as_mut().unwrap()["item_id"] = json!("attention/seed");
+                    command["args"] = json!({"screen":"Attention","params":{"id":"attention/other"}});
+                }
                 _ => unreachable!(),
             }
             let mut ui = crate::ui::Ui::new(crate::ui::demo::test_world());
