@@ -401,3 +401,24 @@ fn memberless_agent_children_still_require_the_barrier() {
         );
     }
 }
+
+#[test]
+fn attention_capability_is_additive_and_anchored() {
+    let (store, anchor) = enabled();
+    started(&store, json!({"declared_admission":1,"declared_attention":1}));
+    let (peer, _) = peer(&store, &anchor);
+    started(&peer, json!({"declared_admission":1}));
+    sync(&peer, &store);
+    publish(&store, "version 2\nmission \"memory\" state=\"ready\" { goal \"Work.\"; declared-budgets { memory-max \"8G\"; } }\n", "memory").unwrap();
+    let attention = "version 2\nmission \"attention\" state=\"ready\" { goal \"Work.\"; declared-budgets { attention \"person/reviewer\" asks=3; } }\n";
+    let before = store.index().unwrap();
+    let error = publish(&store, attention, "attention").unwrap_err();
+    assert_eq!(error.code, ERROR);
+    assert!(error.message.contains("host/birch"));
+    assert!(error.message.contains("features.declared_attention=1"));
+    assert_eq!(store.index().unwrap(), before);
+    started(&peer, json!({"declared_admission":1,"declared_attention":1}));
+    assert_eq!(publish(&store, attention, "unanchored").unwrap_err().code, ERROR);
+    sync(&peer, &store);
+    publish(&store, attention, "supported").unwrap();
+}

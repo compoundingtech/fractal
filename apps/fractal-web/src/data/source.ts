@@ -318,6 +318,20 @@ export interface AttachmentPort {
   readonly send: (request: AttachmentSendRequest) => Promise<ConversationPortResult<ActionResult>>
 }
 
+export type BrowserPairingStatus = 'unpaired' | 'paired' | 'pending' | 'denied' | 'expired'
+/** `undefined` when this host does not offer browser pairing (HTTP 404). */
+export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus; readonly displayCode?: string | undefined; readonly credentialChanged?: boolean | undefined } | undefined
+
+/**
+ * Pairs this browser with the serving Fractal host (`/_fractal/pair/*`). The credential lives in a
+ * cookie the page cannot read; the port only reports status and starts or forgets a pairing.
+ */
+export interface BrowserPairingPort {
+  readonly status: () => Promise<BrowserPairingStatusReply>
+  readonly start: (deviceLabel: string) => Promise<{ readonly requestId: string; readonly displayCode: string }>
+  readonly forget: () => Promise<void>
+}
+
 export type NetworkReachability = { readonly _tag: 'Online' } | { readonly _tag: 'Offline' }
 
 /**
@@ -404,6 +418,8 @@ export interface DataSource {
   readonly resources?: AgentResourceSource
   /** The monitor's existing port, unchanged: fixtures declare a synthetic source, live the same-origin relay. */
   readonly usage: MonitorSource
+  /** Same-origin browser pairing; present only where the page itself is served, never in fixtures or replays. */
+  readonly pairing?: BrowserPairingPort
   /** Native default or injected trace provider, bound to the owning live runtime. */
   readonly sessionTrace?: (query: TraceQuery) => Promise<TraceSeries>
   /** Live client-observed state kept separate from the feature-facing feed projection. */

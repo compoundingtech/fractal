@@ -806,7 +806,8 @@ pub fn authenticate(
         }
         let pairing_completion = request.method() == axum::http::Method::POST
             && request.uri().path().starts_with("/v1/client/pairings/")
-            && request.uri().path().ends_with("/complete");
+            && (request.uri().path().ends_with("/complete")
+                || request.uri().path() == "/v1/client/pairings/renewals/pending");
         return pairing_completion
             .then(ClientSession::pairing)
             .ok_or_else(|| forbidden("the Fabric-loopback client credential is required"));
@@ -1860,6 +1861,13 @@ pub fn device_resources(
     claims.sort_by_key(|claim| claim.store_index);
     let mut paired = BTreeMap::<String, (&ClaimRecord, Option<&ClaimRecord>)>::new();
     let mut names = BTreeMap::<String, String>::new();
+    let mut unadmitted = BTreeSet::new();
+    let mut withdrawals = BTreeMap::<&str, Vec<&ClaimRecord>>::new();
+    for claim in &claims {
+        if claim.kind == "custom.client.pairing-revoked" {
+            withdrawals.entry(&claim.subject).or_default().push(claim);
+        }
+    }
     for claim in &claims {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
         if claim.kind == "custom.client.pairing-begun"
@@ -1868,7 +1876,7 @@ pub fn device_resources(
         }
         if claim.kind == "custom.client.pairing-completed"
             && !state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
-            continue;
+            unadmitted.insert(claim.id.clone());
         }
         if claim.kind == "custom.client.pairing-begun"
             && let Some(name) = fields.get("device_name").and_then(Value::as_str)
@@ -1882,7 +1890,20 @@ pub fn device_resources(
             "custom.client.pairing-completed"
                 if fields.get("person_id").and_then(Value::as_str) == Some(person) =>
             {
-                paired.insert(device_id.to_owned(), (claim, None));
+                let mut withdrawn = None;
+                if unadmitted.contains(&claim.id) {
+                    if paired.get(device_id).is_some_and(|(current, _)| !unadmitted.contains(&current.id)) {
+                        continue;
+                    }
+                    for revoked in withdrawals.get(claim.subject.as_str()).into_iter().flatten() {
+                        if state.store.pairing_revocation_is_trusted(revoked, claim).map_err(ApiError::internal)? {
+                            withdrawn = Some(*revoked);
+                        }
+                    }
+                    // Raw shadows cannot replace admitted grants or withdrawn legacy history.
+                    if withdrawn.is_none() { continue; }
+                }
+                paired.insert(device_id.to_owned(), (claim, withdrawn));
             }
             "custom.client.pairing-revoked" => {
                 if let Some(entry) = paired.get_mut(device_id)

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Roll compatibility baselines forward to v0.3.31",
+  "replay": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; fixtures account for baselines that already reject service profiles and plugin-principal inspection, reroute outbox mail, and route sends to advertised inboxes. Authentication, owner-read, exactly-once storage, candidate shard routing and claim-retention controls remain. No runtime contract or operator change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Compatibility test inputs only; no runtime contract or operator change."
+  }
+}

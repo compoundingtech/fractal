@@ -17,6 +17,8 @@
     { "file": "agent-related-runs.json", "definition": "AgentRelatedRuns" },
     { "file": "resources.json", "definition": "GoldenResourceSet" },
     { "file": "person-ask-mission.json", "definition": "Mission" },
+    { "file": "mission-detail-step-history.json", "definition": "Mission" },
+    { "file": "mission-declaration-provenance.json", "definition": "MissionDeclaration" },
     { "file": "conversation-search.json", "definition": "Envelope" },
     { "file": "timeline.json", "definition": "Envelope" },
     { "file": "timeline-views.json", "definition": "Envelope" },

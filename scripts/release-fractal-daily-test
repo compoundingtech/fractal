@@ -178,9 +178,10 @@ with tempfile.TemporaryDirectory() as temporary:
         (checkout / f'.github/{kind}-compat-baseline.json').write_text(json.dumps(pin))
     (checkout / 'scripts/release_notes.py').write_text(STUB_NOTES)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
-    # Fixture history must not depend on the account's interactive signing agent.
+    # Fixture history must not depend on account signing or identity hooks.
     sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'core.hooksPath', '/dev/null', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     sh('git', 'remote', 'add', 'origin', str(checkout), cwd=checkout)

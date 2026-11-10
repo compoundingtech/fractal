@@ -9,6 +9,207 @@ pub use crate::store::custom::tests_shared_delivery::{DECIDER, FLEET, RAW_KINDS,
 pub use crate::store::custom::tests_shared_delivery::{request, signed_pair, signed_sync, tree_claim, tree_document, tree_status};
 use super::*;
 
+#[test]
+fn decision_inputs_reject_unregistered_person_answer() {
+    let store = Store::open_memory("example").unwrap();
+    tree_claim(&store, TREE, "answered", DECIDER, json!({
+        "question":"ship", "answer":"yes"
+    })).unwrap();
+    assert!(store.decision_inputs(TREE).unwrap_err().to_string().contains("registration is unavailable"));
+}
+
+#[test]
+fn decision_inputs_require_recipient_authority_in_immutable_registration() {
+    let store = Store::open_memory("example").unwrap();
+    let mut manifest = decision_tree();
+    // Keep attention's recipient mapping and a schema-valid recipient-only reply,
+    // while weakening the distinct answer claim consumed by the decision reader.
+    let reply_kind = "custom.decision.tree.v1.reply";
+    manifest.claims.insert(
+        reply_kind.into(),
+        manifest.claims["custom.decision.tree.v1.answered"].clone(),
+    );
+    manifest.attention.as_mut().unwrap().reply.kind = reply_kind.into();
+    manifest.claims.get_mut("custom.decision.tree.v1.answered").unwrap().authority = Authority::Owner;
+    store.register_custom_kind(&RegistrationRequest {
+        manifest, actor: SEAT.into(),
+    }).unwrap();
+    tree_claim(&store, TREE, "opened", SEAT, json!({
+        "seat":SEAT, "recipient":DECIDER
+    })).unwrap();
+    assert!(store.decision_inputs(TREE).unwrap_err().to_string()
+        .contains("only from the addressed recipient"));
+}
+
+fn decision_inputs_limit_fixture() -> (Store, ClaimRecord, u64) {
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: decision_tree(), actor: SEAT.into(),
+    }).unwrap();
+    let opened = tree_claim(&store, TREE, "opened", SEAT, json!({
+        "seat":SEAT, "recipient":DECIDER
+    })).unwrap();
+    let bytes = store.readers.get().query_row(
+        "SELECT length(CAST(body AS BLOB)) FROM claims WHERE id=?1",
+        [&opened.id], |row| row.get(0),
+    ).unwrap();
+    (store, opened, bytes)
+}
+
+#[test]
+fn decision_inputs_claim_limit_refuses_instead_of_truncating() {
+    let (store, opened, bytes) = decision_inputs_limit_fixture();
+    let error = store.decision_inputs_with_limits(TREE, 0, bytes).unwrap_err();
+    assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    let snapshot = store.decision_inputs_with_limits(TREE, 1, bytes).unwrap();
+    assert_eq!(snapshot.claims.len(), 1);
+    assert_eq!(snapshot.claims[0].id, opened.id);
+}
+
+#[test]
+fn decision_inputs_body_byte_limit_refuses_instead_of_truncating() {
+    let (store, opened, bytes) = decision_inputs_limit_fixture();
+    let error = store.decision_inputs_with_limits(TREE, 1, bytes - 1).unwrap_err();
+    assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    let snapshot = store.decision_inputs_with_limits(TREE, 1, bytes).unwrap();
+    assert_eq!(snapshot.claims.len(), 1);
+    assert_eq!(snapshot.claims[0].id, opened.id);
+}
+
+#[test]
+fn decision_inputs_limits_exclude_repaired_history() {
+    let (store, opened, bytes) = decision_inputs_limit_fixture();
+    let raw = tree_document(&store, "doc/example/limit-repair", b"unreadable source");
+    let repaired = tree_claim(&store, TREE, "damaged", SEAT, json!({
+        "raw":raw, "records":1, "imported":0, "malformed":1
+    })).unwrap();
+    store.seal_local_batches().unwrap();
+    store.connection.batched(|tx| -> Result<()> {
+        let changed = tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h7ddc25a3b2d6 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+            [&repaired.id],
+        )?;
+        assert!(changed > 0);
+        Ok(())
+    }).unwrap().unwrap();
+    let snapshot = store.decision_inputs_with_limits(TREE, 1, bytes).unwrap();
+    assert_eq!(snapshot.claims.len(), 1);
+    assert_eq!(snapshot.claims[0].id, opened.id);
+}
+
+#[test]
+fn decision_inputs_limits_count_all_claims_and_sum_utf8_body_bytes() {
+    let (store, _, opened_bytes) = decision_inputs_limit_fixture();
+    let raw = tree_document(&store, "doc/example/limit-bytes", b"unreadable source");
+    let answered = tree_claim(&store, TREE, "damaged", SEAT, json!({
+        "raw":raw, "records":1, "imported":0, "malformed":1, "detail":"✓"
+    })).unwrap();
+    let (answer_bytes, answer_chars): (u64, u64) = store.readers.get().query_row(
+        "SELECT length(CAST(body AS BLOB)),length(body) FROM claims WHERE id=?1",
+        [&answered.id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert!(answer_bytes > answer_chars);
+    let total = opened_bytes + answer_bytes;
+    let count_error = store.decision_inputs_with_limits(TREE, 1, total).unwrap_err();
+    assert_eq!(count_error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    let byte_error = store.decision_inputs_with_limits(TREE, 2, total - 1).unwrap_err();
+    assert_eq!(byte_error.downcast_ref::<FractalError>().unwrap().code, "decision-inputs-too-large");
+    assert_eq!(store.decision_inputs_with_limits(TREE, 2, total).unwrap().claims.len(), 2);
+}
+
+fn decision_preflight_work_fixture(count: u64, repaired: bool) -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    // Only the preflight's authoritative tables/indexes are needed. Avoid projection
+    // maintenance so the measured work is the production preflight, not fixture setup.
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h749cf1015bd0 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY);
+         CREATE TABLE claims(id TEXT PRIMARY KEY,batch_id TEXT,subject TEXT,body TEXT);
+         CREATE INDEX claims_subject ON claims(subject);
+         CREATE TABLE replica_records(claim_id TEXT,state TEXT);
+         CREATE INDEX replica_records_claim ON replica_records(claim_id);
+         CREATE INDEX replica_records_repaired_claim ON replica_records(claim_id) WHERE state='repaired';
+         INSERT INTO batches VALUES('batch');",
+    ).unwrap();
+    {
+        let tx = connection.unchecked_transaction().unwrap();
+        let mut insert = tx.prepare(
+            /* sqlite-large-value: allow-for-now lv-h9d4209b9ce0c owner=fractal_store::store::custom::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,'batch',?2,'{\"fields\":{\"detail\":\"✓\"}}')",
+        ).unwrap();
+        let mut repair = tx.prepare(
+            /* sqlite-large-value: allow-for-now lv-h7b32036bdf19 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES(?1,'repaired')",
+        ).unwrap();
+        for index in 0..count {
+            insert.execute(/* sqlite-large-value: allow-for-now lv-h51660fd08a1f owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ params![index.to_string(), TREE]).unwrap();
+            if repaired {
+                repair.execute(/* sqlite-large-value: allow-for-now lv-h09f141e001e0 owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ [index.to_string()]).unwrap();
+            }
+        }
+        drop(insert);
+        drop(repair);
+        tx.commit().unwrap();
+    }
+    connection
+}
+
+fn decision_preflight_refusal_steps(
+    connection: &Connection,
+    max_claims: u64,
+    max_body_bytes: u64,
+) -> usize {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let steps = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&steps);
+    connection.progress_handler(1, Some(move || {
+        counter.fetch_add(1, Ordering::Relaxed);
+        false
+    }));
+    let result = decision_inputs_preflight(connection, TREE, max_claims, max_body_bytes);
+    connection.progress_handler(0, None::<fn() -> bool>);
+    assert_eq!(
+        result.unwrap_err().downcast_ref::<FractalError>().unwrap().code,
+        "decision-inputs-too-large",
+    );
+    steps.load(Ordering::Relaxed)
+}
+
+#[test]
+fn decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail() {
+    let costs = [256, 8192].map(|count| {
+        let connection = decision_preflight_work_fixture(count, false);
+        decision_preflight_refusal_steps(&connection, 1, u64::MAX)
+    });
+    assert!(costs[0] < 1000, "claim cap must stop after two rows: {costs:?}");
+    assert!(costs[1] <= costs[0] + 100, "tail must not add SQLite work: {costs:?}");
+}
+
+#[test]
+fn decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail() {
+    let costs = [256, 8192].map(|count| {
+        let connection = decision_preflight_work_fixture(count, false);
+        // Disable the effective count cap: only the running byte cap can stop this read.
+        decision_preflight_refusal_steps(&connection, u64::MAX, 1)
+    });
+    assert!(costs[0] < 1000, "byte cap must stop after one row: {costs:?}");
+    assert!(costs[1] <= costs[0] + 100, "tail must not add SQLite work: {costs:?}");
+}
+
+#[test]
+fn decision_inputs_preflight_bounds_repaired_history_work() {
+    let small = decision_preflight_work_fixture(2, true);
+    decision_inputs_preflight(&small, TREE, 0, 0).unwrap();
+    let costs = [
+        DECISION_INPUTS_MAX_SCANNED_CLAIMS + 1,
+        4 * DECISION_INPUTS_MAX_SCANNED_CLAIMS,
+    ].map(|count| {
+        let connection = decision_preflight_work_fixture(count, true);
+        decision_preflight_refusal_steps(&connection, 0, 0)
+    });
+    assert!(
+        costs[1] <= costs[0] + 100,
+        "repaired-only history must stop at the scanned-row budget: {costs:?}",
+    );
+}
+
 fn audit_custom_dirty(store: &Store) {
     store.connection.write().execute_batch(
         /* sqlite-large-value: allow-for-now lv-h4094ac3a489b owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE custom_dirty_audit(subject TEXT);
@@ -250,7 +451,7 @@ fn custom_non_custom_dependency_canonical_change_refreshes_consumer() {
     audit_custom_dirty(&store);
     // Synthetic canonical repair isolates record invalidation from claim insertion.
     store.connection.batched(|tx| -> Result<()> {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h7ddc25a3b2d6 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&input.id])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h59a9d79d4e2d owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [&input.id])?;
         let queued: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
             [consumer], |row| row.get(0),
@@ -306,7 +507,7 @@ fn custom_registration_document_record_change_reaches_registry_expansion() {
              WHERE binding.kind='doc.bound' LIMIT 1", [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h59a9d79d4e2d owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [binding])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hbe9ab32f43d1 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1", [binding])?;
         assert!(tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
             [registry], |row| row.get::<_, bool>(0),

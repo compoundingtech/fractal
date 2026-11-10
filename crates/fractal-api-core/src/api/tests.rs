@@ -122,13 +122,13 @@ fn ancestry_records_environment_read_failure() {
             },
             |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
                 Err(AncestryUnavailableReason::ProcessReadFailed {
-                    operation: "proc-environ-read", error: "Permission denied".into(),
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
                 })
             }),
             |cause| recorded.push((cause.pid, cause.reason.clone())));
         assert_eq!(result, HarnessAncestry::Unavailable);
         assert_eq!(recorded, vec![(Some(ancestor), AncestryUnavailableReason::ProcessReadFailed {
-            operation: "proc-environ-read", error: "Permission denied".into(),
+            operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
         })]);
     });
 }
@@ -175,7 +175,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_, _| HarnessAncestry::Bound("agent/example".into()),
+        reserved, router(state), Some(store.clone()), None, |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -200,20 +200,28 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
 #[tokio::test]
 async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
     use http_body_util::BodyExt as _;
-    for ancestry in [HarnessAncestry::Unavailable, HarnessAncestry::Person] {
+    for (ancestry, worker) in [(HarnessAncestry::Unavailable, false),
+        (HarnessAncestry::Unavailable, true), (HarnessAncestry::Person, false)] {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let socket = root.path().join("bound.sock");
         let reserved = reserve_unix_socket(&socket, None).await.unwrap();
         let (ready, waiting) = tokio::sync::oneshot::channel();
-        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
-            |_, _| HarnessAncestry::Unavailable
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+            -> Result<HarnessAncestry, AncestryUnavailableCause> = if ancestry == HarnessAncestry::Unavailable {
+            |pid, _| Err(AncestryUnavailableCause { pid: Some(pid + 1),
+                reason: AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied (os error 13)".into(),
+                } })
         } else {
-            |_, _| HarnessAncestry::Person
+            |_, _| Ok(HarnessAncestry::Person)
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
-        let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-            reserved, app, Some(state.store), lookup,
+        let authority: Option<WorkerAuthority> = worker.then(|| {
+            Arc::new(|| Ok(std::process::id())) as WorkerAuthority
+        });
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+            reserved, app, Some(state.store), authority, lookup,
             move || { let _ = ready.send(()); },
         ));
         waiting.await.unwrap();
@@ -227,19 +235,83 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
             ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
             ("GET", "/v1/internal/example", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", true, "{}", true),
             ("GET", "/v1/client/session", true, "{}", true),
+            ("POST", "/v1/internal/replication-wake", false, "{}", true),
+            ("GET", "/v1/internal/fleet/membership", false, "{}", true),
+            ("GET", "/v1/client/capabilities", true, "{}", true),
             ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
             ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
         ] {
-            let mut request = Request::builder().method(method).uri(path).header("host", "local");
+            let mut request = Request::builder().method(method).uri(path).header("host", "local")
+                .header("x-verified-worker-fallback", "true");
             if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
             let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
-            let refused = sensitive && ancestry == HarnessAncestry::Unavailable;
+            let refused = sensitive && ancestry == HarnessAncestry::Unavailable && !worker;
             assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
             response.into_body().collect().await.unwrap();
         }
         server.abort();
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person() {
+    use tower::ServiceExt as _;
+    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let process = local_harness_process(pid).unwrap();
+    let parent = pid + 1;
+    let ancestry = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+        |_| {
+            let mut process = process.clone();
+            process.generation.as_mut().unwrap().0 = parent;
+            Ok(process)
+        },
+        |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+            // Model a same-uid, non-dumpable service manager: metadata remains readable,
+            // but its environment does not.
+            Err(AncestryUnavailableReason::ProcessReadFailed {
+                operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
+            })
+        }), |_| {});
+    assert_eq!(ancestry, HarnessAncestry::Unavailable);
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    for verified in [false, true] {
+        let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
+        let app = Router::new().fallback(|| async { "accepted" })
+            .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
+        for (method, path, header) in [
+            ("POST", "/v1/internal/replication/receive", None),
+            ("POST", "/v1/internal/seat-freshness", None),
+            ("POST", "/v1/internal/seat-freshness/reads", None),
+            ("POST", "/v1/internal/seat-snapshot", None),
+            ("POST", crate::peer::CLIENT_READ_FORWARD_PATH, None),
+            ("POST", "/v1/internal/replication-wake", None),
+            ("GET", "/v1/internal/fleet/membership", None),
+            ("POST", "/v1/internal/fleet/endpoints", None),
+            ("POST", "/v1/internal/fleet/redeem", None),
+            ("POST", "/v1/internal/fleet/invites", None),
+            ("GET", "/v1/client/capabilities", Some(client_v0::LOCAL_PERSON_HEADER)),
+            ("GET", "/v1/client/capabilities", Some(wire_names::LOCAL_PERSON_HEADER_ALIAS)),
+        ] {
+            let mut request = Request::builder().method(method).uri(path);
+            if let Some(header) = header { request = request.header(header, "person/operator"); }
+            let mut request = request.body(Body::from(r#"{"actor":"person/operator"}"#)).unwrap();
+            request.extensions_mut().insert(ancestry.clone());
+            request.extensions_mut().insert(LocalPeer { pid, ancestor: None, peer_process: Some(peer.clone()) });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), if verified {
+                StatusCode::OK
+            } else { StatusCode::UNPROCESSABLE_ENTITY }, "{verified} {method} {path} {header:?}");
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2378,7 +2450,7 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let root = tempfile::tempdir().unwrap();
-    let app = AppState { store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
+    let app = AppState { browser_pairing_login: None, store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
     let store = app.store.clone();
     let send = |id: &str, from: &str, recipient: &str, tags: &[&str]| {
         store
@@ -4066,7 +4138,7 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
 async fn a_bound_harness_cannot_record_seat_freshness() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let received = crate::peer::ReceivedSeatFreshness {
         from: "another-member".into(),
         seats: vec![crate::peer::SeatHeard {
@@ -4159,7 +4231,7 @@ async fn internal_routes_refuse_seat_callers() {
 async fn a_seat_reads_fleet_views_through_public_routes_only() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let call = |method: &str, route: &str, bound: bool| {
         let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
         if bound {
@@ -4186,7 +4258,7 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let declarations = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, &state.node).unwrap();
     state.store.apply_internal(&declarations, "workflow-registration-fixture").unwrap();
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let request = apply_request(&state, PERFORMANCE_REGISTRATION, "agent/foreign", "forged-workflow-register");
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/intent/apply")
         .header("content-type", "application/json").extension(BoundAgent("agent/own".into()))
@@ -4223,7 +4295,7 @@ async fn repair_actor_bound_router_refuses_foreign_agent_and_person_before_token
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/foreign", "person/operator"] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -4242,7 +4314,7 @@ async fn repair_actor_bound_router_requires_present_nonempty_actor() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for body in [
         json!({"token":"not-a-repair-token"}),
         json!({"token":"not-a-repair-token","actor":null}),
@@ -4263,7 +4335,7 @@ async fn repair_actor_bound_router_own_actor_reaches_token_validation_and_daemon
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, refusal) = repair_actor_apply_request(
         app.clone(),
@@ -4294,7 +4366,7 @@ async fn repair_actor_unbound_router_supports_legacy_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -4318,7 +4390,7 @@ async fn repair_actor_bound_router_refuses_legacy_apply_with_or_without_actor() 
     // Both the handler and the daemon's outer binding guard must close the legacy path.
     for app in [
         app.clone(),
-        app.layer(from_fn_with_state(state.store.clone(), guard_bound_actor)),
+        app.layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor)),
     ] {
         for body in [
             json!({"token":token}),
@@ -4346,7 +4418,7 @@ async fn repair_actor_unbound_router_refuses_supplied_actor_without_daemon_bindi
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/own", "person/operator", ""] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -4363,7 +4435,7 @@ async fn repair_actor_unbound_router_refuses_attributed_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -8029,6 +8101,133 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
     let (_, mailbox) =
         get_request(app, "/v1/messages/page?to=agent%2Freceiver&limit=100").await;
     assert!(mailbox["items"].as_array().unwrap().is_empty(), "{mailbox}");
+}
+
+#[tokio::test]
+async fn replying_settles_stream_routed_parents_and_replays_without_another_send() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/receiver\" {{ host {:?}; command \"true\"; workspace {:?} }}",
+        state.store.origin(),
+        root.path().display().to_string(),
+    );
+    let intent = crate::graph::parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-stream-recipient").unwrap();
+    let app = router(state.clone());
+    for initial in ["sent", "delivered", "read", "closed"] {
+        let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+            "idempotency_key": format!("stream-parent-{initial}"),
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Please answer."
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{original}");
+        let parent = original["subject"].as_str().unwrap();
+        assert!(state.store.message(parent).unwrap().unwrap().created_index
+            >= crate::store::messages_shard::STREAM_INDEX_BASE);
+        assert!(state.store.claims_for(parent, Some("message.sent")).unwrap().is_empty());
+        for lifecycle in ["delivered", "read", "closed"] {
+            if initial == "sent" {
+                break;
+            }
+            crate::store::messages_shard::record_lifecycle(
+                &state.store, parent, &format!("message.{lifecycle}"),
+                Some("agent/example/receiver"),
+                &BTreeMap::from([("status".into(), json!(lifecycle))]),
+            ).unwrap();
+            if lifecycle == initial {
+                break;
+            }
+        }
+        let reply = json!({
+            "idempotency_key": format!("stream-reply-{initial}"),
+            "from": "agent/example/receiver",
+            "to": "agent/example/sender",
+            "content": "Answered.",
+            "in_reply_to": parent
+        });
+        let (status, sent) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["already_sent"], false);
+        assert_eq!(state.store.message(parent).unwrap().unwrap().status, "closed");
+        let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+            .unwrap().unwrap();
+        assert_eq!(marks.iter().filter(|(kind, _, _)| kind == "message.closed").count(), 1);
+        assert!(state.store.claims_for(parent, Some("message.closed")).unwrap().is_empty());
+
+        let (status, repeated) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["already_sent"], true);
+        assert_eq!(repeated["subject"], sent["subject"]);
+        assert_eq!(repeated["sent_at"], sent["sent_at"]);
+        let reply_subject = sent["subject"].as_str().unwrap();
+        assert_eq!(state.store.claims_for(reply_subject, Some("message.sent")).unwrap().len(), 1);
+
+        // A changed request under the same key fails before another send, even after closure.
+        let mut changed = reply;
+        changed["content"] = json!("Different answer.");
+        let (status, error) = json_request(app.clone(), "/v1/messages", changed).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+        assert_eq!(state.store.claims_for(reply_subject, Some("message.sent")).unwrap().len(), 1);
+        assert_eq!(state.store.message(parent).unwrap().unwrap().status, "closed");
+    }
+}
+
+#[tokio::test]
+async fn a_retired_recipient_cannot_reply_or_settle_its_successors_stream_mail() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/old\" {{ host {:?}; command \"true\"; workspace \"/tmp\" }}\nagent \"example/new\" {{ command \"true\"; workspace \"/tmp\" }}",
+        state.store.origin(),
+    );
+    let intent = parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-retirement-fixture").unwrap();
+    let app = router(state.clone());
+    let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+        "idempotency_key": "reply-retired-parent",
+        "from": "agent/example/sender",
+        "to": "agent/example/old",
+        "content": "Keep this for the successor."
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let parent = original["subject"].as_str().unwrap();
+    assert!(state.store.message(parent).unwrap().unwrap().created_index
+        >= crate::store::messages_shard::STREAM_INDEX_BASE);
+    for lifecycle in ["delivered", "read"] {
+        crate::store::messages_shard::record_lifecycle(
+            &state.store, parent, &format!("message.{lifecycle}"),
+            Some("agent/example/old"),
+            &BTreeMap::from([("status".into(), json!(lifecycle))]),
+        ).unwrap();
+    }
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "reply-retired-custody", &[], Some("agent/example/new"), None,
+    ).unwrap();
+    let (status, refused) = json_request(app, "/v1/messages", json!({
+        "idempotency_key": "reply-retired-refused",
+        "from": "agent/example/old",
+        "to": "agent/example/sender",
+        "content": "A stale process answered.",
+        "in_reply_to": parent
+    })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(state.store.operation_claim("reply-retired-refused").unwrap().is_none());
+    // Also exercise settlement's own admission, independently of the pre-send check.
+    let refused = settle_answered_message(
+        &state.store, parent, "agent/example/old", "agent/example/sender",
+        "message/stale-reply", "claim/stale-reply",
+    ).unwrap_err();
+    assert_eq!(refused.code, "wrong-message-recipient");
+    assert_eq!(state.store.message(parent).unwrap().unwrap().status, "read");
+    let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+        .unwrap().unwrap();
+    assert!(!marks.iter().any(|(kind, _, _)| kind == "message.closed"));
 }
 
 #[tokio::test]
@@ -12516,6 +12715,449 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
     );
 }
 
+async fn writer_binding_request(
+    app: Router,
+    path: &str,
+    bound: Option<&str>,
+    credential: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(bound) = bound {
+        request = request.extension(BoundAgent(bound.into()));
+    }
+    if let Some(credential) = credential {
+        request = request.header("authorization", format!("Bearer {credential}"));
+    }
+    let response = app
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
+}
+
+fn writer_binding_pairing(state: &AppState, credential: &str, scopes: &[&str]) {
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject: "custom/client/writer-binding".into(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some("person/example".into()),
+        fields: serde_json::from_value(json!({
+            "credential_hash": client_v0::credential_digest(credential),
+            "session_actor": "person/example/session/phone",
+            "person_id": "person/example",
+            "device_id": "device/writer-binding",
+            "scopes": scopes,
+            "expires_at_unix_ms": u64::MAX,
+            "pairing_operation_version": 1
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn writer_binding_local_claims_preserve_optional_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (name, actor) in [("person", Some("person/example")), ("missing", None)] {
+        let subject = format!("custom/example/local-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = json!(actor);
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), actor);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_bound_claim_actor_matches_and_omissions_are_attributed() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (name, actor) in [
+        ("explicit", Some(json!("agent/own"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/writer-{name}");
+        let mut body = json!({
+            "subject": subject, "kind": "custom.example.recorded", "fields": {}
+        });
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"), "{name}");
+    }
+    for actor in ["agent/other", "person/example"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None,
+            json!({"subject":"custom/example/other-writer", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for sender in ["agent/other", "person/example"] {
+        for path in ["/v1/claims", "/v1/messages"] {
+            let before = state.store.index().unwrap();
+            let body = if path == "/v1/claims" {
+                json!({"subject":"message/writer-binding-other", "kind":"message.sent",
+                    "actor":"agent/own", "fields":{
+                        "from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"
+                    }})
+            } else {
+                json!({"from":sender, "to":"agent/receiver", "content":"hello",
+                    "idempotency_key":"writer-binding-other"})
+            };
+            let (status, refusal) = writer_binding_request(
+                app.clone(), path, Some("agent/own"), None, body,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {sender}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    for path in ["/v1/claims", "/v1/messages"] {
+        let body = if path == "/v1/claims" {
+            json!({"subject":"message/writer-binding-own", "kind":"message.sent",
+                "fields":{"from":"agent/own", "to":"agent/receiver", "content":"hello", "status":"sent"}})
+        } else {
+            json!({"from":"agent/own", "to":"agent/receiver", "content":"hello",
+                "idempotency_key":"writer-binding-own"})
+        };
+        let (status, receipt) = writer_binding_request(
+            app.clone(), path, Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {receipt}");
+        let subject = receipt["subject"].as_str().unwrap();
+        let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"));
+        assert_eq!(claims[0].body["fields"]["from"], "agent/own");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_read_only_pairing_reads_and_refuses_generic_posts() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-read-only";
+    writer_binding_pairing(&state, credential, &["read.projections"]);
+    let app = router(state.clone());
+    let response = app.clone().oneshot(Request::builder()
+        .uri("/v1/claims")
+        .header("authorization", format!("Bearer {credential}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for (path, body) in [
+        ("/v1/claims", json!({"subject":"custom/example/paired-read", "kind":"custom.example.recorded",
+            "actor":"person/example", "fields":{}})),
+        ("/v1/claims", json!({"subject":"message/paired-read", "kind":"message.sent",
+            "actor":"person/example", "fields":{
+                "from":"person/example", "to":"agent/receiver", "content":"hello", "status":"sent"}})),
+        ("/v1/messages", json!({"from":"person/example", "to":"agent/receiver",
+            "content":"hello", "idempotency_key":"paired-read"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-control";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work", "control.messages"]);
+    let app = router(state.clone());
+    for (name, actor) in [
+        ("explicit", Some(json!("person/example"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/paired-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+    }
+    for actor in ["person/example/session/phone", "person/other", "agent/other"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":"custom/example/paired-other", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    for sender in ["person/example", "person/other", "person/example/session/phone"] {
+        let before = state.store.index().unwrap();
+        let subject = "message/writer-binding-paired";
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":subject, "kind":"message.sent", "actor":"person/example",
+                "fields":{"from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"}}),
+        ).await;
+        if sender == "person/example" {
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+            assert_eq!(claims[0].body["fields"]["from"], sender);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{sender}: {receipt}");
+            assert_eq!(receipt["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-reserved-records";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    let app = router(state.clone());
+    for bound in [false, true] {
+        let actor = if bound { "agent/own" } else { "person/example" };
+        for (subject, kind) in [
+            ("custom/client/writer-binding-reserved", "custom.client.pairing-completed"),
+            ("custom/client/pairing-writer-binding", "custom.example.recorded"),
+        ] {
+            let before = state.store.index().unwrap();
+            let (status, response) = writer_binding_request(
+                app.clone(), "/v1/claims", bound.then_some(actor),
+                (!bound).then_some(credential),
+                json!({"subject":subject, "kind":kind, "actor":actor,
+                    "fields":{"credential_hash":client_v0::credential_digest("reserved-record"),
+                        "session_actor":"person/example/session/other",
+                        "person_id":"person/example", "device_id":"device/other",
+                        "scopes":["control.work"], "expires_at_unix_ms":u64::MAX,
+                        "pairing_operation_version":1}}),
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bound}/{kind}: {response}");
+            assert_eq!(response["code"], "claim-write-forbidden");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_legacy_attention_operations_require_attention_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "scope-api-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let (status, ask) = json_request(app.clone(), "/v1/work/ask", json!({
+        "person":"person/example", "title":"Choose a date", "reason":"A date",
+        "actor":actor, "new_run":"scope-date", "idempotency_key":"scope-ask"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{ask}");
+    let subject = ask["subject"].as_str().unwrap();
+    let episode = state.store.claims_for(subject, Some("work.person-asked")).unwrap()[0].id.clone();
+    let credential = "writer-binding-work-only";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    for (path, body) in [
+        ("/v1/work/done", json!({"subject":subject, "actor":"person/example",
+            "summary":"Friday", "episode":episode, "evidence":[], "idempotency_key":"scope-done"})),
+        ("/v1/custom/reply", json!({"subject":"custom/example/reply",
+            "registration":"custom/example/registration", "revision":"revision/one",
+            "episode":"episode/one", "fields":{}, "actor":"person/example",
+            "idempotency_key":"scope-reply"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, response) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let projection = state.store.step_run(subject).unwrap().unwrap();
+    assert!(projection.person_answers.is_empty());
+}
+
+#[tokio::test]
+async fn writer_binding_native_sessions_and_internal_routes_retain_their_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let peer = NativeDeliveryPeer {
+        agent: "agent/native".into(), transport: "claude-hook", pid: 37, archives_inbox: false,
+    };
+    for actor in ["agent/native", "agent/other", "person/example"] {
+        let request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(peer.clone())
+            .extension(client_v0::ClientSession::for_tests(actor, actor, "unix"))
+            .body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        let result = super::write_principal::bind_request(&state, request).await;
+        assert_eq!(result.is_ok(), actor == "agent/native", "{actor}");
+    }
+    let app = router(state.clone()).layer(axum::Extension(peer.clone()));
+    let before = state.store.index().unwrap();
+    let (status, response) = writer_binding_request(
+        app, "/v1/agents/restart", None, None,
+        json!({"subject":"agent/native","actor":"agent/other","idempotency_key":"native-restart"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
+    for path in ["/v1/internal/replication/receive", "/v1/repair/apply"] {
+        for native in [false, true] {
+            let mut request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json");
+            if native { request = request.extension(peer.clone()); }
+            let result = super::write_principal::bind_request(
+                &state, request.body(Body::from("{}")).unwrap(),
+            ).await;
+            assert_eq!(result.is_ok(), !native, "{path}/{native}");
+        }
+    }
+    for native in [false, true] {
+        let mut request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(HarnessAncestry::Unavailable);
+        if native { request = request.extension(peer.clone()); }
+        let request = request.body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        assert!(super::write_principal::bind_request(&state, request).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_dedicated_optional_fields_use_the_connected_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (path, key) in [
+        ("/v1/launches", "requester"),
+        ("/v1/intent/apply", "actor"),
+        ("/v1/reviews/mission/example", "actor"),
+        ("/v1/messages/example/claims", "actor"),
+        ("/v1/delivery/hold", "actor"),
+    ] {
+        for body in [json!({}), json!({(key): null})] {
+            let request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(body.to_string())).unwrap();
+            let bound = super::write_principal::bind_request(&state, request).await.unwrap();
+            let bytes = to_bytes(bound.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value[key], "agent/own", "{path}: {value}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_native_receipts_and_tracking_retain_seat_attribution() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for transport in ["app-server", "claude-channel", "claude-hook", "omp-channel", "pi-channel", "exec"] {
+        let app = router(state.clone()).layer(axum::Extension(NativeDeliveryPeer {
+            agent: "agent/native".into(), transport, pid: 37, archives_inbox: false,
+        }));
+        for (kind, subject, fields) in [
+            ("custom.agent.initial-message", format!("custom/agent/initial-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","from":"person/example"})),
+            ("custom.agent.first-native-launch", format!("custom/agent/seed-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","outcome":"fresh"})),
+            ("subagent.appeared", "agent/native".into(),
+                json!({"subagent_id":format!("child-{transport}"),"driver":transport,
+                    "incarnation_id":"one","lease_expires_at_unix_ms":u64::MAX})),
+            ("runtime.observed", "agent/native".into(), json!({"status":"running"})),
+        ] {
+            let (status, receipt) = writer_binding_request(app.clone(), "/v1/claims", None, None,
+                json!({"subject":subject,"kind":kind,"fields":fields})).await;
+            assert_eq!(status, StatusCode::OK, "{transport}/{kind}: {receipt}");
+            assert_eq!(receipt["actor"], "agent/native");
+            if kind == "custom.agent.initial-message" {
+                assert_eq!(receipt["body"]["fields"]["from"], "person/example");
+            }
+        }
+        let (status, receipt) = writer_binding_request(app, "/v1/claims", None, None,
+            json!({"subject":"custom/example/native-other","kind":"custom.example.recorded",
+                "actor":"person/example","fields":{}})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{receipt}");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_json_media_types_and_missing_message_sender() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (media_type, sender, expected) in [
+        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("application/vnd.fractal+json; charset=utf-8", None, StatusCode::OK),
+    ] {
+        let mut fields = json!({"to":"agent/receiver","content":"hello","status":"sent"});
+        if let Some(sender) = sender { fields["from"] = json!(sender); }
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/claims")
+            .header("content-type", media_type)
+            .extension(BoundAgent("agent/own".into()))
+            .body(Body::from(json!({"subject":"message/writer-binding-media",
+                "kind":"message.sent","fields":fields}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, expected, "{}", String::from_utf8_lossy(&bytes));
+    }
+    let claim = state.store.claims_for("message/writer-binding-media", Some("message.sent")).unwrap();
+    assert_eq!(claim[0].actor.as_deref(), Some("agent/own"));
+    assert_eq!(claim[0].body["fields"]["from"], "agent/own");
+}
+
 #[tokio::test]
 async fn ordinary_claim_writes_cannot_create_pairing_records() {
     let root = tempfile::tempdir().unwrap();
@@ -14494,7 +15136,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     let preview = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
     state.store.apply(&intent, &preview.subject_tokens, "signature-resume-owner").unwrap();
     let fault_agent = state.store.fleet_fault_agent().unwrap().unwrap();
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let fault = || state.store.signature_migration().unwrap().fault;
 
     state.store.fail_signature_migration("fixture stopped page").unwrap();
@@ -14530,7 +15172,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
 async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let dismiss = |bound: Option<&'static str>, actor: &'static str| {
         let mut request = Request::builder()
             .method("POST")
@@ -14587,7 +15229,7 @@ async fn checkpoint_actor_request(
 async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
         for actor in ["person/operator", "agent/other"] {
             let before = state.store.index().unwrap();
@@ -14624,7 +15266,7 @@ async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
     state.store.trim_locally(true).unwrap();
     *state.store.extension::<crate::store::answers_check::TrimSettings>()
         .notify.lock().unwrap() = Some("agent/helper".into());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let (status, resumed) = checkpoint_actor_request(
         app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
     ).await;

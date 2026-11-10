@@ -39,6 +39,9 @@ on:
       - scripts/release-fractal*
       - scripts/release_artifact.py
       - scripts/release_draft_recovery.py
+      - scripts/release_gh.py
+      - scripts/release_tag.py
+      - scripts/release-publish-embed*
       - scripts/release-fractal-embed.mjs
       - apps/fractal-web/**
       - scripts/release_notes*

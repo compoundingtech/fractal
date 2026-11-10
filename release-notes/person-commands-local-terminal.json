@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Explain that person commands require a local terminal on the daemon host; SSH sessions are not supported.",
+  "replay": {"status": "none", "detail": "No graph replay or stored data change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "Authorization rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "Only refusal guidance and documentation change; the foreign-agent-actor code and request admission logic are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "No recovery action required."}
+}

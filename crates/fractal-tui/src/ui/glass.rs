@@ -4250,7 +4250,7 @@ impl Ui {
             Some(group) if group != focus => {
                 // A click on another split's message box focuses the split and the box.
                 let composer = self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
-                    matches!(hit, Hit::Composer) && contains(*rect, column, row)
+                    matches!(hit, Hit::Composer | Hit::ChatComposer) && contains(*rect, column, row)
                 });
                 self.focus_group(group);
                 !composer

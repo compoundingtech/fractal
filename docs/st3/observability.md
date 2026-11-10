@@ -800,7 +800,7 @@ or harness end, retirement, or removal still excludes the incarnation.
 Refresh subscribes to the store commit notification before the initial fold,
 then coalesces commits with a minimum 30-second rest (or the preceding fold's
 duration, whichever is longer). It also wakes for the earliest relevant shared
-classification boundary: idle freshness at heard-at + 90,001 ms, launch/down at
+classification boundary: idle freshness at heard-at + `HARNESS_OBSERVATION_FRESHNESS` + 1 ms,
 launch + 120,001 ms or heard-at + 661,001 ms, an owned live child's lease expiry,
 and the canonical attention snapshot's next visibility boundary. These strict-age
 offsets match the existing card overlay; working turns have no age-only expiry.
@@ -1077,10 +1077,10 @@ bands at the next successful refresh, normally at most about 30 seconds late
 reclassify cached messages, so a recent-band age can briefly exceed one day.
 Failed refreshes retain the last complete summary and log a warning.
 
-For a live-latency alert unmasked by stale backlog, use:
+For an unread-latency alert across all ages, including stale pending mail, use:
 
 ```promql
-max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_age_band="recent",st_mailbox_state=~"pending|delivered"}) > 1800
+max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_state=~"pending|delivered"}) > 1800
 ```
 
 For a weekly stale-backlog list, use

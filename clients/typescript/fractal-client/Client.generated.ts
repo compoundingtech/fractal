@@ -10,6 +10,7 @@ import type {
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    AttentionBudgetReport,
     MissionDeclaration,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
@@ -701,6 +702,7 @@ export class FractalClient {
     async machinesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/machines' + query(options), undefined, requestOptions); }
     async devicesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/devices' + query(options), undefined, requestOptions); }
     async attentionList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/attention' + query(options), undefined, requestOptions); }
+    async attentionBudget(mission: string, person?: string, at?: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AttentionBudgetReport>> { return this.get('/v1/client/attention-budget' + query({ mission, person, at }), undefined, requestOptions); }
     async attentionGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/attention/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async messagesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/messages' + query(options), undefined, requestOptions); }
     async messagesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/messages/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
@@ -713,6 +715,8 @@ export class FractalClient {
     async schedulesList(options: { cursor?: string; limit?: number; unheard_after_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SchedulesPage>> { return this.get('/v1/client/schedules' + query(options), undefined, requestOptions); }
     async missionsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/missions' + query(options), undefined, requestOptions); }
     async missionsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    /** The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission. */
+    async missionsGetRun(id: string, run: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}` + query({ run }), undefined, requestOptions); }
     async workList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/work' + query(options), undefined, requestOptions); }
     async workGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/work/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async resourcesList(filters: ResourcesFilter = {}, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ResourcesPage>> { return this.get('/v1/client/resources' + query({ ...filters, ...options }), undefined, requestOptions); }

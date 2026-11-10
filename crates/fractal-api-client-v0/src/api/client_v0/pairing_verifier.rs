@@ -1,4 +1,4 @@
-//! Daemon-local pairing verifiers shared by person pairing and future assistant callers.
+//! Daemon-local pairing verifiers shared by person and assistant pairing.
 //! This belongs beside both pairing handlers, not in bearer credential hashing: low-entropy
 //! codes need a secret that is deliberately absent from claims and logical backups.
 use std::fs::{self, File, OpenOptions};
@@ -11,9 +11,24 @@ use hmac::{Hmac, Mac as _};
 use sha2::{Digest as _, Sha256};
 
 pub const MARKER: &str = "hmac-sha256-v1";
-pub const PERSON_TTL_MS: u128 = 300_000;
+pub const CHALLENGE_TTL_MS: u128 = 300_000;
 
 const MAC_DOMAIN: &[u8] = b"fractal/pairing-code-verifier/v1";
+
+pub fn restart() -> super::ApiError {
+    super::ApiError {
+        status: super::StatusCode::FORBIDDEN,
+        code: "pairing-restart-required".into(),
+        message: "start pairing again".into(),
+        details: Box::default(),
+    }
+}
+
+/// Legacy verifiers are accepted only within the original bounded challenge window.
+pub fn legacy_window_open(expires: u128, accepted_at: u128, now: u128) -> bool {
+    expires > now && expires.checked_sub(accepted_at)
+        .is_some_and(|lifetime| lifetime <= CHALLENGE_TTL_MS)
+}
 
 /// Load or durably create the daemon's 32-byte secret. All creators serialize on a
 /// separate lock inode; the final key is published only after its contents are synced.
@@ -68,7 +83,7 @@ pub fn key_id(key: &[u8; 32]) -> String {
 }
 
 /// Compute HMAC-SHA256 for a low-entropy pairing code; not for bearer lookup indexes.
-/// Input: domain, full prefixed pairing ID UTF-8 bytes, then code UTF-8 bytes,
+/// Input: domain, full prefixed pairing or assistant grant ID UTF-8 bytes, then code UTF-8 bytes,
 /// each prefixed by its byte length as big-endian u32. No normalization is applied.
 pub fn digest(key: &[u8; 32], pairing_id: &str, code: &str) -> String {
     let mac = pairing_mac(key, pairing_id, code);
@@ -104,6 +119,15 @@ pub fn random_id() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_window_requires_an_unexpired_bounded_lifetime() {
+        assert!(legacy_window_open(300_001, 1, 2));
+        assert!(!legacy_window_open(300_002, 1, 2));
+        assert!(!legacy_window_open(300_001, 1, 300_001));
+        assert!(!legacy_window_open(300_001, 1, 300_002));
+        assert!(!legacy_window_open(1, 2, 0));
+    }
 
     #[test]
     fn keyed_codes_and_random_identity() {

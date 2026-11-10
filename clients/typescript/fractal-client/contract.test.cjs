@@ -287,6 +287,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     const readArguments = (id, options) => {
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
+            case 'attention-budget': return ['mission/example', undefined, undefined, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
             case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
@@ -1086,6 +1087,19 @@ test('mission declaration read encodes exact revisions and preserves served text
     assert.equal(calls.at(-1), 'https://example.test/v1/client/mission-declaration?mission=' + encodeURIComponent(value.mission) + '&revision=' + encodeURIComponent(value.revision));
     await client.missionDeclarationGet(value.mission);
     assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
+});
+
+test('mission detail run read names the requested run and leaves the plain detail unbounded by it', async () => {
+    const calls = [];
+    const mission = 'mission/example/readback';
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : { kind: 'mission', id: mission }));
+    } });
+    await client.missionsGetRun(mission, 'mission-run/old&one');
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/missions/' + encodeURIComponent(mission) + '?run=' + encodeURIComponent('mission-run/old&one'));
+    await client.missionsGet(mission);
+    assert.equal(new URL(calls.at(-1)).searchParams.has('run'), false);
 });
 
 test('terminal exact filters encode subjects and refuse an old server ignoring filters', async () => {

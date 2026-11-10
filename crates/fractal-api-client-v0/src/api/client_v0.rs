@@ -37,7 +37,12 @@ pub use fractal_api_core::api::client_v0::{ClientSession, CollectionSubscribe, E
 pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
+pub mod attention_budget;
 pub mod assistant;
+pub mod browser_pairing;
+#[cfg(test)]
+mod browser_pairing_tests;
+pub mod device_renewal;
 pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
@@ -70,6 +75,8 @@ mod collection_refresh_tests;
 mod conversation_follow_tests;
 #[cfg(test)]
 mod launch_detail_tests;
+#[cfg(test)]
+mod mission_history_tests;
 #[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
@@ -115,6 +122,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
@@ -198,6 +206,12 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
+        .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
+        .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
+        .route("/v1/client/pairings/renewals/stage", post(device_renewal::stage))
+        .route("/v1/client/pairings/renewals/pending", post(device_renewal::pending))
+        .route("/v1/client/pairings/renewals/complete", post(device_renewal::complete))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
@@ -3077,8 +3091,20 @@ pub fn mission_resources(
     history: bool,
     selected_id: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    mission_resources_for_run(store, snapshot_index, history, selected_id, None)
+}
+
+/// [`mission_resources`], with `requested_run`'s timing, history and enrichment lifted on a detail
+/// read beside the open runs and the latest finished run.
+pub fn mission_resources_for_run(
+    store: &Store,
+    snapshot_index: u64,
+    history: bool,
+    selected_id: Option<&str>,
+    requested_run: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
     store.read_snapshot(|_| {
-        mission_resources_filtered(store, snapshot_index, history, selected_id, None)
+        mission_resources_filtered(store, snapshot_index, history, selected_id, None, requested_run)
     })
 }
 
@@ -3121,7 +3147,9 @@ fn mission_resources_filtered(
     history: bool,
     selected_id: Option<&str>,
     page_ids: Option<&[String]>,
+    requested_run: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    let requested_run = requested_run.filter(|_| selected_id.is_some());
     let at_unix_ms = client_now_ms();
     let human_attention_runs = store.human_attention_runs()?;
     let mut missions = BTreeMap::<String, Vec<MissionRunView>>::new();
@@ -3264,16 +3292,25 @@ fn mission_resources_filtered(
             });
             let timing_runs = runs.iter().filter(|run|
                 !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
-                    || latest_finished.is_some_and(|latest| latest.subject == run.subject))
+                    || latest_finished.is_some_and(|latest| latest.subject == run.subject)
+                    || requested_run == Some(run.subject.as_str()))
                 .map(|run| run.subject.clone()).collect::<Vec<_>>();
             let timing = store.mission_step_timestamps_for_runs(&timing_runs, None)?;
+            // A detail also folds each enriched step's attempts, waits and transitions.
+            let histories = if selected_id.is_some() {
+                store.mission_step_histories_for_runs(&timing_runs, at_unix_ms)?
+            } else {
+                BTreeMap::new()
+            };
             let run_details = runs
                 .iter()
                 .map(|header| {
-                    // Enrich open runs and only the newest finished run, on the header snapshot.
+                    // Enrich open runs, the newest finished run and a requested run, on the
+                    // header snapshot.
                     let run = if selected_id.is_some()
                         && (!matches!(header.status.as_str(), "completed" | "failed" | "cancelled")
-                            || latest_finished.is_some_and(|run| run.subject == header.subject))
+                            || latest_finished.is_some_and(|run| run.subject == header.subject)
+                            || requested_run == Some(header.subject.as_str()))
                     {
                         store.mission_run(&header.id)?.ok_or_else(|| {
                             anyhow::anyhow!("mission run {} disappeared during detail read", header.id)
@@ -3366,6 +3403,12 @@ fn mission_resources_filtered(
                     let shows_steps = selected_id.is_some()
                         || !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                         || latest.is_some_and(|latest| latest.subject == run.subject);
+                    let open_run = !matches!(run.status.as_str(), "completed" | "failed" | "cancelled");
+                    let step_etas = if selected_id.is_some() && open_run {
+                        store.mission_run_step_etas(&run.subject)?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3387,7 +3430,7 @@ fn mission_resources_filtered(
                                         "failure": wake.failure,
                                     })
                                 });
-                                json!({
+                                let mut value = json!({
                                     "id": step.subject,
                                     "path": step.step,
                                     "title": step.title,
@@ -3415,7 +3458,19 @@ fn mission_resources_filtered(
                                     "wake": wake,
                                     "claim_expires_at": step.claim_expires_at_unix_ms.map(client_timestamp),
                                     "nudged_at": step.nudged_at_unix_ms.map(client_timestamp),
-                                })
+                                });
+                                if let Some(history) = histories.get(step.subject.as_str()) {
+                                    value["attempts"] = json!(history.attempts);
+                                    value["waits"] = json!(history.waits);
+                                    value["transitions"] = json!(history.transitions);
+                                    value["history_complete"] = json!(history.complete);
+                                }
+                                if let Some((low, high, samples)) = step_etas.get(&step.step)
+                                    .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
+                                {
+                                    value["eta"] = json!({"low_ms": low, "high_ms": high, "samples": samples});
+                                }
+                                value
                             })
                             .collect::<Vec<_>>()
                     });
@@ -4303,18 +4358,30 @@ fn missions_tree_value_within(
         "truncated": truncated }))
 }
 
+/// `GET /v1/client/missions/{id}?run=`: the run whose timing and step history the detail lifts
+/// beside its open runs and its latest finished run. Other query keys are ignored, as before.
+#[derive(Debug, Default, Deserialize)]
+pub struct MissionDetailQuery {
+    run: Option<String>,
+}
+
 pub async fn mission_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<MissionDetailQuery>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let store = state.store.clone();
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
+    let requested_run = query.run.filter(|run| !run.is_empty()).map(|run| {
+        if run.starts_with("mission-run/") { run } else { format!("mission-run/{run}") }
+    });
+    let requested = requested_run.clone();
     let mut items = super::blocking_store(move || {
-        let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
+        let mut items = mission_resources_for_run(&store, snapshot_index, true, Some(&selected), requested.as_deref())?;
         // The presentation the missions list publishes for this mission; a read computes none.
         if let Some(published) = store.published_missions_list().newest()
             && let Some(card) = published.rows.cards.get(&selected)
@@ -4328,6 +4395,13 @@ pub async fn mission_detail(
     })
     .await?;
     // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    if let Some(run) = &requested_run
+        && items.first().is_some_and(|item| {
+            !item["runs"].as_array().is_some_and(|runs| runs.iter().any(|known| known == run))
+        })
+    {
+        return Err(ApiError::not_found("the requested run does not belong to this mission"));
+    }
     fractal_api_core::api::message_reads::relay_client_wakes(&state, &mut items)
         .await
         .map_err(ApiError::internal)?;
@@ -5644,7 +5718,7 @@ fn begin_person_challenge(
     let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
     let pairing_id = format!("pairing/{stable}");
     let subject = format!("custom/client/pairing-{stable}");
-    let expires_at = client_now_ms() + pairing_verifier::PERSON_TTL_MS;
+    let expires_at = client_now_ms() + pairing_verifier::CHALLENGE_TTL_MS;
     let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let person_id = request.person_id;
     let fabric_gateway = request.fabric_gateway == Some(true);
@@ -5884,6 +5958,13 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.body["fields"]["browser_request"] == true
+        && (browser_pairing::approval(&state, &begun)? != "approved"
+            || request.device_public_key != format!("browser:{id}")
+            || request.fabric_node_id.is_some())
+    {
+        return Err(forbidden("browser pairing requires its owner's approved request"));
+    }
     if begun.origin != state.store.origin() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -5901,12 +5982,7 @@ pub async fn pairing_complete(
         .map_err(ApiError::internal)?
         .claims
         .is_empty();
-    let restart = || ApiError {
-        status: StatusCode::FORBIDDEN,
-        code: "pairing-restart-required".into(),
-        message: "start pairing again".into(),
-        details: Box::default(),
-    };
+    let restart = pairing_verifier::restart;
     let expires = begun
         .body
         .pointer("/fields/expires_at_unix_ms")
@@ -5916,6 +5992,12 @@ pub async fn pairing_complete(
     let now = client_now_ms();
     let expected = begun.body.pointer("/fields/code_hash").and_then(Value::as_str).unwrap_or_default();
     let valid_code = match begun.body.pointer("/fields/verifier") {
+        Some(Value::String(marker)) if marker == browser_pairing::VERIFIER => {
+            if begun.body["fields"]["browser_request"] != true {
+                return Err(restart());
+            }
+            browser_pairing::verify_request_key(&request.code, expected)
+        }
         Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
             let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
             if begun.body.pointer("/fields/verifier_key_id").and_then(Value::as_str)
@@ -5929,9 +6011,10 @@ pub async fn pairing_complete(
         }
         Some(_) => return Err(restart()),
         None => {
-            if expires <= now || expires.checked_sub(begun.accepted_at_unix_ms)
-                .is_none_or(|lifetime| lifetime > pairing_verifier::PERSON_TTL_MS)
-            {
+            if begun.body["fields"]["browser_request"] == true {
+                return Err(restart());
+            }
+            if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
                 return Err(restart());
             }
             expected == credential_digest(&request.code)
@@ -8256,7 +8339,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8290,6 +8373,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -9125,14 +9210,22 @@ async fn dispatch_action(
                 .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
                 .map_err(ApiError::internal)?;
             let mut paired = None;
+            let mut legacy = None;
+            let mut legacy_revoked = None;
             for claim in &claims.claims {
-                if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str())
-                    && state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
-                    paired = Some(claim);
-                    break;
+                if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str()) {
+                    if state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+                        paired = Some(claim);
+                        break;
+                    }
+                    if state.store.pairing_completion_is_revoked(claim).map_err(ApiError::internal)? {
+                        legacy_revoked.get_or_insert(claim);
+                    } else {
+                        legacy.get_or_insert(claim);
+                    }
                 }
             }
-            let paired = paired.ok_or_else(|| {
+            let paired = paired.or(legacy_revoked).or(legacy).ok_or_else(|| {
                 ApiError::not_found(format!("paired device `{device}` does not exist"))
             })?;
             if paired.origin != state.node {
@@ -9149,13 +9242,25 @@ async fn dispatch_action(
                     )])),
                 });
             }
+            if !state.store.pairing_completion_is_admitted(paired, client_now_ms()).map_err(ApiError::internal)? {
+                if session.transport != "unix" || !authority_actor.starts_with("person/")
+                    || paired.body.pointer("/fields/person_id").and_then(Value::as_str) != Some(authority_actor.as_str()) {
+                    return Err(forbidden("only the issuing Unix person can revoke this legacy pairing"));
+                }
+                if state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)? {
+                    return Err(validation("paired device is already revoked"));
+                }
+            }
             state
                 .store
                 .append_client_operation_claim(&ClaimInput {
                     subject: paired.subject.clone(),
                     kind: "custom.client.pairing-revoked".into(),
                     actor: Some(authority_actor.clone()),
-                    fields: BTreeMap::from([("device_id".into(), Value::String(device.clone()))]),
+                    fields: BTreeMap::from([
+                        ("device_id".into(), Value::String(device.clone())),
+                        ("completion_id".into(), Value::String(paired.id.clone())),
+                    ]),
                     evidence: vec![paired.id.clone()],
                     expected_subject: None,
                     idempotency_key: Some(request.idempotency_key.clone()),
@@ -13855,6 +13960,7 @@ mission "differential" state="ready" {
         AppState {
             seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
+            browser_pairing_login: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
@@ -16329,6 +16435,100 @@ subscription "watch/source" {
                 expected,
                 "only the first feature header negotiates: {first:?}, {second:?}",
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_pairing_revoke_is_deny_only() {
+        for native in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let input = ClaimInput {
+                subject: "custom/client/legacy-revoke".into(),
+                kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/alex".into()),
+                fields: serde_json::from_value(json!({
+                    "device_id":"device/legacy-revoke", "person_id":"person/alex",
+                    "credential_hash":credential_digest("legacy-revoke-secret"),
+                    "session_actor":"client/legacy-revoke", "scopes":["read.projections","control.pairing"],
+                    "expires_at_unix_ms":client_now_ms() as u64 + 60_000
+                })).unwrap(),
+                evidence:vec![], expected_subject:None, idempotency_key:None,
+            };
+            let completed = if native {
+                state.store.append_client_operation_claim(&input).unwrap()
+            } else {
+                state.store.append_claim(&input).unwrap()
+            };
+            if native {
+                // A newer retained record with the same device ID must not mask the admitted grant.
+                let mut retained = input.clone();
+                retained.subject = "custom/client/legacy-shadow".into();
+                retained.fields.insert("credential_hash".into(), json!("unrelated-retained-digest"));
+                state.store.append_claim(&retained).unwrap();
+            }
+            let bearer = Request::builder().uri("/v1/client/agents")
+                .header(AUTHORIZATION, "Bearer legacy-revoke-secret")
+                .body(Body::empty()).unwrap();
+            assert_eq!(authenticate(&state, &bearer, "fabric-loopback").is_ok(), native);
+            let snapshot = new_client_snapshot(&state);
+            let mut request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id:"action/legacy-revoke".into(),
+                action_type:"pairing.revoke".into(), idempotency_key:"legacy-revoke-test-key".into(),
+                fence: Fence { snapshot_id:snapshot.id.clone(), ..Default::default() },
+                parameters:json!({"target_id":"device/legacy-revoke"}),
+            };
+            for session in [
+                ClientSession::local(Some("person/other")).unwrap(),
+                ClientSession::local(Some("agent/bound")).unwrap(),
+                ClientSession::for_tests("client/remote", "person/alex", "fabric-loopback"),
+            ].into_iter().filter(|_| !native) {
+                assert_eq!(dispatch_action(&state, &snapshot, &session, &request).await.unwrap_err().status,
+                    StatusCode::FORBIDDEN);
+            }
+            let owner = if native {
+                let remote = authenticate(&state, &bearer, "fabric-loopback").unwrap();
+                validate_action_admission(&remote, &request).unwrap();
+                remote
+            } else {
+                ClientSession::local(Some("person/alex")).unwrap()
+            };
+            request.parameters = json!({"target_id":"device/unknown"});
+            assert_eq!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err().status,
+                StatusCode::NOT_FOUND);
+            request.parameters = json!({"target_id":"device/legacy-revoke"});
+            assert_eq!(device_resources(&state, &snapshot, "person/alex").unwrap().len(), usize::from(native));
+            dispatch_action(&state, &snapshot, &owner, &request).await.unwrap();
+            let revoked = state.store.claims_for_subject_kind_at(&completed.subject,
+                "custom.client.pairing-revoked", None, true, 1).unwrap().claims.remove(0);
+            assert!(state.store.client_operation_is_trusted(&revoked).unwrap());
+            assert!(state.store.pairing_revocation_is_trusted(&revoked, &completed).unwrap());
+            assert_eq!(state.store.client_operation_is_trusted(&completed).unwrap(), native);
+            assert!(authenticate(&state, &bearer, "fabric-loopback").is_err());
+            if native {
+                dispatch_action(&state, &snapshot, &owner, &request).await.unwrap();
+            } else {
+                assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                    .message.contains("already revoked"));
+            }
+            assert!(state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
+                completion_id:completed.id.clone(),
+                record_hash:fractal_store::pairing::record_hash(&completed.origin,
+                    completed.actor.as_deref(), &completed.body["fields"]).unwrap(),
+                until_unix_ms:fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS as u64,
+            }]).is_err());
+            if !native {
+                let mut shadow = input.clone();
+                shadow.subject = "custom/client/unrevoked-legacy-shadow".into();
+                state.store.append_claim(&shadow).unwrap();
+            }
+            if !native {
+                assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                    .message.contains("already revoked"));
+            }
+            let devices = device_resources(&state, &new_client_snapshot(&state), "person/alex").unwrap();
+            assert_eq!(devices.len(), 1);
+            assert_eq!(devices[0]["state"], "revoked");
         }
     }
 
@@ -24523,14 +24723,14 @@ mission "example/zero-run" state="ready" {
 
     #[test]
     fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
-        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
-        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
-        // freshness window nearly all the time, never older than a heartbeat.
+        // An idle report remains current through the shared freshness window; after that it
+        // still proves liveness until the separate heartbeat grace period expires.
         let started = 1_790_000_000_000_u64;
         for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
             let mut card = sessionless_card(json!("indeterminate"));
             overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
-            assert_eq!(card["state"], "waiting", "{age}");
+            let current = u128::from(age) <= fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+            assert_eq!(card["state"], if current { "running" } else { "waiting" }, "{age}");
             assert!(card.get("down_since").is_none(), "{age}");
             assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
         }
@@ -24728,6 +24928,7 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "status-cache");
         let subject = "agent/cedar";
+        let stale_age = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis() + 1_000;
         let append = |kind: &str, fields: Value| {
             state.store.append_claim(&ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
@@ -24736,7 +24937,7 @@ mission "example/zero-run" state="ready" {
             }).unwrap()
         };
         append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
-        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - 91_000) as u64}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - stale_age) as u64}));
         let index = state.store.index().unwrap();
         let before = client_agent_resources(&state.store, false, "", index).unwrap();
         let before = before.iter().find(|item| item["id"] == subject).unwrap();
@@ -24751,7 +24952,7 @@ mission "example/zero-run" state="ready" {
         peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
-        cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
+        cached_harness.observed_at_unix_ms = client_now_ms() - stale_age;
         aged[0]["_status_source"] = json!(cached_harness);
         let mut on_host = aged.clone();
         overlay_agent_resources(&peer.store, &mut aged, "").unwrap();
