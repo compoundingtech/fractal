@@ -7557,8 +7557,7 @@ impl std::fmt::Debug for RunCredential {
 #[derive(Clone, Debug)]
 pub struct BoundRun(pub crate::store::run_credentials::RunBinding);
 
-/// The environment variable a program attempt's effects carry their run credential in.
-pub const RUN_CREDENTIAL_ENV: &str = "ST_RUN_CREDENTIAL";
+pub use crate::store::run_credentials::RUN_CREDENTIAL_ENV;
 
 impl HarnessAncestry {
     fn agent(&self) -> Option<&str> {
