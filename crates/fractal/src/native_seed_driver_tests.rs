@@ -134,6 +134,7 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
                 Some("person/operator"),
             ).unwrap();
             let state = AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: Some("person/operator".into()),
                 store,
