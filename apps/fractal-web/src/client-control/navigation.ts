@@ -1,7 +1,7 @@
 /** App destinations, not device.command wire types. The transport must decode its generated screen first. */
 export type ClientControlRouteTarget =
-  | { readonly _tag: 'Inbox' }
-  | { readonly _tag: 'Conversation'; readonly agent: `agent/${string}` }
+  | { readonly _tag: 'NowRoot' }
+  | { readonly _tag: 'Attention'; readonly askId: string }
 
 export interface ClientControlNavigation {
   /** Resolve through the app's subject model; no test-only renderer or fixtureSource. */
