@@ -32,6 +32,7 @@ fn options(store: &Store, sequence: u64) -> Options {
         adopt: Default::default(),
         allow_empty: false,
         confirm_retire: None,
+        enforce: None,
         expected_subjects: Default::default(),
     }
 }

@@ -431,6 +431,7 @@ async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
             adopt: Default::default(),
             allow_empty: false,
             confirm_retire: None,
+            enforce: None,
             expected_subjects: Default::default(),
         };
         let mut args = vec![

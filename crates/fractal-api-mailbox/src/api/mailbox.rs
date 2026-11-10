@@ -3913,7 +3913,7 @@ mod tests {
             set: name.into(), source: Source { repository: "fixture/report".into(),
                 r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
             expected_set: "absent".into(), rollout: Some(policy.clone()),
-            adopt: Default::default(), allow_empty: false, confirm_retire: None,
+            adopt: Default::default(), allow_empty: false, confirm_retire: None, enforce: None,
             expected_subjects: Default::default(),
         };
         let preview = state.store.owned_set_preview(&input, &options).unwrap();
@@ -4881,7 +4881,7 @@ mod tests {
             set: name.into(), source: Source { repository: "fixture/stream".into(),
                 r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
             expected_set: "absent".into(), rollout: Some(policy.clone()),
-            adopt: Default::default(), allow_empty: false, confirm_retire: None,
+            adopt: Default::default(), allow_empty: false, confirm_retire: None, enforce: None,
             expected_subjects: Default::default(),
         };
         let preview = store.owned_set_preview(&input, &options).unwrap();

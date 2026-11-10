@@ -230,6 +230,7 @@ impl Seat {
             adopt: Default::default(),
             allow_empty: retire,
             confirm_retire: None,
+            enforce: None,
             expected_subjects: Default::default(),
         };
         let preview = self.store.owned_set_preview(&input, &options).unwrap();
@@ -535,6 +536,7 @@ fn rollout_provider_switch_is_rejected_before_draining_the_incumbent() {
         adopt: Default::default(),
         allow_empty: false,
         confirm_retire: None,
+        enforce: None,
         expected_subjects: Default::default(),
     };
     let preview = seat.store.owned_set_preview(&input, &options).unwrap();

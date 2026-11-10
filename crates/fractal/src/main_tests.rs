@@ -7871,6 +7871,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
         reason: "adopted hold".into(),
         idempotency_key: "adopt-test".into(),
         legacy_adoption: true,
+        force: false,
     };
     let deadline = request.until_unix_ms;
     let mut paths = NativePaths {
@@ -8596,6 +8597,9 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             adopt: vec![],
             allow_empty: false,
             confirm_retire: None,
+            enforce: None,
+            force: false,
+            reason: None,
             dry_run: false,
             at_index: None,
             actor: "person/test".into(),

@@ -1628,6 +1628,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "source.debt.recorded",
+            &["agent", "schedule"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
             "mission.published",
             &["mission"],
             WritePolicy::AuthorizedRequester,
@@ -3177,6 +3186,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "owned-set.revised" => &[
             ("revision", required_string()),
             ("body", required_object()),
+        ],
+        "source.debt.recorded" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("repository", required_string()),
+            ("ref", required_string()),
+            ("sha", required_string()),
+            ("verb", required_string()),
+            ("reason", required_string()),
+            ("claim", string()),
+            ("revision", string()),
+            ("pointers", array()),
+            ("before", any()),
+            ("after", any()),
         ],
         "mission.published" => &[
             ("revision", string()),

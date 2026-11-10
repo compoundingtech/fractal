@@ -62,10 +62,39 @@ pub async fn apply(
             &request.actor,
         )
         .map_err(ApiError::bad)?;
+    // An ad hoc hold is runtime state outside the declaration: converge it by releasing it.
+    for debt in response.source_debts_reverted.iter().filter(|debt| debt.verb == "hold") {
+        let release = crate::delivery_hold::input(
+            crate::delivery_hold::HoldRequest {
+                subject: debt.subject.clone(),
+                actor: request.actor.clone(),
+                held: false,
+                until_unix_ms: 0,
+                reason: format!(
+                    "source {} reverted the ad hoc hold: {}",
+                    request.options.source.sha, debt.reason
+                ),
+                idempotency_key: format!("source-debt-release:{}", debt.id),
+                legacy_adoption: false,
+                force: false,
+            },
+            client_now_ms() as u64,
+        )
+        .map_err(ApiError::bad)?;
+        state.store.append_claim_outcome(&release).map_err(ApiError::bad)?;
+    }
     signal_changed(&state);
     Ok(Json(
         json!({"publication":response,"set":state.store.owned_sets().map_err(ApiError::bad)?.into_iter().find(|v|v.id==sets::subject(&request.options.set).unwrap())}),
     ))
+}
+
+/// `fractal source status`: each set's enforcement, and open and closed source debt.
+pub async fn source_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.source_status().map_err(anyhow::Error::new))
+        .await
+        .map(Json)
 }
 
 pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {

@@ -317,6 +317,11 @@ enum Command {
         #[command(subcommand)]
         command: OwnedSetsCommand,
     },
+    /// Inspect source enforcement: each owned set's policy and open ad hoc source debt.
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
     /// Start the HTTP API, readers, peers, and reconciler.
     Up(UpArgs),
     /// Understand what needs action now.
@@ -1414,6 +1419,9 @@ struct MissionPublishArgs {
     /// Mission input values for exec gate checks.
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
+    /// Set by `fractal apply --force --reason`; `missions publish` never forces.
+    #[arg(skip)]
+    force_reason: Option<String>,
 }
 
 #[derive(Args)]
@@ -3131,6 +3139,9 @@ struct AgentHoldArgs {
     release: bool,
     #[arg(long)]
     reason: Option<String>,
+    /// Hold a member of a `lifecycle` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "duration")]
+    force: bool,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
@@ -3373,6 +3384,17 @@ struct ApplyArgs {
     allow_empty: bool,
     #[arg(long, requires = "set")]
     confirm_retire: Option<String>,
+    /// Declare the set's source enforcement: `definitions` (members change only through this
+    /// set) or `lifecycle` (also delivery holds on members). Omitted keeps the selected policy.
+    #[arg(long, value_parser = ["definitions", "lifecycle"], requires = "set")]
+    enforce: Option<String>,
+    /// Accept an ad hoc change to an owned-set member and record it as source debt; the next
+    /// set publication reverts it. Needs --reason.
+    #[arg(long, requires = "reason", conflicts_with = "set")]
+    force: bool,
+    /// Why this ad hoc change is forced; recorded with its actor in `fractal source status`.
+    #[arg(long, requires = "force", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: Option<String>,
     /// Complete person or agent subject authoring the publication.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
@@ -3393,6 +3415,12 @@ enum OwnedSetsCommand {
         #[arg(long)]
         sha: String,
     },
+}
+
+#[derive(Subcommand)]
+enum SourceCommand {
+    /// List each owned set's enforcement policy and source, open source debt, and closed debt.
+    Status,
 }
 
 /// Bundle each versioned file into one intent so references may cross file boundaries.
@@ -3452,6 +3480,7 @@ async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Resul
             no_gate_check: args.no_gate_check,
             check: args.check,
             inputs: args.inputs,
+            force_reason: args.force.then_some(args.reason).flatten(),
         },
         json_output,
     )
@@ -3487,6 +3516,7 @@ async fn run_owned_set_apply(
         adopt: args.adopt.into_iter().collect(),
         allow_empty: args.allow_empty,
         confirm_retire: args.confirm_retire,
+        enforce: args.enforce,
         expected_subjects: Default::default(),
     };
     let mut request = Request {
@@ -3678,6 +3708,9 @@ struct AgentStopArgs {
     /// when.
     #[arg(long)]
     reason: Option<String>,
+    /// Stop an owned-set member ad hoc and record source debt; the reason is the debt's.
+    #[arg(long, requires = "reason", conflicts_with = "print_kdl")]
+    force: bool,
     /// Print the exact stop KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
@@ -5989,6 +6022,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
+        Command::Source { command: SourceCommand::Status } => {
+            let status: Value = client.get("/v1/source/status").await?;
+            print_value(&status, cli.json)
+        }
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
         Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
@@ -8050,6 +8087,7 @@ async fn publish_mission_intent(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(args.actor),
+                force_reason: args.force_reason,
             },
         )
         .await?;
@@ -8644,7 +8682,7 @@ async fn publish_text(
     source_name: String,
     actor: String,
 ) -> Result<ApplyResponse> {
-    publish_text_with_expected(client, kdl, source_name, actor, None).await
+    publish_text_with_expected(client, kdl, source_name, actor, None, None).await
 }
 
 async fn publish_text_with_expected(
@@ -8653,6 +8691,7 @@ async fn publish_text_with_expected(
     source_name: String,
     actor: String,
     expected: Option<(&str, &[String])>,
+    force_reason: Option<String>,
 ) -> Result<ApplyResponse> {
     let intent = IntentInput {
         kdl,
@@ -8688,6 +8727,7 @@ async fn publish_text_with_expected(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(actor.clone()),
+                force_reason,
             },
         )
         .await

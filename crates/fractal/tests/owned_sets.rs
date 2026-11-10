@@ -143,6 +143,7 @@ async fn request(daemon: &Daemon, sequence: u64, kdl: String) -> Request {
             adopt: Default::default(),
             allow_empty: false,
             confirm_retire: None,
+            enforce: None,
             expected_subjects: Default::default(),
         },
         actor: "person/operator".into(),
@@ -1661,4 +1662,115 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
         ).unwrap_err().code,
         "authored-session-mismatch",
     );
+}
+
+/// Source enforcement: an ad hoc change to a set member is refused with the set's source and
+/// the escape; `--force --reason` takes effect and records debt; the next publication reverts
+/// it, reports it and closes the debt. A `lifecycle` set gates delivery holds the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_ad_hoc_changes_record_source_debt_until_the_next_publication_reverts_them() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let amber = daemon(root.path(), "amber", key.clone(), &key).await;
+    let subject = "agent/garden/orchard";
+    let publish = |sequence: u64, kdl: String, enforce: Option<&'static str>| {
+        let amber = &amber;
+        async move {
+            let mut publication = request(amber, sequence, kdl).await;
+            publication.options.enforce = enforce.map(str::to_owned);
+            let preview = preview(amber, &mut publication).await;
+            let result: Value = amber.client.post("/v1/sets/apply", &publication).await.unwrap();
+            assert_eq!(result["publication"]["changed"], true);
+            (preview, result)
+        }
+    };
+    publish(10, bundle("source", false), None).await;
+    let source_member = amber.store.owned_sets().unwrap()[0].receipt.members[subject].clone();
+
+    let adhoc = bundle("ad hoc", false);
+    let planned: Value = amber
+        .client
+        .post("/v1/intent/mission", &json!({"intent": {"kdl": adhoc}, "at_index": null}))
+        .await
+        .unwrap();
+    let apply = |force: Option<&str>| {
+        json!({"intent": {"kdl": adhoc}, "expected_subjects": planned["subject_tokens"],
+            "idempotency_key": format!("ad-hoc-{}", force.is_some()), "actor": "person/operator",
+            "force_reason": force})
+    };
+    let refused = amber
+        .client
+        .post::<_, Value>("/v1/intent/apply", &apply(None))
+        .await
+        .unwrap_err()
+        .to_string();
+    for expected in ["set-managed-subject", "owned-set/garden", "acme/garden", &format!("{:040x}", 10), "--force --reason"] {
+        assert!(refused.contains(expected), "{expected} missing from: {refused}");
+    }
+    assert_eq!(amber.store.selected_desired_token(subject).unwrap().unwrap(), source_member.claim);
+
+    let forced: Value = amber
+        .client
+        .post("/v1/intent/apply", &apply(Some("hotfix while CI is down")))
+        .await
+        .unwrap();
+    let recorded = &forced["source_debts_recorded"][0];
+    assert_eq!(recorded["subject"], subject);
+    assert_eq!(recorded["actor"], "person/operator");
+    assert_eq!(recorded["reason"], "hotfix while CI is down");
+    assert_eq!(recorded["sha"], format!("{:040x}", 10));
+    assert!(!recorded["fields"].as_array().unwrap().is_empty(), "{recorded}");
+    // The forced declaration takes effect until the set publishes again.
+    let forced_token = amber.store.selected_desired_token(subject).unwrap().unwrap();
+    assert_ne!(forced_token, source_member.claim);
+    assert_eq!(recorded["claim"], forced_token);
+    let status: Value = amber.client.get("/v1/source/status").await.unwrap();
+    assert_eq!(status["sets"][0]["enforce"], "definitions");
+    assert_eq!(status["open"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(status["open"][0]["id"], recorded["id"]);
+
+    // A new source sequence with the same declarations converges and reports the reversion.
+    let (preview, published) = publish(11, bundle("source", false), None).await;
+    assert_eq!(preview.reverted_debts.len(), 1);
+    assert!(preview.effects[subject].starts_with("revert ad hoc change by person/operator"));
+    let reverted = &published["publication"]["source_debts_reverted"][0];
+    assert_eq!(reverted["subject"], subject);
+    assert_eq!(reverted["actor"], "person/operator");
+    assert_eq!(reverted["reason"], "hotfix while CI is down");
+    assert_eq!(reverted["outcome"], "reverted");
+    assert_eq!(reverted["fields"], recorded["fields"]);
+    let converged = amber.store.owned_sets().unwrap()[0].receipt.members[subject].clone();
+    assert_eq!(converged.revision, source_member.revision);
+    assert_eq!(amber.store.selected_desired_token(subject).unwrap().unwrap(), converged.claim);
+    let status: Value = amber.client.get("/v1/source/status").await.unwrap();
+    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    assert_eq!(status["closed"][0]["id"], recorded["id"]);
+
+    // S2: a `lifecycle` set refuses an ad hoc delivery hold unless forced, and releases it.
+    let mut lifecycle = bundle("source", false);
+    lifecycle.push_str("agent \"garden/rose\" {\n workspace \".\"\n harness \"codex\" {}\n}\n");
+    publish(12, lifecycle.clone(), Some("lifecycle")).await;
+    let until = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap() + 900_000;
+    let hold = |force: bool| {
+        json!({"subject": "agent/garden/rose", "actor": "person/operator", "held": true,
+            "until_unix_ms": until, "reason": "quiet during the demo",
+            "idempotency_key": format!("hold-{force}"), "force": force})
+    };
+    let refused = amber
+        .client
+        .post::<_, Value>("/v1/delivery/hold", &hold(false))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("set-managed-subject") && refused.contains("enforce lifecycle"), "{refused}");
+    amber.client.post::<_, Value>("/v1/delivery/hold", &hold(true)).await.unwrap();
+    let held: Value = amber.client.get("/v1/delivery/hold?subject=agent%2Fgarden%2Frose").await.unwrap();
+    assert_eq!(held["active"], true);
+    let status: Value = amber.client.get("/v1/source/status").await.unwrap();
+    assert_eq!(status["open"][0]["verb"], "hold", "{status}");
+    let (_, published) = publish(13, lifecycle, None).await;
+    assert_eq!(published["publication"]["source_debts_reverted"][0]["outcome"], "closed");
+    assert_eq!(published["set"]["receipt"]["enforce"], "lifecycle");
+    let held: Value = amber.client.get("/v1/delivery/hold?subject=agent%2Fgarden%2Frose").await.unwrap();
+    assert_eq!(held["active"], false, "{held}");
 }

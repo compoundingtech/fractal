@@ -75,6 +75,10 @@ pub struct Revision {
     pub members: BTreeMap<String, Member>,
     pub retired: BTreeMap<String, Member>,
     pub adoptions: BTreeMap<String, Vec<String>>,
+    /// Source enforcement declared by the publisher: `definitions` (absent: members change
+    /// only through this set, `--force --reason` records debt) or `lifecycle` (also holds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -93,6 +97,9 @@ pub struct Options {
     pub confirm_retire: Option<String>,
     #[serde(default)]
     pub expected_subjects: BTreeMap<String, Vec<String>>,
+    /// `definitions` or `lifecycle`; omitted keeps the selected revision's policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -122,6 +129,11 @@ pub struct Preview {
     pub empty: bool,
     pub blockers: Vec<String>,
     pub noop: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce: Option<String>,
+    /// Open source debt against the previous revision that this publication closes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_debts: Vec<crate::model::SourceDebt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -307,6 +319,7 @@ pub fn effective_members(
         };
         members.insert(subject, (member, true, true));
     }
+    let overrides = debt_overrides(connection, view, at)?;
     for (s, m) in &view.receipt.members {
         let retirement = if m.one_shot {
             one_shot_retirement(connection, &view.id, s, m, at)?
@@ -321,6 +334,18 @@ pub fn effective_members(
                     ..m.clone()
                 },
                 true,
+                false,
+            )
+        } else if let Some((claim, revision)) = overrides.get(s) {
+            // A forced ad hoc declaration holds until the set publishes its next revision.
+            // A forced stop is not a set retirement: ownership and the source stay unchanged.
+            (
+                Member {
+                    claim: claim.clone(),
+                    revision: revision.clone(),
+                    ..m.clone()
+                },
+                false,
                 false,
             )
         } else {
@@ -550,6 +575,246 @@ pub fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), Fra
     Ok(())
 }
 
+/// The graph record of one accepted ad hoc change to an owned-set member.
+pub const DEBT_KIND: &str = "source.debt.recorded";
+
+/// The set's declared enforcement; every owned set enforces at least its definitions.
+pub fn enforcement(view: &View) -> &str {
+    view.receipt.enforce.as_deref().unwrap_or("definitions")
+}
+
+fn live_owner(connection: &Connection, member: &str) -> Result<Option<View>, FractalError> {
+    let Some(set) = owner(connection, member, None)? else {
+        return Ok(None);
+    };
+    Ok(selected(connection, None)?.into_iter().find(|v| v.id == set))
+}
+
+fn ad_hoc_refusal(view: &View, member: &str, verb: &str) -> FractalError {
+    let source = &view.receipt.source;
+    FractalError::new(
+        "set-managed-subject",
+        format!(
+            "{member} is managed by {} from {} {} at {} (source sequence {}, enforce {}); \
+             publish its declaration through that set, or accept this ad hoc {verb} as source \
+             debt with --force --reason TEXT",
+            view.id,
+            source.repository,
+            source.r#ref,
+            source.sha,
+            source.sequence,
+            enforcement(view),
+        ),
+    )
+    .with_detail("subject", member)
+    .with_detail("set", view.id.clone())
+    .with_detail("set_revision", reference(view))
+    .with_detail("source", json!(source))
+    .with_detail("enforce", enforcement(view))
+    .with_detail("escape", "--force --reason TEXT")
+}
+
+/// Refuse an ad hoc declaration of a set member, naming the set, its source and the escape.
+pub fn refuse_ad_hoc(connection: &Connection, member: &str, verb: &str) -> Result<(), FractalError> {
+    match live_owner(connection, member)? {
+        Some(view) => Err(ad_hoc_refusal(&view, member, verb)),
+        None => refuse_unmanaged(connection, member),
+    }
+}
+
+/// The set a forced ad hoc declaration of `member` diverges from. Only live agent and schedule
+/// members of a selected, unblocked set can carry debt; everything else keeps its refusal.
+pub fn forceable_member(connection: &Connection, member: &str) -> Result<Option<View>, FractalError> {
+    if owner(connection, member, None)?.is_none() {
+        return Ok(None);
+    }
+    let refused = |message: String| Err(FractalError::new("source-force-refused", message));
+    let Some(view) = live_owner(connection, member)? else {
+        return refused(format!("{member}: its owning set is not selected"));
+    };
+    if !view.blockers.is_empty() {
+        return refused(format!("{member}: {} is blocked: {}", view.id, view.blockers.join("; ")));
+    }
+    match view.receipt.members.get(member) {
+        Some(m) if m.kind != "mission" => Ok(Some(view)),
+        Some(_) => refused(format!("{member}: forced mission definitions are not supported")),
+        None => refused(format!("{member} was retired by {}; publish it through the set", view.id)),
+    }
+}
+
+/// Record one ad hoc change as source debt against the selected set revision.
+#[allow(clippy::too_many_arguments)]
+pub fn record_debt_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    view: &View,
+    subject: &str,
+    verb: &str,
+    forced: Option<(&str, &str)>,
+    diff: Option<&declarations::DeclarationDiff>,
+    actor: Option<&str>,
+    reason: &str,
+    batch: Option<&str>,
+) -> Result<crate::model::SourceDebt, FractalError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(FractalError::new("source-force-refused", "--force needs a nonempty --reason"));
+    }
+    let source = &view.receipt.source;
+    let mut fields = json!({
+        "set": view.id, "set_revision": reference(view), "repository": source.repository,
+        "ref": source.r#ref, "sha": source.sha, "verb": verb, "reason": reason,
+        "pointers": diff.map(|d| d.fields.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+    });
+    if let Some((claim, revision)) = forced {
+        fields["claim"] = json!(claim);
+        fields["revision"] = json!(revision);
+    }
+    if let Some(diff) = diff {
+        fields["before"] = diff.before.clone().unwrap_or(Value::Null);
+        fields["after"] = diff.after.clone();
+    }
+    let record = append_claim_tx(
+        transaction,
+        origin,
+        subject,
+        DEBT_KIND,
+        actor,
+        &json!({ "fields": fields }),
+        &[],
+        batch,
+    )
+    .map_err(internal)?;
+    debt_view(&record).ok_or_else(|| FractalError::new("internal", "unreadable source debt"))
+}
+
+fn debt_view(record: &ClaimRecord) -> Option<crate::model::SourceDebt> {
+    let f = &record.body["fields"];
+    let text = |name: &str| f[name].as_str().map(str::to_owned);
+    Some(crate::model::SourceDebt {
+        id: record.id.clone(),
+        subject: record.subject.clone(),
+        verb: text("verb")?,
+        set: text("set")?,
+        set_revision: text("set_revision")?,
+        repository: text("repository")?,
+        r#ref: text("ref")?,
+        sha: text("sha")?,
+        claim: text("claim"),
+        actor: record.actor.clone(),
+        reason: text("reason")?,
+        fields: f["pointers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str().map(str::to_owned))
+            .collect(),
+        recorded_at: chrono::DateTime::from_timestamp_millis(record.accepted_at_unix_ms as i64)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        outcome: None,
+    })
+}
+
+fn debt_records(
+    connection: &Connection,
+    set_revision: Option<&str>,
+    at: Option<u64>,
+) -> Result<Vec<ClaimRecord>, FractalError> {
+    let mut statement = connection
+        .prepare(&canonical_sql(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims WHERE kind='source.debt.recorded' AND store_index<=?1
+             AND (?2 IS NULL OR json_extract(body,'$.fields.set_revision')=?2)
+             AND NOT EXISTS (SELECT 1 FROM replica_records WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired')
+             ORDER BY CANONICAL_DESC(claims)",
+        ))
+        .map_err(internal)?;
+    statement
+        .query_map(
+            params![at.unwrap_or(u64::MAX).min(i64::MAX as u64), set_revision],
+            claim_from_row,
+        )
+        .map_err(internal)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(internal)
+}
+
+/// The newest forced declaration per member against exactly this selected revision. One
+/// statement per set; a new set revision makes every older override inert.
+fn debt_overrides(
+    connection: &Connection,
+    view: &View,
+    at: Option<u64>,
+) -> Result<BTreeMap<String, (String, String)>, FractalError> {
+    let mut overrides = BTreeMap::new();
+    for record in debt_records(connection, Some(&reference(view)), at)? {
+        let f = &record.body["fields"];
+        let (Some(claim_id), Some(revision)) = (f["claim"].as_str(), f["revision"].as_str()) else {
+            continue;
+        };
+        if overrides.contains_key(&record.subject) || !view.receipt.members.contains_key(&record.subject) {
+            continue;
+        }
+        let valid = claim(connection, claim_id, at)?.is_some_and(|c| {
+            c.kind == "intent.desired"
+                && c.subject == record.subject
+                && serde_json::from_value::<DesiredSubject>(c.body).is_ok_and(|d| {
+                    desired_revision(&d) == revision && d.owner_run.is_none() && d.owner_step.is_none()
+                })
+        });
+        if valid {
+            overrides.insert(record.subject.clone(), (claim_id.to_owned(), revision.to_owned()));
+        }
+    }
+    Ok(overrides)
+}
+
+/// Open debt (against each set's selected revision) and closed debt, newest first.
+pub fn debts(
+    connection: &Connection,
+) -> Result<(Vec<crate::model::SourceDebt>, Vec<crate::model::SourceDebt>), FractalError> {
+    let current: BTreeSet<String> = selected(connection, None)?.iter().map(reference).collect();
+    let (open, closed) = debt_records(connection, None, None)?
+        .iter()
+        .filter_map(debt_view)
+        .partition(|debt| current.contains(&debt.set_revision));
+    Ok((open, closed))
+}
+
+/// Enforcement status of every selected set, with its open and closed source debt.
+pub fn source_status(connection: &Connection) -> Result<Value, FractalError> {
+    let sets = selected(connection, None)?
+        .iter()
+        .map(|view| {
+            json!({"set": view.id, "revision": view.revision, "enforce": enforcement(view),
+                "source": view.receipt.source, "members": view.receipt.members.len(),
+                "blockers": view.blockers})
+        })
+        .collect::<Vec<_>>();
+    let (open, closed) = debts(connection)?;
+    Ok(json!({"sets": sets, "open": open, "closed": closed}))
+}
+
+/// A lifecycle verb on a member of a `lifecycle` set needs `--force --reason`; the caller
+/// records the returned set's debt once the verb succeeds.
+pub fn lifecycle_gate(
+    connection: &Connection,
+    member: &str,
+    verb: &str,
+    force_reason: Option<&str>,
+) -> Result<Option<View>, FractalError> {
+    let Some(view) = live_owner(connection, member)? else {
+        return Ok(None);
+    };
+    if enforcement(&view) != "lifecycle" || !view.receipt.members.contains_key(member) {
+        return Ok(None);
+    }
+    match force_reason.map(str::trim) {
+        Some(reason) if !reason.is_empty() => Ok(Some(view)),
+        _ => Err(ad_hoc_refusal(&view, member, verb)),
+    }
+}
+
 /// A member's conflicts come from its owning set, rather than independent declaration leaves.
 pub fn conflicts_at(
     connection: &Connection,
@@ -668,10 +933,22 @@ pub fn plan_tx(
         })
     };
     let bundle_digest = canonical_hash(&(&input.subjects, &input.missions)).map_err(internal)?;
+    let enforce = match options.enforce.as_deref() {
+        None => old.as_ref().and_then(|v| v.receipt.enforce.clone()),
+        Some("definitions") => None,
+        Some("lifecycle") => Some("lifecycle".to_owned()),
+        Some(other) => {
+            return Err(FractalError::new(
+                "invalid-source-enforcement",
+                format!("enforce must be definitions or lifecycle, not {other}"),
+            ));
+        }
+    };
     let noop = old.as_ref().is_some_and(|v| {
         v.receipt.source == options.source
             && v.receipt.bundle_digest == bundle_digest
             && v.receipt.rollout == options.rollout
+            && v.receipt.enforce == enforce
     });
     let mut blockers = Vec::new();
     let mut manual_seats = input.subjects.values().any(crate::rollout::manual);
@@ -983,6 +1260,29 @@ pub fn plan_tx(
             .map(|(subject, _)| subject.as_str()),
         Some(current_index(transaction).map_err(internal)?),
     )?;
+    // Publication converges every member to this bundle, so it closes all debt against the
+    // previous revision and reports what each forced change becomes.
+    let mut reverted_debts = Vec::new();
+    if let (false, Some(old)) = (noop, &old) {
+        for record in debt_records(transaction, Some(&reference(old)), None)? {
+            let Some(mut debt) = debt_view(&record) else { continue };
+            let forced = record.body["fields"]["revision"].as_str();
+            let adopted = forced.is_some() && live.get(&debt.subject).map(String::as_str) == forced;
+            debt.outcome = Some(match (forced.is_some(), adopted) {
+                (true, true) => "adopted",
+                (true, false) => "reverted",
+                (false, _) => "closed",
+            }.into());
+            if debt.outcome.as_deref() == Some("reverted") {
+                effects.entry(debt.subject.clone()).or_insert_with(|| format!(
+                    "revert ad hoc change by {}: {}",
+                    debt.actor.as_deref().unwrap_or("unknown"),
+                    debt.reason
+                ));
+            }
+            reverted_debts.push(debt);
+        }
+    }
     let rollouts = input.subjects.values().filter(|desired| crate::rollout::manual(desired))
         .filter_map(|desired| {
             let refusal = desired.member.as_ref()
@@ -1005,6 +1305,8 @@ pub fn plan_tx(
         empty: live.is_empty(),
         blockers,
         noop,
+        enforce,
+        reverted_debts,
     };
     Ok(Plan {
         intent,
@@ -1120,6 +1422,7 @@ pub fn commit_tx(
         members,
         retired,
         adoptions: plan.adoptions.clone(),
+        enforce: plan.preview.enforce.clone(),
     };
     let hash = canonical_hash(&revision).map_err(internal)?;
     let predecessors = rows(transaction, None)?
@@ -1322,5 +1625,36 @@ impl Store {
                 Ok(())
             }))
         }).map_err(internal)?
+    }
+
+    /// `fractal source status`: every set's enforcement, open and closed source debt.
+    pub fn source_status(&self) -> Result<Value, FractalError> {
+        source_status(&self.readers.get())
+    }
+
+    /// Refuse a lifecycle `verb` on a member of a `lifecycle` set unless forced; a forced
+    /// verb returns the set to record debt against after the verb succeeds.
+    pub fn source_lifecycle_gate(
+        &self,
+        member: &str,
+        verb: &str,
+        force_reason: Option<&str>,
+    ) -> Result<Option<View>, FractalError> {
+        lifecycle_gate(&self.readers.get(), member, verb, force_reason)
+    }
+
+    pub fn record_lifecycle_debt(
+        &self,
+        view: &View,
+        member: &str,
+        verb: &str,
+        actor: &str,
+        reason: &str,
+    ) -> Result<crate::model::SourceDebt, FractalError> {
+        self.connection
+            .batched(|transaction| {
+                record_debt_tx(transaction, &self.origin, view, member, verb, None, None, Some(actor), reason, None)
+            })
+            .map_err(|error| FractalError::new("internal", error))?
     }
 }

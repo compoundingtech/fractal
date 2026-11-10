@@ -731,6 +731,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/gate-checks/{id}", get(runs::read_gate_check))
         .route("/v1/sets/preview", post(owned_sets::preview))
         .route("/v1/sets/apply", post(owned_sets::apply))
+        .route("/v1/source/status", get(owned_sets::source_status))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/persons/rename", post(agents::rename_person))
@@ -11121,15 +11122,23 @@ async fn apply_with_authority(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
-    let mut response = state
-        .store
-        .apply_as(
+    let mut response = match request.force_reason.as_deref().map(str::trim) {
+        None => state.store.apply_as(
             &intent,
             &request.expected_subjects,
             &request.idempotency_key,
             Some(actor),
-        )
-        .map_err(ApiError::bad)?;
+        ),
+        Some(reason) if !reason.is_empty() => state.store.apply_forced(
+            &intent,
+            &request.expected_subjects,
+            &request.idempotency_key,
+            Some(actor),
+            reason,
+        ),
+        Some(_) => Err(FractalError::new("source-force-refused", "--force needs a nonempty --reason")),
+    }
+    .map_err(ApiError::bad)?;
     response.resolved_kdl = request.intent.kdl;
     signal_changed(&state);
     Ok(Json(response))
@@ -11178,13 +11187,21 @@ async fn post_delivery_hold(
     State(state): State<AppState>,
     Json(request): Json<crate::delivery_hold::HoldRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    let force = request.force;
     let input =
         crate::delivery_hold::input(request, client_now_ms() as u64).map_err(ApiError::bad)?;
     let store = state.store.clone();
     let (claim, appended) = blocking_action(move || {
-        if input.fields.get("held") == Some(&Value::Bool(true))
-            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true))
-        {
+        let holding = input.fields.get("held") == Some(&Value::Bool(true))
+            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true));
+        let reason = input.fields.get("reason").and_then(Value::as_str).map(str::to_owned);
+        // A `lifecycle` set refuses ad hoc holds on its members unless forced as source debt.
+        let debt_set = if holding {
+            store.source_lifecycle_gate(&input.subject, "hold", force.then_some(reason.as_deref()).flatten())?
+        } else {
+            None
+        };
+        if holding {
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -11199,7 +11216,12 @@ async fn post_delivery_hold(
                 ));
             }
         }
-        store.append_claim_outcome(&input)
+        let outcome = store.append_claim_outcome(&input)?;
+        if let (Some(view), true) = (&debt_set, outcome.1) {
+            store.record_lifecycle_debt(view, &input.subject, "hold",
+                input.actor.as_deref().unwrap_or_default(), reason.as_deref().unwrap_or_default())?;
+        }
+        Ok(outcome)
     })
     .await?;
     if appended {
