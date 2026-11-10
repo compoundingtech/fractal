@@ -245,7 +245,11 @@ a mission ID without `mission/`; `write` takes a subject, or a registered family
 block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
 mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
 is. A mission without the block grants its runs nothing. The block is stored with the revision;
-the daemon does not yet bind a run actor or enforce it.
+the daemon does not yet bind a run actor or enforce it. An older member would quarantine a
+revision that declares it (it hashes the mission without the field), so publication holds such a
+revision until every member advertises `mission_authority=1` on its `daemon.started`
+(`mission-authority-unavailable`, also an `apply --dry-run` blocker), as for `capacity`
+([seat lanes](seat-lanes.md)).
 
 A mission can contain direct declarations. Direct agents in the mission can revise the complete mission.
 
