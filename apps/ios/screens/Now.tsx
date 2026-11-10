@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import { Alert, Linking, Pressable, ScrollView, SectionList, View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { Alert, Linking, Pressable, ScrollView, SectionList, View, type ViewToken } from 'react-native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
@@ -16,16 +16,36 @@ import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } fro
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
+import { observedQuestion, publishVisible } from '../clientControlVisible';
 
 // Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
+  const route = useRoute();
+  const visibleIds = useRef<string[] | undefined>(undefined);
+  const viewability = useRef(({ viewableItems }: { viewableItems: ViewToken<HomeRow>[] }) => {
+    visibleIds.current = viewableItems.filter(token => token.isViewable && token.item?.item?.id).map(token => token.item.item.id);
+    publishVisible(route.key, { route: 'NowRoot', screen: 'NowRoot', visible_item_ids: visibleIds.current, opened_item: null });
+  }).current;
   useDebugScroll(list as never);
   const refresh = useRefresh();
   const agentOf = (row: HomeRow) => [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
   const rows = useMemo(() => homeRows(data.attention, caps?.session_actor), [data.attention, caps?.session_actor]);
+  useLayoutEffect(() => {
+    if (rows.length === 0) visibleIds.current = [];
+    if (visibleIds.current) {
+      const ids = new Set(rows.map(row => row.item.id));
+      if (rows.length > 0 && (visibleIds.current.length === 0 || visibleIds.current.some(id => !ids.has(id)))) {
+        visibleIds.current = undefined;
+        publishVisible(route.key, undefined);
+      } else {
+        publishVisible(route.key, { route: 'NowRoot', screen: 'NowRoot', visible_item_ids: visibleIds.current, opened_item: null });
+      }
+    }
+    return () => publishVisible(route.key, undefined);
+  }, [rows, route.key]);
   const requesterOf = (row: HomeRow) => {
     const id = row.item.requester_id ?? row.item.source_id;
     const agent = data.agents.find(candidate => candidate.id === id);
@@ -69,6 +89,7 @@ export function NowScreen() {
       ref={list}
       contentInsetAdjustmentBehavior="automatic"
       sections={sections}
+      onViewableItemsChanged={viewability}
       keyExtractor={row => row.item.id}
       stickySectionHeadersEnabled={false}
       renderSectionHeader={({ section }) => <GroupedHeader title={section.title} count={section.count} />}
@@ -105,6 +126,21 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const kept = useRef(found);
   if (found) kept.current = found;
   const item = found ?? kept.current;
+  const question = item?.request ? observedQuestion(item.request.question) : undefined;
+  // Only the open request branch below has a precisely observable title/question.
+  // In particular, never substitute the requested ID or stale store data for a render.
+  useLayoutEffect(() => {
+    if (!item || item.id !== route.params.id || item.closedElsewhere || item.update
+      || !isRequest(item.attention_kind) || !item.actions.includes('work.done') || !item.request || question === undefined) {
+      publishVisible(route.key, undefined);
+    } else {
+      publishVisible(route.key, {
+        route: 'Attention', screen: 'Attention', visible_item_ids: [item.id],
+        opened_item: { id: item.id, title: detailRow(item).title, body: question },
+      });
+    }
+    return () => publishVisible(route.key, undefined);
+  }, [item, question, route.key, route.params.id]);
   if (!item) return <Screen><Banners /><Empty text={loadErrors.attention ? 'This alert could not be loaded.' : !hasSynced ? 'Checking for this alert…' : status !== 'online' ? 'This alert is not in the offline snapshot. Reconnect to check it.' : 'This item is no longer open.'} /></Screen>;
   const row = detailRow(item);
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
