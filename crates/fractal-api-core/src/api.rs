@@ -157,6 +157,7 @@ mod client_observations;
 pub mod client_push;
 pub mod client_commands;
 pub mod client_control_enrollment;
+pub mod client_control_grants;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
