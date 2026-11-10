@@ -881,6 +881,7 @@ export type AssistantPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   assistant_id: AssistantPrincipal;
   consent_evidence: string;
+  device_key_fingerprint?: string;
   device_name: string;
   disclosure_consent: true;
   expires_in_seconds?: number;
@@ -1890,6 +1891,7 @@ export type ErrorCode = (
   | "issuer-required"
   | "pairing-origin-required"
   | "pairing-restart-required"
+  | "pairing-key-mismatch"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"
@@ -3106,6 +3108,7 @@ export type PersonPairedSession = {
 
 export type PersonPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
+  device_key_fingerprint?: string;
   device_name: string;
   fabric_gateway?: boolean;
   full_control?: boolean;

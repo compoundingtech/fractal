@@ -138,6 +138,7 @@ pub enum ErrorCode {
     IssuerRequired,
     PairingOriginRequired,
     PairingRestartRequired,
+    PairingKeyMismatch,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
@@ -5110,6 +5111,9 @@ pub enum PairingBegin {
 pub struct PersonPairingBegin {
     pub api_version: String,
     pub device_name: String,
+    /// Binds completion to SHA-256 of the exact device public-key UTF-8 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_key_fingerprint: Option<String>,
     pub person_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_control: Option<bool>,
@@ -5236,6 +5240,9 @@ pub enum AssistantScope {
 pub struct AssistantPairingBegin {
     pub api_version: String,
     pub device_name: String,
+    /// Binds completion to SHA-256 of the exact device public-key UTF-8 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_key_fingerprint: Option<String>,
     pub assistant_id: AssistantPrincipal,
     pub scopes: Vec<AssistantScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1751,6 +1751,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "issuer-required",
   "pairing-origin-required",
   "pairing-restart-required",
+  "pairing-key-mismatch",
   "suspend-authored-session-selection",
   "stale-fence",
   "cursor-gap",
