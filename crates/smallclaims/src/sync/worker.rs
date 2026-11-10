@@ -32,6 +32,7 @@ use crate::fleet::transport::{
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
 use crate::replication::{InventoryCheckpoint, ReplicationExchange, ReplicationInventory};
+use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, FailureKind};
 use crate::store::{CheckpointManifest, CheckpointManifestPage, CheckpointManifestRequest};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -2762,6 +2763,19 @@ async fn receive_exchange_inner<B: Backend>(
     body: Bytes,
     timing: &Arc<ExchangeTiming>,
 ) -> Response {
+    receive_exchange_inner_to(
+        State(state), headers, body, timing, &FAILURE_DIAGNOSTICS, &mut std::io::stderr(),
+    ).await
+}
+
+async fn receive_exchange_inner_to<B: Backend>(
+    State(state): State<PeerState<B>>,
+    headers: HeaderMap,
+    body: Bytes,
+    timing: &Arc<ExchangeTiming>,
+    diagnostics: &FailureDiagnostics,
+    output: &mut (impl std::io::Write + Send),
+) -> Response {
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
             Ok(body) => Bytes::from(body),
@@ -2826,7 +2840,9 @@ async fn receive_exchange_inner<B: Backend>(
             && job.digest != request_digest
             && job.answer.borrow().is_none()
         {
-            eprintln!("{}", timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None));
+            drop(jobs);
+            diagnostics.record_to(FailureKind::ExchangeOverload,
+                || timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
             return signed_overload(&state, &request_digest);
         }
         let reuse = jobs
@@ -2840,7 +2856,9 @@ async fn receive_exchange_inner<B: Backend>(
                 .clone()
                 .try_acquire_owned()
             else {
-                eprintln!("{}", timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None));
+                drop(jobs);
+                diagnostics.record_to(FailureKind::ExchangeOverload,
+                    || timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
                 return signed_overload(&state, &request_digest);
             };
             timing.record("permit-acquired");
@@ -3007,7 +3025,8 @@ async fn receive_exchange_inner<B: Backend>(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(Some(Err(failure))) => {
-            eprintln!("{}", job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)));
+            diagnostics.record_to(FailureKind::ExchangeFailed,
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)), output);
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &job_key, &answer);
             let response = signed_response(&state, &request_digest, 0, serde_json::json!({
@@ -3020,7 +3039,8 @@ async fn receive_exchange_inner<B: Backend>(
             }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(None) => {
-            eprintln!("{}", job_timing.failure_line(&headers, &relay, shard.as_deref(), "no-answer", None));
+            diagnostics.record_to(FailureKind::ExchangeNoAnswer,
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "no-answer", None), output);
             finish_exchange_job(&state.fleet, &job_key, &answer);
             signed_error_response(
                 &state,
@@ -3032,7 +3052,8 @@ async fn receive_exchange_inner<B: Backend>(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Err(_) => {
-            eprintln!("{}", job_timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None));
+            diagnostics.record_to(FailureKind::ExchangeOverload,
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
             signed_overload(&state, &request_digest)
         }
     }

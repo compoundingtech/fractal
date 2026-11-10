@@ -412,10 +412,13 @@ pub async fn replication_receive(
         ))
     })
     .await.map_err(|error| {
-        eprintln!(
-            "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
-            correlation.map_or_else(|| "none".into(), |id| id.to_string()),
-            error.code,
+        smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
+            smallclaims::replication_diagnostics::FailureKind::DaemonReceive,
+            || format!(
+                "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
+                correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+                error.code,
+            ),
         );
         error
     })?;

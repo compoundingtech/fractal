@@ -1693,8 +1693,8 @@ original timestamps; subsequent client boundaries remain INFO. The client emits
 `client-headers-received`, and `client-failed`.
 The `client-failed` boundary also includes `peer` (the destination node name).
 
-Each failed, unanswered, or overloaded worker backend exchange response writes one
-stderr `fractal: replication exchange answer` line with `correlation_id`, `peer`,
+Failed, unanswered, or overloaded worker backend exchange responses produce
+rate-limited stderr `fractal: replication exchange answer` lines with `correlation_id`, `peer`,
 `shard`, `outcome` (`failed`, `no-answer`, or `overload`), `code`, `phase`,
 `elapsed_ms`, `permit_wait_ms`, `local_receive_ms`, and `follow_up_export_ms`.
 `correlation_id=none` means the request did not carry a valid exchange UUID;
@@ -1706,11 +1706,20 @@ its elapsed duration at the answer, not zero. `elapsed_ms` uses that same job cl
 also include `local_receive_http_status` when the typed error carries it.
 These lines contain machine metadata, never error bodies or free-form causes.
 
-The daemon receive handler writes one `fractal: replication receive error` stderr
-line on a backend error with `route=/v1/internal/replication/receive`,
+The daemon receive handler produces rate-limited `fractal: replication receive error`
+stderr lines on backend errors with `route=/v1/internal/replication/receive`,
 `correlation_id` (a valid `x-fractal-exchange-id` header, otherwise `none`), and
 `code`. This is distinct from middleware request-duration logging. The handler
 does not currently expose a per-request gate/writer/apply/final-drain timing split.
+
+Both failure diagnostics use one shared bounded limiter per process: four fixed
+keys (worker failed, no-answer, overload, and daemon receive), one sample per key
+per 60 seconds. Peer names, shard IDs, correlation IDs, and error codes never
+create additional keys. Emitted samples append `suppressed=0`. On the next event,
+expired windows with suppressed repeats emit their original sample with
+`event=suppression-summary suppressed=N`; idle windows need no timer.
+Worker admission drops the exchange-jobs lock before formatting or writing these
+diagnostics; neither limiter nor exchange-jobs guards are held during stderr writes.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.
