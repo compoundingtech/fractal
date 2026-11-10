@@ -256,6 +256,9 @@ unrelated history is never enumerated. Total work is proportional to needing
 grant rows and their own matching receipts, not all writer receipts. Ordinary
 dirty authentication receives the first half of each transaction with a durable
 round-robin cursor, so an addition backlog cannot keep dirty subjects fenced.
+Late dirty work sorting before the saved cursor wraps within the same slice,
+without waiting for a later maintenance wakeup. Repeated cursor or recheck writes
+retain one work-set entry even under an outer SQL upsert's conflict policy.
 Original authentication cursors never rewind for membership additions. Key
 pages seek `(writer,start,member_key)` with start at or below the receipt sequence;
 expired windows are filtered after the fixed candidate limit and still consume

@@ -836,7 +836,7 @@ fn duplicate_verified_signature_does_not_refresh_or_dirty_claims() {
 }
 
 #[test]
-fn dirty_claim_flood_is_limited_to_sixty_four_refreshes_per_transaction() {
+fn dirty_claim_flood_reserves_half_the_slice_for_other_maintenance() {
     let store = node("issuer", None);
     for index in 0..(authority::CLAIMS_PER_SLICE * 3 + 7) {
         let mut invalid = fields();
@@ -852,7 +852,9 @@ fn dirty_claim_flood_is_limited_to_sixty_four_refreshes_per_transaction() {
         let transaction = connection.transaction().unwrap();
         let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
         let after: usize = transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get(0)).unwrap();
-        assert_eq!(remaining-after, remaining.min(authority::CLAIMS_PER_SLICE));
+        // Dirty authentication owns half the 64-unit slice; the other half
+        // remains available to proof withdrawals and membership additions.
+        assert_eq!(remaining-after, remaining.min(authority::CLAIMS_PER_SLICE.div_ceil(2)));
         assert_eq!(backfill_markers(&transaction),markers,"completed history was rescanned");
         transaction.commit().unwrap();
         remaining = after;
@@ -1355,6 +1357,56 @@ fn legacy_membership_dirty_obligations_migrate_idempotently_to_verifier_rechecks
         ).unwrap());
         assert!(authority::subject_ready(&connection,SUBJECT).is_err());
     }
+}
+
+#[test]
+fn auth_work_set_is_idempotent_under_outer_upsert_conflict_policy() {
+    let store = node("issuer",None);
+    let grant = append(&store,SUBJECT,GRANTED,fields());
+    drain_authority(&store);
+    let connection = store.connection.write();
+    for _ in 0..2 {
+        connection.execute(
+            "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start)
+             VALUES(?1,0,0,'',-1) ON CONFLICT(claim_id) DO UPDATE SET position=excluded.position",
+            [&grant.id],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)
+             ON CONFLICT(claim_id) DO UPDATE SET claim_id=excluded.claim_id", [&grant.id],
+        ).unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT COUNT(*) FROM assistant_grant_auth_work WHERE claim_id=?1",
+            [&grant.id], |row| row.get::<_,usize>(0),
+        ).unwrap(),1);
+    }
+    connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&grant.id]).unwrap();
+    assert_eq!(connection.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_auth_work WHERE claim_id=?1",
+        [&grant.id], |row| row.get::<_,usize>(0),
+    ).unwrap(),1,"another durable obligation still needs this claim");
+    connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&grant.id]).unwrap();
+    assert_eq!(connection.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_auth_work WHERE claim_id=?1",
+        [&grant.id], |row| row.get::<_,usize>(0),
+    ).unwrap(),0);
+}
+
+#[test]
+fn dirty_work_before_saved_round_robin_cursor_is_serviced_in_the_same_slice() {
+    let store = node("issuer",None);
+    let grant = append(&store,SUBJECT,GRANTED,fields());
+    drain_authority(&store);
+    let mut connection = store.connection.write();
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)",
+        [format!("{}z",grant.id)],
+    ).unwrap();
+    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    let transaction = connection.transaction().unwrap();
+    assert!(authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    assert!(authority::contains(&transaction,&grant.id).unwrap());
+    transaction.commit().unwrap();
 }
 
 include!("assistant_grant_receipt_cost_tests.rs");

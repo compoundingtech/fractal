@@ -229,17 +229,24 @@ fn install_auth_work(connection: &Connection) -> Result<()> {
              UPDATE assistant_grant_additions SET sequence=-1,envelope_hash='',position=-1;"
         )?;
     }
+    // The outer statement's conflict policy can override a trigger's OR IGNORE.
+    // Work is set membership, so explicitly avoid inserting an existing claim;
+    // this remains idempotent under cursor/pending UPSERTs as well as plain writes.
     for table in ["assistant_grant_pending","assistant_grant_auth_cursor","assistant_grant_proof_rechecks"] {
         for event in ["INSERT","UPDATE","DELETE"] {
             let row = if event=="DELETE" { "OLD" } else { "NEW" };
             connection.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS {table}_auth_work_{event} AFTER {event} ON {table} BEGIN
-                   INSERT OR IGNORE INTO assistant_grant_auth_work
+                "DROP TRIGGER IF EXISTS {table}_auth_work_{event};
+                 CREATE TRIGGER {table}_auth_work_{event} AFTER {event} ON {table} BEGIN
+                   INSERT INTO assistant_grant_auth_work
                    SELECT COALESCE((SELECT origin FROM assistant_grant_pending WHERE claim_id={row}.claim_id),
                                    (SELECT origin FROM claims WHERE id={row}.claim_id)),{row}.claim_id
-                   WHERE EXISTS(SELECT 1 FROM assistant_grant_pending WHERE claim_id={row}.claim_id AND authenticated=0)
+                   WHERE (EXISTS(SELECT 1 FROM assistant_grant_pending WHERE claim_id={row}.claim_id AND authenticated=0)
                       OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id={row}.claim_id)
-                      OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id={row}.claim_id);
+                      OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id={row}.claim_id))
+                     AND NOT EXISTS(SELECT 1 FROM assistant_grant_auth_work WHERE claim_id={row}.claim_id)
+                     AND (EXISTS(SELECT 1 FROM assistant_grant_pending WHERE claim_id={row}.claim_id)
+                       OR EXISTS(SELECT 1 FROM claims WHERE id={row}.claim_id));
                    DELETE FROM assistant_grant_auth_work WHERE claim_id={row}.claim_id
                      AND NOT EXISTS(SELECT 1 FROM assistant_grant_pending WHERE claim_id={row}.claim_id AND authenticated=0)
                      AND NOT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id={row}.claim_id)
@@ -1124,6 +1131,12 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
                 continue;
             }
             connection.execute("DELETE FROM meta WHERE key='assistant_grant_dirty_cursor'", [])?;
+            if dirty_visits==0 && !dirty_after.is_empty() {
+                // A late insert/evidence arrival may sort before the saved
+                // cursor. Wrap now, not in a later otherwise empty slice.
+                dirty_after.clear();
+                continue;
+            }
             dirty_done = true;
         }
         let recheck: Option<String> = connection.query_row(

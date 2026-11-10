@@ -706,6 +706,12 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
              FROM assistant_grant_pending WHERE claim_id=?1",
             [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         ).unwrap();
+        let original_windows = windows(&fleet_membership_tx(&target.readers.get()).unwrap());
+        let original_key = ("peer".to_owned(), peer_key.public().to_owned());
+        let original_window = *original_windows.get(&original_key).unwrap();
+        // writer_floor is the last excluded sequence, not the window start.
+        assert!(sequence >= original_window.0
+            && original_window.1.is_none_or(|end| sequence <= end));
         {
             let mut writer = target.connection.write();
             let connection = writer.transaction().unwrap();
@@ -776,7 +782,7 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
         }));
         receive_without_authority_maintenance(&target, &export(&anchor, &target));
         let expected = windows(&fleet_membership_tx(&target.readers.get()).unwrap());
-        assert_eq!(expected.get(&("peer".to_owned(), peer_key.public().to_owned())), Some(&(0, None)));
+        assert_eq!(expected.get(&original_key), Some(&original_window));
         assert!(expected.contains_key(&("peer".to_owned(), future_key.public().to_owned())));
         assert!(!target.claim_has_authenticated_member_writer(&grant.id).unwrap(), "{mutation}");
         assert_windows(&target, &target, mutation);
@@ -1148,7 +1154,7 @@ fn many_past_covering_additions_visit_needy_grants_not_unrelated_receipts() {
         }
         assert!(completed,
             "{unrelated} unrelated receipts exhausted a grant-row-proportional work bound");
-        let work: usize = target.readers.get().query_row(
+        let work: usize = target.connection.write().query_row(
             "SELECT COUNT(*) FROM addition_work", [], |row| row.get(0),
         ).unwrap();
         assert!(work >= additions, "fixture did not exercise every real admission");
