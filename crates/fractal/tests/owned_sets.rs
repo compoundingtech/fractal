@@ -147,6 +147,7 @@ async fn request(daemon: &Daemon, sequence: u64, kdl: String) -> Request {
         },
         actor: "person/operator".into(),
         idempotency_key: format!("publish-{sequence}"),
+        program_bundles: Default::default(),
     }
 }
 

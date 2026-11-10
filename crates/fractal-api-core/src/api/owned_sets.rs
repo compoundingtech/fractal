@@ -53,6 +53,7 @@ pub async fn apply(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
     let response = state
         .store
         .apply_owned_set(
