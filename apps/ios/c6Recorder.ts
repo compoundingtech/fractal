@@ -12,6 +12,14 @@ export type C6Row = {
 export type C6Send = { signal: AbortSignal; request: (id: string) => void; ack: () => void; cleanup: (close: () => void) => void };
 export const C6_LIMIT = 200;
 export const C6_TIMEOUT_MS = 15_000;
+export const checkC6Aborted = (signal?: { readonly aborted: boolean; readonly reason?: unknown }): void => {
+  if (!signal?.aborted) return;
+  if (signal.reason != null) throw signal.reason;
+  if (typeof DOMException !== 'undefined') throw new DOMException('This operation was aborted', 'AbortError');
+  const error = new Error('This operation was aborted');
+  error.name = 'AbortError';
+  throw error;
+};
 export const nearestRank = (values: readonly number[], percentile: number): number | null => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -74,9 +82,9 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
               }),
             ]);
           } catch (error) {
-            row.errorName = error instanceof Error ? error.name : null;
             row.status = this.cancelled ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'failed';
             row.errorCode = this.cancelled ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'request-failed';
+            row.errorName = row.status === 'failed' && error instanceof Error ? error.name : null;
           } finally {
             active = false;
             clearTimeout(timer);
@@ -100,6 +108,7 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
             }
           }
         }
+        if (row.status !== 'failed') row.errorName = null;
         this.rows = [...this.rows.slice(-(C6_LIMIT - 1)), row];
         this.ports.changed();
       }

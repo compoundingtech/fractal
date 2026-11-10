@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { C6Recorder, C6_LIMIT, nearestRank } from './c6Recorder.ts';
+import { test, beforeEach, afterEach } from 'node:test';
+import { C6Recorder, C6_LIMIT, nearestRank, checkC6Aborted } from './c6Recorder.ts';
 import { ForegroundGate } from './foreground.ts';
 import { createRequire } from 'node:module';
 import { FractalClient } from '../../clients/typescript/fractal-client/Client.generated.ts';
@@ -8,6 +8,30 @@ import { FractalClient } from '../../clients/typescript/fractal-client/Client.ge
 const require = createRequire(import.meta.url);
 const { AbortController: RNAbortController } = require('abort-controller/dist/abort-controller');
 const capabilities = require('../../docs/st3/client-v0/fixtures/capabilities.json');
+const nativeAbortController = globalThis.AbortController;
+beforeEach(() => { globalThis.AbortController = RNAbortController; });
+afterEach(() => { globalThis.AbortController = nativeAbortController; });
+
+test('C6 send cancellation accepts the React Native AbortSignal polyfill', () => {
+  const controller = new RNAbortController();
+  assert.equal(controller.signal.throwIfAborted, undefined);
+  assert.doesNotThrow(() => checkC6Aborted(undefined));
+  assert.doesNotThrow(() => checkC6Aborted(controller.signal));
+  controller.abort();
+  assert.throws(() => checkC6Aborted(controller.signal), error => error.name === 'AbortError' && error.message === 'This operation was aborted');
+});
+
+test('C6 send cancellation preserves abort reasons without requiring DOMException', t => {
+  for (const reason of [new TypeError('cancelled'), 'cancelled', 0, false]) {
+    assert.throws(() => checkC6Aborted({ aborted: true, reason }), error => error === reason);
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'DOMException');
+  t.after(() => Object.defineProperty(globalThis, 'DOMException', descriptor));
+  globalThis.DOMException = undefined;
+  const controller = new RNAbortController();
+  controller.abort();
+  assert.throws(() => checkC6Aborted(controller.signal), error => error instanceof Error && error.name === 'AbortError' && error.message === 'This operation was aborted');
+});
 
 test('C6 status under the React Native AbortSignal polyfill', async t => {
   const original = globalThis.AbortController;
@@ -116,6 +140,7 @@ test('timeouts are bounded rows, abort requests, and ignore late events', async 
   late.forEach(event => event());
   assert.equal(calls, 10); assert.equal(aborted, 10);
   assert(recorder.rows.every(row => row.status === 'timeout' && row.errorCode === 'timeout' && row.ackMs === null && row.echoMs === null && row.requestId === null));
+  assert(recorder.rows.every(row => row.errorName === null));
 });
 
 test('keeps ACK when echo is missing and never exports raw errors or message content', async () => {
@@ -202,6 +227,7 @@ for (const reason of ['blur', 'background', 'subscription-replaced']) {
     assert.equal(aborted, true);
     assert.equal(recorder.rows.length, 10);
     assert(recorder.rows.every(row => row.status === 'cancelled' && row.errorCode === 'cancelled'));
+    assert(recorder.rows.every(row => row.errorName === null));
     assert(recorder.rows.slice(1).every(row => row.requestId === null && row.ackMs === null));
   });
 }

@@ -5,7 +5,8 @@ import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { C6Recorder, type C6Context, type C6Send } from './c6Recorder';
-import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
+import { resendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
+import { sendSignedMessage } from './c6MessageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
@@ -1141,21 +1142,11 @@ function useAppStore(proof?: FabricProfile) {
       // The first try goes on the snapshot a window frame already brought, with no capabilities read;
       // each try after Fractal said the last applied nothing reads a fresh one.
       const fences = sendFences(lastSnapshot.current, fence);
-      const outcome = await sendBoundMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
-        build: async () => {
-          c6Send?.signal.throwIfAborted();
-          const id = actionId();
-          c6Send?.request(id);
+      const outcome = await sendSignedMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
+        client, c6Send, actionId, fences, fence, originalAvailable,
+        parameters: async id => {
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
-          const parameters = proof ? unsigned : await signMessage(id, unsigned, signingProfile);
-          return { id, idempotency_key: id, fence: await fences(), parameters };
-        },
-        fence: async () => { c6Send?.signal.throwIfAborted(); originalAvailable(); return fence(); },
-        send: async request => {
-          originalAvailable(); c6Send?.signal.throwIfAborted();
-          const result = await client.messageSend(request, { signal: c6Send?.signal });
-          c6Send?.ack();
-          return result;
+          return proof ? unsigned : await signMessage(id, unsigned, signingProfile);
         },
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
