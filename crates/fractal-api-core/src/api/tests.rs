@@ -27,7 +27,7 @@ fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
 fn launch_visualizations_emit_fractal_for_drafts_and_previews() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let kdl = "version 2\nmission \"example/versions\" { title \"Versions\"; }";
+    let kdl = "version 2\nmission \"example/versions\" state=\"ready\" { goal \"Check versions\"; }";
     let intent = crate::graph::parse_test_intent(kdl, &state.node).unwrap();
     let mut session: PlanningSessionView = serde_json::from_value(json!({
         "subject": "planning/versions", "id": "versions", "mission": "example/versions",
