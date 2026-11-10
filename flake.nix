@@ -403,6 +403,11 @@
           inherit effect-utils system version buildStamp;
           source = self;
         };
+        fractalWebPublisher = import ./nix/fractal-web-publisher.nix {
+          inherit effect-utils system version;
+          source = self;
+          installation = fractalWeb.installation;
+        };
 
         st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
           assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
@@ -894,6 +899,12 @@
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.fractal-web = fractalWeb;
+        packages.fractal-web-publisher = fractalWebPublisher;
+        apps.fractal-web-publisher = {
+          type = "app";
+          program = "${fractalWebPublisher}/bin/fractal-web-publisher";
+        };
+        checks.fractal-web-publisher = fractalWebPublisher;
         packages.fractal = fractal;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
