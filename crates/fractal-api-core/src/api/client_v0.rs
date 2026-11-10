@@ -759,7 +759,8 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
-    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+    if let Some(web) = request.extensions().get::<LocalWebSession>()
+        && !request.headers().contains_key(AUTHORIZATION) {
         let mut session = ClientSession::local(Some(&web.person))?;
         session.actor = format!("client/local-web/{}", web.id);
         session.transport = "local-web";
@@ -811,6 +812,9 @@ pub fn authenticate(
     let digest = credential_digest(credential);
     if let Some(session) = assistant::authenticate(state, &digest, transport)? {
         assistant::authorize_route(&session, request)?;
+        if external_grants::is_service(&session) {
+            external_grants::audit_service_read(state, &session)?;
+        }
         return Ok(session);
     }
     let pairings = state
