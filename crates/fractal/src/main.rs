@@ -5255,6 +5255,13 @@ fn cli_main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    if native_driver_requested(arguments.iter().skip(1).cloned()) {
+        // SAFETY: native harness HOME is selected before any runtime or worker thread starts.
+        if let Err(error) = unsafe { fractal_daemon::instance::activate_native_session_home() } {
+            stderr_message("st", format_args!("native session home: {error:#}"));
+            return ExitCode::from(2);
+        }
+    }
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
     clap_complete::env::CompleteEnv::with_factory(cli_command).complete();
@@ -7568,7 +7575,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
         client_relay: fractal_daemon::peer::ClientRelay::from_config(&config)?
             .map(|relay| relay.with_links(store.clone())),
-        native_session_home: std::env::var_os("HOME").map(PathBuf::from),
+        native_session_home: fractal_daemon::instance::native_session_home()?,
         planner_default: config.planner.clone(),
         harness_question_sink: None,
         assistant_receipts: Default::default(),

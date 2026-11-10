@@ -65,7 +65,7 @@ an existing migrated root, except that `work/` stays at its legacy location):
 | `bin/` | the `st3`, `st` and `pty` that the installer puts there | |
 | `claude/` | the instance's Claude account, plugins and `st` skill | `CLAUDE_CONFIG_DIR` |
 | `codex/` | the instance's Codex account and `st` skill | `CODEX_HOME` |
-| `home/` | the skill copy for pi, omp and opencode (`home/.agents/skills`) | |
+| `home/` | native harness HOME, pi/omp session stores and shared skills (`home/.agents/skills`) | `HOME` for native drivers and hooks |
 | `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the Fractal Assistant | |
 | `app/` | the macOS app bundle | |
 
@@ -73,6 +73,17 @@ The instance is applied to the environment once, at startup, before any thread e
 and everything it starts (seats, harnesses, hooks) inherit it, so code that reads `XDG_*_HOME`
 itself lands in the instance without knowing about instances. Seats of an instance sign in to
 Claude and Codex separately from your own; that is what makes the first run clean.
+
+Native-session inventory, search, session lists and conversation timelines discover only the
+instance's `home/`, never the login user's HOME. This existing instance-owned home also holds
+generic harness skills, so native drivers and their children use it as HOME. Its `.claude`,
+`.codex` and `.local/share` are checked aliases to the instance's existing `claude/`, `codex/`
+and `data/` directories; provider logins and OpenCode sessions stay in their existing locations.
+An inherited `PI_CODING_AGENT_DIR` is cleared at the native-driver boundary so pi/omp use the
+instance profile. Managed sessions with explicit driver-owned transcript paths retain those paths.
+The default instance keeps the login HOME and its existing discovery behavior unchanged.
+Ordinary CLI and service-manager operations retain the login HOME, including nested CLI calls
+from an instance's harness.
 
 Beyond directories, an instance has its own names:
 

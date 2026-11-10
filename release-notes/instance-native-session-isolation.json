@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Isolate native session discovery and harness HOME in named instances",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or projection changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No claim or wire schema changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Native session readers use the selected instance home; native drivers and hooks use the same home."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The default instance keeps its existing HOME and native discovery. Named instances use their existing home directory, with checked aliases to existing provider accounts and XDG data."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "Restart an existing named instance daemon to use the isolated discovery root."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Named-instance pi/omp profiles are separate from the login profile; sign in or configure the instance profile as needed. Existing provider account directories are unchanged."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "No session files are copied, moved or deleted. An unexpected native-home alias is rejected rather than read."
+  }
+}

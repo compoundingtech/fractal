@@ -2817,6 +2817,81 @@ mod tests {
     #[cfg(target_os = "linux")]
     use fractal_store::external_sessions::shared_tests_seats::path_executable;
 
+    #[test]
+    fn native_session_discovery_is_instance_scoped() {
+        use fractal_kernel::instance;
+        const CHILD: &str = "FRACTAL_TEST_NATIVE_INSTANCE_HOME";
+        if let Ok(case) = std::env::var(CHILD) {
+            let login_home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let write_session = |home: &Path, id: &str| {
+                let directory = home.join(".codex/sessions/2026/11/10");
+                fs::create_dir_all(&directory).unwrap();
+                fs::write(
+                    directory.join(format!("rollout-{id}.jsonl")),
+                    format!("{}\n", json!({"type":"session_meta", "payload":{"id":id, "cwd":home}})),
+                ).unwrap();
+            };
+            write_session(&login_home, "login-only");
+            if case == "instance" {
+                // SAFETY: isolated single-test subprocess; no runtime or other readers exist.
+                let selected = unsafe { instance::activate("trial") }.unwrap();
+                let native = instance::native_session_home().unwrap().unwrap();
+                assert_eq!(native, selected.native_session_home());
+                fs::create_dir_all(selected.codex_home()).unwrap();
+                write_session(&native, "instance-only");
+                let home = Some(native.as_path());
+                // Inventory and search use these discovery entrypoints, including the cached history.
+                for discovery in [
+                    crate::external_sessions::discover_fresh(home, true).unwrap(),
+                    crate::external_sessions::discover(home, true).unwrap(),
+                ] {
+                    assert_eq!(discovery.sessions.len(), 1);
+                    assert_eq!(discovery.sessions[0].native_id, "instance-only");
+                }
+                let login_id = crate::external_sessions::external_session_id(
+                    crate::external_sessions::ExternalDriver::Codex, "login-only",
+                );
+                assert!(crate::external_sessions::find_conversation(home, &login_id).unwrap().is_none());
+                unsafe { instance::activate_native_session_home() }.unwrap();
+                assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(native.clone()));
+                assert!(std::env::var_os("PI_CODING_AGENT_DIR").is_none());
+                assert_eq!(instance::current(), Some(selected.clone()));
+                assert_eq!(PathBuf::from(std::env::var_os("CODEX_HOME").unwrap()), selected.codex_home());
+                assert_eq!(fs::canonicalize(native.join(".codex")).unwrap(), fs::canonicalize(selected.codex_home()).unwrap());
+                assert_eq!(fs::read_link(native.join(".claude")).unwrap(), selected.claude_config_dir());
+                assert_eq!(fs::read_link(native.join(".local/share")).unwrap(), selected.data_home());
+                // Re-exec and nested CLI selection must not nest instances beneath the synthetic HOME.
+                unsafe { instance::activate("trial") }.unwrap();
+                assert_eq!(instance::current(), Some(selected));
+                assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(login_home));
+            } else {
+                assert!(instance::current().is_none());
+                let native = instance::native_session_home().unwrap().unwrap();
+                assert_eq!(native, login_home);
+                let discovery = crate::external_sessions::discover_fresh(Some(&native), true).unwrap();
+                assert_eq!(discovery.sessions.len(), 1);
+                assert_eq!(discovery.sessions[0].native_id, "login-only");
+                let before: Vec<_> = std::env::vars_os().collect();
+                unsafe { instance::activate_native_session_home() }.unwrap();
+                assert_eq!(std::env::vars_os().collect::<Vec<_>>(), before);
+            }
+            return;
+        }
+        for case in ["default", "instance"] {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "external_sessions::tests::native_session_discovery_is_instance_scoped", "--nocapture", "--test-threads=1"])
+                .env(CHILD, case)
+                .env("HOME", home.path())
+                .env("PI_CODING_AGENT_DIR", home.path().join("ambient-profile"))
+                .env_remove("ST_INSTANCE")
+                .env_remove("FRACTAL_INSTANCE")
+                .env_remove("ST_INSTANCE_HOST_HOME")
+                .output().unwrap();
+            assert!(output.status.success(), "{case}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn omp_old_hook_recovery_requires_exact_live_lineage_account_and_header() {
