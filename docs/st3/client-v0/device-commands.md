@@ -238,10 +238,17 @@ grant `item_id` binds that screen to the seed; another ask is `screen-not-grante
 `Conversation` is always `screen-not-granted`. Answer, close, read-state and
 `message.send` verbs are `verb-not-granted`; no grant authorizes a mutation.
 
-The existing session-scoped `commands` collection includes
-`kind: "client-control-grant"` lifecycle records, even before the first command.
-Their states are `active`, `expired` and `revoked`. A command embeds the grant
-record and binds `grant_id` and `run_id`; no second command transport exists.
+The existing session-scoped `commands` collection includes generated
+`kind: "client-control-grant-lifecycle"` resources before the first command.
+Their states are `started`, `ended` and `revoked`; the stable resource ID and
+strictly increasing sequence identify the latest durable transition per grant.
+Idle subscribers receive revocation and run/claim/deadline termination without
+issuing a command or resubscribing. Lifecycle drives only the control indicator
+and termination: policy remains in each command's `control_grant` record.
+Commands without an active matching lifecycle grant fail closed. Clients ignore
+duplicate/out-of-order starts, preserve the grant's `item_id` binding, and never
+reactivate a terminal grant ID. A command binds `grant_id` and `run_id`; no second
+command transport exists.
 
 Granted result acceptance verifies the generated canonical bytes directly with
 the enrolled P-256 key, not principal message authority. The outer outcome,

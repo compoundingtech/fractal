@@ -65,6 +65,64 @@ async fn narrow_grant_accepts_signed_result_but_never_message_authority_and_reco
 }
 
 #[tokio::test]
+async fn command_revoke_race_is_fail_closed_in_both_serialization_orders() {
+    for revoke_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (state, key, grant, issuer) = super::super::client_control_grants::test_support::fixture(root.path());
+        let client = super::super::client_control_enrollment::enrolled(&state, &grant.device).unwrap().session;
+        // Two actors are released in a controlled order, without scheduling
+        // sleeps. Both legal lock orderings must have the same authority fence.
+        let (first_done, second_may_start) = std::sync::mpsc::channel();
+        let attempt = std::thread::scope(|scope| {
+            let command_state = &state;
+            let command_issuer = &issuer;
+            let command_grant = &grant;
+            let revoke_state = &state;
+            let revoke_issuer = &issuer;
+            let revoke_grant = &grant;
+            if revoke_first {
+                let revocation = scope.spawn(move || {
+                    super::super::client_control_grants::revoke_grant(revoke_state, revoke_issuer, &revoke_grant.grant_id).unwrap();
+                    first_done.send(()).unwrap();
+                });
+                let command = scope.spawn(move || {
+                    second_may_start.recv().unwrap();
+                    issue(command_state, command_issuer, command_request(command_grant))
+                });
+                revocation.join().unwrap();
+                command.join().unwrap()
+            } else {
+                let command = scope.spawn(move || {
+                    let result = issue(command_state, command_issuer, command_request(command_grant));
+                    first_done.send(()).unwrap();
+                    result
+                });
+                let revocation = scope.spawn(move || {
+                    second_may_start.recv().unwrap();
+                    super::super::client_control_grants::revoke_grant(revoke_state, revoke_issuer, &revoke_grant.grant_id).unwrap();
+                });
+                let result = command.join().unwrap();
+                revocation.join().unwrap();
+                result
+            }
+        });
+        if revoke_first {
+            let error = attempt.unwrap_err();
+            assert_eq!(error.code, "grant-expired");
+            assert!(error.details["command_id"].is_string());
+            assert!(error.details["receipt_claim_id"].is_string());
+        } else {
+            let command = attempt.unwrap();
+            assert!(report(&state, &client, signed_request(&command, &client, &key)).is_err());
+            let terminal = read(&state, &issuer, command["id"].as_str().unwrap()).unwrap();
+            assert_eq!(terminal["state"], "refused");
+            assert!(terminal["receipt_claim_id"].is_string());
+            assert!(terminal.get("verified_result_signature").is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn result_refuses_wrong_key_binding_purpose_and_unsigned_visible_state() {
     let root = tempfile::tempdir().unwrap();
     let (state, key, grant, issuer) = super::super::client_control_grants::test_support::fixture(root.path());

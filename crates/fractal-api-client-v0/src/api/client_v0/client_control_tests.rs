@@ -55,11 +55,71 @@ async fn client_control_lifecycle_uses_existing_commands_collection_before_any_c
     let (_, items, more, _) = collection_items_with_windows(&state, &client, &request, permit, None).await.unwrap();
     assert!(!more);
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["kind"], "client-control-grant");
-    assert_eq!(items[0]["state"], "active");
+    assert_eq!(items[0]["kind"], "client-control-grant-lifecycle");
+    assert_eq!(items[0]["state"], "started");
     assert_eq!(items[0]["session"], client.actor);
     client_control_grants::revoke_grant(&state, &issuer, &grant.grant_id).unwrap();
     let permit = Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap();
     let (_, items, _, _) = collection_items_with_windows(&state, &client, &request, permit, None).await.unwrap();
     assert_eq!(items[0]["state"], "revoked");
+}
+
+#[tokio::test]
+async fn client_control_idle_stream_observes_revocation_and_run_end() {
+    for run_end in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let (state, _, grant, issuer) = client_control_grants::test_support::fixture(root.path());
+        let client = client_control_enrollment::enrolled(&state, &grant.device).unwrap().session;
+        let stream_state = state.clone();
+        let app = axum::Router::new().route("/stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+            let state = stream_state.clone();
+            let client = client.clone();
+            async move {
+                let windows = collection_windows::Windows::attach(&state.store);
+                upgrade.on_upgrade(move |socket| collection_stream_socket_with_reader(
+                    socket, state, client, None,
+                    move |state, session, request, permit| {
+                        let windows = windows.clone();
+                        async move { collection_items_with_windows(&state, &session, &request, permit, windows).await }
+                    },
+                ))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+        socket.send(tokio_tungstenite::tungstenite::Message::Text(
+            json!({"kind":"subscribe","id":"commands","collection":"commands"}).to_string().into(),
+        )).await.unwrap();
+        let initial = super::tests::next_data_frame(&mut socket).await;
+        let started = &initial["items"][0];
+        assert_eq!(started["kind"], "client-control-grant-lifecycle");
+        assert_eq!(started["state"], "started");
+        assert_eq!(started["grant_id"], grant.grant_id);
+        // Fence the initial send before changing authority. No command, result,
+        // resubscription or manual lifecycle refresh may wake this idle client.
+        socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
+        super::tests::next_pong(&mut socket).await;
+        if run_end {
+            state.store.set_mission_run_state(&grant.run_id, "cancelled", "terminal", Some("idle run ended")).unwrap();
+        } else {
+            client_control_grants::revoke_grant(&state, &issuer, &grant.grant_id).unwrap();
+        }
+        let changed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = super::tests::next_data_frame(&mut socket).await;
+                if let Some(event) = frame["upserts"].as_array().and_then(|items| items.iter()
+                    .find(|item| item["kind"] == "client-control-grant-lifecycle" && item["state"] != "started")) {
+                    break event.clone();
+                }
+            }
+        }).await.expect("idle client must receive the terminal lifecycle transition");
+        assert_eq!(changed["id"], started["id"]);
+        assert_eq!(changed["state"], if run_end { "ended" } else { "revoked" });
+        assert_eq!(changed["reason"], if run_end { "run-ended" } else { "revoked" });
+        assert!(changed["sequence"].as_u64().unwrap() > started["sequence"].as_u64().unwrap());
+        socket.close(None).await.unwrap();
+        server.abort();
+    }
 }
