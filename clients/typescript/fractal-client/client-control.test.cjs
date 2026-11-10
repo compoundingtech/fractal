@@ -13,7 +13,7 @@ const loaded = new Module(filename, module);
 loaded.filename = filename;
 loaded.paths = module.paths;
 loaded._compile(source, filename);
-const { visibleStateCanonicalJson, visibleStateDigest, clientResultCanonicalBytes } = loaded.exports;
+const { ClientResultCanonicalizationError, visibleStateCanonicalJson, visibleStateDigest, clientResultCanonicalBytes } = loaded.exports;
 const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../fixtures/clients/client-control-v1.golden.json'), 'utf8'));
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const point = Buffer.from(fixture.public_key_sec1_base64url, 'base64url');
@@ -37,9 +37,13 @@ test('all clients share canonical bytes, digest and purpose-specific fixed-key s
     assert.equal(verifies(bytes, messageSignature), false);
   }
 });
-test('JCS refuses lone surrogate strings', () => {
-  const state = { ...fixture.vectors[0].input.visible_state, route: '\ud800' };
-  assert.throws(() => visibleStateCanonicalJson(state), /Invalid Unicode/);
+test('JCS exposes typed lone-surrogate refusals through canonical byte generation', async () => {
+  for (const route of ['\ud800', '\udc00']) {
+    const state = { ...fixture.vectors[0].input.visible_state, route };
+    const isInvalidUnicode = error => error instanceof ClientResultCanonicalizationError && error.code === 'invalid-unicode';
+    assert.throws(() => visibleStateCanonicalJson(state), isInvalidUnicode);
+    await assert.rejects(clientResultCanonicalBytes({ ...fixture.vectors[0].input, visible_state: state }), isInvalidUnicode);
+  }
 });
 
 test('injected SHA256 reproduces golden bytes without a WebCrypto dependency', async () => {
