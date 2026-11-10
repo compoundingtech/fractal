@@ -160,6 +160,52 @@ mod tests {
     }
 
     #[test]
+    fn claim_page_allowlists_intersect_filters_before_pagination() {
+        let store = Store::open_memory("node").unwrap();
+        let denied = "custom.acme.private";
+        append(&store, "custom/acme/change/1", denied);
+        let a = append(&store, "custom/acme/change/1", CHANGE);
+        append(&store, "custom/acme/change/1", denied);
+        let b = append(&store, "custom/acme/change/2", NOTE);
+        append(&store, "custom/acme/changes/outside", CHANGE);
+        let c = append(&store, "custom/acme/change/1", CHANGE);
+        append(&store, "custom/acme/change/1", denied);
+        let prefix = ClaimsFilter {
+            subject_prefix: Some("custom/acme/change/"),
+            ..ClaimsFilter::default()
+        };
+        let allowed = [CHANGE, NOTE];
+        let page = |filter, after, before, descending, limit, kinds| {
+            store.claims_page_matching_with_kinds(
+                filter, None, after, before, descending, limit, kinds,
+            ).unwrap()
+        };
+        let first = page(prefix, 0, None, false, 1, Some(allowed.as_slice()));
+        assert_eq!((indexes(&first), first.next_cursor), (vec![a], Some(a)));
+        let rest = page(prefix, a, None, false, 10, Some(allowed.as_slice()));
+        assert_eq!((indexes(&rest), rest.next_cursor), (vec![b, c], None));
+        let newest = page(prefix, 0, None, true, 1, Some(allowed.as_slice()));
+        assert_eq!((indexes(&newest), newest.next_cursor), (vec![c], Some(c)));
+        let older = page(prefix, 0, Some(c), true, 10, Some(allowed.as_slice()));
+        assert_eq!((indexes(&older), older.next_cursor), (vec![b, a], None));
+        let exact = ClaimsFilter { subject: Some("custom/acme/change/1"), ..ClaimsFilter::default() };
+        assert_eq!(indexes(&page(exact, 0, None, false, 10, Some(allowed.as_slice()))), vec![a, c]);
+        let kind = ClaimsFilter { kind: Some(CHANGE), ..prefix };
+        assert_eq!(indexes(&page(kind, 0, None, false, 10, Some(allowed.as_slice()))), vec![a, c]);
+        let excluded = ClaimsFilter { kind: Some(denied), ..prefix };
+        let empty = page(excluded, 0, None, false, 10, Some(allowed.as_slice()));
+        assert!(empty.claims.is_empty());
+        assert_eq!(empty.next_cursor, None);
+        let empty = page(prefix, 0, None, false, 10, Some([].as_slice()));
+        assert!(empty.claims.is_empty());
+        assert_eq!(empty.next_cursor, None);
+        assert_eq!(
+            indexes(&page(prefix, 0, None, false, 10, None)),
+            indexes(&store.claims_page_matching(prefix, None, 0, None, false, 10).unwrap()),
+        );
+    }
+
+    #[test]
     fn claims_by_kinds_after_reads_newer_claims_under_a_prefix() {
         let store = Store::open_memory("node").unwrap();
         let a = append(&store, "custom/acme/change/1", CHANGE);
@@ -203,7 +249,7 @@ mod tests {
                 (ClaimsSubject::Range, false, "USING INDEX claims_subject_index (subject>? AND subject<?)"),
                 (ClaimsSubject::Exact, true, "USING INDEX claims_subject_kind_index (subject=? AND kind=? AND store_index>?)"),
             ] {
-                let plan = plan(&store, &claims_page_query(subject, kind, descending));
+                let plan = plan(&store, &claims_page_query(subject, kind, descending, false));
                 assert!(plan.contains(expected), "{subject:?} kind={kind}: {plan}");
                 assert!(!plan.contains("SCAN claims"), "{subject:?} kind={kind}: {plan}");
             }

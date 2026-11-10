@@ -253,5 +253,16 @@ journal entry of a program step run (docs/st3/program-engine.md §5). Versions 1
 frozen. Generate it from the merged registry with
 `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v19.json`;
 do not hand-edit the snapshot. The simulation selects v19. Draws use the existing `step-run`
-subject family and the generic system-only append path. The never-trim set is characterized by
-hosted CI: seed runs on a loaded shared host diverge from CI at the same commit (#6210).
+subject family and the generic system-only append path.
+
+A drawn `client.operation-authorized` (in the corpus since v17) is not written. Every replica
+admits that kind only from a keyed member's signed envelope and holds an unkeyed writer's as
+unsigned; the simulated nodes have no member keys. Written, it stayed pending on every other node
+and the oracle and held every later checkpoint back, so the run never settled and the writer held
+a claim the oracle never saw. On hosted CI, v19's draws first wrote one, in seeds 1 and 34; off
+CI, schedules diverge and more seeds wrote one (seeds 3, 13, 17, 277 and 1597 in burst run
+42880734602). The input is still drawn, so a seed whose store refused it keeps its schedule.
+With v19 every fixed seed converges and trims (hosted run 42884923668), so the never-trim set is
+empty. The never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a
+lightly loaded burst runner diverge from CI at the same commit (#6210); burst run 42884913070
+leaves seeds 55 and 610 untrimmed.

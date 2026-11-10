@@ -287,7 +287,108 @@ fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
             }
         }
     }
+    assert_eq!(
+        work_oracle(store, time, Some("garden/birch"), usize::MAX),
+        work_oracle(store, time, Some("agent/garden/birch"), usize::MAX),
+        "legacy and canonical actor filters preserve the same direct seat-queue order"
+    );
+    let (legacy, _) = publication.rows.actor_rows("garden/birch");
+    let (canonical, built) = publication.rows.actor_rows("agent/garden/birch");
+    assert!(!built, "a canonical actor reuses its legacy filter's order");
+    assert!(Arc::ptr_eq(&legacy, &canonical), "both spellings share one actor order");
     (publication, changed)
+}
+
+#[test]
+fn published_work_keeps_persisted_legacy_assignments_and_available_seats_visible() {
+    let _clock = Clock::at(start_time());
+    for available in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let store = Store::open(&path, "cedar").unwrap();
+        mission(&store, "garden/alpha");
+        let run = start(&store, "garden/alpha", "legacy-work-list");
+        let (subject, _) = step(&run, "plant");
+        store.set_step_state(&subject, "ready", None).unwrap();
+        // Retain an actual older member's projection spelling, rather than testing two empty
+        // actor filters against a row already canonicalized by the current writer.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        smallclaims::store::projection_digest::register(&connection).unwrap();
+        let assignee = (!available).then_some("garden/ash");
+        let candidates = if available { r#"["garden/ash"]"# } else { "[]" };
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h16928b5eb896 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, candidates],
+        ).unwrap();
+        drop(connection);
+        let (publication, _) = fold_work_checked(&store);
+        for actor in ["garden/ash", "agent/garden/ash"] {
+            let (indexes, _) = publication.rows.actor_rows(actor);
+            assert_eq!(indexes.len(), 1, "{actor}, available={available}");
+            assert_eq!(publication.rows.order[indexes[0] as usize], subject);
+            assert_eq!(
+                work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0.len(),
+                1,
+                "the persisted legacy row is visible in the direct read too"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_spelling_ready_rows_keep_queue_order_in_direct_and_published_work() {
+    for (legacy, canonical) in [
+        ("node/worker", "agent/node/worker"),
+        ("node.builder", "agent/node.builder"),
+    ] {
+    let _clock = Clock::at(start_time());
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "cedar").unwrap();
+    mission(&store, "garden/alpha");
+    let first = start(&store, "garden/alpha", "mixed-first");
+    let second = start(&store, "garden/alpha", "mixed-second");
+    let (first_subject, _) = step(&first, "plant");
+    let (second_subject, _) = step(&second, "plant");
+    for subject in [&first_subject, &second_subject] {
+        store.set_step_state(subject, "ready", None).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    smallclaims::store::projection_digest::register(&connection).unwrap();
+    for (subject, assignee, created) in [
+        (&first_subject, if legacy.contains('/') { legacy } else { canonical }, "10"),
+        (&second_subject, canonical, "20"),
+    ] {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hb7cf1dc01667 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, created_at_unix_ms=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, created],
+        ).unwrap();
+    }
+    drop(connection);
+    store.move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
+        agent: canonical.into(),
+        run: second.id.clone(),
+        placement: "top".into(),
+        anchor: None,
+        reason: Some("reverse readiness order".into()),
+        actor: "person/operator".into(),
+        idempotency_key: "reverse-ready-order".into(),
+    }).unwrap();
+    let (publication, _) = fold_work_checked(&store);
+    for actor in [legacy, canonical] {
+        let order = store.seat_run_order(actor).unwrap();
+        let work = store.client_work_at_snapshot(Some(actor), false, publication.rows.time_unix_ms).unwrap();
+        let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
+        let selected = crate::seat_queue::select(canonical, &steps, &order);
+        assert_eq!(selected.ready, [&*second_subject, &*first_subject],
+            "both spellings honor the explicit queue order, opposite readiness order");
+        let direct = work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0;
+        let (indexes, _) = publication.rows.actor_rows(actor);
+        assert_eq!(indexes.iter().map(|&index| publication.rows.order[index as usize].as_str())
+            .collect::<Vec<_>>(), [&*second_subject, &*first_subject]);
+        assert_eq!(publication.rows.page_of(Some(&indexes), 0, usize::MAX).0, direct);
+    }
+    }
 }
 
 #[test]
