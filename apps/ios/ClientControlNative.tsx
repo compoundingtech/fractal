@@ -99,7 +99,11 @@ export const ClientControlNative = () => {
       result: async (binding, current) => {
         if (!current()) return;
         const result = await signClientResult(binding, controlProfile.signing, signWithDeviceKey, Date.now(), base64url(Crypto.getRandomBytes(16)),
-          async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, bytes)));
+          async bytes => {
+            const input = bytes.buffer instanceof ArrayBuffer
+              ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Uint8Array.from(bytes);
+            return new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, input));
+          });
         if (!result || !current()) return;
         await client.deviceResult(result);
       },
