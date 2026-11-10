@@ -80,7 +80,7 @@ describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
     expect(field.style.boxSizing).toBe('border-box')
     expect(field.style.borderRadius).toBe('6px')
     expect(within(host).getByRole('button', { name: 'Filter agents' })).not.toBeNull()
-    expect(within(host).queryByRole('button', { name: 'Show' })).toBeNull()
+    expect(within(host).getByRole('button', { name: 'Show' })).not.toBeNull()
     expect(within(host).queryByRole('button', { name: 'Show finished agents' })).toBeNull()
     expect(within(host).getByRole('button', { name: /Sort agents/ })).not.toBeNull()
     field.focus()
