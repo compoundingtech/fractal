@@ -59,7 +59,7 @@ impl Store {
 
     /// Publish a one-step mission, start a run of it and put its step at attempt 1, working.
     pub fn start_program_step_for_tests(&self) -> StepRunView {
-        crate::store::tests_shared_missions::publish_carry(self, r#"version 2
+        crate::store::tests_shared_seats::publish_mission(self, r#"version 2
 mission "land" state="ready" {
   goal "Land one change."
   step "program" { agentless }
