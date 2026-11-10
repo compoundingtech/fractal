@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Generate typed session-scoped client-control grant lifecycle resources and injectable TypeScript SHA-256",
+  "replay": {"status":"none","detail":"Wire schema and client decoder sources only; this fragment does not change claim replay."},
+  "schema": {"status":"changed","detail":"Adds client-control-grant-lifecycle Resource with grant/run/device/session/item binding, started/ended/revoked state, reason and monotonic sequence on existing commands snapshot/changes frames."},
+  "rules": {"status":"changed","detail":"Lifecycle rows drive indicators and termination, not command policy. Decoders reject sequence zero and values above 2^53-1 before ordering checks. Bound item IDs must match; stale valid started rows are ignored; terminal grants cannot reactivate; commands without active lifecycle state fail closed."},
+  "compatibility": {"status":"changed","detail":"Rust, Swift and TypeScript decode the lifecycle resource through generated Resource arms. Older clients preserve the unknown resource. TypeScript canonical helpers accept injected raw-byte SHA-256 for Hermes and expose ClientResultCanonicalizationError with invalid-unicode code; canonical bytes remain unchanged."},
+  "downtime": {"status":"none","detail":"No live setup, enrollment or daemon operation is performed by these source changes."},
+  "manual": {"status":"none","detail":"Integrate source layers before one cargo run -p fractal-client-codegen. Shared lifecycle resources, frames and fail-closed traces are checked by client tests."},
+  "recovery": {"status":"none","detail":"No stored data migration is introduced by generated lifecycle decoder source."}
+}

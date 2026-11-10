@@ -486,6 +486,10 @@ export class FractalClient {
         return this.request('POST', '/v1/client/device-results', result, undefined, undefined, requestOptions);
     }
 
+    async clientTestRevoke(device: string, requestOptions: RequestOptions = {}): Promise<unknown> {
+        return this.request('POST', '/v1/client/test-clients/revoke', { device }, undefined, undefined, requestOptions);
+    }
+
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {
         return this.request<PairingChallenge>('POST', '/v1/client/pairings', request, undefined, undefined, requestOptions);
     }

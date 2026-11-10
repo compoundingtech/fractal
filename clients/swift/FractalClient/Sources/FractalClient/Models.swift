@@ -791,20 +791,23 @@ public struct DeviceCommandRequest: Codable, Sendable {
     public let apiVersion, device: String
     public let command: PhoneCommand
     public let ttlMS: UInt64?
-    public init(device: String, command: PhoneCommand, ttlMS: UInt64? = nil, apiVersion: String = "st3.client.v0") {
-        self.apiVersion = apiVersion; self.device = device; self.command = command; self.ttlMS = ttlMS
+    public let grantID: String?
+    public init(device: String, command: PhoneCommand, ttlMS: UInt64? = nil, grantID: String? = nil, apiVersion: String = "st3.client.v0") {
+        self.apiVersion = apiVersion; self.device = device; self.command = command; self.ttlMS = ttlMS; self.grantID = grantID
     }
-    private enum Keys: String, CodingKey { case apiVersion = "api_version", device, ttlMS = "ttl_ms" }
+    private enum Keys: String, CodingKey { case apiVersion = "api_version", device, ttlMS = "ttl_ms", grantID = "grant_id" }
     public init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: Keys.self)
         apiVersion = try box.decode(String.self, forKey: .apiVersion)
         device = try box.decode(String.self, forKey: .device)
         ttlMS = try box.decodeIfPresent(UInt64.self, forKey: .ttlMS)
+        grantID = try box.decodeIfPresent(String.self, forKey: .grantID)
         command = try PhoneCommand(from: decoder)
     }
     public func encode(to encoder: Encoder) throws {
         var box = encoder.container(keyedBy: Keys.self)
         try box.encode(apiVersion, forKey: .apiVersion); try box.encode(device, forKey: .device)
+        try box.encodeIfPresent(grantID, forKey: .grantID)
         try box.encodeIfPresent(ttlMS, forKey: .ttlMS); try command.encode(to: encoder)
     }
 }
@@ -813,10 +816,12 @@ public struct DeviceResult: Codable, Sendable {
     public let outcome: DeviceCommandOutcome
     public let result: JSONValue?
     public let errorCode: String?
-    public init(commandID: String, outcome: DeviceCommandOutcome, result: JSONValue? = nil, errorCode: String? = nil) {
-        self.commandID = commandID; self.outcome = outcome; self.result = result; self.errorCode = errorCode
+    public let binding: ClientResultBinding?
+    public let signature: DeviceSignature?
+    public init(commandID: String, outcome: DeviceCommandOutcome, result: JSONValue? = nil, errorCode: String? = nil, binding: ClientResultBinding? = nil, signature: DeviceSignature? = nil) {
+        self.commandID = commandID; self.outcome = outcome; self.result = result; self.errorCode = errorCode; self.binding = binding; self.signature = signature
     }
-    enum CodingKeys: String, CodingKey { case commandID = "command_id", outcome, result, errorCode = "error_code" }
+    enum CodingKeys: String, CodingKey { case commandID = "command_id", outcome, result, errorCode = "error_code", binding, signature }
 }
 public struct DeviceCommand: Codable, Sendable, Identifiable {
     public let id, kind, revision, updatedAt, deviceID, sessionActor, issuedBy, issuedAt, expiresAt: String
@@ -824,9 +829,14 @@ public struct DeviceCommand: Codable, Sendable, Identifiable {
     public let state: DeviceCommandState
     public let result: JSONValue?
     public let errorCode: String?
+    public let grantID, runID: String?
+    public let controlGrant: ClientControlGrant?
+    public let receiptClaimID: String?
     private enum Keys: String, CodingKey {
         case id, kind, revision, updatedAt = "updated_at", deviceID = "device_id", sessionActor = "session_actor"
         case issuedBy = "issued_by", issuedAt = "issued_at", expiresAt = "expires_at", state, result, errorCode = "error_code"
+        case grantID = "grant_id", runID = "run_id", controlGrant = "control_grant"
+        case receiptClaimID = "receipt_claim_id"
     }
     public init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: Keys.self)
@@ -836,6 +846,9 @@ public struct DeviceCommand: Codable, Sendable, Identifiable {
         issuedBy = try box.decode(String.self, forKey: .issuedBy); issuedAt = try box.decode(String.self, forKey: .issuedAt)
         expiresAt = try box.decode(String.self, forKey: .expiresAt); state = try box.decode(DeviceCommandState.self, forKey: .state)
         result = try box.decodeIfPresent(JSONValue.self, forKey: .result); errorCode = try box.decodeIfPresent(String.self, forKey: .errorCode)
+        grantID = try box.decodeIfPresent(String.self, forKey: .grantID); runID = try box.decodeIfPresent(String.self, forKey: .runID)
+        controlGrant = try box.decodeIfPresent(ClientControlGrant.self, forKey: .controlGrant)
+        receiptClaimID = try box.decodeIfPresent(String.self, forKey: .receiptClaimID)
         command = try PhoneCommand(from: decoder, resource: true)
     }
     public func encode(to encoder: Encoder) throws {
@@ -846,6 +859,9 @@ public struct DeviceCommand: Codable, Sendable, Identifiable {
         try box.encode(issuedBy, forKey: .issuedBy); try box.encode(issuedAt, forKey: .issuedAt)
         try box.encode(expiresAt, forKey: .expiresAt); try box.encode(state, forKey: .state)
         try box.encodeIfPresent(result, forKey: .result); try box.encodeIfPresent(errorCode, forKey: .errorCode)
+        try box.encodeIfPresent(grantID, forKey: .grantID); try box.encodeIfPresent(runID, forKey: .runID)
+        try box.encodeIfPresent(controlGrant, forKey: .controlGrant)
+        try box.encodeIfPresent(receiptClaimID, forKey: .receiptClaimID)
         try command.encode(to: encoder, resource: true)
     }
 }
@@ -994,11 +1010,32 @@ public enum HarnessInvalidAnswerReason: String, Codable, Sendable { case unknown
 public struct HarnessInvalidAnswerDetails: Codable, Sendable { public let reason: HarnessInvalidAnswerReason }
 public enum HarnessNotAnswerableReason: String, Codable, Sendable { case adapterMissing = "adapter_missing", adapterUnavailable = "adapter_unavailable" }
 public struct HarnessNotAnswerableDetails: Codable, Sendable { public let reason: HarnessNotAnswerableReason }
+public enum ClientControlGrantLifecycleState: String, Codable, Sendable { case started, ended, revoked }
+public struct ClientControlGrantLifecycleResource: Codable, Sendable, Identifiable {
+    public let id, kind, revision, updatedAt, grantID, runID, device, session: String
+    public let itemID: String?
+    public let state: ClientControlGrantLifecycleState
+    public let reason: String
+    public let sequence: UInt64
+    enum CodingKeys: String, CodingKey {
+        case id, kind, revision, updatedAt = "updated_at", grantID = "grant_id", runID = "run_id", itemID = "item_id", device, session, state, reason, sequence
+    }
+}
+/// Existing commands snapshot/changes frames; lifecycle rows share Resource decoding.
+public struct ClientCommandsCollectionFrame: Codable, Sendable {
+    public let kind, id, collection: String
+    public let snapshot: Snapshot
+    public let items, upserts: [Resource]?
+    public let removes, order: [String]?
+    public let hasMore: Bool
+    enum CodingKeys: String, CodingKey { case kind, id, collection, snapshot, items, upserts, removes, order, hasMore = "has_more" }
+}
 public enum Resource: Codable, Sendable, Identifiable {
     case harnessQuestion(HarnessQuestionResource)
     case connectedClient(ConnectedClientResource), usage(UsageResource)
     case summary(SummaryResource)
     case deviceCommand(DeviceCommand)
+    case clientControlGrantLifecycle(ClientControlGrantLifecycleResource)
     case attention(AttentionResource), message(MessageResource), launch(LaunchResource), launchVariant(LaunchVariantResource), launchDecision(LaunchDecisionResource), launchApproval(LaunchApprovalResource), mission(MissionResource), work(WorkResource), agent(AgentResource), runtime(RuntimeResource), observer(ObserverResource), subscription(SubscriptionResource), lane(LaneResource), machine(MachineResource), device(DeviceResource), operation(OperationResource), history(HistoryResource), session(SessionResource), glass(GlassResource), ownedSet(OwnedSetResource)
     /// A kind this client does not know, from a member newer than it: kept whole so an older
     /// client skips it or shows it plainly instead of failing the page it came in.
@@ -1027,6 +1064,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case "machine": self = .machine(try MachineResource(from: decoder))
         case "device": self = .device(try DeviceResource(from: decoder))
         case "device-command": self = .deviceCommand(try DeviceCommand(from: decoder))
+        case "client-control-grant-lifecycle": self = .clientControlGrantLifecycle(try ClientControlGrantLifecycleResource(from: decoder))
         case "operation": self = .operation(try OperationResource(from: decoder))
         case "history": self = .history(try HistoryResource(from: decoder))
         case "session": self = .session(try SessionResource(from: decoder))
@@ -1058,6 +1096,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .machine(let v): try v.encode(to: encoder)
         case .device(let v): try v.encode(to: encoder)
         case .deviceCommand(let v): try v.encode(to: encoder)
+        case .clientControlGrantLifecycle(let v): try v.encode(to: encoder)
         case .operation(let v): try v.encode(to: encoder)
         case .history(let v): try v.encode(to: encoder)
         case .session(let v): try v.encode(to: encoder)
@@ -1067,7 +1106,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .deviceCommand(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .clientControlGrantLifecycle(let v): v.id; case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .deviceCommand(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {
