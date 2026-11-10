@@ -1,6 +1,6 @@
 //! A missed CI objective is a fault for the fleet's fault agent.
 //!
-//! The objectives `slo/targets.toml` declares for CI (each `[[duration]]` and `[[count]]`) are
+//! The objectives `slo/objectives.kdl` ships for CI (each `ci-duration` and `ci-count`) are
 //! read from the rows the SLO history samples once a minute. An objective whose row is missed
 //! opens one `operational.failure` on this member's `daemon/NODE` subject, addressed to the fleet
 //! fault agent and never to a person; it stays one episode until the row is met again, when an
