@@ -79,6 +79,8 @@ pub struct MailLine {
 #[derive(Clone, Debug)]
 pub struct Context {
     pub agent: String,
+    /// The `description` of the seat's current declaration: its charter.
+    pub charter: Option<String>,
     pub handoff: Option<Handoff>,
     pub work: Vec<StepRunView>,
     pub mail: Vec<MailLine>,
@@ -86,6 +88,10 @@ pub struct Context {
 
 /// Read a seat's handoff and live state from the graph.
 pub fn gather(store: &Store, agent: &str) -> Result<Context> {
+    let charter = store
+        .desired_subject_with_writer(agent)?
+        .filter(|(desired, _)| desired.kind == "agent")
+        .and_then(|(desired, _)| crate::model::canonical_child_string(&desired.desired, "description"));
     let handoff = match document_name(agent) {
         Some(name) => latest_handoff(store, &name)?,
         None => None,
@@ -126,6 +132,7 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
         .collect();
     Ok(Context {
         agent: agent.to_owned(),
+        charter,
         handoff,
         work,
         mail,
@@ -243,7 +250,9 @@ fn is_session_start(message: &MessageView) -> bool {
 }
 
 /// The message a fresh session starts with, or none when the seat has nothing to carry over: no
-/// handoff and no work. Unread mail reaches the session on its own, so it alone says nothing.
+/// handoff and no work. Unread mail reaches the session on its own, so it alone says nothing, and
+/// neither does the charter: a seat with nothing in flight takes no turn, as at its first start,
+/// and reads its charter when work arrives.
 pub fn render(context: &Context, now_unix_ms: u128) -> Option<String> {
     if context.handoff.is_none() && context.work.is_empty() {
         return None;
@@ -254,6 +263,9 @@ pub fn render(context: &Context, now_unix_ms: u128) -> Option<String> {
          this. If you do not, this is where the session before you was: carry on from here \
          without waiting to be told.\n",
     );
+    if let Some(charter) = &context.charter {
+        let _ = write!(out, "\n## Your charter\n\n{}\n", charter.trim_end());
+    }
     match &context.handoff {
         Some(handoff) => {
             let age = age(now_unix_ms.saturating_sub(handoff.written_at_unix_ms));
@@ -388,6 +400,7 @@ mod tests {
     fn context() -> Context {
         Context {
             agent: "agent/garden/ash".into(),
+            charter: Some("Keep the widget build green.\nOwn its release notes.".into()),
             handoff: Some(Handoff {
                 reference: "doc/agents/garden/ash/handoff@abc".into(),
                 written_at_unix_ms: 0,
@@ -435,6 +448,18 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_session_reads_its_charter_before_where_it_was() {
+        let text = render(&context(), 0).expect("a message");
+        let charter = text
+            .find("\n## Your charter\n\nKeep the widget build green.\nOwn its release notes.\n")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(charter < text.find("## Handoff").unwrap(), "{text}");
+        let mut uncharted = context();
+        uncharted.charter = None;
+        assert!(!render(&uncharted, 0).unwrap().contains("## Your charter"));
+    }
+
+    #[test]
     fn the_prepare_message_says_why_when_and_how_to_acknowledge() {
         let text = render_prepare("the declared model changed", 130_000, 10_000);
         assert!(text.contains("the declared model changed"), "{text}");
@@ -454,6 +479,8 @@ mod tests {
         let mut empty = context();
         empty.handoff = None;
         empty.work.clear();
+        // A charter alone is no reason for a turn: the seat reads it when work arrives.
+        assert!(empty.charter.is_some());
         assert_eq!(render(&empty, 0), None);
     }
 

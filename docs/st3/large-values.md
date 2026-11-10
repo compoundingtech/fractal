@@ -191,14 +191,26 @@ These accept existing inline representations, not a value-size or cost bound.
 | Inventory ID | Producer and reviewed value flow | Reason and next step |
 | --- | --- | --- |
 | `lv-h17335d660f3b` | `fractal_store::store::attention` prepares the effective-reviewer pending-request query and hydrates request bodies and canonical episode timestamps. | Preserve exact episode and canonical ordering; trace composed SQL and reference/chunk variable request values. |
-| `lv-hc89d14431aec` | `fractal_evidence::store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold; the typed assignment-cut refactor preserves its SQL bytes. | Trace composed query and reference representation while preserving exact request identity and historical authority. |
-| `lv-hdc87d88b5a4d` | `fractal_store::store::human_review_reassignment` reads the effective reviewer for one request, including canonical repair and receipt selection; only the builder call shape changes. | Trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
+| `lv-hc89d14431aec` | `fractal_evidence::store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold; agent-review requests ignore person repairs, while human results retain canonical ordering. | Trace composed query and reference representation while preserving exact request identity and historical authority. |
+| `lv-hdc87d88b5a4d` | `fractal_store::store::human_review_reassignment` reads the effective reviewer for one request, including canonical human repair and receipt selection. The fold excludes repairs only when the stored request's `gate_kind` is exactly `agent-review`; `IS NOT` keeps requests with no `gate_kind` unchanged. | Admission rejects agent-review repairs with `agent-review-reassignment-forbidden`; the read fence also covers imported history. Trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
 | `lv-h12810b4d74c0` | `fractal_store::store::person_rename` hydrates a receipt by idempotency key. | Preserve original report and actor/people validation; prepare a body/reference representation with identical replay semantics. |
 | `lv-h273f7a4b7c06` | `fractal_store::store::person_rename` reads the canonical receipt destination by old-person subject. | Both reducers must choose the same winner; reference variable person keys without changing canonical ordering. |
 | `lv-hfbb687ae03ed` | `fractal_store::store::person_work` evaluates receipt-winner SQL for a reassignment claim. | Trace composed SQL and variable claim/person keys toward a reference representation without changing winner selection. |
 | `lv-hf6f5b79d7be9` | `fractal_store::store::person_work` updates assignee and its index key, fenced by step and previous person. | Preserve atomic episode-fenced assignment; bound/reference values and account for old cell/index-key reclamation. |
 | `lv-h2c8b0107116f` | `fractal_store::store` hydrates the first authorized exact-request answer with effective-reviewer predicates. | Reference/chunk hydrated values while preserving answer authority at its canonical moment. |
 | `lv-h82624af80f95` | `fractal_store::store` schema adds request, answer, reassignment, reviewer-routing and exact episode indexes. | Existing variable inline keys enable indexed episode seeks but are not bounded-size proof; reference/chunk variable columns and index expressions without changing fold semantics. |
+
+The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
+
+### Agent answer atomicity inventory review
+
+The dormant answer writer shares generic append's operation-outcome admission and isolates its mutations in a savepoint. These reviewed exceptions preserve existing value representations; they do not establish size bounds.
+
+| Inventory IDs | Producer and reviewed value flow | Rationale and next step |
+| --- | --- | --- |
+| `lv-h9376410940d5`, `lv-h25f2de100e85`, `lv-hf3bdff08c789` | `fractal_store::store::agent_review_transaction` starts, releases or rolls back a fixed-name savepoint. | Fixed control SQL carries no request/body values; retain explicit rollback isolation while tracing the composed write path. |
+| `lv-hc04950ca3e3d`, `lv-h21a64752ecb4` | `fractal_missions::store::missions::run_review::answer_tests` lists tables and snapshots every stored cell in a real in-memory fixture. | Test-only equality proves claims, events, projections and operation rows do not survive refusal; this unbounded fixture read is not a production size/cost guarantee. Quote table names and trace cell representations if reused outside tests. |
+| `lv-hde1a4495a8b4` | The same test module stores a genuine consumed signature as the next writer's expected signature. | Exercises the real post-insert nonce-replay failure, not a mock. The public signature JSON remains inline fixture data; prepare/reference it before any production reuse. |
 
 ### Conversation-owner inventory review (PR #3116)
 
@@ -520,39 +532,67 @@ and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
 
-## Assistant principal admission index review
+## Assistant principal admission and authenticated authority inventory
 
-`fractal_store::store` owns schema site `lv-hd7de403d2fec`, replacing
-`lv-h7e7937d8fad1`. The principal admission indexes retain claim-kind TEXT
-and the effective principal JSON field inline; absent principals use the fixed
-`assistant/chatgpt` key. The added expiry suffix supports live-grant range seeks.
-`claims_assistant_v1_transition_index` keys subject, kind, origin, actor and
-store index TEXT/INTEGER columns, so an authoritative policy or revocation lookup
-seeks past overlays from another origin or actor.
-These indexes change neither claim bodies nor admission semantics. Keys remain variable-size, and SQLite maintains them
-on insertion and deletion; indexed lookup is not a byte-size or startup-cost
-proof. The producer maintainer retains `chunk-or-reference-variable-columns`
-responsibility while preserving effective-principal matching and claim authority.
+The admission-index review established the need for effective-principal matching
+(including the legacy `assistant/chatgpt` default), live-grant expiry range seeks,
+and subject/kind/origin/actor transition seeks that exclude another issuer's
+overlays. The authenticated authority projection in PR #5993 preserves those
+requirements without treating raw claim rows as authority.
 
-`fractal_store::store::assistant_write` owns the read-only sink
-`lv-h1cad9af7ef23`, replacing `lv-h0fa302b0797b`. The shared validated transition
-query binds a grant subject, claim kind, origin, owner actor, grant claim ID,
-local origin and optional store-index seek boundary, and returns at most one
-claim row. The boundary allows callers to continue past a structurally valid but
-cryptographically unauthenticated foreign transition. It writes nothing; bodies
-stay inline, so the exception establishes neither encoded-size nor execution-cost bounds.
+`smallclaims::store::assistant_grant_authority` owns schema site
+`lv-hbfff283c1bdb`. Its authority transition index includes the exact base claim
+and canonical store order; its effective-grant active index keys principal,
+owner, revocation, expiry and profile. Authenticated records, grant subjects,
+principal/actor keys and proof identities remain inline variable-size values.
+The producer retains `chunk-or-reference-variable-columns` responsibility:
+representation changes must preserve authentication, effective-principal
+matching, latest-policy/revocation selection and proof invalidation/reclamation.
+Indexed lookup and bounded catch-up batches prove neither encoded byte size nor
+total startup cost.
 
-`fractal_api_core::api::client_v0::external_grants` owns the conservative
-read-only sink `lv-hc1c46de6a890`, replacing `lv-h99f1a302c7b1`. Its dynamically
-composed candidate query binds fixed claim kinds, an assistant principal, an
-optional expiry cutoff, local origin, owner actor, and optional ignored profile
-and excluded claim ID. It returns candidate grant/transition claim rows for one
-batch full-provenance check before latest-policy and revocation filtering.
-It adds no writer or persistent body copy; principal, subject, claim-ID TEXT keys
-and returned inline bodies remain variable-size. The producer maintainer retains
-`trace-statement-and-value-representation` responsibility for these bindings and
-returned values; fewer candidates and indexed seeks do not establish encoded-size
-or execution-cost bounds.
+The former raw-claim principal, principal/expiry and transition indexes and the
+raw transition-reader exception `lv-h1cad9af7ef23` are superseded, not a second
+production admission path. Raw claims remain evidence; projection readers must
+not restore authority to unauthenticated overlays.
+
+`fractal_api_core::api::client_v0::external_grants` no longer owns a raw SQL
+candidate sink: `lv-h99f1a302c7b1` and its intermediate batch-provenance
+replacement `lv-hc1c46de6a890` are superseded by the authenticated projection
+API. Candidate selection retains principal, owner, expiry, ignored-profile and
+excluded-claim filtering without rehydrating raw claim history as authority.
+The projection's record copies and variable index keys remain transitional debt,
+not an encoded-size or execution-cost guarantee.
+
+The merged `fractal_store::store` schema is `lv-h6e39e16546c7`, replacing
+`lv-h22c8c670811c` and `lv-h6088551c41aa`. It retains the desired-kind/subject
+index and local desired-write witness while removing the obsolete raw principal
+index. Variable columns and index keys still require reference/chunk conversion.
+
+The merged inventory additionally reviews the authority producer's pending proof
+identities, membership-window additions/retractions, resumable authentication
+cursors, dirty/recompute work, invalidation triggers, local-append witnesses and
+upgrade metadata. These retain inline claim/subject/writer/member-key strings,
+signed-record identities and record JSON so proof invalidation and catch-up
+remain exact. The owning producer must preserve those identities, atomic
+visibility and keyed reclamation when changing representation; batch counts do
+not bound individual values. Savepoint/release and composed read sinks remain
+conservative `trace-statement-and-value-representation` exceptions.
+
+The corresponding API, delivery, wake, authority, membership-property,
+receipt-cost and benchmark fixtures mutate isolated proof/cursor/claim state or
+count work to exercise those invariants. Their module owners retain the listed
+body/predecessor, exact-wire, generation/reclamation and reference TODOs; test
+coverage establishes no production value-size exemption.
+
+Reviewed manual flows `smallclaims::store::insert_claim`,
+`smallclaims::store::put_document_as` and
+`smallclaims::store::receive_replication_exchange_via` retain their existing
+representation TODOs. Local inserts now stamp the authority local-append witness;
+document writes preserve blob, idempotency and writer-admission semantics; exchange
+receipt preserves exact envelopes/signatures, carrier evidence and pending
+admission. Their refreshed fingerprints do not generalize document or transport
+limits into universal stored-value bounds.
 
 The `smallclaims::store::membership_query_tests` maintainer owns test-only sites
 `lv-hb5e52f377f02`, `lv-he6cdb35f9041` and `lv-h85da58ff0363`. These change a

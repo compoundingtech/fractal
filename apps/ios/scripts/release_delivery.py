@@ -14,6 +14,19 @@ import time
 
 BUNDLE_ID = "com.compoundingtech.fractal"
 
+
+def bundle_id(variant):
+    return BUNDLE_ID + (".test" if variant == "test" else "")
+
+
+def variant_state(state, variant):
+    """The normal lane retains its exact path; test never shares mutable state."""
+    return state / "ios-test-variant" if variant == "test" else state
+
+
+def build_environment(variant):
+    return {**DAILY_BUILD_ENV, "APP_VARIANT": "test" if variant == "test" else "daily"}
+
 # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 def ios_env(suffix, default=None, environment=os.environ):
     """Prefer Fractal; an explicitly empty value masks the legacy spelling."""
@@ -172,10 +185,12 @@ def build_identity(args, *, fabric_hash=None):
         "env": {key: value for key, value in sorted(os.environ.items())
                 if key.startswith("EXPO_PUBLIC_")
                 and key not in ("EXPO_PUBLIC_FRACTAL_BUILD", "EXPO_PUBLIC_ST3_BUILD")},
-        "pinned": DAILY_BUILD_ENV,
+        "pinned": build_environment(args.variant),
         "fabric_framework": (fabric_hash if fabric_hash is not None else
                              framework_hash(args.state / "checkout", required=False)),
     }
+    if args.variant == "test":
+        identity["test_profiles"] = [args.test_app_profile, args.test_runner_profile]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -187,7 +202,7 @@ def build_release(args):
     inputs_file = cache / "inputs.json"
     inputs = json.loads(inputs_file.read_text()) if inputs_file.exists() else {}
     env = os.environ.copy()
-    env.update(DAILY_BUILD_ENV, DEVELOPER_DIR=args.developer_dir,
+    env.update(build_environment(args.variant), DEVELOPER_DIR=args.developer_dir,
                EXPO_PUBLIC_FRACTAL_BUILD=args.commit[:12],
                EXPO_PUBLIC_ST3_BUILD=args.commit[:12], CI="1",
                LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8")
@@ -229,8 +244,8 @@ def build_release(args):
         print("Reusing locked pnpm workspace dependencies", flush=True)
     config = json.loads(run(["pnpm", "exec", "expo", "config", "--type", "public", "--json"],
                             cwd=app, env=env, capture=True))
-    if config["ios"]["bundleIdentifier"] != BUNDLE_ID:
-        raise ValueError("Tracked ref lacks the daily app variant; refusing to replace Debug")
+    if config["ios"]["bundleIdentifier"] != bundle_id(args.variant):
+        raise ValueError("Tracked ref lacks the selected app variant; refusing another identity")
     # Reuse the documented builder inside the same gated worker as Xcode.
     run(["sh", "modules/fractal-fabric/build.sh"], cwd=app, env=env)
     fabric_hash = framework_hash(repo)
@@ -241,7 +256,7 @@ def build_release(args):
         "packages": identities, "config": config,
         "source": git(repo, "ls-tree", "-r", args.commit, "--", *native_paths),
         "developer_dir": args.developer_dir, "team": args.team,
-        "pod": shutil.which("pod"), "env": DAILY_BUILD_ENV,
+        "pod": shutil.which("pod"), "env": build_environment(args.variant),
         "fabric_framework": fabric_hash,
     }, sort_keys=True).encode()).hexdigest()
     regenerate = (inputs.get("native") != native_identity
@@ -280,11 +295,16 @@ def build_release(args):
         raise ValueError("FractalFabricRust.xcframework changed before linking")
     derived = cache / "derived"
     run(["pnpm", "run", "export:ios"], cwd=app, env=env)
+    signing = (["CODE_SIGN_STYLE=Manual", f"DEVELOPMENT_TEAM={args.team}",
+                "CODE_SIGN_IDENTITY=Apple Development",
+                f"FRACTAL_IOS_TEST_APP_PROFILE={args.test_app_profile}",
+                f"FRACTAL_IOS_TEST_RUNNER_PROFILE={args.test_runner_profile}"]
+               if args.variant == "test" else
+               ["CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
+                "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates"])
     run(["xcodebuild", "-workspace", str(workspace), "-scheme", workspace.stem,
          "-configuration", "Release", "-sdk", "iphoneos", "-destination", "generic/platform=iOS",
-         "-derivedDataPath", str(derived), "-jobs", "4",
-         "CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
-         "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates", "build"],
+         "-derivedDataPath", str(derived), "-jobs", "4", *signing, "build"],
         cwd=app, env=env)
     # DerivedData survives native identity changes. Select only the current Expo
     # product; unrelated products from earlier generated workspaces may remain.
@@ -294,8 +314,8 @@ def build_release(args):
         raise ValueError("Expected one successful Release app")
     with (apps[0] / "Info.plist").open("rb") as file:
         info = plistlib.load(file)
-    if info.get("CFBundleIdentifier") != BUNDLE_ID:
-        raise ValueError("Built app is not the daily bundle")
+    if info.get("CFBundleIdentifier") != bundle_id(args.variant):
+        raise ValueError("Built app is not the selected bundle")
     if any(info.get(key) != value for key, value in stamp.items()):
         raise ValueError("Built app has stale source identity")
     if args.commit[:12].encode() not in (apps[0] / "main.jsbundle").read_bytes():
@@ -384,10 +404,12 @@ class Delivery:
             if any(not isinstance(app, dict) or not isinstance(app.get("bundleIdentifier"), str)
                    for app in apps):
                 raise ValueError("Invalid installed-app entry")
-            matches = [app for app in apps if app["bundleIdentifier"] == BUNDLE_ID]
-            if len(matches) != 1:
-                raise ValueError("Expected one installed daily app")
-            version = matches[0].get("bundleVersion") if matches else None
+            matches = [app for app in apps if app["bundleIdentifier"] == bundle_id(self.args.variant)]
+            if len(matches) != 1 and not (self.args.variant == "test" and not matches):
+                raise ValueError("Expected one installed selected app")
+            # A new isolated test app has no previous install. The normal lane
+            # still requires its authoritative readback exactly as before.
+            version = matches[0].get("bundleVersion") if matches else "0"
             if matches and (not isinstance(version, str) or not version.isascii() or not version.isdigit()):
                 raise ValueError("Invalid installed daily build version")
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
@@ -412,8 +434,34 @@ class Delivery:
         self.persist()
         return version
 
+    def verify_install_artifact(self, artifact):
+        app = Path(artifact["app"])
+        try:
+            with (app / "Info.plist").open("rb") as file:
+                info = plistlib.load(file)
+            if info.get("CFBundleIdentifier") != bundle_id(self.args.variant):
+                self.record("install_refused", commit=artifact["commit"], reason="bundle_mismatch",
+                            build_version=artifact["build_version"])
+                return False
+            verify_fabric_linkage(app, info, self.env)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            # Invalidate retention and delivery intent, even if it already reached the phone.
+            (app.parent / "success.json").unlink(missing_ok=True)
+            for field in ("pending", "install_attempt"):
+                if self.data.get(field, {}).get("app") == artifact["app"]:
+                    del self.data[field]
+            if self.data.get("installed_key") == artifact["key"]:
+                self.data.pop("installed_key", None)
+            self.persist()
+            self.record("install_refused", commit=artifact["commit"], reason="fabric_missing",
+                        build_version=artifact["build_version"])
+            return False
+        return True
+
     def recover_install(self, pending):
         """Confirm an interrupted attempt using the same installed-build readback."""
+        if not self.verify_install_artifact(pending):
+            return False
         version = self.read_installed(pending)
         if version is None:
             return False
@@ -443,6 +491,7 @@ class Delivery:
         if self.data.get("config", config) != config:
             raise ValueError("Device/team or trust configuration changed: use a separate state directory")
         if self.args.reconcile_installed:
+            # Readback-only reconciliation cannot install or launch an artifact.
             if not self.data.get("trusted_head"):
                 raise ValueError("--reconcile-installed requires initialized delivery state")
             version = self.read_installed()
@@ -534,6 +583,8 @@ class Delivery:
         if self.env.get("AGENT_ACTION_APPROVAL") != "deploy":
             self.record("install_held", commit=pending["commit"], reason="deploy_approval_required")
             return
+        if not self.verify_install_artifact(pending):
+            return
         if not pending["installed"]:
             version = self.read_installed(pending)
             if version is None:
@@ -579,7 +630,7 @@ class Delivery:
             self.record("installed", commit=pending["commit"])
         try:
             run(["xcrun", "devicectl", "device", "process", "launch", "--device", self.args.device,
-                 BUNDLE_ID, "--timeout", "30"],
+                 bundle_id(self.args.variant), "--timeout", "30"],
                 env=self.env)
         except (OSError, subprocess.SubprocessError) as error:
             self.record("launch_failed", commit=pending["commit"], reason=str(error))
@@ -654,7 +705,10 @@ class Delivery:
                    str(Path(__file__).resolve()), "--build-worker",
                    "--repo", str(repo), "--output", str(output),
                    "--team", self.args.team, "--commit", commit,
-                   "--build-version", version, "--developer-dir", self.args.developer_dir]
+                   "--build-version", version, "--developer-dir", self.args.developer_dir,
+                   "--variant", self.args.variant,
+                   "--test-app-profile", self.args.test_app_profile or "",
+                   "--test-runner-profile", self.args.test_runner_profile or ""]
         with (output / "build.log").open("a") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode or not (output / "success.json").exists():
@@ -686,6 +740,10 @@ def main():
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--ref", default=ios_env("REF", "origin/main"))
     parser.add_argument("--state", type=Path)
+    parser.add_argument("--variant", choices=("normal", "test"),
+                        default=ios_env("VARIANT", "normal"))
+    parser.add_argument("--test-app-profile", default=ios_env("TEST_APP_PROFILE"))
+    parser.add_argument("--test-runner-profile", default=ios_env("TEST_RUNNER_PROFILE"))
     parser.add_argument("--expected-origin", default=ios_env("EXPECTED_ORIGIN"),
                         help="Exact trusted origin URL, supplied by the operator")
     parser.add_argument("--trusted-commit", default=ios_env("TRUSTED_COMMIT"),
@@ -713,6 +771,10 @@ def main():
     args.repo = args.repo.expanduser().resolve()
     if not args.team or not args.developer_dir:
         parser.error("--team/FRACTAL_IOS_TEAM and --developer-dir/DEVELOPER_DIR are required")
+    if args.variant not in ("normal", "test"):
+        parser.error("FRACTAL_IOS_VARIANT must be normal or test")
+    if args.variant == "test" and not args.test_app_profile:
+        parser.error("test variant requires --test-app-profile/FRACTAL_IOS_TEST_APP_PROFILE")
     if args.build_worker:
         build_release(args)
         return
@@ -729,7 +791,7 @@ def main():
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if validation.returncode or ref.startswith("-"):
             parser.error("--ref must be a valid branch name or full commit SHA")
-    args.state = args.state.expanduser().resolve()
+    args.state = variant_state(args.state.expanduser().resolve(), args.variant)
     delivery = Delivery(args)
     with (args.state / "delivery.lock").open("a") as lock:
         try:

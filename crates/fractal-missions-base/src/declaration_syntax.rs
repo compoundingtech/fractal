@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::model::FractalError;
@@ -36,6 +35,76 @@ pub const VARIABLES: &[&str] = &[
     "candidate.index",
     "PATH",
 ];
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-09-kdl-fractal-context-names — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Spell each `${FRACTAL_X}` context reference inside `mission` declarations as the registered
+/// `${ST_X}` before parsing, as `terminal` is lowered to `pty`. Either spelling publishes the same
+/// mission revision, so members that only know the `ST_` names run it unchanged. Escaped `$${…}`
+/// text and names that are not context variables stay as written.
+pub fn lower_context_references(document: &mut KdlDocument) {
+    fn lower(node: &mut KdlNode) {
+        for entry in node.entries_mut() {
+            let Some(lowered) = entry
+                .value()
+                .as_string()
+                .and_then(registered_references)
+            else {
+                continue;
+            };
+            let value = KdlValue::String(lowered);
+            if let Some(format) = entry.format_mut() {
+                format.value_repr = value.to_string();
+            }
+            entry.set_value(value);
+        }
+        if let Some(children) = node.children_mut() {
+            children.nodes_mut().iter_mut().for_each(lower);
+        }
+    }
+    for node in document.nodes_mut() {
+        if node.name().value() == "mission" {
+            lower(node);
+        }
+    }
+}
+
+/// `text` with its `${FRACTAL_X}` context references spelled `${ST_X}`, or `None` when it has none.
+fn registered_references(text: &str) -> Option<String> {
+    if !text.contains("${FRACTAL_") {
+        return None;
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut lowered = false;
+    while let Some(start) = rest.find("${") {
+        let (before, tail) = (&rest[..start], &rest[start + 2..]);
+        output.push_str(before);
+        output.push_str("${");
+        rest = tail;
+        if before.ends_with('$') {
+            continue;
+        }
+        let Some(end) = tail.find('}') else {
+            continue;
+        };
+        let name = &tail[..end];
+        let Some(suffix) = name.strip_prefix("FRACTAL_") else {
+            continue;
+        };
+        if let Some(registered) = VARIABLES
+            .iter()
+            .find(|variable| variable.strip_prefix("ST_") == Some(suffix))
+        {
+            output.push_str(registered);
+            output.push('}');
+            rest = &tail[end + 1..];
+            lowered = true;
+        }
+    }
+    output.push_str(rest);
+    lowered.then_some(output)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-09-kdl-fractal-context-names
 
 pub fn is_reserved_context_name(name: &str) -> bool {
     (VARIABLES.contains(&name) && name != "PATH") || name == "ST3_SUBJECT"
@@ -134,26 +203,7 @@ pub fn first_string(node: &KdlNode) -> Result<String, FractalError> {
         .and_then(|value| value_string(value))
 }
 
-pub fn json_value(value: &KdlValue) -> Result<Value, FractalError> {
-    Ok(match value {
-        KdlValue::String(value) => Value::String(value.clone()),
-        KdlValue::Integer(value) => {
-            let integer = i64::try_from(*value).map_err(|_| {
-                FractalError::new(
-                    "integer-range",
-                    "a KDL integer must fit a signed 64-bit value",
-                )
-            })?;
-            Value::Number(integer.into())
-        }
-        KdlValue::Float(value) => Value::Number(
-            serde_json::Number::from_f64(*value)
-                .ok_or_else(|| FractalError::new("invalid-number", "a float must be finite"))?,
-        ),
-        KdlValue::Bool(value) => Value::Bool(*value),
-        KdlValue::Null => Value::Null,
-    })
-}
+pub use crate::declaration_kdl::{json_value, parse_duration};
 
 pub fn one_string(node: &KdlNode) -> Result<String, FractalError> {
     ensure_no_children(node)?;
@@ -175,35 +225,6 @@ pub fn one_string_with_children(node: &KdlNode) -> Result<String, FractalError> 
             ))
         }
     })
-}
-
-pub fn parse_duration(value: &str, positive: bool) -> Result<u64, FractalError> {
-    let (number, multiplier) = if let Some(value) = value.strip_suffix("ms") {
-        (value, 1)
-    } else if let Some(value) = value.strip_suffix('s') {
-        (value, 1_000)
-    } else if let Some(value) = value.strip_suffix('m') {
-        (value, 60_000)
-    } else if let Some(value) = value.strip_suffix('h') {
-        (value, 3_600_000)
-    } else if let Some(value) = value.strip_suffix('d') {
-        (value, 86_400_000)
-    } else {
-        (value, 1_000)
-    };
-    let number = number
-        .parse::<u64>()
-        .map_err(|_| FractalError::new("invalid-duration", format!("invalid duration `{value}`")))?;
-    let duration = number
-        .checked_mul(multiplier)
-        .ok_or_else(|| FractalError::new("duration-range", "duration is too large"))?;
-    if positive && duration == 0 {
-        return Err(FractalError::new(
-            "invalid-duration",
-            "a required duration must be positive",
-        ));
-    }
-    Ok(duration)
 }
 
 pub fn parse_map_child(

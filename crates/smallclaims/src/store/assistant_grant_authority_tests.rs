@@ -46,6 +46,144 @@ fn fields() -> Value {
     })
 }
 
+fn service_fields() -> Value {
+    // Main's Service fixtures use bare grant IDs and omit assistant consent/read mode.
+    json!({
+        "grant_id": "0123456789abcdef01234567",
+        "issuer": OWNER,
+        "principal": "plugin/test/reader",
+        "profile": "service",
+        "session_actor": "plugin/test/reader/session/0123456789abcdef01234567",
+        "credential_hash": "b".repeat(64),
+        "expires_at_unix_ms": 10000,
+        "scopes": ["read.claims", "read.work", "read.documents"]
+    })
+}
+
+#[test]
+fn service_local_grant_authenticates_projection_immediately_without_assistant_consent() {
+    let store = node("issuer", None);
+    let grant = append(&store, SUBJECT, GRANTED, service_fields());
+    let connection = store.readers.get();
+    assert!(authority::contains(&connection, &grant.id).unwrap());
+    assert_eq!(authority::by_credential(&connection, &"b".repeat(64)).unwrap().unwrap().id, grant.id);
+    let candidates = authority::candidates(&connection, "plugin/test/reader", OWNER, Some(0), None, None).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, grant.id);
+    let has_envelope: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1)",
+        [&grant.id], |row| row.get(0),
+    ).unwrap();
+    assert!(!has_envelope, "Service authority must not wait for sealing");
+}
+
+#[test]
+fn service_projection_validators_enforce_closed_identity_policy_and_common_checks() {
+    let store = node("issuer", None);
+    let grant = append(&store, SUBJECT, GRANTED, service_fields());
+    assert!(authority::structurally_valid(&grant, &grant));
+    for (field, value) in [
+        ("principal", json!("assistant/other")),
+        ("principal", json!("plugin//reader")),
+        ("principal", json!("plugin/test/reader/extra")),
+        ("principal", json!("plugin/test/read er")),
+        ("profile", json!("assistant")),
+        ("profile", Value::Null),
+        ("session_actor", json!("plugin/test/other/session/0123456789abcdef01234567")),
+        ("issuer", json!("human/other")),
+        ("grant_id", json!("bad")),
+        ("credential_hash", json!("not-a-digest")),
+        ("code_hash", json!("not-a-digest")),
+        ("credential", json!("raw-secret")),
+        ("code", json!("raw-code")),
+        ("expires_at_unix_ms", json!(-1)),
+        ("scopes", json!(["read.assistant.summary"])),
+        ("scopes", json!(["write.claims"])),
+        ("scopes", json!(["read.claims", 1])),
+    ] {
+        let mut malformed = grant.clone();
+        malformed.body["fields"][field] = value;
+        assert!(!authority::structurally_valid(&malformed, &malformed), "accepted malformed {field}");
+    }
+    for principal in ["plugin/issuer-name/reader_1.0", "plugin/Test/Reader"] {
+        let mut valid = grant.clone();
+        valid.body["fields"]["principal"] = json!(principal);
+        valid.body["fields"]["session_actor"] = json!(format!("{principal}/session/0123456789abcdef01234567"));
+        assert!(authority::structurally_valid(&valid, &valid));
+    }
+}
+
+#[test]
+fn service_late_signature_promotes_grant_policy_and_revocation() {
+    let (source, key) = source();
+    let target = node("reader", Some(key.public()));
+    let grant = append(&source, SUBJECT, GRANTED, service_fields());
+    let exchange = export(&source, &target);
+    receive(&target, &unsigned(&exchange));
+    assert!(authority::by_credential(&target.readers.get(), &"b".repeat(64)).unwrap().is_none());
+    receive(&target, &signatures(&exchange));
+    assert_eq!(authority::by_credential(&target.readers.get(), &"b".repeat(64)).unwrap().unwrap().id, grant.id);
+    let mut changed = service_fields();
+    changed["expires_at_unix_ms"] = json!(20000);
+    changed["scopes"] = json!(["read.work"]);
+    let policy = append(&source, SUBJECT, POLICY, changed);
+    receive(&target, &export(&source, &target));
+    assert_eq!(authority::transition(&target.readers.get(), &grant, POLICY).unwrap().unwrap().id, policy.id);
+    let revoke = append(&source, SUBJECT, REVOKED, service_fields());
+    let exchange = export(&source, &target);
+    receive(&target, &unsigned(&exchange));
+    assert!(authority::transition(&target.readers.get(), &grant, REVOKED).is_err());
+    receive(&target, &signatures(&exchange));
+    assert_eq!(authority::transition(&target.readers.get(), &grant, REVOKED).unwrap().unwrap().id, revoke.id);
+    assert!(authority::candidates(&target.readers.get(), "plugin/test/reader", OWNER, Some(0), None, None).unwrap().is_empty());
+}
+
+#[test]
+fn service_signed_and_local_unsealed_grants_survive_projection_backfill() {
+    let (store, _) = source();
+    let sealed = append(&store, SUBJECT, GRANTED, service_fields());
+    store.seal_local_batches().unwrap();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-ha76427048a9d owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_local_appends WHERE claim_id=?1", [&sealed.id],
+    ).unwrap();
+    let mut changed = service_fields();
+    changed["credential_hash"] = json!("c".repeat(64));
+    let unsealed = append(&store, SUBJECT, GRANTED, changed);
+    reset_projection(&store.connection.write());
+    drain_authority(&store);
+    let connection = store.readers.get();
+    assert!(authority::contains(&connection, &sealed.id).unwrap());
+    assert!(authority::contains(&connection, &unsealed.id).unwrap());
+    assert_eq!(authority::by_credential(&connection, &"b".repeat(64)).unwrap().unwrap().id, sealed.id);
+    assert_eq!(authority::by_credential(&connection, &"c".repeat(64)).unwrap().unwrap().id, unsealed.id);
+}
+
+#[test]
+fn legacy_service_on_assistant_remains_cross_profile_conflict_evidence() {
+    let store = node("issuer", None);
+    let assistant = append(&store, SUBJECT, GRANTED, fields());
+    let mut legacy = fields();
+    legacy["profile"] = json!("service");
+    legacy["grant_id"] = json!("assistant-grant/fedcba9876543210fedcba98");
+    legacy["session_actor"] = json!("assistant/chatgpt/session/assistant-grant/fedcba9876543210fedcba98");
+    let service = append(&store, "custom/client/assistant-v1-fedcba9876543210fedcba98", GRANTED, legacy);
+    assert!(authority::structurally_valid(&service, &service));
+    let connection = store.readers.get();
+    let candidates = authority::candidates(&connection, "assistant/chatgpt", OWNER, Some(0), None, None).unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().any(|claim| claim.id == assistant.id));
+    assert!(candidates.iter().any(|claim| claim.id == service.id));
+    let mut invalid = service.clone();
+    invalid.body["fields"]["scopes"] = json!(["read.claims"]);
+    assert!(!authority::structurally_valid(&invalid, &invalid));
+    invalid = service.clone();
+    invalid.body["fields"]["disclosure_consent"] = Value::Null;
+    assert!(!authority::structurally_valid(&invalid, &invalid));
+    invalid = service.clone();
+    invalid.body["fields"]["minimal_read_mode"] = Value::Null;
+    assert!(!authority::structurally_valid(&invalid, &invalid));
+}
+
 fn append(store: &Store, subject: &str, kind: &str, fields: Value) -> ClaimRecord {
     store.append_claim(&ClaimInput {
         subject: subject.into(), kind: kind.into(), actor: Some(OWNER.into()),
@@ -222,7 +360,7 @@ fn backfill_markers(connection: &Connection) -> Vec<(String, String)> {
 
 fn insert_raw_signature(connection: &Connection, signature: &ReplicaEnvelopeSignature) {
     connection.execute(
-        "INSERT OR IGNORE INTO replica_envelope_signatures
+        /* sqlite-large-value: allow-for-now lv-hdd61bb7dd3ca owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures
             (writer,sequence,envelope_hash,member_key,signature,stored_at_unix_ms)
          VALUES(?1,?2,?3,?4,?5,'0')",
         params![signature.writer,signature.sequence,signature.hash,signature.member_key,signature.signature],
@@ -458,7 +596,7 @@ fn deterministic_event_permutations_match_raw_history_and_subject_rebuilds() {
 
 fn reset_projection(connection: &Connection) {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h9fa3ab767307 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */
+        /* sqlite-large-value: allow-for-now lv-ha93665c85209 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */
         "DELETE FROM assistant_grant_effective;
          DELETE FROM assistant_grant_authority;
          DELETE FROM assistant_grant_pending;
@@ -496,7 +634,7 @@ fn receive_pre_projection_unsigned_history(target: &Store, exchange: &Replicatio
         let transaction = connection.transaction().unwrap();
         for signature in signatures(exchange).signatures {
             transaction.execute(
-                "DELETE FROM replica_envelope_signatures
+                /* sqlite-large-value: allow-for-now lv-h9b903d60d4d6 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
                 params![signature.writer, signature.sequence, signature.hash, signature.member_key],
             ).unwrap();
@@ -571,12 +709,12 @@ fn older_build_raw_legacy_replication_cannot_authenticate_on_new_build_reopen() 
         let mut connection = victim.connection.write();
         let transaction = connection.transaction().unwrap();
         transaction.execute(
-            "INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-hebabcaf7fd3f owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
              VALUES(?1,?2,?3,?4,?5,?6)",
             params![grant.batch_id,grant.origin,sequence,previous,hash,grant.accepted_at_unix_ms.to_string()],
         ).unwrap();
         transaction.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-he87b7a8b6b00 owner=smallclaims::store::assistant_grant_authority_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![grant.id,grant.batch_id,grant.subject,grant.kind,grant.origin,grant.actor,
                 canonical_json_text(&grant.body).unwrap(),serde_json::to_string(&grant.predecessors).unwrap(),
@@ -606,12 +744,12 @@ fn unsigned_remote_without_membership_drains_once_and_maintenance_goes_idle() {
         // Reproduce a pre-envelope remote import: no local append marker,
         // replica receipt, signature, or membership window can authenticate it.
         transaction.execute(
-            "INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h99e2f6069dc7 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
              VALUES(?1,?2,?3,?4,?5,?6)",
             params![grant.batch_id,grant.origin,sequence,previous,hash,grant.accepted_at_unix_ms.to_string()],
         ).unwrap();
         transaction.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+            /* sqlite-large-value: allow-for-now lv-h4d9aa050b4a3 owner=smallclaims::store::assistant_grant_authority_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![grant.id,grant.batch_id,grant.subject,grant.kind,grant.origin,grant.actor,
                 canonical_json_text(&grant.body).unwrap(),serde_json::to_string(&grant.predecessors).unwrap(),
@@ -648,7 +786,7 @@ fn local_append_authenticates_immediately_and_local_unsealed_and_signed_history_
     // A pre-marker sealed claim must stand on its real signature, not its
     // origin. A post-upgrade unsealed claim stands on durable local admission.
     store.connection.write().execute(
-        "DELETE FROM assistant_grant_local_appends WHERE claim_id=?1", [&sealed.id],
+        /* sqlite-large-value: allow-for-now lv-he990aaffd4df owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_local_appends WHERE claim_id=?1", [&sealed.id],
     ).unwrap();
     let mut changed = fields();
     changed["credential_hash"] = json!("c".repeat(64));
@@ -669,7 +807,7 @@ fn local_append_authenticates_immediately_and_local_unsealed_and_signed_history_
 fn ambiguous_pre_marker_local_unsealed_history_fails_closed() {
     let store = node("victim", None);
     let grant = append(&store, SUBJECT, GRANTED, fields());
-    store.connection.write().execute("DELETE FROM assistant_grant_local_appends", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2dd1bfa09a04 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_local_appends", []).unwrap();
     reset_projection(&store.connection.write());
     drain_authority(&store);
     assert_bearer_rejected(&store, &grant);
@@ -821,9 +959,9 @@ fn duplicate_verified_signature_does_not_refresh_or_dirty_claims() {
     let mut connection = target.connection.write();
     // Any refresh would delete this sentinel. Abort that attempted write rather
     // than merely checking the final projection, which might be unchanged.
-    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hbf1fdaf2776a owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     connection.execute_batch(
-        "CREATE TEMP TRIGGER reject_duplicate_refresh BEFORE DELETE ON assistant_grant_dirty
+        /* sqlite-large-value: allow-for-now lv-h9c6f8e69acbb owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER reject_duplicate_refresh BEFORE DELETE ON assistant_grant_dirty
          BEGIN SELECT RAISE(ABORT,'duplicate refreshed authority'); END;",
     ).unwrap();
     let transaction = connection.transaction().unwrap();
@@ -834,7 +972,7 @@ fn duplicate_verified_signature_does_not_refresh_or_dirty_claims() {
     let dirty: usize = transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get(0)).unwrap();
     assert_eq!(dirty,1);
     transaction.commit().unwrap();
-    connection.execute_batch("DROP TRIGGER reject_duplicate_refresh; DELETE FROM assistant_grant_dirty;").unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h68996f133d87 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER reject_duplicate_refresh; DELETE FROM assistant_grant_dirty;").unwrap();
     drop(connection);
     assert_reference_and_rebuild(&target);
 }
@@ -912,7 +1050,7 @@ fn every_nonempty_maintenance_queue_receives_a_unit_within_one_zero_slice_round(
 }
 
 fn authentication_key_cost(connection: &Connection, signature: &ReplicaEnvelopeSignature) -> (usize,i32,i32) {
-    let mut statement = connection.prepare(authority::AUTHENTICATION_KEYS_QUERY).unwrap();
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h418f3ec55f8d owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ authority::AUTHENTICATION_KEYS_QUERY).unwrap();
     let rows = statement.query_map(
         params![signature.writer,signature.sequence,signature.hash,-1,"",authority::MEMBERSHIP_KEYS_PER_REFRESH],
         |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)),
@@ -981,7 +1119,7 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
         invalid.member_key = format!("!{index:08}");
         invalid.signature = "invalid".into();
         connection.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
+            /* sqlite-large-value: allow-for-now lv-h02562e83e833 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
             params![invalid.writer,invalid.member_key]).unwrap();
         insert_raw_signature(&connection,&invalid);
     }
@@ -1029,10 +1167,10 @@ fn key_only_authentication_cursor_migration_requeues_without_trusting_old_positi
     drain_authority(&store);
     let connection = store.connection.write();
     connection.execute_batch(
-        "ALTER TABLE assistant_grant_auth_cursor DROP COLUMN membership_start;"
+        /* sqlite-large-value: allow-for-now lv-h1ae4a2fcf40e owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE assistant_grant_auth_cursor DROP COLUMN membership_start;"
     ).unwrap();
     connection.execute(
-        "INSERT INTO assistant_grant_auth_cursor VALUES(?1,9223372036854775807,9223372036854775807,'~stale')",
+        /* sqlite-large-value: allow-for-now lv-ha9371a8fef8c owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor VALUES(?1,9223372036854775807,9223372036854775807,'~stale')",
         [&grant.id]).unwrap();
     authority::install(&connection,"issuer").unwrap();
     assert!(!connection.query_row(
@@ -1043,7 +1181,7 @@ fn key_only_authentication_cursor_migration_requeues_without_trusting_old_positi
         [&grant.id], |row| row.get::<_,bool>(0)).unwrap(),
         "migration must retain the interrupted authentication obligation");
     connection.execute(
-        "INSERT INTO assistant_grant_auth_cursor VALUES(?1,7,9,'new-checkpoint',3)",
+        /* sqlite-large-value: allow-for-now lv-hba715e11f267 owner=smallclaims::store::assistant_grant_authority_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO assistant_grant_auth_cursor VALUES(?1,7,9,'new-checkpoint',3)",
         [&grant.id]).unwrap();
     authority::install(&connection,"issuer").unwrap();
     let cursor: (i64,i64,String,i64) = connection.query_row(
@@ -1070,11 +1208,11 @@ fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_
     let mut connection = target.connection.write();
     // Put the real key after all expired windows by start, not member-key order.
     connection.execute(
-        "UPDATE assistant_grant_membership_windows SET start=?2 WHERE writer=?1 AND member_key=?3",
+        /* sqlite-large-value: allow-for-now lv-h06703a74a220 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_membership_windows SET start=?2 WHERE writer=?1 AND member_key=?3",
         params![signature.writer,signature.sequence,signature.member_key]).unwrap();
     for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*3+1) {
         connection.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,0)",
+            /* sqlite-large-value: allow-for-now lv-h3bfdf85ceb51 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,0)",
             params![signature.writer,format!("~expired/{index:08}")]).unwrap();
     }
     insert_raw_signature(&connection,&signature);
@@ -1083,7 +1221,7 @@ fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_
     assert_eq!(before.2,0);
     for index in 0..4096 {
         connection.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
+            /* sqlite-large-value: allow-for-now lv-h0e74c062c397 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
             params![signature.writer,format!("!future/{index:08}"),signature.sequence+1]).unwrap();
     }
     assert_eq!(authentication_key_cost(&connection,&signature),before,
@@ -1115,12 +1253,12 @@ fn expired_membership_windows_consume_bounded_pages_and_future_windows_stay_out_
     // The signature remains cryptographically valid, but an expired window
     // must never authenticate it during a subsequent proof recheck.
     connection.execute(
-        "UPDATE assistant_grant_membership_windows SET start=0,end=0 WHERE writer=?1 AND member_key=?2",
+        /* sqlite-large-value: allow-for-now lv-h64769f90bcc0 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_membership_windows SET start=0,end=0 WHERE writer=?1 AND member_key=?2",
         params![signature.writer,signature.member_key]).unwrap();
     connection.execute(
-        "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id]).unwrap();
+        /* sqlite-large-value: allow-for-now lv-h642b57ed2c8a owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id]).unwrap();
     connection.execute(
-        "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+        /* sqlite-large-value: allow-for-now lv-hafd668e892ee owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     drop(connection);
     drain_authority(&target);
     assert!(!authority::contains(&target.readers.get(),&grant.id).unwrap(),
@@ -1139,11 +1277,11 @@ fn membership_addition_receipt_flood_uses_the_same_fixed_refresh_budget() {
     let mut connection = target.connection.write();
     let markers = backfill_markers(&connection);
     connection.execute(
-        "INSERT INTO assistant_grant_additions(writer,member_key,lower_sequence,upper_sequence)
+        /* sqlite-large-value: allow-for-now lv-h00986dca7a94 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_additions(writer,member_key,lower_sequence,upper_sequence)
          VALUES('anchor',?1,0,9223372036854775807)", [key.public()],
     ).unwrap();
     connection.execute_batch(
-        "CREATE TEMP TABLE refreshed_items (claim_id TEXT);
+        /* sqlite-large-value: allow-for-now lv-h49244ed4f44b owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE refreshed_items (claim_id TEXT);
          CREATE TEMP TRIGGER count_membership_refresh AFTER UPDATE ON assistant_grant_additions
          BEGIN INSERT INTO refreshed_items VALUES(NEW.sequence); END;",
     ).unwrap();
@@ -1184,7 +1322,7 @@ fn late_signature_restarts_an_in_progress_key_cursor_before_its_old_position() {
     // windows in the same start range so the genuine key precedes the cursor.
     for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*2) {
         connection.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
+            /* sqlite-large-value: allow-for-now lv-h3135f9c18750 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,NULL)",
             params![signature.writer,format!("~{index:08}"),member_start]).unwrap();
     }
     connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
@@ -1226,17 +1364,17 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
     // Keep an unsigned later-position copy, leaving the signed envelope with
     // no attached claim record when its signature arrives.
     connection.execute(
-        "INSERT INTO replica_envelopes
+        /* sqlite-large-value: allow-for-now lv-h664aa3828314 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelopes
          SELECT writer,sequence,'decoy-envelope',previous_hash,accepted_at_unix_ms,
                 payload,batch_id,relay,receipt_state,validation_error,received_at_unix_ms
          FROM replica_envelopes WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
         params![signature.writer,signature.sequence,signature.hash]).unwrap();
     connection.execute(
-        "UPDATE replica_records SET envelope_hash='decoy-envelope',position=1 WHERE claim_id=?1",
+        /* sqlite-large-value: allow-for-now lv-h1c051df8af17 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET envelope_hash='decoy-envelope',position=1 WHERE claim_id=?1",
         [&grant.id]).unwrap();
     for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*2) {
         connection.execute(
-            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
+            /* sqlite-large-value: allow-for-now lv-hec4dd1196f81 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
             params![signature.writer,format!("~{index:08}")]).unwrap();
     }
     connection.execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
@@ -1257,7 +1395,7 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
     assert_eq!(cursors,1,"signature unexpectedly had a linked claim record");
     let transaction = connection.transaction().unwrap();
     transaction.execute(
-        "INSERT INTO replica_records
+        /* sqlite-large-value: allow-for-now lv-h74c78298f3cf owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records
             (record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
          SELECT 'earlier-signed-record',writer,sequence,?2,0,raw,'valid',claim_id,'0'
          FROM replica_records WHERE claim_id=?1",
@@ -1316,16 +1454,16 @@ fn dirty_and_auth_cursor_work_fence_only_their_subject_on_every_read_path() {
     let independent = independent_grant(&store);
     drain_authority(&store);
     let connection = store.connection.write();
-    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hf6ea61b38c5c owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     assert!(authority::maintenance_pending(&connection).unwrap());
     assert_subject_fenced(&connection, &grant, &independent);
-    connection.execute("DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h7494541ec904 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [&grant.id]).unwrap();
     connection.execute(
-        "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) VALUES(?1,0,0,'',-1)",
+        /* sqlite-large-value: allow-for-now lv-h5b218f4cabfc owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start) VALUES(?1,0,0,'',-1)",
         [&grant.id],
     ).unwrap();
     assert_subject_fenced(&connection, &grant, &independent);
-    connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h15542ec4c6ea owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&grant.id]).unwrap();
     assert!(authority::contains(&connection, &grant.id).unwrap());
 }
 
@@ -1365,16 +1503,16 @@ fn subject_readiness_seeks_only_its_indexed_obligations_with_large_unrelated_que
     drain_authority(&store);
     let connection = store.connection.write();
     connection.execute(
-        "UPDATE assistant_grant_pending SET auth_member_key='lost-key',auth_sequence=7,
+        /* sqlite-large-value: allow-for-now lv-h5df4dd1dd74d owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE assistant_grant_pending SET auth_member_key='lost-key',auth_sequence=7,
          auth_envelope_hash='proof' WHERE claim_id=?1", [&grant.id],
     ).unwrap();
     connection.execute(
-        "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
+        /* sqlite-large-value: allow-for-now lv-hc91d2f57cab1 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
          VALUES(?1,'lost-key',7,7)", [&grant.origin],
     ).unwrap();
     let cost = |subject: &str| {
-        let mut statement = connection.prepare(authority::SUBJECT_PENDING_QUERY).unwrap();
-        let pending: bool = statement.query_row([subject], |row| row.get(0)).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb30e13c4dc6f owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ authority::SUBJECT_PENDING_QUERY).unwrap();
+        let pending: bool = statement.query_row(/* sqlite-large-value: allow-for-now lv-hade54ba19418 owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0)).unwrap();
         (pending,statement.get_status(StatementStatus::VmStep),
             statement.get_status(StatementStatus::FullscanStep))
     };
@@ -1387,11 +1525,11 @@ fn subject_readiness_seeks_only_its_indexed_obligations_with_large_unrelated_que
     for index in 0..4096 {
         let writer = format!("unrelated-{index}");
         connection.execute(
-            "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
+            /* sqlite-large-value: allow-for-now lv-hb8b541534641 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence)
              VALUES(?1,'lost-key',0,100)", [&writer],
         ).unwrap();
         connection.execute(
-            "INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key)
+            /* sqlite-large-value: allow-for-now lv-h77dca66dd9fc owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key)
              VALUES(?1,7,'proof','lost-key')", [&writer],
         ).unwrap();
     }
@@ -1408,11 +1546,11 @@ fn legacy_membership_dirty_obligations_migrate_idempotently_to_verifier_rechecks
     receive_pre_projection_unsigned_history(&target,&export(&source,&target));
     let connection = target.connection.write();
     connection.execute_batch(
-        "CREATE TABLE assistant_grant_membership_dirty (
+        /* sqlite-large-value: allow-for-now lv-h64bd448a0436 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE assistant_grant_membership_dirty (
            writer TEXT PRIMARY KEY, sequence INTEGER NOT NULL, claim_id TEXT NOT NULL);"
     ).unwrap();
     connection.execute(
-        "INSERT INTO assistant_grant_membership_dirty VALUES(?1,-1,'')", [&grant.origin],
+        /* sqlite-large-value: allow-for-now lv-h8ae28328b54c owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_dirty VALUES(?1,-1,'')", [&grant.origin],
     ).unwrap();
     for _ in 0..2 {
         authority::install(&connection,"reader").unwrap();
@@ -1440,12 +1578,12 @@ fn auth_work_set_is_idempotent_under_outer_upsert_conflict_policy() {
     let connection = store.connection.write();
     for _ in 0..2 {
         connection.execute(
-            "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start)
+            /* sqlite-large-value: allow-for-now lv-h5ae439b456a4 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key,membership_start)
              VALUES(?1,0,0,'',-1) ON CONFLICT(claim_id) DO UPDATE SET position=excluded.position",
             [&grant.id],
         ).unwrap();
         connection.execute(
-            "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)
+            /* sqlite-large-value: allow-for-now lv-hef325d41f3b7 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)
              ON CONFLICT(claim_id) DO UPDATE SET claim_id=excluded.claim_id", [&grant.id],
         ).unwrap();
         assert_eq!(connection.query_row(
@@ -1453,12 +1591,12 @@ fn auth_work_set_is_idempotent_under_outer_upsert_conflict_policy() {
             [&grant.id], |row| row.get::<_,usize>(0),
         ).unwrap(),1);
     }
-    connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h32d93849d196 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&grant.id]).unwrap();
     assert_eq!(connection.query_row(
         "SELECT COUNT(*) FROM assistant_grant_auth_work WHERE claim_id=?1",
         [&grant.id], |row| row.get::<_,usize>(0),
     ).unwrap(),1,"another durable obligation still needs this claim");
-    connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&grant.id]).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-ha57a171023e8 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&grant.id]).unwrap();
     assert_eq!(connection.query_row(
         "SELECT COUNT(*) FROM assistant_grant_auth_work WHERE claim_id=?1",
         [&grant.id], |row| row.get::<_,usize>(0),

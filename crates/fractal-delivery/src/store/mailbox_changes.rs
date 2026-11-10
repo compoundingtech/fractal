@@ -14,6 +14,8 @@ const MESSAGE_CHANGES: &str = "SELECT DISTINCT changed.subject FROM claims chang
                      OR EXISTS(SELECT 1 FROM claims sent INDEXED BY claims_subject_kind_index
                         WHERE sent.subject=changed.subject AND sent.kind='message.sent'
                           AND json_extract(sent.body,'$.fields.to') IN (?2,?3))
+                     OR EXISTS(SELECT 1 FROM local_stream_sent sent WHERE sent.subject=changed.subject
+                          AND json_extract(sent.fields,'$.to') IN (?2,?3))
                      OR EXISTS(SELECT 1 FROM desired,json_each(desired.body,'$.children') child
                         WHERE desired.subject=changed.subject AND desired.kind='message'
                           AND json_extract(child.value,'$.name')='to'

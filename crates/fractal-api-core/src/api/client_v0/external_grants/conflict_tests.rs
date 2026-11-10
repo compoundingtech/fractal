@@ -612,7 +612,7 @@ fn dirty_grant_reads_and_bearers_fail_closed_without_blocking_an_unrelated_crede
     authenticate_id(&state, ASSISTANT_ID).unwrap().unwrap();
     authenticate_id(&state, SERVICE_ID).unwrap().unwrap();
     state.store.connection.write().execute(
-        "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&grant.id],
+        /* sqlite-large-value: allow-for-now lv-hda4b15518ef0 owner=fractal_api_core::api::client_v0::external_grants::conflict_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&grant.id],
     ).unwrap();
     assert!(authenticate_id(&state, ASSISTANT_ID).unwrap().is_none());
     authenticate_id(&state, SERVICE_ID).unwrap().unwrap();
@@ -645,7 +645,7 @@ fn dirty_opposite_profile_witness_does_not_clear_an_established_conflict() {
     replicate(&b, &a);
     assert_conflict(&authenticate_id(&a, ASSISTANT_ID).unwrap_err());
     a.store.connection.write().execute(
-        "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&service.id],
+        /* sqlite-large-value: allow-for-now lv-h830bfc82281f owner=fractal_api_core::api::client_v0::external_grants::conflict_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&service.id],
     ).unwrap();
     assert!(authenticate_id(&a, SERVICE_ID).unwrap().is_none(),
         "the dirty subject's own credential is fenced");
@@ -672,7 +672,7 @@ fn clean_grant_inspection_omits_pending_expired_or_revoked_opposite_history() {
         let inspected = projection_with_witness(&a, &assistant).unwrap();
         assert_eq!(inspected["cleared_conflicts"][0]["cause"], cause);
         a.store.connection.write().execute(
-            "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&service.id],
+            /* sqlite-large-value: allow-for-now lv-hb8b3d12c32f5 owner=fractal_api_core::api::client_v0::external_grants::conflict_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&service.id],
         ).unwrap();
         assert!(authenticate_id(&a, SERVICE_ID).unwrap().is_none());
         assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());

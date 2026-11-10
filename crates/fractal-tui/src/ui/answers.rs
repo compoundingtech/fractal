@@ -6,12 +6,14 @@ pub(super) struct PendingAnswer {
     position: usize,
     words: Option<String>,
     answer: Option<String>,
+    /// The other answers whose notes went with this one: confirmed, their drafts are done.
+    noted: Vec<String>,
 }
 
 impl Ui {
     /// Called by the live dispatcher before spawning the RPC, never after awaiting it.
     pub(super) fn begin_answer(&mut self, effect: &Effect) {
-        let Effect::Attention { id, action, reason, answer } = effect else { return };
+        let Effect::Attention { id, action, reason, answer, option_notes } = effect else { return };
         if action != "work.done" || self.pending_answers.contains_key(id) {
             return;
         }
@@ -23,6 +25,7 @@ impl Ui {
             position,
             words: reason.clone(),
             answer: answer.clone(),
+            noted: option_notes.iter().map(|(answer, _)| answer.clone()).collect(),
         });
         self.hide_pending_answers();
         self.refresh_tab_statuses();
@@ -39,10 +42,14 @@ impl Ui {
     }
 
     /// Success means BOTH action acceptance and a complete Attention window without the card.
-    /// A refusal restores the card without stealing focus from the next request's draft.
+    /// A refusal restores the card without stealing focus from the next request's draft; notes
+    /// on other answers were never taken off the card, so they are all still there.
     pub(super) fn finish_answer(&mut self, id: &str, accepted: bool) {
         let Some(pending) = self.pending_answers.remove(id) else { return };
         if accepted {
+            for answer in &pending.noted {
+                self.conversation_state.drafts.remove(&format!("answer:{id}:{answer}"));
+            }
             return;
         }
         self.acted.remove(id);
@@ -126,8 +133,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn notes_survive_highlight_changes_and_send_only_the_bound_options_note() {
+    /// Writes note “A” on “Yes”, then note “B” on “Other”, which stays open in the editor, as a
+    /// person does before choosing.
+    fn two_notes() -> Ui {
         let mut ui = note_request(None, false);
         ui.click(Hit::Answer(0));
         press(&mut ui, KeyCode::Char('c'));
@@ -138,10 +146,123 @@ mod tests {
         press(&mut ui, KeyCode::Char('B'));
         assert_eq!(ui.conversation_state.drafts.get("answer:attention/first:yes").map(String::as_str), Some("A"));
         assert_eq!(ui.conversation_state.drafts.get("answer:attention/first:other").map(String::as_str), Some("B"));
+        ui
+    }
+
+    /// Notes saved on both named answers, with no editor open.
+    fn saved_notes(custom: bool) -> Ui {
+        let mut ui = note_request(None, custom);
+        for (answer, text) in [("yes", "  A  "), ("other", "B")] {
+            ui.conversation_state.drafts.insert(format!("answer:attention/first:{answer}"), text.into());
+        }
+        ui
+    }
+
+    #[test]
+    fn the_chosen_answer_goes_with_every_note_on_the_other_answers() {
+        let mut ui = two_notes();
         ui.click(Hit::Enter);
         assert!(matches!(&ui.effects[..], [Effect::Attention {
-            answer: Some(answer), reason: Some(text), ..
-        }] if answer == "other" && text == "B"));
+            answer: Some(answer), reason: Some(text), option_notes, ..
+        }] if answer == "other" && text == "B" && option_notes == &[("yes".to_owned(), "A".to_owned())]));
+        // Chosen from the list without opening its note, the highlighted answer carries them too.
+        let mut ui = saved_notes(false);
+        ui.answering = Some(0);
+        press(&mut ui, KeyCode::Enter);
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), option_notes, ..
+        }] if answer == "yes" && text == "  A  " && option_notes == &[("other".to_owned(), "B".to_owned())]),
+            "{:?}", ui.effects);
+    }
+
+    #[test]
+    fn dismissal_uses_its_named_note_and_preserves_every_other_note() {
+        let mut ui = saved_notes(false);
+        if let Load::Ready(items) = &mut ui.world.attention {
+            for item in items {
+                if let AttentionKind::Request { structured: Some(request), .. } = &mut item.kind {
+                    let mut dismiss = request.answers[0].clone();
+                    dismiss.id = "dismiss".into();
+                    dismiss.label = "Dismiss".into();
+                    request.answers.push(dismiss);
+                }
+            }
+        }
+        ui.conversation_state.drafts.insert(
+            "answer:attention/first:dismiss".into(), "  No action needed  ".into(),
+        );
+        press(&mut ui, KeyCode::Char('x'));
+        assert_eq!(ui.confirm, Some('r'));
+        press(&mut ui, KeyCode::Char('y'));
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), option_notes, ..
+        }] if answer == "dismiss" && text == "  No action needed  " && option_notes == &[
+            ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
+        ]), "{:?}", ui.effects);
+    }
+
+    #[test]
+    fn synthetic_dismissal_preserves_every_named_note() {
+        let mut ui = saved_notes(false);
+        press(&mut ui, KeyCode::Char('x'));
+        assert_eq!(ui.confirm, Some('r'));
+        press(&mut ui, KeyCode::Char('y'));
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), option_notes, ..
+        }] if answer == "dismiss" && text == "Dismissed without an answer." && option_notes == &[
+            ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
+        ]), "{:?}", ui.effects);
+    }
+
+    #[test]
+    fn a_custom_answer_carries_the_notes_on_named_answers() {
+        let mut ui = saved_notes(true);
+        ui.click(Hit::Answer(2));
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.editing);
+        press(&mut ui, KeyCode::Char('X'));
+        ui.click(Hit::Enter);
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: None, reason: Some(text), option_notes, ..
+        }] if text == "X" && option_notes == &[
+            ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
+        ]), "{:?}", ui.effects);
+    }
+
+    /// An older Fractal, without `person-answer-option-notes`, is refused before anything is
+    /// sent (`crate::attention_action`); the card and every note come back for the person.
+    #[test]
+    fn notes_refused_by_an_older_fractal_all_stay_on_the_card() {
+        let mut ui = two_notes();
+        ui.click(Hit::Enter);
+        let effect = ui.effects.pop().unwrap();
+        ui.note_acted(&effect);
+        assert!(!ui.world.attention.items().iter().any(|item| item.id == "attention/first"));
+        // What the live loop does with the refusal (`Fetched::AlertOutcome`).
+        ui.finish_answer("attention/first", false);
+        ui.answer_errors.insert("attention/first".into(), crate::OptionNotesUnsupported.to_string());
+        assert!(ui.world.attention.items().iter().any(|item| item.id == "attention/first"));
+        assert_eq!(ui.note_answers["attention/first"], "other");
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:other"], "B");
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:yes"], "A");
+        assert!(ui.answer_errors["attention/first"].contains("person-answer-option-notes"));
+        // Sending again, once Fractal is updated, tries the same answer with the same notes.
+        ui.answer_errors.clear();
+        ui.select(0);
+        ui.editing = true;
+        ui.click(Hit::Enter);
+        assert_eq!(ui.effects.last(), Some(&effect), "{:?}", ui.effects);
+    }
+
+    #[test]
+    fn a_confirmed_answer_retires_the_notes_it_carried() {
+        let mut ui = two_notes();
+        ui.click(Hit::Enter);
+        let effect = ui.effects.pop().unwrap();
+        ui.note_acted(&effect);
+        ui.finish_answer("attention/first", true);
+        assert!(!ui.conversation_state.drafts.contains_key("answer:attention/first:yes"));
+        assert!(!ui.conversation_state.drafts.contains_key("answer:attention/first:other"));
     }
 
     #[test]
@@ -193,7 +314,7 @@ mod tests {
         let mut ui = note_request(Some("accept"), false);
         let effect = Effect::Attention {
             id: "attention/first".into(), action: "work.done".into(),
-            answer: Some("yes".into()), reason: Some("retain this".into()),
+            answer: Some("yes".into()), reason: Some("retain this".into()), option_notes: Vec::new(),
         };
         ui.note_acted(&effect);
         ui.finish_answer("attention/first", false);
@@ -287,15 +408,16 @@ mod tests {
             let (_, request) = ui.structured_request().unwrap();
             ui.click(Hit::Answer(0));
             ui.click(Hit::Enter);
-            let Effect::Attention { answer, reason, .. } = ui.effects.pop().unwrap() else {
+            let Effect::Attention { answer, reason, option_notes, .. } = ui.effects.pop().unwrap() else {
                 panic!("expected answer effect");
             };
             let (summary, answer) =
-                crate::person_step_response(Some(&request), answer, reason).unwrap();
+                crate::person_step_response(Some(&request), answer, reason, option_notes).unwrap();
             assert_eq!(summary, "Yes");
             let answer = answer.unwrap();
             assert_eq!(answer.id.as_deref(), Some("yes"));
             assert_eq!(answer.text, None);
+            assert!(answer.option_notes.is_empty());
         }
     }
 
@@ -372,7 +494,7 @@ mod tests {
         let mut ui = requests();
         let effect = Effect::Attention {
             id: "attention/first".into(), action: "work.done".into(),
-            reason: Some("my answer".into()), answer: None,
+            reason: Some("my answer".into()), answer: None, option_notes: Vec::new(),
         };
         ui.note_acted(&effect);
         ui.finish_answer("attention/first", false);

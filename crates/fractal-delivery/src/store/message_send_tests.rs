@@ -530,13 +530,13 @@ fn writer_recheck_fences_dirty_subject_without_exposing_projection_state() {
     input.fields.insert("to".into(), json!("agent/example-recipient.local"));
     // An unrelated pending claim must not prevent the actual mutation transaction.
     store.connection.lock().unwrap().execute(
-        "INSERT INTO assistant_grant_dirty(claim_id) VALUES('unrelated-claim')", [],
+        /* sqlite-large-value: allow-for-now lv-hb8891f8aff3c owner=fractal_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES('unrelated-claim')", [],
     ).unwrap();
     assert!(store.append_assistant_claim_outcome(&input, &authorization).unwrap().1);
     input.subject = "message/assistant-dirty-subject-denied".into();
     input.idempotency_key = Some("assistant-dirty-subject-denied".into());
     store.connection.lock().unwrap().execute(
-        "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&granted.id],
+        /* sqlite-large-value: allow-for-now lv-he8ff1a0f8ec1 owner=fractal_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&granted.id],
     ).unwrap();
     let error = store.append_assistant_claim_outcome(&input, &authorization).unwrap_err();
     assert_eq!(error.code, "forbidden");
