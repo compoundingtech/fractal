@@ -57,6 +57,21 @@ mission "absent-reporter" state="ready" report-to="agent/node.nobody" {
   goal "Name an agent that is not declared."
   step "build" { assigned-to "agent/node.builder" }
 }
+mission "gated" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
+  concurrent-runs
+  goal "Wait on a person and on a fact."
+  step "review" {
+    agentless
+    gate "accept" type="human" {
+      reviewer "person/example"
+      question "Accept this?"
+    }
+  }
+  step "observe" {
+    agentless
+    gate "signal" { field "status" "resource/loop-result" is "ready" }
+  }
+}
 mission "loop-parent" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
   concurrent-runs
   goal "Watch progress in child rounds."
@@ -684,6 +699,54 @@ fn a_held_step_that_only_renews_its_lease_stalls() {
     act("renew", "renew-quiet-24", None);
     fixture.passes(2);
     assert_eq!(stalled(), 2, "silence after progress is a new stall");
+}
+
+/// The runtime holds an agentless gate step without a claimant or a lease, so it is not a held
+/// step and nothing renews it: its last change is its sign of life, as before lease renewals
+/// stopped counting. A run that only waits on open gates therefore stalls at its limit, once;
+/// `report-stalls=#false` is how a run that intends such a wait says so.
+#[test]
+fn a_gate_step_the_runtime_holds_is_not_a_held_step() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("gated", "gated-run");
+    fixture.passes(4);
+    let view = fixture.store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(view.steps.len(), 2);
+    for step in &view.steps {
+        assert!(step.agentless, "{}", step.step);
+        assert_eq!(step.status, "working", "{}", step.step);
+        assert!(step.claimant.is_none(), "{}", step.step);
+        assert!(step.claim_expires_at_unix_ms.is_none(), "{}", step.step);
+    }
+    // No held step: the stall clock is the newest change of the run or of a step.
+    let quiet_since = crate::reconcile::run_report::run_activity(&view);
+    let last_change = view
+        .steps
+        .iter()
+        .map(|step| step.updated_at_unix_ms)
+        .chain([view.created_at_unix_ms, view.updated_at_unix_ms])
+        .max()
+        .unwrap();
+    assert_eq!(quiet_since, last_change);
+    assert_eq!(
+        fixture.reconciler.incremental.next_due(&run.subject),
+        Some(quiet_since + 10 * MINUTE)
+    );
+    let stalled = || {
+        fixture
+            .reports(REPORTER)
+            .into_iter()
+            .filter(|message| message.tags.contains(&"st3-run-report:stalled".to_owned()))
+            .count()
+    };
+    {
+        let _inside = Clock::at(&fixture.store, quiet_since + 9 * MINUTE);
+        fixture.passes(2);
+        assert_eq!(stalled(), 0);
+    }
+    let _later = Clock::at(&fixture.store, quiet_since + 3 * 24 * 60 * MINUTE);
+    fixture.passes(3);
+    assert_eq!(stalled(), 1, "one report, however long the gates stay open");
 }
 
 #[test]
