@@ -1500,7 +1500,7 @@ public struct PairingChallenge: Codable, Sendable {
     public let principal: AssistantPrincipal?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
     enum CodingKeys: String, CodingKey { case kind, pairingID = "pairing_id", code, expiresAt = "expires_at", personRootFingerprint = "person_root_fingerprint", principal, grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
 }
-public struct PairingComplete: Codable, Sendable { public let apiVersion: String; public let code: String; public let devicePublicKey: String; public var keyStorage: String? = nil; public var fabricNodeID: String? = nil; enum CodingKeys: String, CodingKey { case apiVersion = "api_version", code, devicePublicKey = "device_public_key", keyStorage = "key_storage", fabricNodeID = "fabric_node_id" } }
+public struct PairingComplete: Codable, Sendable { public let apiVersion: String; public let code: String; public let devicePublicKey: String; public var proof: String? = nil; public var keyStorage: String? = nil; public var fabricNodeID: String? = nil; enum CodingKeys: String, CodingKey { case apiVersion = "api_version", code, devicePublicKey = "device_public_key", proof, keyStorage = "key_storage", fabricNodeID = "fabric_node_id" } }
 public enum PairedSession: Codable, Sendable {
     case person(PersonPairedSession), assistant(AssistantPairedSession)
     public init(from decoder: Decoder) throws {

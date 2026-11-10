@@ -616,7 +616,7 @@ their existing authenticated HTTP(S) gateway transport remains available.
 `fractal up` listens on two different Unix sockets. `fractal.sock` is the privileged trusted-local API;
 `fractal-client.sock` is the paired-only client gateway backed by `fabric_router`. The latter rejects
 ordinary requests without a paired bearer credential, except for public capability negotiation
-and pairing completion. The socket
+and pairing claim/completion. Pairing status and approval remain trusted-local issuer operations. The socket
 paths can be set with `socket` and `client_gateway_socket` in `config.toml`, or with `--socket` and
 `--client-gateway-socket` for a foreground daemon. They must never name the same path.
 
@@ -1888,17 +1888,68 @@ fingerprint, which authenticates the delegating root rather than the new device.
 Completion with a different key returns nonretryable `pairing-key-mismatch`;
 it does not grant credentials.
 
-The `pairing-key-binding` version 1 capability advertises support. Anonymous
-discovery requests opt in with `/v1/client/capabilities?accepts=pairing-key-binding`;
-without that query, the legacy one-capability discovery response is unchanged.
-Clients must discover support before sending the optional begin field to older
-servers that reject unknown fields, and must not silently retry a requested
-bound pairing without its binding. This rollout is additive: omitted fingerprints
-preserve legacy person and assistant pairing, including existing pending challenges.
-Mandatory binding is a separate release, gated on shipped key-before-approval
-support in the iOS, browser, and CLI pairing artifacts. At that cutover, unbound
-begin and completion will return typed `pairing-key-binding-required`; this
-additive release does not enforce that refusal or close legacy unbound pairing.
+The `pairing-key-binding` version 2 capability advertises required, post-scan
+key claims and local approval. Version 1 supports only optional prebound keys.
+Anonymous discovery opts in with
+`/v1/client/capabilities?accepts=pairing-key-binding`; without that query the
+legacy discovery response is unchanged. Clients must discover support before
+sending new fields to older servers that reject unknown fields, and must not
+silently retry a requested binding without it. Required-QR clients must require
+version 2 or newer before issuing or claiming a challenge.
+
+`PersonPairingBegin` additionally accepts `binding: "required" | "optional"`;
+omitting it means optional. The interactive `devices pair --gateway` person QR
+flow seals `binding: "required"` in its trusted-local begin before displaying
+any QR. No scanning-key fingerprint is needed at issue time. A required challenge
+does not approve a key at issue time. Assistant pairing retains optional
+prebinding and does not acquire a QR flow.
+
+After scanning, the device proves possession with
+`POST /v1/client/pairings/{id}/claim` and body
+`{api_version, code, device_public_key, proof}`. The public key is either
+`p256:` plus unpadded base64url of the 65-byte uncompressed SEC1 point, or bare
+unpadded base64url of a 32-byte Ed25519 key. Sign exactly the UTF-8 bytes
+`pairing.claim.v1\n${fullPrefixedPairingId}\n${lowercaseHexSha256(codeUtf8)}`,
+with no trailing newline. `proof` is unpadded base64url of the raw 64-byte
+signature: P-256 ECDSA SHA-256 `r || s`, or native Ed25519. The server computes
+the canonical fingerprint from the exact public-key string. Only one claim is
+accepted: even an identical replay returns nonretryable `pairing-already-claimed`.
+An invalid proof, code, expired challenge, or consumed challenge returns
+nonretryable `pairing-claim-invalid`. A successful claim presents the key and
+returns `awaiting-approval`; it creates no approval, grant, or credential.
+
+All three handshake endpoints return `PairingKeyStatus`:
+`{kind: "pairing-key-status", status, device_key_fingerprint?, expires_at}`.
+`status` is `awaiting-key`, `awaiting-approval`, `approved`, `completed`, or
+`expired`. The trusted local issuer observes it using
+`GET /v1/client/pairings/{id}?wait_ms=30000`, a reactive long-poll rather than
+periodic polling. After comparing the presented fingerprint, the issuer calls
+`POST /v1/client/pairings/{id}/approve` with
+`{api_version, device_key_fingerprint}`. That local request creates the one
+approval naming exactly the claimed scanning key. Optional already-bound
+challenges report `approved` for the matching key.
+
+Only that approved key may complete a required challenge, and completion must
+prove possession again. `POST /v1/client/pairings/{id}/complete` accepts optional
+`proof` alongside `api_version`, `code`, and `device_public_key`. Required
+completion signs exactly three UTF-8 lines:
+`pairing.complete.v1\n${fullPrefixedPairingId}\n${lowercaseHexSha256(codeUtf8)}`.
+The separators are LF bytes, and there is no trailing LF. Use the approved key
+and the same public-key and raw-signature base64url encodings as the claim.
+The claim and completion purposes are domain-separated: a claim signature must
+never verify as completion, nor a completion signature as a claim.
+Missing approval or a missing required proof returns HTTP 403, nonretryable
+`pairing-key-binding-required`; an invalid proof or wrong key returns HTTP 403,
+nonretryable `pairing-key-mismatch`. Optional legacy completion neither requires
+nor verifies `proof`; optional bound key mismatches retain `pairing-key-mismatch`.
+Person-root pinning, Fabric identity, and browser opaque identity remain
+separate from this signing-key approval.
+
+This increment secures the shipped interactive gateway QR flow. Omitted
+bindings preserve optional manual person and assistant calls and existing
+pending challenges. PR2 stages global manual-code binding enforcement after
+shipped key-before-approval support in iOS, browser, and CLI artifacts; this
+increment does not claim to close all legacy unbound manual pairing.
 
 For bound CLI pairing, run `fractal devices prepare --key-file device-key.pk8`
 on the device first and retain that private file. Confirm the displayed

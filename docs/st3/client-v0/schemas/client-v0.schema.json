@@ -4383,6 +4383,7 @@
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
+        "proof": { "type": "string", "description": "Required only for required-binding challenges. Unpadded base64url raw 64-byte signature over UTF-8 pairing.complete.v1, newline, full prefixed pairing ID, newline, lowercase hexadecimal SHA-256 of code UTF-8; no trailing newline. Uses the approved device key and the same key/signature encoding as a claim, but a distinct purpose. Optional legacy completion ignores this field." },
         "key_storage": { "enum": ["secure-enclave", "software"] },
         "fabric_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
