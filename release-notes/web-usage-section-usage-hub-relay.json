@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Relay the operator's usage hub quota to clients, and show it in a collapsible Usage section at the bottom of the web sidebar",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The relay holds one in-memory reading per refresh window."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},
+  "compatibility": {"status": "changed", "detail": "GET /v1/client/usage/quota is additive and requires read.projections. Existing routes and clients are unchanged. A web client on an older daemon receives 404 and says no quota source is configured."},
+  "downtime": {"status": "none", "detail": "No startup work. Reads are bounded to one outbound request per refresh window with a five-second deadline."},
+  "manual": {"status": "changed", "detail": "Optional: to show quota, set [usage_hub] url in the daemon config after upgrading. A daemon older than this release refuses a config file that sets the key. No re-pairing or restart is needed; without the key the route reports disabled."},
+  "recovery": {"status": "changed", "detail": "Remove [usage_hub] from the config before swapping back to an older daemon, which would refuse the unknown key. No persistent state changes."}
+}

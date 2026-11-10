@@ -137,18 +137,19 @@ describe('conversation eager graph boundary', () => {
     expect(eagerGraph(resolve(web, 'ConversationPane.tsx'), true).dependencies).toContain('@pierre/highlights')
   })
 
-  it('keeps inline alert answers reachable through the on-demand Alerts tab', () => {
-    const graph = eagerGraph(resolve(web, 'AlertsTab.tsx'))
-    expect(graph.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
+  it('keeps alert answers reachable through the on-demand details view', () => {
+    const graph = eagerGraph(resolve(web, 'AlertDetailsPane.tsx'))
+    expect(eagerGraph(resolve(web, 'AlertsTab.tsx')).files).not.toContain(resolve(web, '../conversation/alerts/AnswerAlert.tsx'))
     expect(graph.files).toContain(resolve(web, '../conversation/alerts/AnswerAlert.tsx'))
     expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
     expect(graph.dependencies).not.toContain('@pierre/highlights')
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/syntaxGrammar.ts'))
-    const withHighlights = eagerGraph(resolve(web, 'AlertsTab.tsx'), true)
+    const withHighlights = eagerGraph(resolve(web, 'AlertDetailsPane.tsx'), true)
     expect(withHighlights.dependencies).toContain('@pierre/highlights')
     const production = eagerGraph(resolve(web, 'main.tsx'), true)
     expect(production.files).toContain(resolve(web, 'AlertsTab.tsx'))
+    expect(production.files).toContain(resolve(web, 'AlertDetailsPane.tsx'))
     expect(production.files).toContain(resolve(web, '../conversation/alerts/AgentAlerts.tsx'))
   })
 
