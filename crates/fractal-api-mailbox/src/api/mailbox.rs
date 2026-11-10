@@ -505,11 +505,11 @@ type SnapshotUpdate = (crate::store::MailboxWatermark, Snapshot, bool, Maintenan
 #[derive(Clone, Default)]
 struct MailRecovery {
     admitted: std::collections::BTreeSet<String>,
-    backlog: usize,
+    backlog: std::collections::BTreeSet<String>,
 }
 
-/// Recovery is bounded per connection, not per snapshot or delivery receipt.
-/// A preview keeps all policy-recheck candidates without consuming the offer budget.
+/// One oldest-first recovery batch stays outstanding until every member is delivered or withdrawn.
+/// A preview keeps all policy-recheck candidates without admitting an offer.
 fn retain_live_mail(
     store: &Store,
     messages: &mut Vec<crate::model::MessageView>,
@@ -519,6 +519,7 @@ fn retain_live_mail(
     admit: bool,
 ) -> anyhow::Result<()> {
     let mut candidates = Vec::with_capacity(messages.len());
+    let mut available = if recovered.backlog.is_empty() { RECOVERY_BACKLOG_LIMIT } else { 0 };
     for (position, message) in messages.drain(..).enumerate() {
         let Some(sent) = sent_claim(store, &message)? else {
             continue;
@@ -539,10 +540,11 @@ fn retain_live_mail(
         } else if never_offered(store, message)? {
             let held = crate::silent::is_held(message);
             let age = recovery_backlog(*accepted_at, since);
-            if held || age.is_some_and(|backlog| !admit || !backlog || recovered.backlog < RECOVERY_BACKLOG_LIMIT) {
+            if held || age.is_some_and(|backlog| !admit || !backlog || available > 0) {
                 if admit {
                     if !held && age == Some(true) {
-                        recovered.backlog += 1;
+                        available -= 1;
+                        recovered.backlog.insert(message.subject.clone());
                     }
                     recovered.admitted.insert(message.subject.clone());
                 }
@@ -663,6 +665,12 @@ where
     let mut close_own = std::collections::BTreeSet::new();
     let mut hold = None;
     let result = store.read_snapshot(|_| {
+        // Receipt changes wake this delta reader even when the next held identities did not
+        // change. Re-read once when the entire batch settles, to admit the next oldest batch.
+        let previous = if recovery_batch_settled(store, &admitted.backlog)? {
+            admitted.backlog.clear();
+            None
+        } else { previous };
         let (mark, seat, mut messages) = if let Some((mark, (mut seat, mut messages))) = previous {
             let changes = store.mailbox_changes(binding, &mark, &messages)?;
             let mut updated = changes.seat || changes.resync || !changes.messages.is_empty();
@@ -2378,7 +2386,7 @@ mod tests {
         rechecks.retain(|subject| eligible.contains(subject));
         assert!(held.is_empty());
         assert!(rechecks.contains("message/old-0"));
-        assert_eq!(preview.backlog, 0);
+        assert!(preview.backlog.is_empty());
         let (_, delta, _, _) = update_snapshot(
             &store, &fence, raw_snapshot, Some((mark, initial)), floor,
             &mut delta_recovery, &mut policies, &mut order,
@@ -2387,8 +2395,8 @@ mod tests {
         selected.sort();
         assert_eq!(selected, expected, "a whole import delta shares one oldest-first budget");
         assert_eq!(recover(&mut admitted), expected);
-        assert_eq!(admitted.backlog, RECOVERY_BACKLOG_LIMIT);
-        assert_eq!(recover(&mut admitted), expected, "updates must not refill the budget");
+        assert_eq!(admitted.backlog.len(), RECOVERY_BACKLOG_LIMIT);
+        assert_eq!(recover(&mut admitted), expected, "unconfirmed offers must not refill the batch");
         send_at("late-extra", since - threshold - 40);
         send_at("live", since + 1);
         let after_delta = recover(&mut admitted);
@@ -2400,6 +2408,97 @@ mod tests {
         let next_connection = recover(&mut MailRecovery::default());
         assert!(next_connection.iter().all(|s| !admitted.admitted.contains(s)));
         assert!(!next_connection.iter().any(|s| s == "message/staged" || s == "message/expired"));
+    }
+
+    #[test]
+    fn recovery_refills_on_settled_receipt_deltas_in_batches_of_five() {
+        for (stream, withdraw) in [(false, false), (true, false), (false, true), (true, true)] {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("graph.db");
+        let store = Arc::new(Store::open(&database, "node").unwrap());
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let receipt = |subject: &str, phase: &str| {
+            if stream {
+                crate::store::messages_shard::record_lifecycle(
+                    &store, subject, phase, Some(if phase == "message.closed" { "daemon/runtime" } else { "agent/eval.worker" }),
+                    &BTreeMap::from([("status".into(), json!(phase.strip_prefix("message.").unwrap()))]),
+                ).unwrap();
+            } else {
+                crate::store::message_marks::record(&store, subject, phase, "agent/eval.worker").unwrap();
+            }
+        };
+        crate::store::mailbox_tests::ready(&store, "recovery");
+        let fence = store.bind_mailbox(&Fence::new("agent/eval.worker", "recovery", "delivery")).unwrap();
+        let since = client_now_ms();
+        for id in (0..12).rev() {
+            let input = ClaimInput {
+                subject: format!("message/batch-{id:02}"), kind: "message.sent".into(),
+                actor: Some("agent/eval.sender".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")), ("from".into(), json!("agent/eval.sender")),
+                    ("to".into(), json!(fence.subject)), ("content".into(), json!("QUARTZ SIGNAL")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            };
+            let claim = if stream { shard.append_claim(&input).unwrap() } else { store.append_claim(&input).unwrap() };
+            let connection = rusqlite::Connection::open(if stream {
+                root.path().join("shards/messages/claims.sqlite3")
+            } else { database.clone() }).unwrap();
+            crate::store::configure_projection_writer(&connection).unwrap();
+            connection.execute("UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![(since - 7_200_000 + id).to_string(), claim.id]).unwrap();
+        }
+        let floor = (since, store.index().unwrap());
+        let mut recovery = MailRecovery::default();
+        let mut policies = std::collections::BTreeSet::new();
+        let mut order = MailboxOrder::new();
+        let mut previous = None;
+        for (start, end) in [(0, 5), (5, 10), (10, 12)] {
+            let (mark, snapshot, updated, _) = update_snapshot(
+                &store, &fence, raw_snapshot, previous.take(), floor,
+                &mut recovery, &mut policies, &mut order,
+            ).unwrap();
+            assert!(updated);
+            let expected = (start..end).map(|id| format!("message/batch-{id:02}"))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(recovery.backlog, expected);
+            assert_eq!(snapshot.1.iter().filter(|m| m.status == "sent")
+                .map(|m| m.subject.clone()).collect::<std::collections::BTreeSet<_>>(), expected);
+            previous = Some((mark, snapshot));
+            for (position, subject) in expected.iter().enumerate() {
+                let phase = if position == 0 { "message.staged" } else { "message.delivered" };
+                receipt(subject, phase);
+            }
+            let (mark, snapshot, _, _) = update_snapshot(
+                &store, &fence, raw_snapshot, previous.take(), floor,
+                &mut recovery, &mut policies, &mut order,
+            ).unwrap();
+            assert_eq!(recovery.backlog, expected, "one staged member must block refill");
+            assert!(!snapshot.1.iter().any(|m| m.status == "sent"));
+            previous = Some((mark, snapshot));
+            receipt(expected.first().unwrap(), if withdraw { "message.closed" } else { "message.delivered" });
+            assert!(recovery_batch_settled(&store, &expected).unwrap());
+            if withdraw {
+                let message = store.message(expected.first().unwrap()).unwrap().unwrap();
+                assert_eq!(message.status, "closed");
+                for kind in ["message.delivered", "message.read"] {
+                    assert!(if stream {
+                        crate::store::messages_shard::mailbox_reads::lifecycle_step(
+                            &store, &message.subject, kind,
+                        ).unwrap().is_none()
+                    } else {
+                        store.latest_claim(&message.subject, Some(kind)).unwrap().is_none()
+                    }, "withdrawal must not manufacture delivery evidence");
+                }
+            }
+        }
+        let (_, snapshot, _, _) = update_snapshot(
+            &store, &fence, raw_snapshot, previous.take(), floor,
+            &mut recovery, &mut policies, &mut order,
+        ).unwrap();
+        assert!(recovery.backlog.is_empty(), "the final two-member batch must settle");
+        assert!(!snapshot.1.iter().any(|message| message.status == "sent" || message.status == "staged"));
+        }
     }
 
     #[test]

@@ -130,6 +130,13 @@ their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps
 selected card in a regular, closable tab. Opening it again focuses the existing tab in this
 space. Move it into a split with the tab menu or by dragging; Esc does not close it.
 
+On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
+`✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
+every note on the other named answers (a custom answer or a dismissal carries them too), and the
+line above the keys names each one. A Fractal that does not advertise
+`person-answer-option-notes` is asked first and sent nothing: the card says why and keeps the
+answer and every note, instead of dropping the notes it cannot take.
+
 A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
 `mission-run/NAME/RUN` and `machine/NAME`), `--split` and `--below` for a split, `--keep-focus` to leave
 the person where they are. The command writes a small file into the configured person's private state

@@ -1137,6 +1137,25 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `fractal work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask keeps no `request` field and takes no named answer.
+
+Typed answer inputs and stored answers may also carry `option_notes: [{id, text}]` for
+named options other than the selected one. Each ID must exist in the request and occur
+once, and each note must contain non-blank text of at most 8,000 characters. Invalid
+notes are refused, never discarded. The chosen option's note remains `text`.
+All option notes survive in `person_answers` and are included in the asker's
+`Answered` message and human-readable answer details.
+The persisted summary also names every other-option note, including when a caller
+supplies an explicit summary, so older readers that ignore the new field still show
+the notes. Strict older schema validators may refuse the extended answer rather
+than render incomplete data.
+
+The terminal UI requires the `person-answer-option-notes` capability (version 1,
+state `granted`) before sending notes on other options. A daemon without that capability
+cannot receive that answer: the UI explains the incompatibility and retains the draft.
+Answers without other-option notes omit `option_notes` and remain compatible with
+older daemons. This prevents an older daemon from ignoring notes while the UI claims
+they were sent.
+
 Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
 `respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
 `assistant_session_actor` expose separate server-owned provenance, not person
