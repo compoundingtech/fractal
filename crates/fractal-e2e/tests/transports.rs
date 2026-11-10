@@ -481,13 +481,12 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         serve_terminal_state("raw-client-paired", 24, 80).await;
     let incarnation = format!("{}:2026-09-30T00:00:00.000Z", std::process::id());
     publish_terminal(&state, &incarnation).await;
-    let challenge = local.pairing_begin_person(&PersonPairingBegin {
-        api_version: fractal_client::API_VERSION.into(),
-        device_name: "Raw terminal device".into(),
-        person_id: "person/avery".into(),
-        full_control: Some(true),
-        scopes: None, fabric_gateway: None,
-    }).await.unwrap();
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
+    device_name: "Raw terminal device".into(),
+    person_id: "person/avery".into(),
+    full_control: Some(true),
+    scopes: None, fabric_gateway: None, }).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let app = fractal_daemon::api::fabric_router(state.clone());
@@ -497,6 +496,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: "raw-terminal-public-key-000000000000000000000".into(),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },).await.unwrap();
@@ -1230,8 +1230,10 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
     assert!(
         read_only
             .pairing_begin_person(&PersonPairingBegin {
+                binding: None,
                 api_version: fractal_client::API_VERSION.into(),
                 device_name: "Unattributed device".into(),
+                device_key_fingerprint: None,
                 person_id: "person/ada".into(),
                 full_control: None,
                 scopes: None, fabric_gateway: None,
@@ -1604,7 +1606,8 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, unix_app).await });
     wait_for_socket(&socket).await;
     let local = Client::unix_as(&socket, "person/ada");
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Conformance phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
@@ -1622,6 +1625,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         api_version: fractal_client::API_VERSION.into(),
         code: challenge.value.code,
         device_public_key: "conformance-public-key-000000000000000000000000".into(),
+        proof: None,
         key_storage: None,
         fabric_node_id: None,
     },)

@@ -143,7 +143,8 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     };
     for algorithm in ["ed25519", "p256"] {
         for import in [false, true] {
-            let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+            let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+            binding: None,
             device_name: "CLI device".into(),
             person_id: "person/avery".into(),
             full_control: Some(true),
@@ -292,7 +293,8 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             );
         }
     }
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(),
+    binding: None,
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
@@ -323,7 +325,8 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     assert!(!loaded.devices[0].allow_public_http);
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
+    binding: None,
     person_id: "person/avery".into(), full_control: Some(true), scopes: None, fabric_gateway: None, }).await.unwrap().value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
     let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
@@ -5536,4 +5539,72 @@ async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources(
     );
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shipped_qr_cli_issues_required_then_approves_only_the_claimed_scanning_key() {
+    use fractal_client::{Client, PairingComplete, PairingKeyClaim};
+    use fractal_client::device::{KeyAlgorithm, SigningKey, device_key_fingerprint};
+    const PERSON: &str = "person/operator";
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    state.store.bind_fleet("549d4b9d-f23c-41e9-9e0b-15f13ab837e6").unwrap();
+    state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let socket = root.path().join("qr.sock");
+    let local_server = serve_for_test(&socket, fractal_daemon::api::router(state.clone())).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let gateway = fractal_daemon::api::fabric_router(state.clone());
+    let gateway_server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap(); });
+    // Execute the shipped CLI dispatch that requests and displays QR challenges.
+    let issued = value(&run_cli(&socket, &[
+        "devices","--as",PERSON,"pair","Scanning device","--gateway",&base,"--full-control",
+    ]).await);
+    let challenge = &issued["value"];
+    let id = challenge["pairing_id"].as_str().unwrap();
+    let code = challenge["code"].as_str().unwrap();
+    let begun = state.store.claims_for_kind_at("custom.client.pairing-begun",None,true,10).unwrap().claims.remove(0);
+    assert_eq!(begun.body["fields"]["binding"],"required");
+    assert!(begun.body["fields"].get("device_key_fingerprint").is_none());
+    let scanner = SigningKey::generate(KeyAlgorithm::P256).unwrap();
+    let wrong = SigningKey::generate(KeyAlgorithm::P256).unwrap();
+    let public = scanner.public_key().unwrap();
+    let fingerprint = device_key_fingerprint(&public);
+    let client = Client::fabric_pairing(&base);
+    let complete = |key: &SigningKey| PairingComplete {
+        api_version:fractal_client::API_VERSION.into(),code:code.into(),device_public_key:key.public_key().unwrap(),
+        proof:Some(key.pairing_completion_proof(id,code).unwrap()),
+        key_storage:Some("software".into()),fabric_node_id:None,
+    };
+    assert!(client.pairing_complete_person(id,&complete(&scanner)).await.unwrap_err().to_string().contains("scanning device key"));
+    let claim = PairingKeyClaim {
+        api_version:fractal_client::API_VERSION.into(),code:code.into(),device_public_key:public.clone(),
+        proof:scanner.pairing_claim_proof(id,code).unwrap(),
+    };
+    let claimed = client.pairing_key_claim(id,&claim).await.unwrap().value;
+    assert_eq!(claimed.device_key_fingerprint.as_deref(),Some(fingerprint.as_str()));
+    assert!(client.pairing_key_claim(id,&claim).await.is_err());
+    let accepted = value(&run_cli(&socket,&[
+        "devices","--as",PERSON,"approve",id,"--device-key-fingerprint",&fingerprint,
+    ]).await);
+    assert_eq!(accepted["value"]["status"],"approved");
+    let duplicate = run_cli(&socket,&[
+        "devices","--as",PERSON,"approve",id,"--device-key-fingerprint",&fingerprint,
+    ]).await;
+    assert!(!duplicate.status.success());
+    assert!(client.pairing_complete_person(id,&complete(&wrong)).await.is_err());
+    let paired = client.pairing_complete_person(id,&complete(&scanner)).await.unwrap().value;
+    fractal_client::device::verify_device_key_proofs(PERSON,&paired.device_key_chain,&paired.device_key_proofs,&public).unwrap();
+    assert!(client.pairing_complete_person(id,&complete(&scanner)).await.is_err());
+    let approvals = state.store.claims_for_subject_kind_at(&begun.subject,"custom.client.pairing-key-approved",None,true,10).unwrap().claims;
+    let completions = state.store.claims_for_subject_kind_at(&begun.subject,"custom.client.pairing-completed",None,true,10).unwrap().claims;
+    assert_eq!(approvals.len(),1);
+    assert_eq!(approvals[0].body["fields"]["device_key_fingerprint"],fingerprint);
+    assert_eq!(completions.len(),1);
+    assert_eq!(completions[0].body["fields"]["device_public_key"],public);
+    let grants = state.store.claims_for_subject_kind_at(PERSON,"principal.key-granted",None,true,100).unwrap().claims;
+    assert_eq!(grants.iter().filter(|grant|grant.body["fields"]["key"]==public).count(),1);
+    assert!(!grants.iter().any(|grant|grant.body["fields"]["key"]==wrong.public_key().unwrap()));
+    gateway_server.abort();
+    local_server.abort();
 }

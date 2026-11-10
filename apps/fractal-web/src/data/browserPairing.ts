@@ -4,10 +4,11 @@ import type { BrowserPairingPort } from './source.ts'
 const decodeStatus = Schema.decodeUnknownSync(Schema.Struct({
   status: Schema.Literals(['unpaired', 'paired', 'pending', 'denied', 'expired']),
   displayCode: Schema.optional(Schema.String),
+  deviceKeyFingerprint: Schema.optional(Schema.String),
   credentialChanged: Schema.optional(Schema.Boolean),
   credentialRejected: Schema.optional(Schema.Boolean),
 }))
-const decodeStarted = Schema.decodeUnknownSync(Schema.Struct({ requestId: Schema.String, displayCode: Schema.String }))
+const decodeStarted = Schema.decodeUnknownSync(Schema.Struct({ requestId: Schema.String, displayCode: Schema.String, deviceKeyFingerprint: Schema.optional(Schema.String) }))
 
 /** A pairing endpoint answered, but not with success; network failures stay plain fetch errors. */
 export class PairingHttpError extends Error {

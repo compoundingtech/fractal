@@ -11,6 +11,7 @@ async fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientS
     let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
     let Json(paired) = pairing_complete(State(state.clone()),Extension(local),AxumPath(id.into()),Json(PairingComplete {
         api_version:CLIENT_API_VERSION.into(),code:challenge["code"].as_str().unwrap().into(),
+        proof: None,
         device_public_key:format!("opaque-device-identity-without-signing-key:{name}"),key_storage:None,fabric_node_id:None,
     })).await.unwrap();
     let request = axum::http::Request::builder().method("POST").uri("/v1/client/actions")
@@ -117,6 +118,7 @@ async fn browser_pairing_explicit_verifier_requires_a_32_byte_hex_key() {
         let id = started["requestId"].as_str().unwrap();
         let result = pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
             api_version:CLIENT_API_VERSION.into(),code:presented.clone(),
+            proof: None,
             device_public_key:format!("browser:{id}"),key_storage:None,fabric_node_id:None,
         })).await;
         assert_eq!(result.is_ok(),allowed);
@@ -145,6 +147,7 @@ async fn browser_pairing_stripped_verifier_never_uses_legacy_completion() {
     let id = started["requestId"].as_str().unwrap();
     let error = pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
         api_version:CLIENT_API_VERSION.into(),code:key.clone(),
+        proof: None,
         device_public_key:format!("browser:{id}"),key_storage:None,fabric_node_id:None,
     })).await.unwrap_err();
     assert_eq!(error.code,"pairing-restart-required");
@@ -173,6 +176,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     let id = denied["requestId"].as_str().unwrap();
     assert!(pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
         api_version: CLIENT_API_VERSION.into(), code: key.clone(), device_public_key: format!("browser:{id}"),
+        proof: None,
         key_storage: None, fabric_node_id: None,
     })).await.is_err(), "ordinary completion must not bypass owner approval");
     answer(&state,&owner,&denied,"deny").unwrap();
@@ -401,4 +405,28 @@ async fn browser_pairing_begin_rate_limit_is_per_device_even_after_denial() {
     assert_eq!(error.status,StatusCode::TOO_MANY_REQUESTS);
     let other = paired_device(&state,&["read.projections"],"other-publisher").await;
     assert!(start(&state,&other,&key).await["requestId"].is_string());
+}
+
+#[tokio::test]
+async fn browser_pairing_one_owner_approval_names_the_bound_identity_fingerprint() {
+    let (_root, state, owner) = fixture().await;
+    let key = "b".repeat(64);
+    let started = start(&state, &owner, &key).await;
+    let id = started["requestId"].as_str().unwrap();
+    let fingerprint = pairing_verifier::device_key_fingerprint(&format!("browser:{id}"));
+    assert_eq!(started["deviceKeyFingerprint"], fingerprint);
+    let request = begun(&state, &started);
+    assert_eq!(request.body["fields"]["device_key_fingerprint"], fingerprint);
+    let ask = request.body["fields"]["browser_ask"].as_str().unwrap();
+    let asks = state.store.claims_for_subject_kind_at(ask, "work.person-asked", None, true, 10).unwrap().claims;
+    assert_eq!(asks.len(), 1);
+    assert!(asks[0].body.to_string().contains(&fingerprint));
+    assert!(asks[0].body.to_string().contains("not a signing key"));
+    answer(&state, &owner, &started, "approve").unwrap();
+    let Json(redeemed) = poll(&state, &owner, &started, &key).await.unwrap();
+    assert!(redeemed["bearer"].is_string());
+    let completed = state.store.claims_for_subject_kind_at(&request.subject, "custom.client.pairing-completed", None, true, 10).unwrap().claims;
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].body["fields"]["device_key_fingerprint"], fingerprint);
+    assert_eq!(completed[0].body["fields"]["device_public_key"], format!("browser:{id}"));
 }

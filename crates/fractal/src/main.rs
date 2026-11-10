@@ -2157,6 +2157,15 @@ enum DevicesCommand {
         #[arg(long, default_value_t = 72, value_parser = clap::value_parser!(u64).range(1..=168))]
         expires_in_hours: u64,
     },
+    /// Prepare and retain a software key on the new device before trusted pairing approval.
+    Prepare {
+        /// Key algorithm; use the same algorithm when completing with --key-file.
+        #[arg(long, value_parser = ["ed25519", "p256"], default_value = "p256")]
+        algorithm: String,
+        /// Private DER PKCS#8 file to create (mode 0600), or reuse if it already exists.
+        #[arg(long)]
+        key_file: PathBuf,
+    },
     /// Begin local pairing for one named person and device, or one assistant grant.
     Pair {
         /// Device name; optional only for `--assistant`, which defaults to the assistant name.
@@ -2172,14 +2181,26 @@ enum DevicesCommand {
         /// `devices fabric enable`); without it pairing grants nothing over Fabric.
         #[arg(long, conflicts_with = "assistant")]
         fabric_gateway: bool,
-        /// Explicit phone-reachable gateway URL; show a pairing QR in an interactive terminal.
-        #[arg(long, value_parser = pairing_qr::parse_gateway, conflicts_with = "assistant")]
+        /// Phone-reachable gateway URL; require scanning-key approval and show an interactive QR.
+        /// Cannot be combined with a prepared fingerprint: approve the presented scanning key instead.
+        #[arg(long, value_parser = pairing_qr::parse_gateway, conflicts_with_all = ["assistant", "device_key_fingerprint"])]
         gateway: Option<reqwest::Url>,
+        /// Bind approval to the fingerprint printed by `devices prepare` on the new device.
+        /// This is not the person-root --fingerprint used during completion.
+        #[arg(long)]
+        device_key_fingerprint: Option<String>,
         /// Begin a revocable external-assistant grant (defaults to assistant/chatgpt).
         #[arg(long, num_args = 0..=1, default_missing_value = "assistant/chatgpt", value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
         #[command(flatten)]
         grant: AssistantGrantTerms,
+    },
+    /// Explicitly approve one presented scanning key over the trusted local person connection.
+    Approve {
+        pairing_id: String,
+        /// Exact scanning-device fingerprint shown by that device.
+        #[arg(long)]
+        device_key_fingerprint: String,
     },
     /// Inspect, revoke, or change one assistant grant; trusted local Unix person only.
     Grant {
@@ -2197,6 +2218,14 @@ enum DevicesCommand {
         /// Import a private mode-0600 DER PKCS#8 file; otherwise generate a key.
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Require key-bound pairing with this prepared key's fingerprint.
+        /// Requires --key-file and pairing-key-binding v1 or newer. For QR pairing, use --claim first.
+        #[arg(long, requires = "key_file")]
+        device_key_fingerprint: Option<String>,
+        /// Present this retained key once for QR approval, then exit without completing.
+        /// After the trusted issuer approves, rerun without --claim using the same key and code.
+        #[arg(long, requires = "device_key_fingerprint", conflicts_with = "assistant")]
+        claim: bool,
         /// Credential and private-key profile; person devices share Fractal TUI's profile by default,
         /// assistant grants use a separate assistant profile.
         #[arg(long)]
@@ -5871,6 +5900,32 @@ async fn run(cli: Cli) -> Result<()> {
     if matches!(&cli.command, Command::Migrate { command: MigrateCommand::LaunchdDomain }) {
         return migrate_cli::print_launchd_domain();
     }
+    if let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::Prepare { algorithm, key_file }),
+        ..
+    }) = &cli.command
+    {
+        let algorithm = match algorithm.as_str() {
+            "ed25519" => fractal_client::device::KeyAlgorithm::Ed25519,
+            "p256" => fractal_client::device::KeyAlgorithm::P256,
+            _ => anyhow::bail!("Choose ed25519 or p256"),
+        };
+        let key = fractal_client::device::SigningKey::prepare(algorithm, key_file)?;
+        let fingerprint = fractal_client::device::device_key_fingerprint(&key.public_key()?);
+        if cli.json {
+            println!("{}", serde_json::to_string(&json!({
+                "kind": "pairing-key-prepared",
+                "key_file": key_file,
+                "device_key_fingerprint": fingerprint,
+            }))?);
+        } else {
+            println!(
+                "Retained private key: {}\nDevice-key fingerprint: {fingerprint}\nOn the trusted member, run `fractal devices pair DEVICE --device-key-fingerprint {fingerprint}` (add --assistant for an assistant grant).\nComplete here with the same --key-file, --algorithm and --device-key-fingerprint. Person pairing separately requires the trusted person-root --fingerprint.",
+                key_file.display()
+            );
+        }
+        return Ok(());
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -5879,6 +5934,8 @@ async fn run(cli: Cli) -> Result<()> {
                 pairing_id,
                 algorithm,
                 key_file,
+                device_key_fingerprint,
+                claim,
                 profile,
                 allow_public_http,
                 fingerprint,
@@ -5896,6 +5953,7 @@ async fn run(cli: Cli) -> Result<()> {
                 key_file.as_deref(),
                 profile.as_deref(),
                 *allow_public_http,
+                device_key_fingerprint.as_deref(),
                 cli.json,
             )
             .await;
@@ -5911,6 +5969,8 @@ async fn run(cli: Cli) -> Result<()> {
                 fingerprint: fingerprint.as_deref(),
                 unpinned: *unpinned,
             },
+            device_key_fingerprint.as_deref(),
+            *claim,
             cli.json,
         )
         .await;
@@ -9635,6 +9695,7 @@ async fn run_devices(
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),
+        DevicesCommand::Prepare { .. } => unreachable!("handled without local config"),
         DevicesCommand::Fabric { .. } => unreachable!("handled without a client"),
         DevicesCommand::RenewStage { .. } => unreachable!("handled before product client requests"),
         DevicesCommand::Ls => {
@@ -9668,13 +9729,18 @@ async fn run_devices(
             device_name,
             assistant: Some(assistant),
             grant,
+            device_key_fingerprint,
             // clap rejects --full-control and --read-only alongside --assistant.
             ..
         } => {
             let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, grant)?;
+            if device_key_fingerprint.is_some() {
+                fractal_client::device::require_pairing_key_binding(&client).await?;
+            }
             let response = client
                 .pairing_begin(&PairingBegin::Assistant(AssistantPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
+                    device_key_fingerprint,
                     device_name: device_name.unwrap_or_else(|| match assistant {
                         AssistantPrincipal::Chatgpt => "ChatGPT".into(),
                         AssistantPrincipal::Mcp => "MCP".into(),
@@ -9690,7 +9756,7 @@ async fn run_devices(
             print_client_value(&response, json_output)?;
             if !json_output {
                 println!(
-                    "Complete on the assistant host before the code expires: `fractal devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. Grant scopes and expiry are sealed; change them with `fractal devices --as {person} grant policy <grant>`."
+                    "Complete on the assistant host before the code expires: `fractal devices complete MEMBER_URL PAIRING_ID --assistant`, then enter the code. For key-bound approval, also pass the prepared --key-file, matching --algorithm and --device-key-fingerprint. Grant scopes and expiry are sealed; change them with `fractal devices --as {person} grant policy <grant>`."
                 );
             }
             Ok(())
@@ -9701,6 +9767,7 @@ async fn run_devices(
             read_only,
             fabric_gateway,
             gateway,
+            device_key_fingerprint,
             assistant: None,
             grant,
         } => {
@@ -9709,6 +9776,11 @@ async fn run_devices(
                 "--expires-in, --scope, --disclose-to-openai and --consent-evidence apply only to --assistant pairing"
             );
             let device_name = device_name.context("name the device to pair")?;
+            if gateway.is_some() {
+                fractal_client::device::require_pairing_key_binding_v2(&client).await?;
+            } else if device_key_fingerprint.is_some() {
+                fractal_client::device::require_pairing_key_binding(&client).await?;
+            }
             if let Some(gateway) = &gateway {
                 let local_member = client.capabilities().await?.snapshot.host_id;
                 pairing_qr::check_begin_member(gateway, &local_member, &config.peers)?;
@@ -9722,6 +9794,8 @@ async fn run_devices(
                 .pairing_begin_person(&PersonPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
                     device_name,
+                    device_key_fingerprint,
+                    binding: gateway.as_ref().map(|_| "required".into()),
                     person_id: person.clone(),
                     full_control: full_control.then_some(true),
                     scopes: read_only.then(|| {
@@ -9758,6 +9832,31 @@ async fn run_devices(
                     println!("Hint: --gateway <url> enables a pairing QR in an interactive terminal.");
                 }
             }
+            if gateway.is_some()
+                && !json_output
+                && std::io::stdout().is_terminal()
+                && std::io::stdin().is_terminal()
+            {
+                pairing_qr::approve_scanning_key(&client, &response.value.pairing_id).await?;
+            } else if gateway.is_some() && !json_output {
+                println!("Scanning-key approval is required. After scanning, run `fractal devices approve {} --device-key-fingerprint DEVICE_SHA256` on this trusted machine.", response.value.pairing_id);
+            }
+            Ok(())
+        }
+        DevicesCommand::Approve { pairing_id, device_key_fingerprint } => {
+            anyhow::ensure!(
+                matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)),
+                "scanning-key approval requires the trusted local Unix socket"
+            );
+            fractal_client::device::require_pairing_key_binding_v2(&client).await?;
+            let response = client.pairing_key_approve(
+                &pairing_id,
+                &fractal_client::PairingKeyApproval {
+                    api_version: CLIENT_V0_API_VERSION.into(),
+                    device_key_fingerprint,
+                },
+            ).await?;
+            print_client_value(&response, json_output)?;
             Ok(())
         }
         DevicesCommand::Grant { command } => {
@@ -9962,9 +10061,15 @@ async fn run_devices_complete_assistant(
     key_file: Option<&Path>,
     profile: Option<&Path>,
     allow_public_http: bool,
+    device_key_fingerprint: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
     let key = completion_signing_key(algorithm, key_file)?;
+    if let Some(fingerprint) = device_key_fingerprint {
+        fractal_client::device::check_bound_completion(
+            member_url, &key, fingerprint, allow_public_http,
+        ).await?;
+    }
     let path = profile
         .map(Path::to_path_buf)
         .map(Ok)
@@ -10014,15 +10119,34 @@ async fn run_devices_complete(
     key_file: Option<&Path>,
     profile: Option<&Path>,
     options: fractal_client::device::CompletionOptions<'_>,
+    device_key_fingerprint: Option<&str>,
+    claim: bool,
     json_output: bool,
 ) -> Result<()> {
     options.validate()?;
     let key = completion_signing_key(algorithm, key_file)?;
+    if let Some(fingerprint) = device_key_fingerprint {
+        fractal_client::device::check_bound_completion(
+            member_url, &key, fingerprint, options.allow_public_http,
+        ).await?;
+    }
     let path = profile
         .map(Path::to_path_buf)
         .map(Ok)
         .unwrap_or_else(fractal_client::device::profile_path)?;
     let code = fractal_client::device::read_pairing_code()?;
+    if claim {
+        let status = fractal_client::device::claim_pairing_key(
+            member_url, pairing_id, &code, &key, options.allow_public_http,
+        ).await?;
+        if json_output {
+            print_value(&status, true)?;
+        } else {
+            println!("Scanning-device key fingerprint: {}", fractal_client::device::device_key_fingerprint(&key.public_key()?));
+            println!("Pairing status: {}. No completion was attempted. Ask the trusted issuer to approve this exact key, then rerun without --claim using the same --key-file and code.", status.status);
+        }
+        return Ok(());
+    }
     let device = fractal_client::device::complete_with_options(
         &path, member_url, pairing_id, &code, key, options,
     )

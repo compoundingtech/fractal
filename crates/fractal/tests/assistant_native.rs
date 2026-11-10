@@ -87,17 +87,16 @@ impl Harness {
     }
 
     async fn pair_principal(&self, principal: AssistantPrincipal) -> AssistantPairedSession {
-        let begin = AssistantPairingBegin {
-            api_version: fractal_client::API_VERSION.into(), device_name: "Native assistant test".into(),
-            assistant_id: principal.clone(), scopes: scopes(), expires_in_seconds: Some(3600),
-            disclosure_consent: true, consent_evidence: "Isolated integration disclosure consent".into(),
-            minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow),
-        };
+        let begin = AssistantPairingBegin { device_key_fingerprint: None, api_version: fractal_client::API_VERSION.into(), device_name: "Native assistant test".into(),
+        assistant_id: principal.clone(), scopes: scopes(), expires_in_seconds: Some(3600),
+        disclosure_consent: true, consent_evidence: "Isolated integration disclosure consent".into(),
+        minimal_read_mode: Some(AssistantMinimalReadMode::CallerBoundAllow), };
         let challenge = self.owner("POST", "/v1/client/pairings", &begin).await;
         let path = format!("/v1/client/pairings/{}/complete", challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/"));
         let complete = PairingComplete {
             api_version: fractal_client::API_VERSION.into(), code: challenge["value"]["code"].as_str().unwrap().into(),
             device_public_key: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into(),
+            proof: None,
             key_storage: Some("software".into()),
             fabric_node_id: None,
         };

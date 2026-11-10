@@ -28,6 +28,7 @@ const fixture = async (admitted = false) => {
   const received: { path: string; auth: string | undefined; body: Record<string, unknown>; cookie: string | undefined }[] = []
   let status = 'pending'
   let grantStatus = 200
+  let deviceKeyFingerprint: unknown
   const daemon = createServer((req, res) => { void (async () => {
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
@@ -40,7 +41,7 @@ const fixture = async (admitted = false) => {
       return
     }
     res.end(JSON.stringify(req.url?.endsWith('/redeem') ? status === 'approved' ? { bearer: device, scopes: ['control.messages'], expiresAt: 123 } : { status }
-      : req.url?.endsWith('/revoke-current') ? {} : { requestId: 'request-one', displayCode: '123456', expiresAt: 123 }))
+      : req.url?.endsWith('/revoke-current') ? {} : { requestId: 'request-one', displayCode: '123456', ...(deviceKeyFingerprint === undefined ? {} : { deviceKeyFingerprint }), expiresAt: 123 }))
   })().catch(() => res.destroy()) })
   const socketPath = join(root, 'daemon.sock')
   daemon.listen(socketPath)
@@ -80,7 +81,7 @@ const fixture = async (admitted = false) => {
     upstream.end(action === 'start' ? JSON.stringify({ deviceLabel: 'Personal browser' }) : undefined)
     return promise
   }
-  return { call, received, setStatus: (value: string) => { status = value }, setGrantStatus: (value: number) => { grantStatus = value } }
+  return { call, received, setStatus: (value: string) => { status = value }, setGrantStatus: (value: number) => { grantStatus = value }, setFingerprint: (value: unknown) => { deviceKeyFingerprint = value } }
 }
 
 it('keeps request secrets and grants only in secure cookies and revokes before forgetting', async () => {
@@ -127,6 +128,22 @@ it.each(['denied', 'expired'])('clears a %s pairing cookie', async status => {
   const result = await setup.call('redeem', cookie)
   expect(await result.json()).toEqual({ status })
   expect(result.headers.getSetCookie()).toEqual([`fractal_pair=${flags}0`])
+})
+it('forwards the browser identity fingerprint from start through the pending status', async () => {
+  const setup = await fixture()
+  const fingerprint = `sha256:${createHash('sha256').update('browser:request-one').digest('base64url')}`
+  setup.setFingerprint(fingerprint)
+  const start = await setup.call('start')
+  expect(await start.json()).toEqual({ requestId: 'request-one', displayCode: '123456', deviceKeyFingerprint: fingerprint, expiresAt: 123 })
+  const cookie = start.headers.getSetCookie()[0]!.split(';')[0]!
+  expect(await (await setup.call('status', cookie)).json()).toEqual({ status: 'pending', displayCode: '123456', deviceKeyFingerprint: fingerprint })
+})
+it.each([42, 'sha256:short', `sha1:${'a'.repeat(43)}`])('rejects a malformed browser identity fingerprint %s', async value => {
+  const setup = await fixture()
+  setup.setFingerprint(value)
+  const start = await setup.call('start')
+  expect(start.status).toBe(502)
+  expect(start.headers.getSetCookie()).toEqual([])
 })
 it.each(['start', 'status', 'forget', 'redeem'])('refuses %s without admitted personal login or with cross-origin requests', async action => {
   const setup = await fixture()

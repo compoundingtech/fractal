@@ -633,6 +633,10 @@
       "issuer-required",
       "pairing-origin-required",
       "pairing-restart-required",
+      "pairing-key-mismatch",
+      "pairing-key-binding-required",
+      "pairing-already-claimed",
+      "pairing-claim-invalid",
       "suspend-authored-session-selection",
       "stale-fence",
       "cursor-gap",
@@ -4285,6 +4289,7 @@
       "properties": {
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "device_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$", "description": "Optional completion key binding: sha256: followed by base64url without padding of SHA-256 of the exact device_public_key UTF-8 bytes." },
         "assistant_id": { "$ref": "#/$defs/AssistantPrincipal" },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_in_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000, "default": 3600 },
@@ -4303,6 +4308,8 @@
       "properties": {
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "device_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$", "description": "Optional completion key binding: sha256: followed by base64url without padding of SHA-256 of the exact device_public_key UTF-8 bytes." },
+        "binding": { "enum": ["required", "optional"], "description": "Absent means optional. Required seals the challenge before QR display and requires a signed scanning-key claim followed by trusted local approval." },
         "person_id": { "type": "string", "pattern": "^person/[^/]+$" },
         "full_control": { "type": "boolean" },
         "fabric_gateway": { "type": "boolean", "description": "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." },
@@ -4313,6 +4320,37 @@
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
           "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
         }
+      }
+    },
+    "PairingKeyClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "code", "device_public_key", "proof"],
+      "properties": {
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
+        "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
+        "device_public_key": { "type": "string", "description": "p256: followed by unpadded base64url of the uncompressed 65-byte SEC1 point, or bare unpadded base64url of a 32-byte Ed25519 public key." },
+        "proof": { "type": "string", "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$", "description": "Unpadded base64url raw 64-byte signature over UTF-8 pairing.claim.v1, newline, full prefixed pairing ID, newline, lowercase hexadecimal SHA-256 of code UTF-8; no trailing newline. P-256 uses ECDSA SHA-256 r||s; Ed25519 uses its native signature." }
+      }
+    },
+    "PairingKeyApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api_version", "device_key_fingerprint"],
+      "properties": {
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
+        "device_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" }
+      }
+    },
+    "PairingKeyStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "status", "expires_at"],
+      "properties": {
+        "kind": { "const": "pairing-key-status" },
+        "status": { "enum": ["awaiting-key", "awaiting-approval", "approved", "completed", "expired"] },
+        "device_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" },
+        "expires_at": { "$ref": "#/$defs/Timestamp" }
       }
     },
     "PairingChallenge": {
@@ -4345,6 +4383,7 @@
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
+        "proof": { "type": "string", "description": "Required only for required-binding challenges. Unpadded base64url raw 64-byte signature over UTF-8 pairing.complete.v1, newline, full prefixed pairing ID, newline, lowercase hexadecimal SHA-256 of code UTF-8; no trailing newline. Uses the approved device key and the same key/signature encoding as a claim, but a distinct purpose. Optional legacy completion ignores this field." },
         "key_storage": { "enum": ["secure-enclave", "software"] },
         "fabric_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }

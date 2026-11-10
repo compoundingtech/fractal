@@ -81,16 +81,17 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     let id = hex::encode(random);
+    let device_key_fingerprint = pairing_verifier::device_key_fingerprint(&format!("browser:{id}"));
     let display = format!("{}-{}", &id[..4], &id[4..8]);
     let ask = state.store.ask_person(&PersonAskRequest {
         person: session.authority_actor.clone(), actor: REQUESTER.into(),
         title: format!("Pair browser: {}", body.device_label),
-        reason: format!("Approve only after comparing this display code with the browser you are using. Device labels and login text are supplied by the requester, not proof of browser identity.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
+        reason: format!("Approve only after comparing this display code and browser identity fingerprint with the browser you are using. This is an opaque browser identity, not a signing key. Device labels and login text are supplied by the requester, not proof of browser identity.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nBrowser identity fingerprint: {device_key_fingerprint}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
         step: None, new_run: None, incarnation: None, legacy_request: None,
         idempotency_key: format!("browser-pairing:{id}"), deadline_ms: Some(300_000), default_answer: None,
         request: Some(json!({"version":1,"type":"decision",
-            "question":format!("Pair {} ({display})?", body.device_label),
-            "why_person":"Only you can compare this display code with the browser you are using. The requester supplies the device label and login text.",
+            "question":format!("Pair {} ({display}, {device_key_fingerprint})?", body.device_label),
+            "why_person":"Only you can compare this display code and browser identity fingerprint with the browser you are using. The requester supplies the device label and login text.",
             "answers":[
                 {"id":"approve","label":"Approve","outcome":"accept","consequence":"Grant this browser read access and message sending for 30 days."},
                 {"id":"deny","label":"Deny","outcome":"decline","consequence":"Refuse this browser pairing."}
@@ -108,13 +109,14 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
             ("device_name".into(), json!(body.device_label)), ("tailnet_login".into(), json!(body.tailnet_login)),
             ("code_hash".into(), json!(body.request_key_digest)), ("scopes".into(), json!(SCOPES)),
             ("verifier".into(), json!(VERIFIER)),
+            ("device_key_fingerprint".into(), json!(device_key_fingerprint)),
             ("publisher_grant".into(), json!(session.pairing_grant)), ("requested_at_unix_ms".into(), json!(now)),
             ("expires_at_unix_ms".into(), json!(expires)), ("browser_request".into(), json!(true)),
             ("browser_ask".into(), json!(ask.subject)), ("display_code".into(), json!(display)),
         ]), evidence: vec![], expected_subject: Some(None), idempotency_key: None,
     }).map_err(ApiError::bad)?;
     signal_changed(&state);
-    Ok(Json(json!({"requestId":id,"displayCode":display,"expiresAt":client_timestamp(expires)})))
+    Ok(Json(json!({"requestId":id,"displayCode":display,"deviceKeyFingerprint":device_key_fingerprint,"expiresAt":client_timestamp(expires)})))
 }
 
 fn answer_is_admitted(state: &AppState, begun: &ClaimRecord, asking: &ClaimRecord, answer: &ClaimRecord) -> Result<bool, ApiError> {
@@ -185,6 +187,7 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
     if status != "approved" { return Ok(Json(json!({"status":status}))); }
     let Json(paired) = pairing_complete(State(state), Extension(session), AxumPath(id.clone()), Json(PairingComplete {
         api_version: CLIENT_API_VERSION.into(), code: body.request_key,
+        proof: None,
         device_public_key: format!("browser:{id}"), key_storage: None, fabric_node_id: None,
     })).await?;
     Ok(Json(json!({"bearer":paired["credential"],"scopes":paired["scopes"],"expiresAt":paired["expires_at"]})))

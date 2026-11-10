@@ -96,6 +96,22 @@ impl SigningKey {
         Self::from_pkcs8(algorithm, &bytes)
     }
 
+    /// Retain a key before requesting approval. Existing private keys are reused, never replaced.
+    pub fn prepare(algorithm: KeyAlgorithm, path: &Path) -> Result<Self> {
+        if open_private(path)?.is_some() {
+            return Self::import(algorithm, path);
+        }
+        let key = Self::generate(algorithm)?;
+        let parent = path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+        temporary.write_all(&key.decoded()?)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary.persist_noclobber(path).map_err(|error| error.error)?;
+        Ok(key)
+    }
+
     fn decoded(&self) -> Result<Vec<u8>> {
         URL_SAFE_NO_PAD
             .decode(&self.pkcs8)
@@ -143,6 +159,16 @@ impl SigningKey {
             .map_err(|_| anyhow::anyhow!("Sign with device key"))?,
         };
         Ok(URL_SAFE_NO_PAD.encode(signed.as_ref()))
+    }
+
+    /// Prove possession of the retained scanning key for this exact challenge and code.
+    pub fn pairing_claim_proof(&self, pairing_id: &str, code: &str) -> Result<String> {
+        self.sign(pairing_claim_message(pairing_id, code).as_bytes())
+    }
+
+    /// Authorize completion with the retained scanning key, separately from claiming it.
+    pub fn pairing_completion_proof(&self, pairing_id: &str, code: &str) -> Result<String> {
+        self.sign(pairing_completion_message(pairing_id, code).as_bytes())
     }
 
     /// Check actual possession before consuming a pairing code. This is a local self-test,
@@ -610,6 +636,7 @@ pub async fn complete_assistant(
             device_public_key: public,
             key_storage: Some("software".into()),
             fabric_node_id: None,
+            proof: None,
         },
     ).await.context("Complete assistant pairing")?;
     let mut device = AssistantDevice { endpoint, allow_public_http, session: session.value, signing_key: key };
@@ -752,6 +779,89 @@ pub fn validate_fingerprint(fingerprint: &str) -> Result<()> {
     Ok(())
 }
 
+fn pairing_claim_message(pairing_id: &str, code: &str) -> String {
+    format!("pairing.claim.v1\n{pairing_id}\n{:x}", Sha256::digest(code.as_bytes()))
+}
+
+fn pairing_completion_message(pairing_id: &str, code: &str) -> String {
+    format!("pairing.complete.v1\n{pairing_id}\n{:x}", Sha256::digest(code.as_bytes()))
+}
+
+/// SHA-256 of the exact device public-key UTF-8 string, not its decoded key bytes.
+pub fn device_key_fingerprint(public_key: &str) -> String {
+    format!("sha256:{}", URL_SAFE_NO_PAD.encode(Sha256::digest(public_key.as_bytes())))
+}
+
+fn supports_pairing_key_binding(capabilities: &serde_json::Value, minimum_version: u64) -> bool {
+    matches!(capabilities["api_version"].as_str(), Some("st3.client.v0" | "fractal.client.v0"))
+        && capabilities["capabilities"].as_array().is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability["id"] == "pairing-key-binding"
+                    && capability["version"].as_u64().is_some_and(|version| version >= minimum_version)
+                    && capability["state"] == "granted"
+            })
+        })
+}
+
+/// Refuse bound pairing on members that could silently ignore the requested key binding.
+pub async fn require_pairing_key_binding(client: &Client) -> Result<()> {
+    require_pairing_key_binding_version(client, 1).await
+}
+
+/// Require post-scan key presentation and explicit issuer approval before issuing a QR.
+pub async fn require_pairing_key_binding_v2(client: &Client) -> Result<()> {
+    require_pairing_key_binding_version(client, 2).await
+}
+
+async fn require_pairing_key_binding_version(client: &Client, minimum_version: u64) -> Result<()> {
+    let capabilities: serde_json::Value = client.get("/v1/client/capabilities?accepts=pairing-key-binding").await
+        .context("Read pairing-key-binding capability; the pairing code was not submitted")?;
+    ensure!(
+        supports_pairing_key_binding(&capabilities, minimum_version),
+        "Member must advertise pairing-key-binding v{minimum_version} or newer; upgrade it before retrying. The pairing code was not submitted"
+    );
+    Ok(())
+}
+
+/// Check a retained key and member capability before the CLI reads or submits the code.
+pub async fn check_bound_completion(
+    endpoint: &str,
+    key: &SigningKey,
+    fingerprint: &str,
+    allow_public_http: bool,
+) -> Result<()> {
+    ensure!(
+        device_key_fingerprint(&key.public_key()?) == fingerprint,
+        "The retained key does not match --device-key-fingerprint"
+    );
+    let endpoint = validate_endpoint_with_http_policy(endpoint, allow_public_http)?;
+    let mut client = Client::fabric_pairing(&endpoint);
+    client.http = transport::client(&endpoint, allow_public_http)?;
+    require_pairing_key_binding(&client).await
+}
+
+/// Claim once with a retained key; callers must explicitly request this operation, not retry it.
+pub async fn claim_pairing_key(
+    endpoint: &str,
+    pairing_id: &str,
+    code: &str,
+    key: &SigningKey,
+    allow_public_http: bool,
+) -> Result<crate::PairingKeyStatus> {
+    ensure!(!code.trim().is_empty(), "A pairing code is required");
+    let endpoint = validate_endpoint_with_http_policy(endpoint, allow_public_http)?;
+    let mut client = Client::fabric_pairing(&endpoint);
+    client.http = transport::client(&endpoint, allow_public_http)?;
+    require_pairing_key_binding_v2(&client).await?;
+    let response = client.pairing_key_claim(pairing_id, &crate::PairingKeyClaim {
+        api_version: crate::API_VERSION.into(),
+        code: code.into(),
+        device_public_key: key.public_key()?,
+        proof: key.pairing_claim_proof(pairing_id, code)?,
+    }).await?;
+    Ok(response.value)
+}
+
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 // Sunset: 60 days after the first release shipping this bridge. Pairing still sends st3.
 fn supports_device_key_proofs(capabilities: &serde_json::Value) -> bool {
@@ -804,6 +914,11 @@ pub async fn complete_with_options(
         supports_device_key_proofs(&capabilities),
         "Member does not support verifiable device grants; upgrade it before retrying. The pairing code was not submitted"
     );
+    let proof = if supports_pairing_key_binding(&capabilities, 2) {
+        Some(key.pairing_completion_proof(pairing_id, code.trim())?)
+    } else {
+        None
+    };
     let session = client.pairing_complete_person(pairing_id,
     &PairingComplete {
         api_version: crate::API_VERSION.into(),
@@ -811,6 +926,7 @@ pub async fn complete_with_options(
         device_public_key: public.clone(),
         key_storage: Some("software".into()),
         fabric_node_id: None,
+        proof,
     },)
         .await
         .context("Complete device pairing")?
@@ -982,6 +1098,98 @@ pub fn read_pairing_code() -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn device_fingerprint_hashes_exact_public_key_text() {
+        assert_eq!(
+            device_key_fingerprint("abc"),
+            "sha256:ungWv48Bz-pBQUDeXa4iI7ADYaOWF3qctBD_YfIAFa0"
+        );
+        assert_ne!(device_key_fingerprint("abc"), device_key_fingerprint("abc\n"));
+    }
+
+    #[test]
+    fn pairing_claim_proof_signs_exact_challenge_and_code_digest() -> Result<()> {
+        let message = pairing_claim_message("pairing/example", "abc");
+        assert_eq!(message, "pairing.claim.v1\npairing/example\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        for algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::P256] {
+            let key = SigningKey::generate(algorithm)?;
+            let public = key.public_key()?;
+            let raw = URL_SAFE_NO_PAD.decode(public.strip_prefix("p256:").unwrap_or(&public))?;
+            let proof = URL_SAFE_NO_PAD.decode(key.pairing_claim_proof("pairing/example", "abc")?)?;
+            assert_eq!(proof.len(), 64);
+            let verifier: &dyn signature::VerificationAlgorithm = match algorithm {
+                KeyAlgorithm::Ed25519 => &signature::ED25519,
+                KeyAlgorithm::P256 => &signature::ECDSA_P256_SHA256_FIXED,
+            };
+            let public_key = signature::UnparsedPublicKey::new(verifier, raw);
+            public_key.verify(message.as_bytes(), &proof).unwrap();
+            assert!(public_key.verify(pairing_claim_message("pairing/other", "abc").as_bytes(), &proof).is_err());
+            assert!(public_key.verify(pairing_claim_message("pairing/example", "other").as_bytes(), &proof).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pairing_completion_proof_signs_exact_frame_and_cannot_cross_verify_claims() -> Result<()> {
+        let pairing_id = "pairing/example";
+        let code = "abc";
+        let completion_message = pairing_completion_message(pairing_id, code);
+        let claim_message = pairing_claim_message(pairing_id, code);
+        assert_eq!(
+            completion_message,
+            "pairing.complete.v1\npairing/example\nba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        for algorithm in [KeyAlgorithm::Ed25519, KeyAlgorithm::P256] {
+            let key = SigningKey::generate(algorithm)?;
+            let public = key.public_key()?;
+            let raw = URL_SAFE_NO_PAD.decode(public.strip_prefix("p256:").unwrap_or(&public))?;
+            let completion_proof = URL_SAFE_NO_PAD.decode(key.pairing_completion_proof(pairing_id, code)?)?;
+            let claim_proof = URL_SAFE_NO_PAD.decode(key.pairing_claim_proof(pairing_id, code)?)?;
+            assert_eq!(completion_proof.len(), 64);
+            let verifier: &dyn signature::VerificationAlgorithm = match algorithm {
+                KeyAlgorithm::Ed25519 => &signature::ED25519,
+                KeyAlgorithm::P256 => &signature::ECDSA_P256_SHA256_FIXED,
+            };
+            let public_key = signature::UnparsedPublicKey::new(verifier, raw);
+            public_key.verify(completion_message.as_bytes(), &completion_proof).unwrap();
+            public_key.verify(claim_message.as_bytes(), &claim_proof).unwrap();
+            assert!(public_key.verify(claim_message.as_bytes(), &completion_proof).is_err());
+            assert!(public_key.verify(completion_message.as_bytes(), &claim_proof).is_err());
+            assert!(public_key.verify(pairing_completion_message("pairing/other", code).as_bytes(), &completion_proof).is_err());
+            assert!(public_key.verify(pairing_completion_message(pairing_id, "other").as_bytes(), &completion_proof).is_err());
+            assert!(public_key.verify(format!("{completion_message}\n").as_bytes(), &completion_proof).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pairing_binding_requires_granted_version_one() {
+        let mut capabilities = serde_json::json!({
+            "api_version": "fractal.client.v0",
+            "capabilities": [{"id": "pairing-key-binding", "version": 1, "state": "granted"}]
+        });
+        assert!(supports_pairing_key_binding(&capabilities, 1));
+        assert!(!supports_pairing_key_binding(&capabilities, 2));
+        capabilities["capabilities"][0]["version"] = 2.into();
+        assert!(supports_pairing_key_binding(&capabilities, 1));
+        assert!(supports_pairing_key_binding(&capabilities, 2));
+        capabilities["capabilities"][0]["state"] = "denied".into();
+        assert!(!supports_pairing_key_binding(&capabilities, 1));
+        assert!(!supports_pairing_key_binding(&capabilities, 2));
+    }
+
+    #[test]
+    fn prepared_key_is_private_and_reused() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("device.pk8");
+        let first = SigningKey::prepare(KeyAlgorithm::P256, &path)?;
+        let second = SigningKey::prepare(KeyAlgorithm::P256, &path)?;
+        assert_eq!(first.public_key()?, second.public_key()?);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        assert!(SigningKey::prepare(KeyAlgorithm::Ed25519, &path).is_err());
+        Ok(())
+    }
+
     #[test]
     fn pairing_proof_advertisement_accepts_both_versions_without_weakening_proof_checks() {
         for version in ["st3.client.v0", "fractal.client.v0", "fractal.client.v1"] {

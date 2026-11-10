@@ -114,9 +114,66 @@ pub(super) fn render(
     )))
 }
 
+/// Wait for presentation, then require one explicit local approval of the exact scanning key.
+pub(super) async fn approve_scanning_key(
+    client: &fractal_client::Client,
+    pairing_id: &str,
+) -> Result<()> {
+    use std::io::Write as _;
+    println!("Waiting for the scanning device's key. No access is granted until you approve.");
+    loop {
+        let response = client.pairing_key_status(pairing_id, Some(30_000)).await?;
+        match response.value.status.as_str() {
+            "awaiting-key" => {}
+            "awaiting-approval" => {
+                let fingerprint = response.value.device_key_fingerprint
+                    .context("member omitted the scanning-device fingerprint")?;
+                println!("Scanning-device key fingerprint: {fingerprint}");
+                print!("Compare this with the scanning device. Approve this exact key? [y/N] ");
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                anyhow::ensure!(
+                    confirms_approval(&answer),
+                    "Pairing refused locally; no approval was sent and no access was granted"
+                );
+                client.pairing_key_approve(
+                    pairing_id,
+                    &fractal_client::PairingKeyApproval {
+                        api_version: fractal_client::API_VERSION.into(),
+                        device_key_fingerprint: fingerprint,
+                    },
+                ).await?;
+                println!("Approved the scanning key. Complete pairing on that device before expiry.");
+                return Ok(());
+            }
+            "expired" => anyhow::bail!("Pairing expired before scanning-key approval; issue a new QR"),
+            "approved" | "completed" => {
+                println!("Pairing is already {}.", response.value.status);
+                return Ok(());
+            }
+            status => anyhow::bail!("Unexpected pairing-key status: {status}"),
+        }
+    }
+}
+
+fn confirms_approval(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scanning_key_approval_requires_an_explicit_yes() {
+        for yes in ["y", "Y\n", "yes", " YES \n"] {
+            assert!(confirms_approval(yes));
+        }
+        for no in ["", "\n", "n", "no", "approve", "yes please"] {
+            assert!(!confirms_approval(no));
+        }
+    }
+
 
     #[test]
     fn known_other_member_is_refused_before_begin_but_unknown_gateway_is_allowed() {
