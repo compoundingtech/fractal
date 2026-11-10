@@ -125,9 +125,9 @@ objective "cpu" {
   indicator "cpu" {
     idle-min-minutes 10
     // daemon_load's bound in CI under its synthetic load, which is not the production target.
-    load-max-cores 2.0
+    load-max-cores 2
   }
-  target "cores" max=1.0
+  target "cores" max=1
   target "idle-cores" max=0.5
 }
 
@@ -198,7 +198,7 @@ objective "projection-divergence" {
 objective "database" {
   about "This member's store: the pages in use, and how much they grow a day once checkpoints and retention have run"
   indicator "database"
-  target "live-gb" max=8.0
+  target "live-gb" max=8
   target "growth-mb-per-day" max=300
 }
 
