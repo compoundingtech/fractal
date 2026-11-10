@@ -118,6 +118,12 @@ fn messages_for_another_attempt_or_host_change_nothing() {
     assert_eq!(journal_claims(&engine, step), 0);
     assert!(engine.lock().running.get(step).is_some_and(|running| running.requests.is_empty()));
     assert_eq!(engine.host_fault(step, 2), None);
+    // A late message for the earlier attempt never removes the attempt that replaced it, and a
+    // refused entry is answered rather than left waiting (no host here, so nothing is sent).
+    engine.done(step, 1, 1, &"a".repeat(64), &message(1, "done")).unwrap();
+    engine.unresponsive(step, 1, 1, &message(1, "unresponsive")).unwrap();
+    assert!(engine.lock().running.contains_key(step));
+    assert_eq!(engine.host_fault(step, 1), None);
 }
 
 #[test]
@@ -137,6 +143,8 @@ fn recorded_groups_are_killed_only_when_their_leader_is_verified() {
     // Recorded by this boot with the leader's start time: an effect a dead host left behind.
     let mut ours = leader();
     record(&ours, &boot, start_time(ours.id() as i32));
+    // The host died between writing this record and renaming it into place: the group runs.
+    std::fs::rename(groups.join(format!("{}.json", ours.id())), groups.join(format!("{}.json.tmp", ours.id()))).unwrap();
     // The same pid with another start time is a process that reused it.
     let mut reused = leader();
     record(&reused, &boot, Some("0".into()));

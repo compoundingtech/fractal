@@ -260,17 +260,17 @@ impl ProgramEngine {
                         Some(view) if !RUNNING_STATES.contains(&view.status.as_str()) => Some(format!("the step is {}", view.status)),
                         Some(_) => None,
                     };
-                    reason.map(|reason| (step.clone(), attempt, reason))
+                    reason.map(|reason| (step.clone(), attempt, running.generation, reason))
                 })
                 .collect::<Vec<_>>();
-            for (step, attempt, reason) in &left {
+            for (step, attempt, generation, reason) in &left {
                 inner.running.remove(step);
                 eprintln!("fractal: program {step} attempt {attempt} cancelled: {reason}");
-                send(&inner, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+                send_to(&inner, *generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
             }
             left
         };
-        for (step, attempt, reason) in left {
+        for (step, attempt, _, reason) in left {
             self.cancel_waits(&step, attempt, &reason)?;
         }
         Ok(())
@@ -325,16 +325,17 @@ impl ProgramEngine {
             }
         };
         let mut inner = self.lock();
-        let Some(pending) = inner
+        let Some((generation, pending)) = inner
             .running
             .get_mut(&request.step)
             .filter(|running| running.dispatch.attempt == request.attempt)
-            .and_then(|running| running.requests.remove(&request.key))
+            .and_then(|running| Some((running.generation, running.requests.remove(&request.key)?)))
         else {
             return Ok(());
         };
-        send(
+        send_to(
             &inner,
+            generation,
             &json!({"t": "resolved", "step": request.step, "attempt": request.attempt, "seq": pending.seq, "key": request.key, "exit": exit}),
         );
         Ok(())
@@ -345,9 +346,11 @@ impl ProgramEngine {
     pub fn fail(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
         {
             let mut inner = self.lock();
-            if inner.running.get(step).is_some_and(|running| running.dispatch.attempt == attempt) {
-                inner.running.remove(step);
-                send(&inner, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+            let running = inner.running.get(step).filter(|running| running.dispatch.attempt == attempt);
+            if let Some(generation) = running.map(|running| running.generation)
+                && forget(&mut inner, step, attempt, generation)
+            {
+                send_to(&inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
             }
         }
         eprintln!("fractal: program {step} attempt {attempt} failed: {reason}");
@@ -555,11 +558,8 @@ impl ProgramEngine {
         let mut killed = 0;
         for entry in std::fs::read_dir(&dir)? {
             let path = entry?.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-                // A record the host was still writing when it died names a group it never ran.
-                std::fs::remove_file(&path)?;
-                continue;
-            }
+            // A `.tmp` record is one the host was renaming into place when it died: its group was
+            // already running, so it is verified like any other record.
             let record: Value = std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -568,12 +568,14 @@ impl ProgramEngine {
             if let Some(pid) = pid
                 && record["boot_id"].as_str() == Some(boot.as_str())
             {
-                let leader = start_time(pid);
-                let ours = match (&leader, record["start_time"].as_str()) {
-                    (Some(now), Some(recorded)) => now == recorded,
+                let ours = match (leader_gone(pid), start_time(pid), record["start_time"].as_str()) {
                     // The leader is gone: anything left in its group is the effect's.
-                    (None, _) => true,
-                    (Some(_), None) => false,
+                    (true, _, _) => true,
+                    (false, Some(now), Some(recorded)) => now == recorded,
+                    // A live leader whose start time cannot be read is never signalled; the
+                    // record stays for the next host start.
+                    (false, None, _) => continue,
+                    (false, Some(_), None) => false,
                 };
                 // SAFETY: signalling a process group has no memory effects.
                 if ours && unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
@@ -631,10 +633,10 @@ impl ProgramEngine {
         };
         let attempt = u32::try_from(attempt)?;
         match message["t"].as_str() {
-            Some("journal") => self.journal_entry(step, attempt, &program, message),
-            Some("run" | "ask") => self.request(step, attempt, &program, message),
-            Some("done") => self.done(step, attempt, &program, message),
-            Some("unresponsive") => self.unresponsive(step, attempt, message),
+            Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
+            Some("run" | "ask") => self.request(step, attempt, generation, &program, message),
+            Some("done") => self.done(step, attempt, generation, &program, message),
+            Some("unresponsive") => self.unresponsive(step, attempt, generation, message),
             other => Err(anyhow!("unknown message type {other:?}")),
         }
     }
@@ -643,8 +645,8 @@ impl ProgramEngine {
     /// resolved by its run's evaluation. The `started` entry, written before the request is
     /// registered, is the change that evaluates the run; a request the daemon cannot accept fails
     /// the step.
-    fn request(&self, step: &str, attempt: u32, program: &str, message: &Value) -> Result<()> {
-        if self.stop_if_left(step, attempt)? {
+    fn request(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
+        if self.stop_if_left(step, attempt, generation)? {
             return Ok(());
         }
         let Some(key) = message["key"].as_str().filter(|key| !key.is_empty() && *key != RESULT_KEY) else {
@@ -657,7 +659,11 @@ impl ProgramEngine {
         self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
         {
             let mut inner = self.lock();
-            let Some(running) = inner.running.get_mut(step).filter(|running| running.dispatch.attempt == attempt) else {
+            let Some(running) = inner
+                .running
+                .get_mut(step)
+                .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)
+            else {
                 return Ok(());
             };
             let request = Request {
@@ -686,12 +692,13 @@ impl ProgramEngine {
 
     /// The backstop to [`Self::release_left`]: stop the program if its step left this attempt.
     /// True when it was stopped.
-    fn stop_if_left(&self, step: &str, attempt: u32) -> Result<bool> {
+    fn stop_if_left(&self, step: &str, attempt: u32, generation: u64) -> Result<bool> {
         let Some(reason) = self.left(step, attempt)? else { return Ok(false) };
         {
             let mut inner = self.lock();
-            inner.running.remove(step);
-            send(&inner, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+            if forget(&mut inner, step, attempt, generation) {
+                send_to(&inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
+            }
         }
         self.cancel_waits(step, attempt, &reason)?;
         Ok(true)
@@ -735,34 +742,44 @@ impl ProgramEngine {
         })
     }
 
-    fn journal_entry(&self, step: &str, attempt: u32, program: &str, message: &Value) -> Result<()> {
-        if self.stop_if_left(step, attempt)? {
+    fn journal_entry(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
+        if self.stop_if_left(step, attempt, generation)? {
             return Ok(());
         }
-        let key = message["key"].as_str().ok_or_else(|| anyhow!("journal entry without a key"))?;
-        let status = message["status"].as_str().ok_or_else(|| anyhow!("journal entry without a status"))?;
-        if key == RESULT_KEY {
-            return Err(anyhow!("a program may not journal the reserved key {RESULT_KEY}"));
-        }
-        let written = self.write_journal(step, attempt, program, key, status, message, None);
-        if status == "started" {
-            return written.map(|_| ()).map_err(Into::into);
+        let key = message["key"].as_str().unwrap_or_default();
+        let status = message["status"].as_str().unwrap_or_default();
+        let written = if key.is_empty() || !["started", "completed", "failed"].contains(&status) {
+            Err(format!("a journal entry needs a key and a status, got key `{key}` status `{status}`"))
+        } else if key == RESULT_KEY {
+            Err(format!("a program may not journal the reserved key {RESULT_KEY}"))
+        } else {
+            self.write_journal(step, attempt, program, key, status, message, None).map(|_| ()).map_err(|error| error.to_string())
+        };
+        let seq = &message["seq"];
+        if status == "started" || seq.is_null() {
+            return written.map_err(|error| anyhow!(error));
         }
         let inner = self.lock();
-        let seq = &message["seq"];
+        // Only the attempt and host that sent the entry hear about it (R01).
+        if !matches!(inner.running.get(step), Some(running) if running.dispatch.attempt == attempt && running.generation == generation) {
+            return Ok(());
+        }
         match written {
-            Ok(_) => send(&inner, &json!({"t": "ack", "step": step, "attempt": attempt, "seq": seq})),
+            Ok(()) => send_to(&inner, generation, &json!({"t": "ack", "step": step, "attempt": attempt, "seq": seq})),
             // The program must not continue past a result that is not durable: the step fails.
-            Err(error) => send(
+            Err(error) => send_to(
                 &inner,
+                generation,
                 &json!({"t": "nack", "step": step, "attempt": attempt, "seq": seq, "error": format!("journal write refused: {error}")}),
             ),
         }
         Ok(())
     }
 
-    fn done(&self, step: &str, attempt: u32, program: &str, message: &Value) -> Result<()> {
-        self.lock().running.remove(step);
+    fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
+        if !forget(&mut self.lock(), step, attempt, generation) {
+            return Ok(());
+        }
         // A program can end while a child run or ask it started is still open (a lost race):
         // nothing waits on it any more.
         let left = self.left(step, attempt)?;
@@ -786,12 +803,14 @@ impl ProgramEngine {
 
     /// The host terminated this attempt's worker after it missed its liveness deadline (DQ8): the
     /// step fails once instead of looping across restarts.
-    fn unresponsive(&self, step: &str, attempt: u32, message: &Value) -> Result<()> {
+    fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
         {
             let mut inner = self.lock();
-            inner.running.remove(step);
+            if !forget(&mut inner, step, attempt, generation) {
+                return Ok(());
+            }
             inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
         }
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
@@ -882,6 +901,33 @@ fn supervise(engine: Weak<ProgramEngine>, every: Duration) {
         let Some(engine) = engine.upgrade() else { return };
         engine.ping_host();
     }
+}
+
+/// Forget `step` only while this engine still runs exactly that attempt on that host generation,
+/// so a late message never removes a newer attempt. True when it did.
+fn forget(inner: &mut Inner, step: &str, attempt: u32, generation: u64) -> bool {
+    let current = inner
+        .running
+        .get(step)
+        .is_some_and(|running| running.dispatch.attempt == attempt && running.generation == generation);
+    if current {
+        inner.running.remove(step);
+    }
+    current
+}
+
+/// Queue one line for host `generation` only; a replaced host's messages never reach its successor.
+fn send_to(inner: &Inner, generation: u64, message: &Value) {
+    if inner.host.as_ref().is_some_and(|host| host.generation == generation) {
+        send(inner, message);
+    }
+}
+
+/// True only when no process has this pid (`ESRCH`); any other answer keeps the leader alive.
+fn leader_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    let missing = unsafe { libc::kill(pid, 0) } == -1;
+    missing && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 /// Queue one line for the live host. A host that is gone drops it; its programs resume on the next.
@@ -981,7 +1027,7 @@ fn boot_id() -> Result<String> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let output = Command::new("sysctl").args(["-n", "kern.boottime"]).output()?;
+        let output = Command::new("/usr/sbin/sysctl").args(["-n", "kern.boottime"]).output()?;
         anyhow::ensure!(output.status.success(), "sysctl kern.boottime failed");
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
@@ -996,7 +1042,7 @@ fn start_time(pid: i32) -> Option<String> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let output = Command::new("ps").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
+        let output = Command::new("/bin/ps").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
         let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         (!text.is_empty()).then_some(text)
     }
