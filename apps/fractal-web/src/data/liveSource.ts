@@ -27,7 +27,7 @@ import { incrDebug, setDebug } from '../telemetry/meters.tsx'
 
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import type { TextItem } from '../conversation/model.ts'
-import { undeclared } from '../monitor/source.ts'
+import { RELAY_PREFIX, relayUsageSource } from '../monitor/source.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
 import { instrumentFetch, recordSocketState } from '../telemetry/transport.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -1339,7 +1339,7 @@ export const liveSource = ({
           }),
         ),
       ),
-      usage: undeclared,
+      usage: { _tag: 'declared', source: relayUsageSource({ label: 'Gateway usage', prefix: `${origin}${RELAY_PREFIX}` }) },
       sync: {
         gateway: gatewaySync,
         agents: agentsRetained.sync,
