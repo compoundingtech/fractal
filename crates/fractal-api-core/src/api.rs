@@ -8039,6 +8039,38 @@ pub fn authorize_worker(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
+/// The identity a local request is bound to by its caller's ancestry: an agent harness, or the
+/// mission run a program effect acts as. Handlers that hold a bound caller to its own identity
+/// read this one extractor, so a bound run is never mistaken for an unbound person.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoundActor {
+    Agent(String),
+    Run(String),
+}
+
+impl BoundActor {
+    pub fn of(extensions: &axum::http::Extensions) -> Option<Self> {
+        extensions.get::<BoundAgent>().map(|agent| Self::Agent(agent.0.clone()))
+            .or_else(|| extensions.get::<BoundRun>().map(|run| Self::Run(run.0.run.clone())))
+    }
+
+    /// The bound identity: the agent as the harness names it, or `mission-run/RUN`.
+    pub fn actor(&self) -> &str {
+        match self { Self::Agent(actor) | Self::Run(actor) => actor }
+    }
+}
+
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for BoundActor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(Self::of(&parts.extensions))
+    }
+}
+
 // The serving boundary supplies the immutable ancestry binding and its identity store before
 // any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(

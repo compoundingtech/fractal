@@ -113,6 +113,70 @@ async fn a_run_credential_binds_requests_to_its_run() {
     assert_eq!(state.store.index().unwrap(), before);
 }
 
+/// A program effect's CLI names its run on the trusted Unix client; only a request its run
+/// credential binds to that same run may.
+#[tokio::test]
+async fn a_run_bound_unix_client_acts_as_its_run_and_no_other() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let binding = state.store.run_binding(&secret).unwrap();
+    let request = |person: &str, bound: bool| {
+        let mut request = Request::builder().method("POST").uri("/v1/client/actions")
+            .header(client_v0::LOCAL_PERSON_HEADER, person);
+        if bound { request = request.extension(BoundRun(binding.clone())); }
+        request.body(Body::empty()).unwrap()
+    };
+    let session = client_v0::authenticate(&state, &request(&step.run, true), "unix").unwrap();
+    assert_eq!((session.actor.as_str(), session.authority_actor.as_str()), (step.run.as_str(), step.run.as_str()));
+    assert!(session.local_peer);
+    for (person, bound) in [(step.run.as_str(), false), ("mission-run/another", true)] {
+        let refused = client_v0::authenticate(&state, &request(person, bound), "unix").unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{person} bound={bound}");
+    }
+}
+
+/// Handlers that hold a bound caller to itself read one bound identity, so a bound run is never
+/// an unbound person: it writes no seat's document, and it is the writer the rules decide.
+#[tokio::test]
+async fn a_bound_run_is_held_to_its_identity_by_document_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    state.store.set_rule("runs-keep-out", &smallclaims::rules::Rule {
+        mode: smallclaims::rules::Mode::Enforce,
+        actors: vec!["mission-run/*".into()],
+        kinds: vec!["doc.bound".into()],
+        subjects: vec!["doc/locked/**".into()],
+        ..Default::default()
+    }, "person/owner").unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let write = |name: &str, key: &str| {
+        let body = json!({"name": name, "bytes": b"notes".to_vec(), "expected_document": null, "idempotency_key": key});
+        let request = Request::builder().method("POST").uri("/v1/documents")
+            .header("content-type", "application/json")
+            .extension(RunCredential::new(secret.clone()))
+            .body(Body::from(body.to_string())).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    let (status, refused) = write("doc/agents/garden/ash/handoff", "seat").await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("document-not-yours")), "{refused}");
+    let (status, refused) = write("doc/locked/notes", "locked").await;
+    assert_eq!(refused["code"], "rule-denied", "{status} {refused}");
+    let (status, written) = write("doc/runs/notes", "notes").await;
+    assert_eq!(status, StatusCode::OK, "{written}");
+    assert_eq!(BoundActor::of(&Request::builder().extension(BoundAgent("agent/a".into())).body(()).unwrap().extensions()),
+        Some(BoundActor::Agent("agent/a".into())));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn empty_process_environment_is_unavailable() {
