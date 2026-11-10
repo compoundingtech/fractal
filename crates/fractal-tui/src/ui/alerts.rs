@@ -1362,6 +1362,7 @@ impl Ui {
                             action: "prompt.respond".into(),
                             reason: None,
                             answer: Some(sent),
+                            option_notes: Vec::new(),
                         },
                         format!("Answering “{}”…", self.answer_words(item, answer)),
                     )
@@ -1381,6 +1382,7 @@ impl Ui {
                             action: "work.done".into(),
                             reason: Some(option.label.clone()),
                             answer: Some(option.id.clone()),
+                            option_notes: self.option_notes(id, Some(&option.id)),
                         },
                         format!("Answering “{}”…", option.label),
                     )
@@ -1396,6 +1398,7 @@ impl Ui {
                         action: "work.done".into(),
                         reason: Some(answer.to_owned()),
                         answer: None,
+                        option_notes: Vec::new(),
                     },
                     format!("Answering “{answer}”…"),
                 ))
