@@ -22,30 +22,28 @@ on:
         type: string
         default: ""
       request:
-        description: Caller request id ([A-Za-z0-9._-], at most 64)
+        description: Unique request id per dispatch ([A-Za-z0-9._-], at most 64)
         required: true
         type: string
 
 permissions:
   contents: read
-  statuses: write
 
 concurrency:
   group: "burst-${{ inputs.request }}"
   cancel-in-progress: false
 
 jobs:
-  burst:
-    name: burst
-    runs-on: ${{ fromJSON(vars.BURST_RUNS_ON || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3","namespace-features:github.run-id={0}"]', github.run_id)) }}
-    timeout-minutes: 180
+  pending:
+    name: pending
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
     defaults:
       run:
         shell: bash
     env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
       SHA: ${{ inputs.sha }}
       SUITE: ${{ inputs.suite }}
       ARGS: ${{ inputs.args }}
@@ -64,6 +62,40 @@ jobs:
             *) echo "::error::suite must be one of: cargo-test nextest st-test-all"; exit 1 ;;
           esac
           if [ "$SUITE" = st-test-all ] && [ -n "$ARGS" ]; then echo "::error::st-test-all takes no args"; exit 1; fi
+      - name: Report the run as pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS --retry 3 -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -d "{\"state\":\"pending\",\"context\":\"burst/$SUITE\",\"description\":\"request=$REQUEST\",\"target_url\":\"$RUN_URL\"}" > /dev/null
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Validates the request and posts a commit status without a checkout.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  burst:
+    name: burst
+    needs: [pending]
+    runs-on: ${{ fromJSON(vars.BURST_RUNS_ON || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3","namespace-features:github.run-id={0}"]', github.run_id)) }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SHA: ${{ inputs.sha }}
+      SUITE: ${{ inputs.suite }}
+      ARGS: ${{ inputs.args }}
+      REQUEST: ${{ inputs.request }}
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    outputs:
+      exit: ${{ steps.suite.outputs.exit }}
+    steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha }}
@@ -98,15 +130,6 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Require the requested commit
         run: 'head=$(git rev-parse HEAD); [ "$head" = "$SHA" ] || { echo "::error::checked out $head, not $SHA"; exit 1; }'
-      - name: Report the run as pending
-        id: pending
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          curl -fsS --retry 3 -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
-            -d "{\"state\":\"pending\",\"context\":\"burst/$SUITE\",\"description\":\"request=$REQUEST\",\"target_url\":\"$RUN_URL\"}" > /dev/null
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -211,17 +234,6 @@ jobs:
           path: "${{ runner.temp }}/burst.log"
           if-no-files-found: warn
           retention-days: 14
-      - name: Report the result on the commit
-        if: always() && steps.pending.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXIT: ${{ steps.suite.outputs.exit }}
-        run: |
-          if [ -z "$EXIT" ]; then state=error; elif [ "$EXIT" = 0 ]; then state=success; else state=failure; fi
-          curl -fsS --retry 3 -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
-            -d "{\"state\":\"$state\",\"context\":\"burst/$SUITE\",\"description\":\"exit=${EXIT:-none} request=$REQUEST\",\"target_url\":\"$RUN_URL\"}" > /dev/null
       - name: Finish with the suite exit
         if: always()
         env:
@@ -237,3 +249,37 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  report:
+    name: report
+    needs: [pending, burst]
+    if: always() && needs.pending.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHA: ${{ inputs.sha }}
+      SUITE: ${{ inputs.suite }}
+      ARGS: ${{ inputs.args }}
+      REQUEST: ${{ inputs.request }}
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    steps:
+      - name: Report the result on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXIT: ${{ needs.burst.outputs.exit }}
+        run: |
+          if [ -z "$EXIT" ]; then state=error; elif [ "$EXIT" = 0 ]; then state=success; else state=failure; fi
+          curl -fsS --retry 3 -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -d "{\"state\":\"$state\",\"context\":\"burst/$SUITE\",\"description\":\"exit=${EXIT:-none} request=$REQUEST\",\"target_url\":\"$RUN_URL\"}" > /dev/null
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Posts the final commit status without a checkout.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

@@ -83,6 +83,16 @@ printf 'exit=%s\\nline=%s\\n' "$code" "$line" >> "$GITHUB_OUTPUT"
 printf '%s\\n' "$line" >> "$GITHUB_STEP_SUMMARY"
 printf '%s\\n' "$line" | tee -a "$log"`
 
+const requestEnv = {
+  SHA: '${{ inputs.sha }}',
+  SUITE: '${{ inputs.suite }}',
+  ARGS: '${{ inputs.args }}',
+  REQUEST: '${{ inputs.request }}',
+  RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+}
+
+// Only the two status jobs hold `statuses: write`, and neither checks out the requested commit:
+// the suite job runs that commit's code with a read-only token.
 export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   name: 'burst',
   'run-name': 'burst ${{ inputs.suite }} ${{ inputs.sha }} ${{ inputs.request }}',
@@ -92,36 +102,41 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
         sha: { description: 'Full 40-character commit SHA to test', required: true, type: 'string' },
         suite: { description: `One of: ${suites.join(', ')}`, required: true, type: 'string' },
         args: { description: 'Extra arguments for cargo-test or nextest, split on spaces', required: false, type: 'string', default: '' },
-        request: { description: 'Caller request id ([A-Za-z0-9._-], at most 64)', required: true, type: 'string' },
+        request: { description: 'Unique request id per dispatch ([A-Za-z0-9._-], at most 64)', required: true, type: 'string' },
       },
     },
   },
-  permissions: { contents: 'read', statuses: 'write' },
+  permissions: { contents: 'read' },
   concurrency: { group: 'burst-${{ inputs.request }}', 'cancel-in-progress': false },
   actionlint: defaultActionlintConfig,
   jobs: {
+    pending: {
+      name: 'pending',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      permissions: { statuses: 'write' },
+      defaults: { run: { shell: 'bash' } },
+      env: requestEnv,
+      steps: [
+        { name: 'Validate the request', run: validate },
+        { name: 'Report the run as pending', env: { GH_TOKEN: '${{ github.token }}' }, run: postStatus('pending', 'request=$REQUEST') },
+      ],
+    },
     burst: {
       name: 'burst',
+      needs: ['pending'],
       'runs-on': runsOn,
       'timeout-minutes': 180,
       defaults: { run: { shell: 'bash' } },
-      env: {
-        ...buildEnv,
-        SHA: '${{ inputs.sha }}',
-        SUITE: '${{ inputs.suite }}',
-        ARGS: '${{ inputs.args }}',
-        REQUEST: '${{ inputs.request }}',
-        RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
-      },
+      env: { ...buildEnv, ...requestEnv },
+      outputs: { exit: '${{ steps.suite.outputs.exit }}' },
       steps: [
-        { name: 'Validate the request', run: validate },
         // st-test-all's checks read the history (genie freshness, the CI script self-tests); the other suites need one commit.
         ...fullHistoryCheckoutSteps({ ref: '${{ inputs.sha }}', 'persist-credentials': false }, {}, "inputs.suite == 'st-test-all'"),
         {
           name: 'Require the requested commit',
           run: 'head=$(git rev-parse HEAD); [ "$head" = "$SHA" ] || { echo "::error::checked out $head, not $SHA"; exit 1; }',
         },
-        { name: 'Report the run as pending', id: 'pending', env: { GH_TOKEN: '${{ github.token }}' }, run: postStatus('pending', 'request=$REQUEST') },
         ...setupSteps,
         { ...megarepoApplyStep, if: "inputs.suite == 'st-test-all'" },
         { name: 'Run the suite', id: 'suite', env: { ST_TEST_ALL: stTestAll, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' }, run: runSuite },
@@ -130,13 +145,6 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
           if: "always() && steps.suite.outcome != 'skipped'",
           uses: 'actions/upload-artifact@v4',
           with: { name: 'burst-log-${{ inputs.request }}', path: '${{ runner.temp }}/burst.log', 'if-no-files-found': 'warn', 'retention-days': 14 },
-        },
-        {
-          name: 'Report the result on the commit',
-          if: "always() && steps.pending.outcome == 'success'",
-          env: { GH_TOKEN: '${{ github.token }}', EXIT: '${{ steps.suite.outputs.exit }}' },
-          run: `if [ -z "$EXIT" ]; then state=error; elif [ "$EXIT" = 0 ]; then state=success; else state=failure; fi
-${postStatus('$state', 'exit=${EXIT:-none} request=$REQUEST')}`,
         },
         {
           name: 'Finish with the suite exit',
@@ -148,5 +156,25 @@ exit "$EXIT"`,
         },
       ],
     },
+    // A suite job that failed before the suite, was cancelled or timed out has no exit: the status is error.
+    report: {
+      name: 'report',
+      needs: ['pending', 'burst'],
+      if: "always() && needs.pending.result == 'success'",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      permissions: { statuses: 'write' },
+      defaults: { run: { shell: 'bash' } },
+      env: requestEnv,
+      steps: [{
+        name: 'Report the result on the commit',
+        env: { GH_TOKEN: '${{ github.token }}', EXIT: '${{ needs.burst.outputs.exit }}' },
+        run: `if [ -z "$EXIT" ]; then state=error; elif [ "$EXIT" = 0 ]; then state=success; else state=failure; fi
+${postStatus('$state', 'exit=${EXIT:-none} request=$REQUEST')}`,
+      }],
+    },
   },
+}, {
+  pending: 'Validates the request and posts a commit status without a checkout.',
+  report: 'Posts the final commit status without a checkout.',
 })))

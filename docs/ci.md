@@ -1596,15 +1596,19 @@ gh workflow run burst.yml --ref main -f sha=FULL_SHA -f suite=cargo-test \
 `sha` must be 40 lowercase hex characters, `request` must match `^[A-Za-z0-9._-]{1,64}$`, and `args`
 must match `^[A-Za-z0-9_:./=@ ,+-]*$`. `args` reaches the command only through the environment and
 is split on spaces. Only a dispatch of main's workflow runs. The suite commands come from that
-workflow; the scripts they call come from the requested commit, which the job checks out with
-its credentials dropped and refuses unless `HEAD` is exactly `sha`. Runs sharing a `request` queue
-behind each other and are never cancelled.
+workflow; the scripts they call come from the requested commit, which the `burst` job checks out
+with its credentials dropped and refuses unless `HEAD` is exactly `sha`. Give every dispatch its own
+`request`: runs are grouped by it and never cancelled, but a newer dispatch with the same id
+replaces one that is still waiting in the group.
 
-The job posts a `burst/SUITE` commit status on `sha`: pending with the run's URL, then success
-exactly when the suite exited 0, with the description `exit=CODE request=REQUEST`. The suite log
-is the `burst-log-REQUEST` artifact. The last line of the suite step and the job summary is
-`burst suite=SUITE sha=SHA request=REQUEST exit=CODE seconds=N`, and the job fails exactly when
-`CODE` is not 0.
+The `burst` job's token can only read the repository. Two small jobs that never check out `sha`
+post the `burst/SUITE` commit status on it: `pending` validates the inputs and posts pending with
+the run's URL; `report` posts success exactly when the suite exited 0, failure for another exit,
+and error when the suite never finished (setup failure, cancellation, timeout), with the
+description `exit=CODE request=REQUEST`. The suite log is the `burst-log-REQUEST` artifact. The
+last line of the suite step and the job summary is
+`burst suite=SUITE sha=SHA request=REQUEST exit=CODE seconds=N`, and the `burst` job fails exactly
+when `CODE` is not 0.
 
 The job runs on the 8x16 Namespace shape at priority 3, the same class as Performance, so it
 never outranks merge groups or required pull request work. The repository variable
