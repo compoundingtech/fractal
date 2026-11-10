@@ -27,6 +27,9 @@ describe('workspace body', () => {
   })
   it('opens the Missions screen from its tab', () => {
     expect(workspaceView({ ref: 'missions' })).toEqual({ _tag: 'Missions' })
+    // A mission ref focuses that mission in the screen instead of dead-ending, and its tab never shows a machine title.
+    expect(workspaceView({ ref: 'mission/person-ask/abc' })).toEqual({ _tag: 'Missions', mission: 'mission/person-ask/abc' })
+    expect(paneTabLabel('mission/person-ask/abc', 'person-ask/abc')).toBe('Missions')
     const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: '', rosterRefs: [], view: workspaceView({ ref: 'missions' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/data-system-state="loading"[^>]*>.*Loading missions</)
     expect(html).not.toMatch(/Choose an agent/)

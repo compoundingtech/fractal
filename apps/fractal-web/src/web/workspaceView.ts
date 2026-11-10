@@ -1,3 +1,5 @@
+import { isMissionRef } from '../missions/missionTitle.ts'
+
 /**
  * What the workspace body shows for the selected pane. Supported subjects and app screens have web surfaces;
  * an unknown pane states its own unavailability instead of repeating the transcript under a different tab.
@@ -5,7 +7,7 @@
 export type WorkspaceView =
   | { readonly _tag: 'Thread' }
   | { readonly _tag: 'Terminal'; readonly ref: TerminalRef }
-  | { readonly _tag: 'Missions' }
+  | { readonly _tag: 'Missions'; readonly mission?: string }
   | { readonly _tag: 'Usage' }
   | { readonly _tag: 'Alert'; readonly id: string }
   | { readonly _tag: 'Document'; readonly ref: `doc/${string}` }
@@ -36,6 +38,10 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
       ? { _tag: 'Terminal', ref: pane.ref }
       : pane.ref === MISSIONS_REF
         ? { _tag: 'Missions' }
+      : isMissionRef(pane.ref)
+        ? { _tag: 'Missions', mission: pane.ref }
+      : isAlertRef(pane.ref)
+        ? { _tag: 'Alert', id: pane.ref.slice(ALERT_PREFIX.length) }
       : pane.ref === 'monitor/quota'
         ? { _tag: 'Usage' }
         : isDocumentRef(pane.ref)
@@ -50,6 +56,7 @@ const SCREEN_LABELS: Readonly<Record<string, string | undefined>> = { [MISSIONS_
  * screen's name, else the ref's last segment in sentence case like "Thread".
  */
 export const paneTabLabel = (ref: string, title: string | undefined): string => {
+  if (isMissionRef(ref)) return 'Missions'
   if (title !== undefined) return title
   const label = SCREEN_LABELS[ref] ?? ref.split('/').at(-1) ?? ref
   return label.charAt(0).toUpperCase() + label.slice(1)

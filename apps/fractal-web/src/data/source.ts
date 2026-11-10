@@ -200,6 +200,8 @@ export interface Fleet {
 export interface RosterDecode {
   readonly undecodable: readonly Undecodable[]
   readonly decodeStale: boolean
+  /** The latest window said more rows exist than it carried. */
+  readonly hasMore?: boolean
 }
 
 /** A roster whose latest frame decoded completely. */
