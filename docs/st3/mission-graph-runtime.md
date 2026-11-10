@@ -1851,6 +1851,8 @@ agentless
 
 `agentless` means that the reconciler performs the work without an agent claim. Subgraphs and gates can complete an agentless step.
 
+An agentless step hands off without waiting for a reconcile pass. When its exec's `driver exec` wrapper reports the exit, the daemon evaluates the run from that change, and evaluates it again at once while each evaluation writes (at most eight in a row): the step completes, the next step becomes ready, and the evaluation that declares the next step's exec also starts it. An exec that renders files, has run before or is under a rollout still starts in the next pass.
+
 A local selector replaces the inherited selector. It does not add to it.
 
 The inheritance order is the step, its mission, its parent step, and its parent mission. The nearest selector wins.
