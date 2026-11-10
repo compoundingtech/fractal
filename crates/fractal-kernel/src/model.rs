@@ -3459,6 +3459,14 @@ pub struct PersonStepResponse {
     pub idempotency_key: String,
 }
 
+/// A person's note about a named option other than their chosen answer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OptionNote {
+    pub id: String,
+    pub text: String,
+}
+
 /// A person's answer as submitted: a named answer `id`, text, or both (`person_request`).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3467,6 +3475,9 @@ pub struct AnswerInput {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Notes on other named options; the chosen answer's note remains `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_notes: Vec<OptionNote>,
 }
 
 /// A response to a person ask, including answers submitted by an authorized assistant.
