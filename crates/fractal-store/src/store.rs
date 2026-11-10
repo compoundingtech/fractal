@@ -15747,6 +15747,59 @@ pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
 
 #[cfg(any(test, feature = "test-support"))]
 #[test]
+pub fn catch_up_projection_distinguishes_inline_local_writes_from_new_admission_between_chunks() {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    for replicated in [false, true] {
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        target.bind_fleet(FLEET).unwrap();
+        let append = |store: &Store, index: usize| {
+            store.put_document(
+                &format!("doc/projection-watermark/{index}"),
+                b"An invented local write.",
+                &None,
+                &format!("projection-watermark-{index}"),
+            ).unwrap();
+        };
+        let admit = || {
+            let mut inventory = target.replication_inventory().unwrap();
+            inventory.accepts = None;
+            let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+            target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+            assert!(target.validate_replication_backlog().unwrap().changed);
+        };
+        for index in 0..=smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append(&source, index);
+        }
+        admit();
+        let admitted = target.index().unwrap();
+        let mut yielded = false;
+        assert!(target.project_replication_backlog_with_yield(|| {
+            if !yielded {
+                yielded = true;
+                let next = smallclaims::store::PROJECTION_CHUNK_CLAIMS + 1;
+                if replicated {
+                    append(&source, next);
+                    admit();
+                } else {
+                    append(&target, next);
+                }
+            }
+        }).unwrap());
+        assert!(yielded, "the test must write between bounded chunks");
+        assert!(target.index().unwrap() > admitted);
+        assert!(target.projected_through() >= admitted);
+        assert_eq!(target.replication_projection_deferred(), replicated);
+        if replicated {
+            assert!(target.project_replication_backlog().unwrap());
+            assert!(!target.replication_projection_deferred());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[test]
 pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
     pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
@@ -15871,8 +15924,8 @@ pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert_eq!(target.projected_through(), admitted);
     assert!(
-        target.replication_projection_deferred(),
-        "later claims still need a pass"
+        !target.replication_projection_deferred(),
+        "inline local writes leave no admitted claim behind the pass"
     );
     assert!(target.project_replication_backlog().unwrap());
     assert!(!target.replication_projection_deferred());
