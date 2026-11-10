@@ -201,7 +201,11 @@ authenticated effective snapshot remains a conflict witness until an authenticat
 transition changes it: pending work cannot clear an existing opposite-profile
 conflict. The inherited fleet-generation fold can still aggregate historical
 signature keys on readers; that pre-existing amplification is tracked by #6124
-and is not claimed fixed here. Writer-time subject fences retain the generic
+and is not claimed fixed here. During a transient subject fence, bearer clients
+receive generic credential rejection, not a subject-maintenance reason. This is
+intentional: distinguishing a fenced credential from an invalid credential would
+create an authentication oracle. Operators can see the cause in trusted-local
+`fractal doctor`. Writer-time subject fences also retain the generic
 authorization denial. Clean-grant inspection omits optional cleared-conflict
 explanations for other subjects whose authentication is pending, rather than
 denying inspection or weakening an established conflict witness.
@@ -212,10 +216,15 @@ reason `grant predates local-append provenance; re-issue`. It also lists remote
 unmarked grants, but reports missing verified provenance and unknown issuance age:
 the absence of this member's local marker does not prove remote history predates
 upgrade. A verified historical signature removes the unauthenticated warning.
+The same private provenance check lists affected grant subjects and their
+maintenance causes: dirty claims awaiting projection, signature authentication
+cursors in progress, unauthenticated grant/policy/revocation evidence, or queued
+writer membership revalidation. A membership warning covers only evidence beyond
+that writer's durable revalidation cursor and clears as maintenance advances.
 These details remain on trusted-local doctor only: paired clients with
 `read.projections` cannot retrieve the provenance check through either the
-operations collection or operation detail. Generic bearer authorization error
-messages are unchanged.
+operations collection or operation detail. Clients continue to receive generic
+credential rejection during subject maintenance, without those diagnostic details.
 
 Reissue means **a new explicit pairing**, not renewal of the old grant or a SQL
 edit. On the daemon host, use the configured owner and original assistant

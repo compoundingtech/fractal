@@ -9514,6 +9514,40 @@ fn pending_assistant_grant_checks(
     }).collect()
 }
 
+fn assistant_grant_subject_maintenance_checks(
+    connection: &rusqlite::Connection,
+) -> anyhow::Result<Vec<DoctorCheck>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT claims.subject, 'dirty claim awaiting projection' AS cause
+         FROM assistant_grant_dirty dirty JOIN claims ON claims.id=dirty.claim_id
+         UNION
+         SELECT claims.subject, 'signature authentication cursor in progress'
+         FROM assistant_grant_auth_cursor cursor JOIN claims ON claims.id=cursor.claim_id
+         UNION
+         SELECT grant_subject, 'unauthenticated grant, policy or revocation evidence'
+         FROM assistant_grant_pending WHERE authenticated=0
+         UNION
+         SELECT pending.grant_subject, 'writer membership revalidation queued: ' || dirty.writer
+         FROM assistant_grant_membership_dirty dirty
+         JOIN assistant_grant_pending pending ON pending.origin=dirty.writer
+         WHERE (pending.sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
+         ORDER BY 1,2",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.map(|row| {
+        let (subject, cause) = row?;
+        Ok(DoctorCheck {
+            // Keep subject causes in the existing trusted-local-only check, which
+            // paired operations exclude from both collection and detail reads.
+            name: "assistant-grant-provenance".into(),
+            status: "warn".into(),
+            message: format!("subject={subject}: external-grant subject maintenance; cause={cause}; bearer clients receive generic credential rejection"),
+        })
+    }).collect()
+}
+
 fn doctor_report_within(
     state: &AppState,
     clock: &DoctorClock,
@@ -9559,6 +9593,9 @@ fn doctor_report_within(
         }
         checks.extend(pending_assistant_grant_checks(
             &state.store.readers.get(), state.store.origin(),
+        ).map_err(ApiError::internal)?);
+        checks.extend(assistant_grant_subject_maintenance_checks(
+            &state.store.readers.get(),
         ).map_err(ApiError::internal)?);
         Ok(checks)
     });

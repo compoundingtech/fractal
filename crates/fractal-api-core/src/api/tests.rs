@@ -1084,6 +1084,45 @@ fn doctor_lists_unmarked_pending_grants_without_dating_remote_history() {
 }
 
 #[test]
+fn doctor_lists_subject_maintenance_for_authenticated_membership_retries() {
+    let store = Store::open_memory("amber").unwrap();
+    let connection = store.connection.lock().expect("fixture writer");
+    for (id, subject, origin, sequence, authenticated, kind) in [
+        ("claim/a", "grant/consumed", "birch", 7, 1, "custom.client.assistant.v1.granted"),
+        ("claim/b", "grant/queued", "birch", 7, 1, "custom.client.assistant.v1.granted"),
+        ("claim/c", "grant/unrelated", "cedar", 8, 1, "custom.client.assistant.v1.granted"),
+        ("claim/revoke", "grant/pending-revoke", "cedar", 9, 0, "custom.client.assistant.v1.revoked"),
+    ] {
+        connection.execute(
+            "INSERT INTO assistant_grant_pending
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
+             VALUES(?1,?2,?3,?4,'person/operator',?5,?6,'{}')",
+            rusqlite::params![id, subject, kind, origin, sequence, authenticated],
+        ).unwrap();
+    }
+    connection.execute(
+        "INSERT INTO assistant_grant_membership_dirty(writer,sequence,claim_id)
+         VALUES('birch',7,'claim/a')", [],
+    ).unwrap();
+    let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
+    assert_eq!(checks.len(), 2);
+    assert!(checks.iter().all(|check| check.name == "assistant-grant-provenance" && check.status == "warn"));
+    assert!(checks.iter().any(|check| check.message.contains("subject=grant/queued")
+        && check.message.contains("writer membership revalidation queued: birch")));
+    assert!(checks.iter().any(|check| check.message.contains("subject=grant/pending-revoke")
+        && check.message.contains("unauthenticated grant, policy or revocation evidence")));
+    assert!(checks.iter().all(|check| check.message.contains("generic credential rejection")));
+    connection.execute(
+        "UPDATE assistant_grant_membership_dirty SET claim_id='claim/b' WHERE writer='birch'", [],
+    ).unwrap();
+    let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
+    assert_eq!(checks.len(), 1);
+    assert!(checks[0].message.contains("subject=grant/pending-revoke"));
+    connection.execute("UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
+    assert!(assistant_grant_subject_maintenance_checks(&connection).unwrap().is_empty());
+}
+
+#[test]
 fn doctor_flags_low_descriptor_limits_and_high_usage() {
     let low = descriptor_usage_check(256, 8192, Some(92));
     assert_eq!(low.status, "warn");
