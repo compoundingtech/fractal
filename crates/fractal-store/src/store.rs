@@ -42,6 +42,8 @@ pub mod identities;
 pub(crate) mod agent_review_answer;
 #[allow(dead_code)]
 pub(crate) mod agent_review_decode;
+#[doc(hidden)]
+pub mod agent_review_transaction;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
@@ -11494,6 +11496,8 @@ pub fn append_claim_tx_with_assistant_answer(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    human_review_reassignment::admit_reassignment(transaction, kind, &fields)
+        .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
         || fields.contains_key("delegation")
         || fields.contains_key("acted_for")
