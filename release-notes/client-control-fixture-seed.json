@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Add source-only fixture native ask seeding and no-read-mutation journey readbacks.",
+  "summary": "Add a common fixture setup and native ask packet with retained creation, no-read-mutation and client-local evidence.",
   "replay": { "status": "none", "detail": "The tooling does not replay or initialize a store." },
   "schema": { "status": "none", "detail": "Use existing native work ask and attention/claim reads without new claims." },
   "rules": { "status": "none", "detail": "The existing CLI enforces actor authority; seed text and exact fixture operator socket are additionally validated." },
   "compatibility": { "status": "none", "detail": "No normal instance, client or protocol behavior changes." },
   "downtime": { "status": "none", "detail": "Shipping source does not start or restart a service." },
-  "manual": { "status": "changed", "detail": "Seed requires separately authorized fixture setup scope; before/after checks compare saved receipts. Native asks have no stored unread bit." },
+  "manual": { "status": "changed", "detail": "Setup, Fabric lifecycle, enrollment and grants require separate authorization. An immutable manifest and separate run record bind every journey to the same ask and enrolled device. E1 creation provenance, E2 no-read-mutation and E3 three-class local diffs establish initially unseen and unmutated evidence; native asks have no stored unread bit. Fixture service uninstall retains evidence; deleting state is not authorized." },
   "recovery": { "status": "none", "detail": "The check is read-only and refused socket/text inputs have no effects." }
 }
