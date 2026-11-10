@@ -1829,6 +1829,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["step"],
         ),
         (
+            "program.step",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &["step", "program"],
+        ),
+        (
             "work.person-asked",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -3373,6 +3382,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claimant", reference()),
             ("claim_incarnation", string()),
             ("claim_expires_at_unix_ms", integer()),
+        ],
+        "program.step" => &[
+            ("key", required_string()),
+            ("status", required_enum(&["started", "completed", "failed"])),
+            ("attempt", required_integer()),
+            ("program", required_string()),
+            ("value", any()),
+            ("error", any()),
+            ("ms", integer()),
+            ("child", string()),
         ],
         "work.person-asked" => &[
             ("run", reference()),
@@ -4955,6 +4974,7 @@ mod tests {
         current.subjects.remove("objective").unwrap();
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
+        current.claims.remove("program.step").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

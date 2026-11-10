@@ -167,7 +167,7 @@ mission "factory/land-program" state="ready" timeout="2h" {
   goal "Land one change on main and prove it live, or leave main as it was."
   authority { publish "scratch/*"; write "resource/factory/*" }
   step "program" timeout="1h" {
-    program "/abs/bundles/land-aff9555cbaf1.mjs" sha256="aff9555c…48f09"
+    program "/abs/bundles/land-aff9555cbaf1.mjs" sha256="aff9555c…48f09" stalled-after="10m"
   }
 }
 ```
@@ -176,6 +176,11 @@ mission "factory/land-program" state="ready" timeout="2h" {
 may not declare an assignee, gates, products, nested or used missions, or `after-run`, and it may not
 be a `finally` step: cancellation cleanup ends final agentless work that has no runtime process, so
 a program compensates inside its body.
+
+`sha256` is the bundle's 64 lowercase hex digits; the path must be absolute. The optional
+`stalled-after` is how long the program may go without a new journal entry before its run reports
+it stalled (§8). The step definition stores them as `program {bundle, bundle_hash,
+stalled_after_ms?}`.
 
 Steps act as the run (R07). The engine starts every effect with a run credential scoped to
 `(run, step run, attempt)`; the daemon binds a request carrying it to the actor
@@ -251,14 +256,21 @@ step's `definition_hash` and the mission revision. A run generation binds one re
 bundle.
 
 1. `fractal apply` of a mission with a `program` reads the declared path, checks its sha256 and
-   stores the bytes as a blob keyed by that hash. The step definition names the hash in a
-   `bundle_hash` field, so the graph replicates the blob with the mission declaration, the way it
-   replicates every blob a claim's `bundle_hash` names ([attachments](attachments.md#what-travels-and-what-does-not)).
-   The member that runs the step reads the blob, never the author's path, which stays as provenance.
+   sends the bytes with the publication (`program_bundles`, base64 by sha256, on the apply and
+   owned-set apply requests). The daemon checks each against its hash, refuses one no program of
+   the intent names, and stores the bytes as a blob keyed by that hash before it publishes. The
+   step definition names the hash in a `bundle_hash` field, so the graph replicates the blob with
+   the mission declaration, the way it replicates every blob a claim's `bundle_hash` names
+   ([attachments](attachments.md#what-travels-and-what-does-not)). The member that runs the step
+   reads the blob, never the author's path, which stays as provenance.
 2. Every dispatch and every resume reads the blob of the revision's hash, whatever the source path
    holds now (R05).
-3. A declaration whose source no longer matches its sha256 is refused at `apply`; a step whose blob
-   is missing fails with `program bundle … is not in this member's store` (R06).
+3. A declaration whose source no longer matches its sha256 is refused by `fractal apply`,
+   `apply --dry-run` and `fractal validate`, which all read the bundle locally. A publication whose
+   program's blob the member holds neither from this publication nor from an earlier one is
+   refused with `missing-program-bundle`, whatever path published it (a replica could never read
+   it). A step whose blob is missing fails with `program bundle … is not in this member's store`
+   (R06).
 4. Revising a running run creates a new generation with a new step run, hence an empty journal: the
    program restarts under the new code (T03). There is no Temporal-style patching.
 
@@ -275,6 +287,7 @@ Each inner step writes registered `program.step` claims on the program's step ru
 | `program` | string | the bundle sha256 that wrote it |
 | `value` / `error` | any | the encoded success value, or the typed error with `_tag` and fields |
 | `ms` | integer | effect duration |
+| `child` | string, optional | the child `mission-run/…` or ask subject the key waits on (§6) |
 
 Idempotency key: `program:STEP:ATTEMPT:KEY:result` for both `completed` and `failed`, so a key has
 one result per attempt whatever its status, and a double execution that produces a different
@@ -427,8 +440,8 @@ on a scratch instance at each.
 
 | Milestone | Ships |
 |---|---|
-| M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with a worker per program, replay, eager cancellation, recorded effect process groups (DQ2) and liveness pings (DQ8); the step definition names its bundle by `bundle_hash` and publishing the declaration stores the blob, so neither the field nor definition hashes change in later milestones (§4); linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
-| M2 Publication | `fractal apply` carries a program mission's bundle to the daemon it publishes on and validates it (§4); the `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration. Factory's landing mission becomes the first production program. |
+| M1 Engine | `program` steps and the `program.step` journal (§5); the supervised host with a worker per program, replay, eager cancellation, recorded effect process groups (DQ2) and liveness pings (DQ8); the step definition names its bundle by `bundle_hash`, `fractal apply` carries and validates the bundle and publishing the declaration stores the blob, so neither the field nor definition hashes change in later milestones (§4); linked child runs with cancellation cascade and serialized sections (§6, §7); the `effect/workflow` binding (§11); mission-run authority (§3); inner steps in the run view and `waiting-on`, and the `program/stalled` and `program/host` faults (§8). |
+| M2 Publication | The `fractal` package's loader renders `Fractal.mission(intent, program)` to a bundle and its KDL declaration. Factory's landing mission becomes the first production program. |
 | M3 One model | The data DSL compiles into programs (§9), with byte and behaviour parity for existing data-DSL missions; published KDL missions keep running on the native graph until they are republished. |
 
 ## Spike results (scratch, macOS, load 80–280)
