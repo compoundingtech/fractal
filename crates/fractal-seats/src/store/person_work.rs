@@ -1221,8 +1221,16 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     /// applied. A person cannot answer it afterwards.
     #[test]
     fn a_structured_ask_resolves_with_its_default_answer_at_its_deadline() {
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _reset = ResetClock;
         let asked = 1_800_000_000_000u128;
-        // The fixture's claimant lease must be live at the simulated ask time.
+        // The fixture's claimant lease and every liveness read use the simulated clock:
+        // batched writes carry it, so an ask accepted at `asked` is in the future at wall time.
         smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
@@ -1239,7 +1247,6 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         assert_eq!(store.ask_person(&too_soon).unwrap_err().code, "invalid-ask-deadline");
         input.default_answer = Some("keep-open".into());
         let ask = store.ask_person(&input).unwrap();
-        smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
         assert_eq!(deadline, asked + 3_600_000);
@@ -1261,6 +1268,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
 
         let early = store.reconcile_person_asks_at(deadline - 1).unwrap();
         assert_eq!(early, PersonAskPass { changed: false, next_deadline: Some(deadline) });
+        smallclaims::store::set_thread_clock(Some(deadline - 1));
         let item = store
             .attention_items(Some("person/avery"))
             .unwrap()
@@ -1278,6 +1286,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         let row = fractal_store::store::attention_ivm::resource(&item).unwrap();
         assert!(row.get("deadline_at").is_none() && row.get("default_answer").is_none(), "{row}");
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+        smallclaims::store::set_thread_clock(Some(deadline));
         assert!(
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
             "the resolved ask leaves the person's home"
