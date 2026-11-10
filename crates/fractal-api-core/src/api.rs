@@ -189,6 +189,7 @@ pub mod records;
 mod write_principal;
 mod native_delivery;
 pub mod replication;
+mod local_only;
 mod runs;
 pub mod sessions;
 pub mod work;
@@ -1058,6 +1059,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             (state.clone(), transport),
             response_envelope,
         ))
+        .layer(from_fn_with_state(state.clone(), local_only::enforce))
         .with_state(state)
 }
 
@@ -6709,6 +6711,9 @@ pub fn remote_unavailable(host: &str) -> ApiError {
 
 /// A known dial-out owner syncs outward but has no inbound owner transport.
 pub fn remote_unavailable_for_owner(state: &AppState, host: &str) -> ApiError {
+    if state.local_only() {
+        return local_only::refusal(crate::config::NetworkOperation::PeerRelay);
+    }
     let dial_out = if let Some(relay) = &state.client_relay {
         relay.is_dial_out_owner(host)
     } else {
@@ -8243,6 +8248,8 @@ pub fn overlay_seat_admission(state: &AppState, items: &mut [Value], history: bo
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let network_policy = crate::config::NetworkPolicy::for_state_dir(&state.state_dir);
+    let network_enabled = !network_policy.is_local_only();
     let mut health = json!({
         "status": "ready",
         "node": state.node,
@@ -8251,6 +8258,12 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
+        "network_policy": {
+            "mode": network_policy,
+            "fleet_join": network_enabled,
+            "replication": network_enabled,
+            "peer_relay": network_enabled,
+        },
         "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
