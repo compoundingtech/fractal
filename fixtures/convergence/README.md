@@ -262,7 +262,7 @@ and the oracle and held every later checkpoint back, so the run never settled an
 a claim the oracle never saw. On hosted CI, v19's draws first wrote one, in seeds 1 and 34; off
 CI, schedules diverge and more seeds wrote one (seeds 3, 13, 17, 277 and 1597 in burst run
 42880734602). The input is still drawn, so a seed whose store refused it keeps its schedule.
-With v19 every fixed seed converges and trims, so the never-trim set is empty. The
-never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a lightly
-loaded burst runner diverge from CI at the same commit (#6210); burst run 42882912660 leaves seeds
-55 and 610 untrimmed.
+With v19 every fixed seed converges and trims (hosted run 42884923668), so the never-trim set is
+empty. The never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a
+lightly loaded burst runner diverge from CI at the same commit (#6210); burst run 42884913070
+leaves seeds 55 and 610 untrimmed.
