@@ -125,7 +125,7 @@ pub fn profile_conflict(state: &AppState, granted: &ClaimRecord) -> Result<Optio
 }
 
 fn profile_conflict_at(state: &AppState, granted: &ClaimRecord, now: u64) -> Result<Option<Value>, ApiError> {
-    let active = candidate_grants(state, principal(fields(granted)?)?, Some(now))?;
+    let active = candidate_grants(state, projection_principal(fields(granted)?)?, Some(now))?;
     let Some((grant, profile)) = active.iter().find(|(grant, _)| grant.id == granted.id) else {
         return Ok(None);
     };
@@ -141,6 +141,14 @@ fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+// Owner management and retained evidence must recognize the projection identity,
+// including legacy Service grants on assistant principals. Never use this parser
+// for issuance or bearer authentication: those require `principal` below.
+pub fn projection_principal(source: &Value) -> Result<&str, ApiError> {
+    Profile::stored(source)?;
+    authority::principal(source).ok_or_else(|| forbidden("invalid external grant projection principal"))
 }
 
 pub fn principal(source: &Value) -> Result<&str, ApiError> {
@@ -265,7 +273,7 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
             // Audit references retained evidence, including unauthoritative overlays.
             if let Some(claim) = state.store.claims_for_subject_kind_at(&subject, kind, None, true, 1)
                 .map_err(ApiError::internal)?.claims.into_iter().next() {
-                audit_principal = Some(principal(fields(&claim)?)?.to_owned());
+                audit_principal = Some(projection_principal(fields(&claim)?)?.to_owned());
                 referenced.push(claim.id);
             }
         }
@@ -299,7 +307,7 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
     let policy = effective(state, granted)?;
     let source = fields(&policy)?;
     let mut value = json!({"kind":"assistant-grant","id":source["grant_id"],
-        "principal":principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
+        "principal":projection_principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
         "expires_at":client_timestamp(source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0)),
         "revoked":revoked(state, granted)?});
     for name in ["session_actor","device_id","key_id","scopes","policy_revision",
@@ -321,7 +329,7 @@ pub fn projection_with_witness(state: &AppState, granted: &ClaimRecord) -> Resul
     if value["conflict"].is_null() {
         let profile = Profile::stored(fields(granted)?)?;
         let mut cleared = Vec::new();
-        for (other, other_profile) in candidate_grants(state, principal(source)?, None)? {
+        for (other, other_profile) in candidate_grants(state, projection_principal(source)?, None)? {
             if profile == other_profile { continue; }
             // Historical explanations are optional: another subject's pending proof
             // must not turn inspection of this clean grant into a bearer denial.

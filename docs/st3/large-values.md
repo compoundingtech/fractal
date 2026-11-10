@@ -564,6 +564,14 @@ excluded-claim filtering without rehydrating raw claim history as authority.
 The projection's record copies and variable index keys remain transitional debt,
 not an encoded-size or execution-cost guarantee.
 
+Owner management, audit and conflict-witness projection preserve historical
+Service-on-assistant identities through the broader projection-principal parser,
+so the authoritative owner can inspect and revoke that retained conflict evidence.
+Representation changes must preserve this recovery path without turning those
+historical identities into Service bearer credentials. Issuance and bearer
+authentication retain the strict profile-specific principal parser; Service
+credentials require a `plugin/<host>/<service>` principal.
+
 The merged `fractal_store::store` schema is `lv-h6e39e16546c7`, replacing
 `lv-h22c8c670811c` and `lv-h6088551c41aa`. It retains the desired-kind/subject
 index and local desired-write witness while removing the obsolete raw principal

@@ -9,21 +9,6 @@ const OWNER: &str = "person/owner";
 const ASSISTANT_ID: &str = "111111111111111111111111";
 const SERVICE_ID: &str = "222222222222222222222222";
 
-// This override is thread-local: the reserved service profile remains closed in
-// production, and another test thread cannot accidentally inherit the fixture.
-struct ServiceFixture;
-impl ServiceFixture {
-    fn enable() -> Self {
-        assert!(!tests::SERVICE_PROFILE.replace(true));
-        Self
-    }
-}
-impl Drop for ServiceFixture {
-    fn drop(&mut self) {
-        tests::SERVICE_PROFILE.set(false);
-    }
-}
-
 fn member(root: &std::path::Path, name: &str) -> AppState {
     let mut state = crate::api::tests_shared::state(root);
     state.store = Arc::new(Store::open_memory(name).unwrap());
@@ -70,6 +55,8 @@ fn admitted_pair_with_floor(root: &std::path::Path, floor: u64) -> (AppState, Ap
     (a, b)
 }
 
+// Service rows with this assistant principal are legacy persisted conflict
+// evidence, never a service credential accepted by the strict bearer parser.
 fn grant_fields(id: &str, profile: &str) -> Value {
     json!({"profile":profile,"grant_id":id,"principal":PRINCIPAL,
         "issuer":OWNER,"session_actor":format!("{PRINCIPAL}/session/{id}"),
@@ -85,6 +72,10 @@ fn issue(state: &AppState, id: &str, profile: &str) -> Result<ClaimRecord, ApiEr
     append(state, subject, GRANTED, OWNER, source, Some(&begun))
 }
 
+fn legacy_service(state: &AppState, id: &str) -> ClaimRecord {
+    raw_claim(state, &subject(id).unwrap(), GRANTED, OWNER, grant_fields(id, "service"))
+}
+
 fn raw_claim(state: &AppState, subject: &str, kind: &str, actor: &str, source: Value) -> ClaimRecord {
     state.store.append_claim(&ClaimInput {
         subject:subject.into(),kind:kind.into(),actor:Some(actor.into()),
@@ -95,6 +86,13 @@ fn raw_claim(state: &AppState, subject: &str, kind: &str, actor: &str, source: V
 
 fn authenticate_id(state: &AppState, id: &str) -> Result<Option<ClientSession>, ApiError> {
     authenticate(state, &credential_digest(id), "http")
+}
+
+fn assert_legacy_bearer_forbidden(state: &AppState, id: &str) {
+    let error = authenticate_id(state, id).expect_err("legacy service evidence is not a bearer");
+    assert_eq!(error.code, "forbidden");
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert!(error.details.is_empty(), "legacy rejection must not expose owner witnesses");
 }
 
 fn assert_conflict(error: &ApiError) {
@@ -116,21 +114,23 @@ fn assert_witness(value: &Value) {
 
 #[test]
 fn disconnected_opposite_profiles_conflict_on_both_members_and_revocation_recovers() {
-    let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
     let assistant = issue(&a, ASSISTANT_ID, "assistant").unwrap();
-    let service = issue(&b, SERVICE_ID, "service").unwrap();
+    let service = legacy_service(&b, SERVICE_ID);
     assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
-    assert!(authenticate_id(&b, SERVICE_ID).unwrap().is_some());
+    assert_legacy_bearer_forbidden(&b, SERVICE_ID);
     replicate(&a, &b);
     replicate(&b, &a);
     for state in [&a, &b] {
         for grant in [&assistant, &service] {
             assert!(state.store.claim_has_authenticated_member_writer(&grant.id).unwrap());
-            let error = authenticate_id(state, fields(grant).unwrap()["grant_id"].as_str().unwrap())
-                .expect_err("both credentials must be suspended on either member");
-            assert_conflict(&error);
+            if fields(grant).unwrap()["profile"] == "assistant" {
+                assert_conflict(&authenticate_id(state, ASSISTANT_ID)
+                    .expect_err("the assistant credential must be suspended on either member"));
+            } else {
+                assert_legacy_bearer_forbidden(state, SERVICE_ID);
+            }
             assert_witness(&profile_conflict(state, grant).unwrap().unwrap());
             assert_witness(&projection_with_witness(state, grant).unwrap()["conflict"]);
         }
@@ -158,11 +158,10 @@ fn disconnected_opposite_profiles_conflict_on_both_members_and_revocation_recove
 
 #[test]
 fn expiry_boundary_clears_conflict_and_disconnected_reissue_recomputes_it() {
-    let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
     let assistant = issue(&a, ASSISTANT_ID, "assistant").unwrap();
-    let service = issue(&b, SERVICE_ID, "service").unwrap();
+    let service = legacy_service(&b, SERVICE_ID);
     // Birch never receives Alder's assistant grant: it remains a disconnected
     // issuer even as Alder receives its grants and policy transitions.
     replicate(&b, &a);
@@ -170,7 +169,7 @@ fn expiry_boundary_clears_conflict_and_disconnected_reissue_recomputes_it() {
 
     let mut policy = fields(&service).unwrap().clone();
     policy["expires_at_unix_ms"] = json!(100_u64);
-    append(&b, service.subject.clone(), POLICY, OWNER, policy, Some(&service)).unwrap();
+    raw_claim(&b, &service.subject, POLICY, OWNER, policy);
     replicate(&b, &a);
     for (now, expected_count, conflicted) in [(99_u64, 2, true), (100, 1, false), (101, 1, false)] {
         let candidates = candidate_grants(&a, PRINCIPAL, Some(now)).unwrap();
@@ -189,7 +188,7 @@ fn expiry_boundary_clears_conflict_and_disconnected_reissue_recomputes_it() {
     assert_witness(&cleared[0]);
 
     let replacement_id = "333333333333333333333333";
-    let replacement = issue(&b, replacement_id, "service").unwrap();
+    let replacement = legacy_service(&b, replacement_id);
     replicate(&b, &a);
     let witness = profile_conflict(&a, &assistant).unwrap().unwrap();
     let rows = witness["grants"].as_array().unwrap();
@@ -199,9 +198,8 @@ fn expiry_boundary_clears_conflict_and_disconnected_reissue_recomputes_it() {
     assert!(!rows.iter().any(|row| row["grant_id"] == SERVICE_ID));
     assert!(profile_conflict(&a, &service).unwrap().is_none());
     assert!(profile_conflict(&a, &replacement).unwrap().is_some());
-    for id in [ASSISTANT_ID, replacement_id] {
-        assert_conflict(&authenticate_id(&a, id).err().unwrap());
-    }
+    assert_conflict(&authenticate_id(&a, ASSISTANT_ID).err().unwrap());
+    assert_legacy_bearer_forbidden(&a, replacement_id);
     let inspected = projection_with_witness(&a, &assistant).unwrap();
     assert_eq!(inspected["conflict"], witness);
     assert!(inspected["cleared_conflicts"].is_null());
@@ -227,11 +225,45 @@ fn same_profile_foreign_grants_do_not_conflict_or_authenticate_on_the_wrong_memb
 }
 
 #[test]
-fn admission_refuses_a_known_authenticated_foreign_opposite_profile() {
-    let _service = ServiceFixture::enable();
+fn plugin_service_bearer_is_independent_of_assistant_profiles_and_bound_to_its_issuer() {
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
-    issue(&b, SERVICE_ID, "service").unwrap();
+    let assistant = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+    let mut source = grant_fields(SERVICE_ID, "service");
+    source["principal"] = json!("plugin/test/reader");
+    source["session_actor"] = json!(format!("plugin/test/reader/session/{SERVICE_ID}"));
+    source["scopes"] = json!(["read.claims", "read.work", "read.documents"]);
+    let service = raw_claim(&b, &subject(SERVICE_ID).unwrap(), GRANTED, OWNER, source);
+    let bearer = authenticate_id(&b, SERVICE_ID).unwrap().unwrap();
+    assert_eq!(bearer.authority_actor, "plugin/test/reader");
+    assert_eq!(bearer.actor, format!("plugin/test/reader/session/{SERVICE_ID}"));
+    assert_eq!(bearer.scopes, BTreeSet::from([
+        "read.claims".to_owned(), "read.work".to_owned(), "read.documents".to_owned()]));
+    replicate(&a, &b);
+    replicate(&b, &a);
+    for state in [&a, &b] {
+        for grant in [&assistant, &service] {
+            assert!(state.store.claim_has_authenticated_member_writer(&grant.id).unwrap());
+            assert!(profile_conflict(state, grant).unwrap().is_none());
+            assert!(projection_with_witness(state, grant).unwrap()["conflict"].is_null());
+        }
+        assert_eq!(candidate_grants(state, PRINCIPAL, Some(0)).unwrap().len(), 1);
+        assert_eq!(candidate_grants(state, "plugin/test/reader", Some(0)).unwrap().len(), 1);
+    }
+    assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
+    assert!(authenticate_id(&b, SERVICE_ID).unwrap().is_some());
+    for (state, id) in [(&a, SERVICE_ID), (&b, ASSISTANT_ID)] {
+        let error = authenticate_id(state, id).unwrap_err();
+        assert_eq!(error.code, "forbidden");
+        assert!(error.message.contains("authoritative grant issuer"));
+    }
+}
+
+#[test]
+fn admission_refuses_a_known_authenticated_foreign_opposite_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = admitted_pair(root.path());
+    legacy_service(&b, SERVICE_ID);
     replicate(&b, &a);
     let error = issue(&a, ASSISTANT_ID, "assistant").err().unwrap();
     assert_conflict(&error);
@@ -257,8 +289,8 @@ fn malformed_local_owner_actor_grants_cannot_suspend_a_local_credential() {
 }
 
 // Same shape as fleet::service_grants' rollback counterexample: a service grant
-// with a non-assistant scope (3), an assistant grant (4) and a well-formed service
-// grant (7), all active for assistant/chatgpt on one member.
+// with a non-assistant scope (3), an assistant grant (4) and legacy service
+// conflict evidence (7), all active for assistant/chatgpt on one member.
 #[test]
 fn compat_counterexample_suspends_the_valid_pair_and_refuses_the_malformed_service() {
     let root = tempfile::tempdir().unwrap();
@@ -270,9 +302,9 @@ fn compat_counterexample_suspends_the_valid_pair_and_refuses_the_malformed_servi
     raw_claim(&state, &subject(malformed).unwrap(), GRANTED, OWNER, source);
     issue(&state, assistant, "assistant").unwrap();
     raw_claim(&state, &subject(service).unwrap(), GRANTED, OWNER, grant_fields(service, "service"));
-    for id in [assistant, service] {
-        assert_conflict(&authenticate_id(&state, id).expect_err("the valid opposite pair is suspended"));
-    }
+    assert_conflict(&authenticate_id(&state, assistant)
+        .expect_err("valid legacy opposite-profile evidence suspends the assistant"));
+    assert_legacy_bearer_forbidden(&state, service);
     assert!(authenticate_id(&state, malformed).unwrap().is_none(),
         "malformed service evidence must not enter bearer authority");
 }
@@ -302,11 +334,10 @@ fn malformed_authenticated_foreign_grants_cannot_suspend_a_local_credential() {
 
 #[test]
 fn foreign_policy_with_mismatched_identity_cannot_clear_a_conflict() {
-    let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
     let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
-    let foreign = issue(&b, SERVICE_ID, "service").unwrap();
+    let foreign = legacy_service(&b, SERVICE_ID);
     let mut policy = fields(&foreign).unwrap().clone();
     policy["session_actor"] = json!("assistant/chatgpt/session/333333333333333333333333");
     raw_claim(&b, &foreign.subject, POLICY, OWNER, policy);
@@ -317,12 +348,11 @@ fn foreign_policy_with_mismatched_identity_cannot_clear_a_conflict() {
 
 #[test]
 fn wrong_origin_revocation_and_expired_policy_cannot_clear_conflict() {
-    let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     for kind in [REVOKED, POLICY] {
         let (a, b) = admitted_pair(root.path());
         let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
-        let foreign = issue(&b, SERVICE_ID, "service").unwrap();
+        let foreign = legacy_service(&b, SERVICE_ID);
         replicate(&a, &b);
         replicate(&b, &a);
         let mut overlay = fields(&foreign).unwrap().clone();
@@ -337,9 +367,8 @@ fn wrong_origin_revocation_and_expired_policy_cannot_clear_conflict() {
             assert!(state.store.claim_has_authenticated_member_writer(&malicious.id).unwrap());
             assert_eq!(effective(state, &foreign).unwrap().id, foreign.id);
             assert_witness(&profile_conflict(state, &local).unwrap().unwrap());
-            for id in [ASSISTANT_ID, SERVICE_ID] {
-                assert_conflict(&authenticate_id(state, id).err().unwrap());
-            }
+            assert_conflict(&authenticate_id(state, ASSISTANT_ID).err().unwrap());
+            assert_legacy_bearer_forbidden(state, SERVICE_ID);
             let inspected = projection_with_witness(state, &local).unwrap();
             assert!(inspected["conflict"].is_object());
             assert!(inspected["cleared_conflicts"].is_null());
@@ -349,14 +378,13 @@ fn wrong_origin_revocation_and_expired_policy_cannot_clear_conflict() {
 
 #[test]
 fn malformed_same_origin_expired_policy_keeps_the_last_valid_live_policy() {
-    let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
     let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
-    let foreign = issue(&b, SERVICE_ID, "service").unwrap();
+    let foreign = legacy_service(&b, SERVICE_ID);
     let mut live = fields(&foreign).unwrap().clone();
     live["policy_revision"] = json!(2);
-    let live = append(&b, foreign.subject.clone(), POLICY, OWNER, live, Some(&foreign)).unwrap();
+    let live = raw_claim(&b, &foreign.subject, POLICY, OWNER, live);
     let mut malformed = fields(&live).unwrap().clone();
     malformed["expires_at_unix_ms"] = json!(1_u64);
     malformed["session_actor"] = json!("assistant/chatgpt/session/not-this-grant");
@@ -636,11 +664,10 @@ fn dirty_grant_reads_and_bearers_fail_closed_without_blocking_an_unrelated_crede
 
 #[test]
 fn dirty_opposite_profile_witness_does_not_clear_an_established_conflict() {
-    let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
     issue(&a, ASSISTANT_ID, "assistant").unwrap();
-    let service = issue(&b, SERVICE_ID, "service").unwrap();
+    let service = legacy_service(&b, SERVICE_ID);
     replicate(&a, &b);
     replicate(&b, &a);
     assert_conflict(&authenticate_id(&a, ASSISTANT_ID).unwrap_err());
@@ -656,18 +683,17 @@ fn dirty_opposite_profile_witness_does_not_clear_an_established_conflict() {
 
 #[test]
 fn clean_grant_inspection_omits_pending_expired_or_revoked_opposite_history() {
-    let _service = ServiceFixture::enable();
     for cause in ["expired", "revoked"] {
         let root = tempfile::tempdir().unwrap();
         let (a, b) = admitted_pair(root.path());
         let assistant = issue(&a, ASSISTANT_ID, "assistant").unwrap();
-        let service = issue(&b, SERVICE_ID, "service").unwrap();
+        let service = legacy_service(&b, SERVICE_ID);
         let mut source = fields(&service).unwrap().clone();
         let kind = if cause == "expired" {
             source["expires_at_unix_ms"] = json!(1_u64);
             POLICY
         } else { REVOKED };
-        append(&b, service.subject.clone(), kind, OWNER, source, Some(&service)).unwrap();
+        raw_claim(&b, &service.subject, kind, OWNER, source);
         replicate(&b, &a);
         let inspected = projection_with_witness(&a, &assistant).unwrap();
         assert_eq!(inspected["cleared_conflicts"][0]["cause"], cause);

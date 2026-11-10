@@ -6,7 +6,7 @@ pub use native::propose;
 pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
 pub use fractal_api_core::api::client_v0::assistant::*;
 pub use fractal_api_core::api::client_v0::assistant::{PRINCIPAL, append, authenticate, authorize_route, device_resources, trusted_issuer};
-use fractal_api_core::api::client_v0::external_grants::{projection_with_witness, revoked};
+use fractal_api_core::api::client_v0::external_grants::{projection_principal, projection_with_witness, revoked};
 pub mod authorization;
 pub mod native;
 pub mod reads;
@@ -241,7 +241,7 @@ async fn revoke_inner(State(state): State<AppState>, Extension(session): Extensi
         let previous = effective(&state, &granted)?;
         let source = fields(&granted)?;
         let mut value = json!({"version":1,"grant_id":source["grant_id"],
-            "principal":principal(source)?,"issuer":issuer,"transport":session.transport,
+            "principal":projection_principal(source)?,"issuer":issuer,"transport":session.transport,
             "timestamp":client_timestamp(client_now_ms()),"outcome":"revoked"});
         // Revocation is not issuance: retain the immutable profile, including
         // the absence of a profile on legacy assistant grants.
@@ -384,6 +384,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn owner_revoke_route_retires_legacy_service_conflict_and_restores_assistant_admission() {
+        use axum::{body::{Body, to_bytes}, http::Request};
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let legacy = seeded_grant(&state, Some("service"));
+        let Json(challenge) = begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(),
+            request()).await.unwrap();
+        let pairing_id = challenge["pairing_id"].as_str().unwrap()
+            .strip_prefix("pairing/").unwrap();
+        let completion: PairingComplete = serde_json::from_value(json!({
+            "api_version":CLIENT_API_VERSION,"code":challenge["code"],
+            "device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32]),
+        })).unwrap();
+        let error = complete(&state, pairing_id, &completion, "fabric-loopback")
+            .await.unwrap_err();
+        assert_eq!(error.code, "grant-profile-conflict");
+        assert!(authenticate(&state, &credential_digest("reserved-service-credential"),
+            "http").is_err(), "legacy conflict evidence must never authenticate as Service");
+
+        let app = super::super::super::router_for_transport(state.clone(),
+            ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+        let mut request = Request::builder().method("POST")
+            .uri("/v1/client/assistant/grants/111111111111111111111111/revoke")
+            .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
+        request.extensions_mut().insert(super::super::super::LocalPeer {
+            pid: 8, peer_process: None, ancestor: None,
+        });
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["value"]["principal"], PRINCIPAL);
+        assert_eq!(body["value"]["revoked"], true);
+        let revoked = latest(&state, &legacy.subject, REVOKED).unwrap().unwrap();
+        assert_eq!(fields(&revoked).unwrap()["profile"], "service");
+        assert_eq!(fields(&revoked).unwrap()["principal"], PRINCIPAL);
+        let Json(paired) = complete(&state, pairing_id, &completion, "fabric-loopback")
+            .await.unwrap().expect("owner revocation must restore actual assistant admission");
+        assert_eq!(paired["principal"], PRINCIPAL);
+        assert!(authenticate(&state,
+            &credential_digest(paired["credential"].as_str().unwrap()),
+            "fabric-loopback").unwrap().is_some());
     }
 
     async fn begin_assistant(state: &AppState) -> Value {
