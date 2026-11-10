@@ -190,7 +190,10 @@ impl std::fmt::Debug for Device {
 
 impl Device {
     pub fn client(&self) -> Result<Client> {
-        let mut client = if self.endpoint.starts_with("fabric:") {
+        let mut client = if let Some(path) = self.endpoint.strip_prefix("unix:") {
+            validate_endpoint(&self.endpoint)?;
+            Client::unix(PathBuf::from(path)).with_credential(&self.session.credential)
+        } else if self.endpoint.starts_with("fabric:") {
             Client::fabric(crate::fabric::FabricEndpoint::parse(&self.endpoint)?)
                 .with_credential(&self.session.credential)
         } else {
@@ -203,6 +206,32 @@ impl Device {
             client.signing_device = Some(Arc::new(self.clone()));
         }
         Ok(client)
+    }
+
+    /// Purpose-specific command result signature; this grants no message authority.
+    pub fn sign_client_result(
+        &self,
+        binding: &fractal_schema::client_control::ClientResultBinding,
+    ) -> Result<DeviceSignature> {
+        use fractal_schema::client_control::{CLIENT_RESULT_SIGNED_FIELDS, client_result_canonical_bytes};
+        let key = self.signing_key.as_ref().context("No enrolled command signing key")?;
+        ensure!(key.algorithm == KeyAlgorithm::P256, "Client results require P-256");
+        ensure!(self.session.scopes.iter().any(|scope| scope == "control.commands"),
+            "Device pairing has no command authority");
+        ensure!(binding.purpose == "client.device-result.v1"
+            && binding.device == self.session.device_id
+            && binding.session == self.session.session_actor,
+            "Result binding does not belong to this device session");
+        Ok(DeviceSignature {
+            signer: self.session.person_id.clone(),
+            key: key.public_key()?,
+            chain: Vec::new(),
+            nonce: random_nonce()?,
+            signed_at_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+            signature: key.sign(&client_result_canonical_bytes(binding)?)?,
+            format: "fields-v1".into(),
+            signed_fields: CLIENT_RESULT_SIGNED_FIELDS.iter().map(|field| (*field).to_owned()).collect(),
+        })
     }
 
     /// Sign the seven fields in device-signing-v1 (nine for a message past `INLINE_MAX_BYTES`),
@@ -371,13 +400,11 @@ impl Profile {
             if let Some(key) = &device.signing_key {
                 key.public_key()?;
                 ensure!(
-                    !device.session.device_key_chain.is_empty()
-                        && device
-                            .session
-                            .scopes
-                            .iter()
-                            .any(|scope| scope == "control.messages"),
-                    "Device signing key has no message delegation"
+                    (!device.session.device_key_chain.is_empty()
+                        && device.session.scopes.iter().any(|scope| scope == "control.messages"))
+                        || (key.algorithm == KeyAlgorithm::P256
+                            && device.session.scopes.iter().any(|scope| scope == "control.commands")),
+                    "Device signing key has neither message nor command authority"
                 );
             }
         }
@@ -628,6 +655,15 @@ pub fn validate_endpoint(endpoint: &str) -> Result<String> {
 }
 
 fn validate_endpoint_with_http_policy(endpoint: &str, allow_public_http: bool) -> Result<String> {
+    if let Some(path) = endpoint.strip_prefix("unix:") {
+        ensure!(
+            Path::new(path).is_absolute() && !path.starts_with("//")
+                && !path.contains(['?', '#', '\0'])
+                && !Path::new(path).components().any(|part| matches!(part, std::path::Component::ParentDir)),
+            "Use unix:/absolute/path for a paired client socket"
+        );
+        return Ok(endpoint.to_owned());
+    }
     let url =
         reqwest::Url::parse(endpoint).context("Member gateway must be an HTTP or HTTPS URL")?;
     ensure!(
@@ -782,8 +818,13 @@ pub async fn complete_with_options(
         );
     }
     let endpoint = validate_endpoint_with_http_policy(endpoint, allow_public_http)?;
-    let mut client = Client::fabric_pairing(&endpoint);
-    client.http = transport::client(&endpoint, allow_public_http)?;
+    let client = if let Some(path) = endpoint.strip_prefix("unix:") {
+        Client::unix(PathBuf::from(path))
+    } else {
+        let mut client = Client::fabric_pairing(&endpoint);
+        client.http = transport::client(&endpoint, allow_public_http)?;
+        client
+    };
     ensure!(!code.trim().is_empty(), "A pairing code is required");
     key.prove(pairing_id, code.trim())?;
     let public = key.public_key()?;
@@ -859,12 +900,13 @@ pub async fn complete_with_options(
                 "Member did not return a verifiable person-root grant for read-only pairing; upgrade the member or explicitly use --unpinned"
             );
         }
+        let retains_key = signs || session.scopes.iter().any(|scope| scope == "control.commands");
         let device = Device {
             endpoint,
             allow_public_http,
             person_root_fingerprint: options.fingerprint.map(str::to_owned),
             session,
-            signing_key: signs.then_some(key),
+            signing_key: retains_key.then_some(key),
         };
         profile
             .devices
@@ -982,6 +1024,30 @@ pub fn read_pairing_code() -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn command_only_p256_profile_loads_without_message_delegation() {
+        let mut device: Device = serde_json::from_value(serde_json::json!({
+            "endpoint":"unix:/fixture/fractal-client.sock","allow_public_http":false,
+            "session":{"kind":"paired-session","device_id":"device/fixture",
+                "person_id":"person/client-control-fixture","session_actor":"person/client-control-fixture/session/tui",
+                "credential":"fixture-credential-00000000000000000000000000",
+                "scopes":["read.projections","control.commands"],"expires_at":"2099-01-01T00:00:00Z"}
+        })).unwrap();
+        device.signing_key = Some(SigningKey::generate(KeyAlgorithm::P256).unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("isolated/devices.json");
+        Profile { devices: vec![device.clone()] }.save(&path).unwrap();
+        let loaded = Profile::load(&path).unwrap().unwrap();
+        assert!(matches!(loaded.clients().unwrap()[0].endpoint, crate::Endpoint::Unix(_)));
+        assert!(loaded.devices[0].session.device_key_chain.is_empty());
+        device.session.scopes = vec!["read.projections".into()];
+        Profile { devices: vec![device] }.save(&path).unwrap();
+        assert!(Profile::load(&path).is_err(), "a key cannot acquire authority just by being stored");
+        for invalid in ["unix:relative", "unix://remote/socket", "unix:/fixture/../main.sock", "unix:/fixture/socket?credential=bad"] {
+            assert!(validate_endpoint(invalid).is_err(), "{invalid}");
+        }
+    }
     #[test]
     fn pairing_proof_advertisement_accepts_both_versions_without_weakening_proof_checks() {
         for version in ["st3.client.v0", "fractal.client.v0", "fractal.client.v1"] {
