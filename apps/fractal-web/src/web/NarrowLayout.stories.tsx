@@ -116,10 +116,10 @@ const assertWide = async (canvasElement: HTMLElement) => {
   await expect(header.queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
   await expect(header.getByRole('button', { name: 'Toggle right panel' })).toBeVisible()
   await expect(header.getByRole('button', { name: 'Actions for WorkbenchShell' })).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Toggle terminal drawer' })).toBeVisible()
+  await expect(header.getByRole('button', { name: 'Show terminal' })).toBeVisible()
   await expect(header.getByText('build-host-a')).toBeVisible()
   await expect(header.queryByRole('button', { name: 'Agent details' })).toBeNull()
-  await expect(header.queryByRole('button', { name: 'Terminal' })).toBeNull()
+  await expect(header.queryByRole('button', { name: 'Show conversation' })).toBeNull()
 }
 /**
  * The inspector is a lazy chunk whose loading fallback carries the same "Agent inspector" landmark, so its own tab
@@ -163,7 +163,7 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const header = within(node)
   const buttons = header.getAllByRole('button')
   await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', `Actions for ${agentName}`, 'Conversation menu', 'Agent details'])
-  for (const name of ['Resources', 'View KDL', 'Terminal', 'Toggle terminal drawer', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
+  for (const name of ['Resources', 'View KDL', 'Show terminal', 'Show conversation', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
   await expect(lane.right).toBeLessThanOrEqual(window.innerWidth)
@@ -194,8 +194,8 @@ const assertPhoneTabRow = async (canvasElement: HTMLElement) => {
   const canvas = within(canvasElement)
   const list = canvas.getByRole('tablist', { name: 'Workspace views' })
   const row = list.parentElement!
-  const terminal = within(row).getByRole('button', { name: 'Terminal' })
-  await expect(canvas.getAllByRole('button', { name: 'Terminal' })).toEqual([terminal])
+  const terminal = within(row).getByRole('button', { name: /^Show (terminal|conversation)$/ })
+  await expect(canvas.getAllByRole('button', { name: /^Show (terminal|conversation)$/ })).toEqual([terminal])
   await expect(list.contains(terminal)).toBe(false)
   // The Terminal toggle's visible label carries its meaning; touch has no hover tooltip.
   await expect(terminal).toBeVisible()
@@ -243,18 +243,18 @@ export const Drawers: Story = { parameters: { scenario: { _tag: 'contract-fixtur
   await assertPhoneHeader(canvasElement)
   const { terminal } = await assertPhoneTabRow(canvasElement)
   // The fixture roster reports no runtime for this agent: the toggle stays, disabled and described by why.
-  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  await expect(terminal).toHaveAccessibleName('Show terminal')
   await expect(terminal).toHaveAttribute('aria-disabled', 'true')
   await expect(terminal).toHaveAccessibleDescription('This agent has no terminal.')
-  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull()
   // Pressing it paints the reason in a popover instead of toggling; Escape returns focus to the toggle.
   await userEvent.click(terminal)
   const reason = await within(document.body).findByRole('dialog', { name: 'Terminal unavailable' })
   await expect(reason).toHaveTextContent('This agent has no terminal.')
   // The popover mounts at the start of its entrance transition (opacity 0) and is painted once it settles.
   await waitFor(() => expect(reason).toBeVisible())
-  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
-  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await expect(terminal).toHaveAccessibleName('Show terminal')
+  await expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Terminal unavailable' })).toBeNull())
   await waitFor(() => expect(terminal).toHaveFocus())
@@ -262,7 +262,7 @@ export const Drawers: Story = { parameters: { scenario: { _tag: 'contract-fixtur
 } }
 export const DrawersLight: Story = { ...Drawers, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Light deterministic workspace feeds pin responsive drawer routing, header controls and unavailable-terminal copy.' } }, args: { scheme: 'light' } }
 
-/** Decode evidence stays between the retained roster and footer in either real sidebar host. */
+/** Decode evidence stays after the retained roster in either real sidebar host. */
 export const DecodeStaleSidebarHosts: Story = {
   tags: ['critical', 'both-widths'],
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic stale roster decoding proves the notice remains visible in both responsive sidebar hosts.' } },
@@ -278,9 +278,7 @@ export const DecodeStaleSidebarHosts: Story = {
     await expect(notice).toHaveAttribute('data-wf-roster-decode', 'stale')
     await expect(host.querySelector('[data-wf-roster-stale]')).toHaveAttribute('data-wf-roster-stale', 'decode')
     const roster = within(host).getByRole('navigation', { name: 'Agent roster' })
-    const footer = host.querySelector('footer')!
     await expect(roster.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    await expect(notice.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await expect(within(notice).getByRole('status')).toHaveTextContent('their data does not match the expected format')
   },
 }
@@ -532,24 +530,29 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   const { canvas, narrow, header } = await workspace(canvasElement)
   if (!narrow) await assertWide(canvasElement)
   if (narrow) await assertPhoneHeader(canvasElement)
-  const terminal = narrow ? (await assertPhoneTabRow(canvasElement)).terminal : header.getByRole('button', { name: 'Toggle terminal drawer' })
-  await expect(terminal).toHaveAttribute('aria-pressed', 'false')
+  const terminal = narrow ? (await assertPhoneTabRow(canvasElement)).terminal : header.getByRole('button', { name: 'Show terminal' })
+  await expect(terminal).not.toHaveAttribute('aria-pressed')
   await expect(terminal).not.toHaveAttribute('aria-disabled')
-  await expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull()
+  await expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull()
   const thread = canvasElement.querySelector<HTMLElement>('[data-testid="conversation-history-host"]')
   await expect(thread).not.toBeNull()
   await userEvent.click(terminal)
-  await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'true'))
-  // The terminal opens as a drawer under the thread, which keeps its node and stays on screen.
-  await expect(await canvas.findByRole('region', { name: 'Terminal drawer' }, { timeout: 15000 })).toBeVisible()
+  await waitFor(() => expect(terminal).toHaveAccessibleName('Show conversation'))
+  // The terminal replaces the conversation, which keeps its node behind it, out of the accessibility tree.
+  await expect(await canvas.findByRole('region', { name: 'Terminal' }, { timeout: 15000 })).toBeVisible()
   await expect(canvasElement.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
-  await expect(thread!.getBoundingClientRect().height).toBeGreaterThan(0)
-  if (narrow) { await assertPhoneHeader(canvasElement); await assertPhoneTabRow(canvasElement) }
+  await expect(thread!.closest('[aria-hidden]')).toHaveAttribute('aria-hidden', 'true')
+  await expect(canvas.queryByRole('toolbar', { name: 'Workspace views' })).toBeNull()
+  // The shown view is not one of the workspace tabs, so only the way back stays in the row.
+  if (narrow) { await assertPhoneHeader(canvasElement); await expect(canvas.queryByRole('tablist', { name: 'Workspace views' })).toBeNull(); await expect(terminal).toBeVisible() }
   terminal.focus()
   await userEvent.keyboard('{Enter}')
-  await waitFor(() => expect(terminal).toHaveAttribute('aria-pressed', 'false'))
-  await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal drawer' })).toBeNull())
-  await waitFor(() => expect(terminal).toHaveFocus())
+  await waitFor(() => expect(terminal).toHaveAccessibleName('Show terminal'))
+  await waitFor(() => expect(canvas.queryByRole('region', { name: 'Terminal' })).toBeNull())
+  await expect(canvasElement.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
+  // A phone keeps focus on its toggle so the switch raises no keyboard; a wide window moves it to an enabled composer.
+  const composer = canvasElement.querySelector<HTMLTextAreaElement>('[data-wf-shown-pane] textarea:not(:disabled)')
+  await waitFor(() => narrow || composer === null ? expect(terminal).toHaveFocus() : expect(composer).toHaveFocus())
   if (!narrow) return
   await assertPhoneHeader(canvasElement)
   await assertPhoneTabRow(canvasElement)
@@ -567,11 +570,11 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   const longTerminal = (await assertPhoneTabRow(canvasElement)).terminal
   await expect(longTerminal).not.toHaveAttribute('aria-disabled')
   await userEvent.click(longTerminal)
-  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'true'))
+  await waitFor(() => expect(longTerminal).toHaveAccessibleName('Show conversation'))
   await assertPhoneHeader(canvasElement, longName)
-  await assertPhoneTabRow(canvasElement)
+  await expect(canvas.queryByRole('tablist', { name: 'Workspace views' })).toBeNull()
   await userEvent.click(longTerminal)
-  await waitFor(() => expect(longTerminal).toHaveAttribute('aria-pressed', 'false'))
+  await waitFor(() => expect(longTerminal).toHaveAccessibleName('Show terminal'))
   await waitFor(() => expect(longTerminal).toHaveFocus())
   await assertPhoneTabRow(canvasElement)
 }) }
@@ -751,8 +754,8 @@ const breakpointDensityPlay: NonNullable<Story['play']> = async ({ canvasElement
   const controls = [...brand!.querySelectorAll<HTMLElement>('button')]
   await expect(controls[0]).toHaveAccessibleName(narrow ? 'Close agents' : 'Collapse agents')
   await expect(brand!.querySelector('strong')).toHaveTextContent('Fractal')
-  // Everything after the wordmark is the alerts count, as in the dock.
-  for (const control of controls.slice(1)) await expect(control.getAttribute('aria-label')).toMatch(/alert/i)
+  // Everything after the wordmark is the Settings control, as in the dock.
+  for (const control of controls.slice(1)) await expect(control).toHaveAccessibleName('Settings')
   for (const control of controls) {
     const box = control.getBoundingClientRect()
     if (coarse) { await expect(box.height).toBeGreaterThanOrEqual(43.5); await expect(box.width).toBeGreaterThanOrEqual(43.5) }
@@ -789,7 +792,7 @@ export const DrawerFocusReturn: Story = {
     const { canvas, narrow, header } = await workspace(canvasElement)
     if (!narrow) return assertWide(canvasElement)
     const toggle = header.getByRole('button', { name: 'Expand sidebar' })
-    const terminal = canvas.getByRole('button', { name: 'Terminal' })
+    const terminal = canvas.getByRole('button', { name: 'Show terminal' })
     for (const dismiss of ['scrim', 'escape'] as const) {
       terminal.focus()
       await expect(terminal).toHaveFocus()
