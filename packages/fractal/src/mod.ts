@@ -755,6 +755,82 @@ const OwnedDeclarationFields = {
   ),
 }
 
+/**
+ * `program "/abs/bundle.mjs" sha256="…" stalled-after="…"?`: the step runs a program bundle the
+ * daemon pins by its sha256 (docs/st3/program-engine.md §3, §4).
+ */
+export const ProgramSpecSchema = Schema.Struct({
+  bundle: Schema.String.pipe(
+    Schema.refine((value): value is string => value.startsWith('/'), {
+      message: 'a program bundle path must be absolute',
+    }),
+  ),
+  sha256: Schema.String.pipe(
+    Schema.refine((value): value is string => /^[0-9a-f]{64}$/u.test(value), {
+      message: 'a program sha256 is 64 lowercase hex digits',
+    }),
+  ),
+  stalledAfter: Schema.optionalKey(Duration),
+}).annotate({ identifier: 'Fractal.ProgramSpec' })
+
+/**
+ * An authority pattern is exact or a terminal `/*` namespace. Mission verbs take mission IDs
+ * without `mission/`; `write` takes a subject, which the native parser checks against the schema
+ * registry.
+ */
+const authorityPattern = (target: 'mission' | 'subject') =>
+  Schema.String.pipe(
+    Schema.refine(
+      (pattern): pattern is string => {
+        const exact = pattern.endsWith('/*') ? pattern.slice(0, -2) : pattern
+        return (
+          exact.length > 0 &&
+          exact.includes('*') === false &&
+          /\s/u.test(exact) === false &&
+          exact.split('/').includes('') === false &&
+          (target === 'subject' || exact.startsWith('mission/') === false)
+        )
+      },
+      {
+        message: `an authority ${target === 'mission' ? 'mission ID' : 'subject'} is exact or ends in a /* namespace`,
+      },
+    ),
+  )
+const authorityRules = (target: 'mission' | 'subject') =>
+  Schema.optionalKey(
+    Schema.NonEmptyArray(authorityPattern(target)).pipe(
+      Schema.refine((values): values is typeof values => new Set(values).size === values.length, {
+        message: 'an authority rule is declared once',
+      }),
+    ),
+  )
+/** The verbs of a mission's `authority` block, in their canonical order. */
+export const authorityVerbs = ['publish', 'start', 'revise', 'write'] as const
+/** What runs of a top-level mission may do as `mission-run/RUN` (docs/st3/program-engine.md §3). */
+export const AuthoritySchema = Schema.Struct({
+  publish: authorityRules('mission'),
+  start: authorityRules('mission'),
+  revise: authorityRules('mission'),
+  write: authorityRules('subject'),
+}).pipe(
+  Schema.refine(
+    (value): value is typeof value => authorityVerbs.some((verb) => value[verb] !== undefined),
+    { message: 'an authority block needs at least one rule' },
+  ),
+  Schema.annotate({ identifier: 'Fractal.Authority' }),
+)
+/** A mission's `authority` block: rules by verb. */
+export type Authority = typeof AuthoritySchema.Encoded
+
+/** Renders rules in the parser's canonical order, so reordering them is no revision. */
+const authorityNode = (authority: typeof AuthoritySchema.Type): Node =>
+  block({
+    name: 'authority',
+    children: authorityVerbs.flatMap((verb) =>
+      (authority[verb] ?? []).toSorted().map((pattern) => child({ name: verb, value: pattern })),
+    ),
+  })
+
 const UsedMissionSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal('revision'), revision: Revision }),
   Schema.Struct({ kind: Schema.Literal('output'), outputOf: LocalId }),
@@ -784,6 +860,7 @@ export const StepSchema = Schema.Struct({
   ),
   producesMission: Schema.optionalKey(MissionId),
   usesMission: Schema.optionalKey(UsedMissionSchema),
+  program: Schema.optionalKey(ProgramSpecSchema),
 }).pipe(
   Schema.refine(
     (s): s is typeof s => (s.agentless === true && s.assignedTo !== undefined) === false,
@@ -799,6 +876,20 @@ export const StepSchema = Schema.Struct({
     (s): s is typeof s => s.agentless !== true || withoutFeedback(s.gates ?? []) === true,
     {
       message: 'feedback human gates require a worker step',
+    },
+  ),
+  Schema.refine(
+    (s): s is typeof s =>
+      s.program === undefined ||
+      (s.assignedTo === undefined &&
+        s.gates === undefined &&
+        s.produces === undefined &&
+        s.producesMission === undefined &&
+        s.usesMission === undefined &&
+        s.exec === undefined),
+    {
+      message:
+        'a program step alone decides its outcome: no assignee, gates, products, exec, or produced or used mission',
     },
   ),
   Schema.annotate({ identifier: 'Fractal.Step' }),
@@ -943,6 +1034,14 @@ export const MissionSchema = Schema.Struct({
   state: Schema.Literal('ready'),
   reportTo: ReportToSchema,
   assignedTo: Schema.optionalKey(Schema.Union([AgentReferenceSchema, PersonReferenceSchema])),
+  concurrentRuns: Schema.optionalKey(
+    Schema.Int.pipe(
+      Schema.refine((value): value is number => value > 0 && value <= 0xffff_ffff, {
+        message: 'concurrent-runs max must be a positive integer',
+      }),
+    ),
+  ),
+  authority: Schema.optionalKey(AuthoritySchema),
   timeout: Schema.optionalKey(Duration),
   stalledAfter: Schema.optionalKey(Duration),
   reportStalls: Schema.optionalKey(Schema.Boolean),
@@ -986,7 +1085,13 @@ export const MissionSchema = Schema.Struct({
   // Try loops first: plain steps accept an id alone and would strip loop fields.
   steps: Schema.Array(Schema.Union([LoopSchema, StepSchema])),
   completion: Schema.optionalKey(CompletionSchema),
-  finally: Schema.optionalKey(Schema.NonEmptyArray(StepSchema)),
+  finally: Schema.optionalKey(
+    Schema.NonEmptyArray(StepSchema).pipe(
+      Schema.refine((steps): steps is typeof steps => steps.every((s) => s.program === undefined), {
+        message: 'a program step cannot be a finally step; compensate inside the program',
+      }),
+    ),
+  ),
   schedule: Schema.optionalKey(ScheduleSchema),
 }).pipe(
   Schema.refine((m): m is typeof m => validGraph(m), {
@@ -1646,6 +1751,19 @@ const lowerStep = (input: typeof StepSchema.Encoded): Node => {
     )
   }
   for (const goal of s.goal ?? []) children.push(child({ name: 'goal', value: goal }))
+  if (s.program !== undefined)
+    children.push(
+      node({
+        name: 'program',
+        args: [s.program.bundle],
+        props: {
+          sha256: s.program.sha256,
+          ...(s.program.stalledAfter === undefined
+            ? {}
+            : { 'stalled-after': lowerDuration(s.program.stalledAfter) }),
+        },
+      }),
+    )
   for (const document of s.documents ?? [])
     children.push(child({ name: 'document', value: document }))
   children.push(...ownedDeclarationNodes(s))
@@ -2404,6 +2522,9 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
     },
     children: [
       ...declaredAdmissionNodes(m),
+      ...(m.concurrentRuns === undefined
+        ? []
+        : [node({ name: 'concurrent-runs', props: { max: m.concurrentRuns } })]),
       ...(m.inputs ?? []).map((value) =>
         node({ name: 'input', args: [value.name], props: { kind: value.kind } }),
       ),
@@ -2420,6 +2541,7 @@ export const mission = <const TMission extends string>(input: MissionInput<TMiss
       ...(m.constraints ?? []).map((constraint) =>
         child({ name: 'constraint', value: constraint }),
       ),
+      ...(m.authority === undefined ? [] : [authorityNode(m.authority)]),
       ...ownedDeclarationNodes(m),
       ...(m.schedule === undefined ? [] : [schedule(m.schedule)]),
       ...(m.completion === undefined ? [] : [completion(m.completion)]),
