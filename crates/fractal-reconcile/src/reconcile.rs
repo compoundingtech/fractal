@@ -17541,6 +17541,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let _look = look_lock.clone().lock_owned().await;
                 let look_deadline = tokio::time::Instant::now() + look_limit;
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                // The arm keeps the oldest pending attempt as its name, so a delivery while it
+                // looks does not retire it. Right before the reads, a webhook refresh takes the
+                // newest pending webhook refresh from the same member, whose answer answers them all.
+                let refresh_attempt = refresh_attempt.as_ref().map(|attempt| {
+                    store.coalesced_refresh_attempt(&observer_subject, attempt).unwrap_or_else(|_| attempt.clone())
+                });
                 if let Some(latest) = cursors.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).cloned() {
                     kept_cursor = Some(latest.clone());
                     cursor = latest;
