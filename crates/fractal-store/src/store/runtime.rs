@@ -464,6 +464,13 @@ impl Runtime for FractalRuntime {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
         self.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND {
+            let gate = self.extensions.get::<message_expiry::ReceiptGate>();
+            let _held = gate.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let admission = |connection: &Connection| message_expiry::validate_shard(self, connection, &input.subject);
+            return append_claim_with_commit_context(store, input, None, None, None, None,
+                ClaimCommitContext { expiry_writer: true, admission: Some(&admission), ..Default::default() });
+        }
         append_claim_fenced_outcome(store, input, None)
     }
 
