@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::github_http::GithubAuth;
 use smallclaims::hash::canonical_hash;
 
-use crate::model::{MessageView, ObserverSpec, St3Error, WatchSpec};
+use crate::model::{MessageView, ObserverSpec, FractalError, WatchSpec};
 
 /// Standing observers poll immediately after restart, then every three minutes while active.
 /// Quiet polls back off to six then ten minutes; any observed fact change resets three minutes.
@@ -53,9 +53,9 @@ pub struct ThreadRef {
 
 impl ThreadRef {
     /// Read `OWNER/REPO#N` or a GitHub issue, pull request or comment URL.
-    pub fn parse(text: &str) -> Result<Self, St3Error> {
+    pub fn parse(text: &str) -> Result<Self, FractalError> {
         let invalid = || {
-            St3Error::new(
+            FractalError::new(
                 "invalid-github-thread",
                 format!("`{text}` is not OWNER/REPO#NUMBER or a GitHub issue or pull request URL"),
             )
@@ -480,14 +480,14 @@ pub fn wake(
     event: &WatchEvent,
     observation: &str,
     posted_by: Option<&str>,
-) -> Result<Wake, St3Error> {
+) -> Result<Wake, FractalError> {
     let delivery_key = canonical_hash(&(
         WATCH_TAG,
         watch_subject,
         watch.since_unix_ms.to_string(),
         event.key(observation),
     ))
-    .map_err(|error| St3Error::new("internal-error", error.to_string()))?;
+    .map_err(|error| FractalError::new("internal-error", error.to_string()))?;
     let pull = facts.get("head_sha").is_some()
         || facts
             .get("url")
@@ -625,14 +625,14 @@ pub fn deadline_wake(
     watch_subject: &str,
     watch: &WatchSpec,
     thread: &ThreadRef,
-) -> Result<Wake, St3Error> {
+) -> Result<Wake, FractalError> {
     let delivery_key = canonical_hash(&(
         WATCH_TAG,
         watch_subject,
         watch.since_unix_ms.to_string(),
         "deadline",
     ))
-    .map_err(|error| St3Error::new("internal-error", error.to_string()))?;
+    .map_err(|error| FractalError::new("internal-error", error.to_string()))?;
     let until = watch.until_unix_ms.map(rfc3339).unwrap_or_default();
     Ok(Wake {
         subject: format!("message/watch-{}", &delivery_key[..20]),

@@ -13,6 +13,7 @@ mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+pub mod quota;
 pub mod scenarios;
 pub use contract::*;
 pub use generated::*;
@@ -20,6 +21,11 @@ mod identities;
 pub use identities::*;
 
 use bytes::Bytes;
+use fractal_socket_discovery::default_unix_socket;
+#[cfg(test)]
+use fractal_socket_discovery::{
+    runtime_or_published_socket, unix_socket_answers, unix_socket_path_fits,
+};
 use futures_util::{SinkExt as _, StreamExt as _};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{Method, Request};
@@ -143,126 +149,6 @@ pub fn discover_unix_identity(
             published: socket,
         }),
     }
-}
-
-/// The runtime default, unless nothing answers there and the daemon's published discovery link
-/// leads to a socket that does. A daemon started with `--socket` elsewhere links its state
-/// directory's `run/fractal.sock` to that socket, while the runtime default can hold a dead socket
-/// left by an earlier daemon. Nothing is probed when the link leads to the default itself. When
-/// no separate runtime directory exists, the published target is used directly: a long state
-/// path can exceed the socket address limit.
-pub fn runtime_or_published_socket(runtime: &Path, published: &Path) -> PathBuf {
-    let Ok(target) = std::fs::canonicalize(published) else {
-        return runtime.to_path_buf();
-    };
-    if runtime == published {
-        // A short parent symlink can be addressable even when its canonical target is not.
-        return if unix_socket_path_fits(&target) {
-            target
-        } else {
-            runtime.to_path_buf()
-        };
-    }
-    if std::fs::canonicalize(runtime).ok().as_ref() == Some(&target) {
-        return runtime.to_path_buf();
-    }
-    let target = if unix_socket_path_fits(&target) {
-        target
-    } else {
-        published.to_path_buf()
-    };
-    let answers = |socket: &Path| unix_socket_path_fits(socket) && unix_socket_answers(socket);
-    if !answers(runtime) && answers(&target) {
-        target
-    } else {
-        runtime.to_path_buf()
-    }
-}
-
-/// Whether the platform can address this filesystem Unix socket path.
-pub fn unix_socket_path_fits(socket: &Path) -> bool {
-    std::os::unix::net::SocketAddr::from_pathname(socket).is_ok()
-}
-
-fn unix_socket_answers(socket: &Path) -> bool {
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
-    use std::os::unix::ffi::OsStrExt as _;
-
-    if !unix_socket_path_fits(socket) {
-        return false;
-    }
-    // Discovery runs before async transport deadlines: a full backlog must never block it.
-    #[cfg(target_os = "linux")]
-    let flags = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
-    #[cfg(not(target_os = "linux"))]
-    let flags = libc::SOCK_STREAM;
-    // SAFETY: socket returns a new descriptor, owned here until every return path drops it.
-    let fd = unsafe { libc::socket(libc::AF_UNIX, flags, 0) };
-    if fd < 0 {
-        return false;
-    }
-    // SAFETY: fd is a valid, uniquely owned descriptor from socket.
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    #[cfg(not(target_os = "linux"))]
-    {
-        // SAFETY: these commands set flags on our valid descriptor without pointer arguments.
-        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
-            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-        {
-            return false;
-        }
-    }
-    // SAFETY: an all-zero sockaddr_un is valid to initialize before setting its fields.
-    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let path = socket.as_os_str().as_bytes();
-    for (destination, source) in address.sun_path.iter_mut().zip(path) {
-        *destination = *source as libc::c_char;
-    }
-    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
-    #[cfg(target_os = "macos")]
-    {
-        address.sun_len = length as u8;
-    }
-    // SAFETY: address contains a validated, NUL-terminated path and length fits sockaddr_un.
-    let result = unsafe {
-        libc::connect(
-            fd.as_raw_fd(),
-            std::ptr::from_ref(&address).cast(),
-            length as libc::socklen_t,
-        )
-    };
-    if result == 0 {
-        return true;
-    }
-    // macOS also refuses full backlogs: both aliases serve one daemon, so refused aliases keep the primary.
-    let error = std::io::Error::last_os_error().raw_os_error();
-    error == Some(libc::EAGAIN)
-        || error == Some(libc::EWOULDBLOCK)
-        || error == Some(libc::EINPROGRESS)
-}
-
-/// Resolve default socket names without changing explicit configured endpoints.
-pub fn default_unix_socket(runtime: &Path, published: &Path) -> PathBuf {
-    let primary = runtime_or_published_socket(runtime, published);
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
-    let legacy_name = match runtime.file_name().and_then(|name| name.to_str()) {
-        Some("fractal.sock") => "st3.sock",
-        Some("fractal-client.sock") => "st3-client.sock",
-        _ => return primary,
-    };
-    let primary_fits = unix_socket_path_fits(&primary);
-    if !primary_fits || !unix_socket_answers(&primary) {
-        let legacy = runtime_or_published_socket(
-            &runtime.with_file_name(legacy_name),
-            &published.with_file_name(legacy_name),
-        );
-        if unix_socket_path_fits(&legacy) && (!primary_fits || unix_socket_answers(&legacy)) {
-            return legacy;
-        }
-    }
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
-    primary
 }
 
 fn configured_socket(document: &str) -> Result<Option<PathBuf>, ClientError> {
@@ -1388,6 +1274,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
+        | ErrorCode::PairingOriginRequired
+        | ErrorCode::PairingRestartRequired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
@@ -2529,6 +2417,24 @@ impl Client {
         self.list_internal("attention", cursor, limit, history)
             .await
     }
+    pub async fn attention_budget(
+        &self,
+        mission: &str,
+        person: Option<&str>,
+        at: Option<u128>,
+    ) -> Result<Envelope<AttentionBudgetReport>, ClientError> {
+        let mut path = format!(
+            "/v1/client/attention-budget?mission={}",
+            percent_encode(mission)
+        );
+        if let Some(person) = person {
+            path.push_str(&format!("&person={}", percent_encode(person)));
+        }
+        if let Some(at) = at {
+            path.push_str(&format!("&at={at}"));
+        }
+        self.get(&path).await
+    }
     pub async fn attention_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("attention", id).await
     }
@@ -2619,6 +2525,19 @@ impl Client {
     pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("missions", id).await
     }
+    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.
+    pub async fn missions_get_run(
+        &self,
+        id: &str,
+        run: &str,
+    ) -> Result<Envelope<Resource>, ClientError> {
+        self.get(&format!(
+            "/v1/client/missions/{}?run={}",
+            percent_encode_segment(id),
+            percent_encode(run)
+        ))
+        .await
+    }
     pub async fn work_list(
         &self,
         cursor: Option<&str>,
@@ -2699,6 +2618,16 @@ impl Client {
     }
     pub async fn agent_queue(&self, agent_id: &str) -> Result<Envelope<AgentQueue>, ClientError> {
         self.agent_queue_internal(agent_id).await
+    }
+    pub async fn agent_related_runs_get(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<AgentRelatedRuns>, ClientError> {
+        self.get(&format!(
+            "/v1/client/agent-related-runs/{}",
+            percent_encode(id)
+        ))
+        .await
     }
     pub async fn harness_inventory_get(
         &self,
@@ -4664,16 +4593,24 @@ impl Client {
             .and_then(|result| result);
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
-            // A schedule collection has no missing-item 404. An older router may answer an
-            // empty Axum 404 rather than a client envelope: report unsupported, never scan.
-            if status == 404 && path.split('?').next() == Some("/v1/client/schedules") {
+            // These projections have no missing-item 404; an older router may return no envelope.
+            let related_runs = path.starts_with("/v1/client/agent-related-runs/");
+            if status == 404
+                && (related_runs || path.split('?').next() == Some("/v1/client/schedules"))
+            {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(),
                     error_version: "st3.client.error.v0".into(),
                     request_id: String::new(),
                     code: ErrorCode::UnsupportedCapability,
-                    message: "this server does not support schedules.list; upgrade the server"
-                        .into(),
+                    message: format!(
+                        "this server does not support {}; upgrade the server",
+                        if related_runs {
+                            "agent-related-runs.get"
+                        } else {
+                            "schedules.list"
+                        }
+                    ),
                     retryable: false,
                     retry_after_ms: None,
                     details: Default::default(),
@@ -6355,6 +6292,20 @@ mod tests {
             assert_eq!(lines.len(),3);
             assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
             assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
+    }
+
+    #[test]
+    fn related_runs_old_daemon_is_typed_unsupported_not_an_empty_list() {
+        runtime().block_on(async {
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("related.sock");
+            let error=serde_json::json!({"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/old","code":"not-found","message":"unknown route","retryable":false,"details":{}}).to_string();
+            let server=scripted_server(&socket,vec![(0,404,String::new()),(0,404,error)]);
+            let client=Client::unix_as(&socket,"person/reviewer");
+            for _ in 0..2 {
+                assert!(matches!(client.agent_related_runs_get("agent/example").await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            }
+            assert_eq!(server.await.unwrap().len(),2);
         });
     }
 

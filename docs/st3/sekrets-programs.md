@@ -54,7 +54,7 @@ login or profile-management request is refused. An explicit profile grant is als
 required; mapping to Ada does not give ownership of Nathan's profiles. Profile
 and grant policies both apply, including expiry, revocation and locks. Program
 callers cannot change profiles/keys/grants, make authorized HTTP requests or read
-the person's audit log. The human reads `st sekrets log` from their login session;
+the person's audit log. The human reads `fractal sekrets log` from their login session;
 allowed calls/refusals/exits retain the program identity in the gateway's local log.
 Program-caller `sekret.called`, `sekret.exited` and `sekret.refused` events are not
 mirrored into the graph: the daemon importer rejects their caller reference,
@@ -67,9 +67,9 @@ not provide a history of Program calls, exits or refusals.
 From the owner's actual login session after the reviewed installation:
 
 ```sh
-st sekrets profile create ada/evidence-sign \
+fractal sekrets profile create ada/evidence-sign \
   --allow 'python3 /nix/store/SIGNER-PIN/evidence-sign'
-st sekrets grant ada/evidence-sign --to program/ci1/ci1-1 \
+fractal sekrets grant ada/evidence-sign --to program/ci1/ci1-1 \
   --allow 'python3 /nix/store/SIGNER-PIN/evidence-sign'
 ```
 
@@ -84,7 +84,7 @@ be the hardened wrapper-owner implementation, not a caller-authored script.
 The existing wrapper interface stays unchanged:
 
 ```sh
-EVIDENCE_SIGNER='["st","sekrets","--profile","ada/evidence-sign","--","python3","/nix/store/SIGNER-PIN/evidence-sign"]' \
+EVIDENCE_SIGNER='["fractal","sekrets","--profile","ada/evidence-sign","--","python3","/nix/store/SIGNER-PIN/evidence-sign"]' \
   scripts/evidence-wrap ...
 ```
 

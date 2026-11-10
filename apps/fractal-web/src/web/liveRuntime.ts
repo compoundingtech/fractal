@@ -1,11 +1,16 @@
 import { Effect, Layer } from 'effect'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
+import { browserPairingPort } from '../data/browserPairing.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
+import { setPageFoldersClientName } from '../folders/client.ts'
+import { takeEarlyCollections } from '../data/sdk-browser/early.ts'
 import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
 export const createPageRuntime = (replay?: Replay) => {
+  const client = `fractal-web ${buildIdentity.machineVersion}`
+  setPageFoldersClientName(client)
   // Dogfood records 100% of pages: budget roots and their SDK detail cannot disappear at 10%.
   const telemetry = makeTelemetry({
     otlpTracesUrl: import.meta.env.VITE_OTLP_TRACES_URL?.trim() || undefined,
@@ -33,6 +38,7 @@ export const createPageRuntime = (replay?: Replay) => {
     adoptEarlyCollections: replay === undefined,
     options: {
       baseUrl: window.location.origin, maxFollows: 8, conversationSlots: 'advertised',
+      client,
       ...(replay === undefined ? {} : { socket: replay.socket, fetch: replay.fetch }),
       parentSpan: ux.activeSpan,
       traceContext: ux.traceContext,
@@ -41,7 +47,8 @@ export const createPageRuntime = (replay?: Replay) => {
     ux: () => ux,
   })
   return {
-    live: replay === undefined ? live : {
+    // Pairing belongs to the host that served this page; a replay has no host to pair with.
+    live: replay === undefined ? { ...live, source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) } } : {
       ...live,
       dispose: () => live.dispose().finally(() => replay.close()),
     },
@@ -50,11 +57,16 @@ export const createPageRuntime = (replay?: Replay) => {
 }
 type PageRuntime = ReturnType<typeof createPageRuntime>
 const retained = import.meta.hot?.data.pageRuntime as PageRuntime | undefined
-const runtime = retained ?? createPageRuntime(
-  import.meta.env.DEV && new URLSearchParams(window.location.search).has('scenario')
-    // Static imports would pull the dev-only kit/world graph into the production entry.
-    ? (await import('./replayRuntime.ts')).createDevReplay(window.location.search)
-    : undefined,
-)
+const replay = retained === undefined && import.meta.env.DEV && new URLSearchParams(window.location.search).has('scenario')
+  // Static imports would pull the dev-only kit/world graph into the production entry.
+  ? (await import('./replayRuntime.ts')).createDevReplay(window.location.search)
+  : undefined
+if (retained === undefined && replay === undefined) {
+  // Validate/clear stale cookies and redeem approved requests before capabilities or live reads.
+  // An early socket may already use the old cookie: discard it rather than adopting its rejection.
+  const status = await browserPairingPort({ baseUrl: window.location.origin }).status().catch(() => undefined)
+  if (status?.credentialChanged === true) takeEarlyCollections()?.close()
+}
+const runtime = retained ?? createPageRuntime(replay)
 if (import.meta.hot !== undefined) import.meta.hot.data.pageRuntime = runtime
 export const { live, telemetry } = runtime

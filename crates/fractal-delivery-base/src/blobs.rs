@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::model::St3Error;
+use crate::model::FractalError;
 
 /// The most one upload may hold.
 pub const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
@@ -61,12 +61,12 @@ pub fn is_sha256(value: &str) -> bool {
 }
 
 /// `blob/<sha256>` or a bare hash, as the hash.
-pub fn parse_reference(value: &str) -> Result<String, St3Error> {
+pub fn parse_reference(value: &str) -> Result<String, FractalError> {
     let hash = value.strip_prefix("blob/").unwrap_or(value).to_ascii_lowercase();
     if is_sha256(&hash) {
         Ok(hash)
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-blob-reference",
             "a blob reference is `blob/` and 64 hex digits",
         ))
@@ -74,7 +74,7 @@ pub fn parse_reference(value: &str) -> Result<String, St3Error> {
 }
 
 /// Check an upload's type and bytes; return the type to record.
-pub fn validate_upload(media_type: &str, bytes: &[u8]) -> Result<&'static str, St3Error> {
+pub fn validate_upload(media_type: &str, bytes: &[u8]) -> Result<&'static str, FractalError> {
     let declared = media_type
         .split(';')
         .next()
@@ -82,22 +82,22 @@ pub fn validate_upload(media_type: &str, bytes: &[u8]) -> Result<&'static str, S
         .trim()
         .to_ascii_lowercase();
     let Some(supported) = MEDIA_TYPES.iter().find(|candidate| **candidate == declared) else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unsupported-media-type",
             format!("an attachment is one of {}", MEDIA_TYPES.join(", ")),
         ));
     };
     if bytes.is_empty() {
-        return Err(St3Error::new("blob-content-mismatch", "the upload is empty"));
+        return Err(FractalError::new("blob-content-mismatch", "the upload is empty"));
     }
     if bytes.len() > MAX_BLOB_BYTES {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "blob-too-large",
             format!("an attachment is at most {MAX_BLOB_BYTES} bytes"),
         ));
     }
     if sniff_media_type(bytes) != Some(*supported) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "blob-content-mismatch",
             format!("the bytes are not {supported}"),
         ));

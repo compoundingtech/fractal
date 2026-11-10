@@ -2,14 +2,14 @@
 
 One place in Fractal decides what a seat's status is: the agent card that `overlay_agent_resources`
 (`crates/fractal-api-core/src/api.rs`) finishes on every read, with the read's own clock. Fractal TUI, the phone app,
-the web app and `st agents show` render that card. None of them re-derives a state from the raw
+the web app and `fractal agents show` render that card. None of them re-derives a state from the raw
 fields, so they cannot disagree.
 
 ## States that need a clock
 
 | Card | Rule |
 | --- | --- |
-| `state: running` | The harness reported `ready`, `idle` or `working` inside the freshness window (90 s), even when the runtime row still says `pending`. A seat can outlive its row. A seat whose runtime row is stuck and whose last report is an idle one older than 90 s but newer than a heartbeat (11 minutes) reads `waiting`, like any other live idle seat; it is never `down`. |
+| `state: running` | The harness reported `ready`, `idle` or `working` inside the shared `HARNESS_OBSERVATION_FRESHNESS` window (five-minute refresh plus thirty seconds), even when the runtime row still says `pending`. A seat can outlive its row. A seat whose runtime row is stuck and whose last report is an idle one older than that window but newer than a heartbeat (11 minutes) reads `waiting`, like any other live idle seat; it is never `down`. |
 | `state: desired` / `starting` | A declared seat inside its launch window (two minutes from its last runtime claim, or from its declaration if it never reported). |
 | `state: down`, `down_since` | A declared seat with no running session and no harness report within a heartbeat (11 minutes; a driver at an empty prompt reports every five minutes) once the launch window has passed. `down_since` is when it last reported after its launch, or when it began waiting if it never has; the report time is the driver's own clock value, so a driver with a skewed clock moves `down_since` by the same amount. Never shown as starting, working or idle. |
 | `current_work[].holder_down_since` | Set on every step a `down` seat holds: the step's progress and activity were written by a holder that has no session. |
@@ -21,24 +21,24 @@ fields, so they cannot disagree.
 `down` is a statement about Fractal's session for the seat: a declaration exists, the runtime row is not
 running, and no harness has reported lately. It is not proof that no process exists. A pty daemon
 and its driver can outlive a runtime row stuck at `pending`; while such a seat reports, the card
-says `running`; when it stops reporting, the card says `down` and `st terminals screen` finds no
+says `running`; when it stops reporting, the card says `down` and `fractal terminals screen` finds no
 session for it too. Finding the process and relaunching a seat that declares `restart always` belong to
 the launch and reconcile path, not to the label.
 
 ## A seat Fractal cannot place on a host
 
-When two hosts both claim a seat's runtime, Fractal cannot say which one runs it, and `st terminals`
+When two hosts both claim a seat's runtime, Fractal cannot say which one runs it, and `fractal terminals`
 refuses with `runtime-authority-indeterminate`. The card keeps `state: waiting` and
 `reachability: indeterminate`, and its `reason` reads "Fractal cannot tell which host runs this agent; its
 processes may be running" unless the harness gave a reason of its own. The card does not call the
-seat running, stopped or down, and the conflicting claims stay as they are. `st agents show` prints
+seat running, stopped or down, and the conflicting claims stay as they are. `fractal agents show` prints
 the same sentence in place of "Still starting". The apps keep their present word for the state until
 they learn to print the reason.
 
 ## A seat that dies mid-turn
 
-Keeping a stale `working` report means the card no longer lapses it after 90 seconds. What ends
-it is the runtime row: the reconciler on the seat's host observes its pty and driver on every pass
+Keeping a stale `working` report means the card never lapses it just because its observation ages.
+What ends it is the runtime row: the reconciler on the seat's host observes its pty and driver on every pass
 and writes `exited` or `vanished`, after which the card reads `stopped` or `failed`, not
 `running` (`a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row`). If that
 reconciler is not running, or never writes the row, the card keeps `running`/`working` and

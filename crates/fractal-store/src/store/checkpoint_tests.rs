@@ -2550,7 +2550,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 25);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 26);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2882,6 +2882,11 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
     let mut old_to_new = BTreeMap::new();
     let mut new_to_old = BTreeMap::new();
     for claim in &claims {
+        // Usage snapshots include durable credit events, never a newest-only slot.
+        if claim.kind == fractal_schema::usage_limits::KIND {
+            assert!(slot_of(claim).is_none());
+            continue;
+        }
         // Rules version 16 added the harness question rule.
         if claim.kind == fractal_schema::harness_questions::OBSERVED {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];

@@ -395,10 +395,12 @@ impl<R> PublishedList<R> {
     }
 }
 
-/// The claims after `?1` through `?2`, by store index, with the step a person-work claim names.
+/// The claims after `?1` through `?2`, by store index, with the step a person-work claim names;
+/// only those node `?3` wrote, unless it is null (a fold reads every claim; the local-commit
+/// scanner asks the same change check about this node's own).
 pub const CLAIMS_SINCE: &str = "SELECT subject, kind, CASE WHEN kind LIKE 'work.person-%'
         THEN json_extract(body,'$.fields.origin_step') END
- FROM claims WHERE store_index>?1 AND store_index<=?2";
+ FROM claims WHERE store_index>?1 AND store_index<=?2 AND (?3 IS NULL OR origin=?3)";
 /// The person asks the requesters in `?1`, a JSON array, made, by the kind index.
 pub const ASKS_BY_REQUESTERS: &str = "SELECT subject, json_extract(body,'$.fields.origin_step') FROM claims
  WHERE kind='work.person-asked' AND actor IN (SELECT value FROM json_each(?1))";

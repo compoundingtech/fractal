@@ -12,7 +12,7 @@ use anyhow::Result;
 use rusqlite::{Connection, Transaction};
 use serde_json::{Value, json};
 
-use super::checkpoint::{DropPlan, SealedSet};
+use super::checkpoint::{ClaimTombstone, DropPlan, SealedSet};
 use super::checkpoint_staging::{CheckpointClaimFacts, StagedPlanner};
 use super::{ReplicatedClaimAdmission, Store, append_claim_record_tx};
 use crate::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
@@ -101,6 +101,12 @@ pub trait Runtime: Send + Sync {
     /// stay advertised; a comparison skips only tables with different definition versions.
     fn projection_versions(&self) -> BTreeMap<String, u64> {
         BTreeMap::new()
+    }
+
+    /// Kinds whose authority requires a keyed writer's signed envelope on every import,
+    /// including source-admitted backup history. Local operation writes are unaffected.
+    fn requires_keyed_envelope(&self, _kind: &str) -> bool {
+        false
     }
 
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
@@ -196,6 +202,19 @@ pub trait Runtime: Send + Sync {
     /// can refold each subject a trim touched once instead of once per deleted claim.
     fn rebuild_deferred(&self, _transaction: &Transaction<'_>, _budget: std::time::Duration) -> Result<bool> {
         Ok(false)
+    }
+
+    /// A trim's step deletes `claims` by calling `delete`, inside the chunk's transaction. A
+    /// runtime whose projections queue work for each deleted claim's subject settles it here, in
+    /// the trim's own paced chunk, instead of leaving it to whichever write projects next; what
+    /// it leaves goes to `rebuild_deferred`. By default, the delete alone.
+    fn delete_trimmed_claims_tx(
+        &self,
+        _transaction: &Transaction<'_>,
+        _claims: &[ClaimTombstone],
+        delete: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        delete()
     }
 
     /// Whether a trim's deletes left anything for `rebuild_deferred`, read without the writer.

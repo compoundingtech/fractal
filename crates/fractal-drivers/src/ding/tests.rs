@@ -150,8 +150,7 @@ fn fractal_notification_wraps_one_bounded_message_with_its_hash_and_graph_addres
 #[test]
 fn person_messages_tell_the_agent_to_answer_in_the_conversation_in_both_native_notices() {
     let note = PERSON_REPLY_INSTRUCTION;
-    assert!(note.contains("this conversation") && note.contains("people have no inbox"));
-    assert!(note.contains("do not reply with st"));
+    assert_eq!(note, "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.");
     assert!(!note.contains("NO REPLY"));
     for from in ["person/ada", "agent/example/worker", "daemon/runtime"] {
         for body in [

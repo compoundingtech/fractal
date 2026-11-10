@@ -1971,15 +1971,6 @@ pub fn state_dir(catalog_root: &Path, identity: &str) -> PathBuf {
         .join(&digest[..24])
 }
 
-/// Read the exact inbox files whose correlated OpenCode assistant turn started.
-pub fn consumed_delivery_filenames(
-    catalog_root: &Path,
-    identity: &str,
-    runtime_id: &str,
-) -> Result<BTreeSet<String>> {
-    consumed_delivery_paths(&state_dir(catalog_root, identity), identity, runtime_id)
-}
-
 /// Read receipts from the host's explicit session directory.
 pub fn consumed_delivery_paths(
     session_dir: &Path,

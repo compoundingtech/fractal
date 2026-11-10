@@ -104,7 +104,7 @@ All at one exact head:
     knowledge is incomplete, is flagged `global_view: yes` and is not a GO. Local validation, authorisation, scopes, signatures
     and refusals about one machine's own state are ordinary: judge them on their merits.
 12. **No containers.** No docker or container on any machine, for proofs, seats or CI jobs; a two-member proof is two
-    `st --instance NAME` instances.
+    `fractal --instance NAME` instances.
 
 ## The risk rubric
 

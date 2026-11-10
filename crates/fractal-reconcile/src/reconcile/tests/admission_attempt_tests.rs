@@ -4,8 +4,15 @@ use serde_json::json;
 const SEAT: &str = "agent/node.fixture";
 
 #[test]
-fn driver_refusal_supplies_restart_error_without_physical_observation_and_is_incarnation_fenced() {
-    for (diagnostic_incarnation, expect_detail) in [("new", true), ("old", false)] {
+fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_attempt() {
+    for (diagnostic_incarnation, receipt_operation, ended_incarnation, expect_detail, expect_started) in [
+        ("new", None, None, true, false),
+        ("old", None, None, false, false),
+        ("old", Some("attempt-operation"), Some("new"), false, true),
+        ("old", Some("attempt-operation"), None, false, true),
+        ("old", Some("attempt-operation"), Some("old"), false, true),
+        ("old", Some("unrelated-operation"), Some("new"), false, false),
+    ] {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(
             &store,
@@ -50,9 +57,55 @@ fn driver_refusal_supplies_restart_error_without_physical_observation_and_is_inc
         let attempt = append(
             "runtime.action.requested",
             request.actor.as_deref(),
-            BTreeMap::from([("action".into(), json!("start"))]),
+            BTreeMap::from([
+                ("action".into(), json!("start")),
+                ("operation".into(), json!("attempt-operation")),
+            ]),
             vec![request.id.clone()],
             Some(format!("agent-restart-attempt:{}", request.id)),
+        );
+        if let Some(operation) = receipt_operation {
+            let receipt = append(
+                "runtime.action.succeeded",
+                None,
+                BTreeMap::from([
+                    ("action".into(), json!("start")),
+                    ("operation".into(), json!(operation)),
+                    ("operation_status".into(), json!("verified")),
+                    ("incarnation_id".into(), json!("new")),
+                ]),
+                vec![attempt.id.clone()],
+                None,
+            );
+            assert!(receipt.id.starts_with("local-observation/"), "{}", receipt.id);
+            assert!(
+                store.claims_for(SEAT, Some("runtime.action.succeeded")).unwrap().is_empty(),
+                "verified start completions live outside the replicated claim log"
+            );
+            assert_eq!(
+                store.observations_for(SEAT, "runtime.action.succeeded").unwrap().len(),
+                1
+            );
+            if let Some(incarnation) = ended_incarnation {
+                append(
+                    "harness.observed",
+                    Some(SEAT),
+                    BTreeMap::from([
+                        ("state".into(), json!("ended")),
+                        ("driver".into(), json!("omp")),
+                        ("incarnation_id".into(), json!(incarnation)),
+                        ("reason".into(), json!("driver-stopped")),
+                        ("exit".into(), json!("exit 143")),
+                    ]),
+                    vec![],
+                    None,
+                );
+            }
+        }
+        assert_eq!(
+            reconciler.verified_restart_exit(SEAT, &attempt).unwrap().is_some(),
+            expect_started,
+            "only the exact attempt's verified local start receipt supplies a completed launch"
         );
         append(
             "harness.diagnostic",
@@ -89,11 +142,23 @@ fn driver_refusal_supplies_restart_error_without_physical_observation_and_is_inc
                 .is_some(),
             expect_detail
         );
+        if expect_started {
+            assert!(store.current_harness(SEAT).unwrap().is_none(),
+                "the live harness view cannot supply terminal evidence");
+        }
         let error = reconciler
             .reconcile_requested_restart(&desired, desired.member.as_ref().unwrap(), None, None)
             .unwrap_err()
             .to_string();
-        if expect_detail {
+        if expect_started {
+            let detail = if ended_incarnation == Some("new") {
+                "the replacement started and then exited: driver-stopped"
+            } else {
+                "the replacement started successfully but is no longer observable"
+            };
+            assert!(error.contains(detail), "{error}");
+            assert!(!error.contains("interrupted before"), "{error}");
+        } else if expect_detail {
             assert!(error.contains("phase=version outcome=timeout"), "{error}");
             assert!(!error.contains("interrupted before"), "{error}");
         } else {

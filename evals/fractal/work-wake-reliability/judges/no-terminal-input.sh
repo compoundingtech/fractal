@@ -13,7 +13,7 @@ fi
 
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 worker="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/wake.worker"
-count="$(st3 trace show "$worker" --json --limit 500 \
+count="$(fractal trace show "$worker" --json --limit 500 \
   | jq -s '[.[] | select(.kind == "terminal.input.requested")] | length')"
 test "$count" -eq 0
 

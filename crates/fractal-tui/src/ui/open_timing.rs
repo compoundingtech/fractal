@@ -1,7 +1,7 @@
 //! One client-process conversation-open measurement, opt-in and content-free.
 //!
 //! The selector observes the ordinary UI; it never opens a pane or changes a request.
-//! This is separate from STUI_TIMING_LOG's all-request/first-wire-frame observer.
+//! This is separate from FRACTAL_TUI_TIMING_LOG's all-request/first-wire-frame observer.
 
 use std::{
     fs::{File, OpenOptions},
@@ -27,8 +27,8 @@ pub(crate) struct Trace {
 impl Trace {
     /// Both variables are required. Missing/invalid configuration never changes the UI.
     pub(crate) fn from_env(started: Instant) -> Option<Self> {
-        let path = std::env::var_os("STUI_OPEN_TRACE_FILE")?;
-        let target = std::env::var("STUI_OPEN_TRACE_CONVERSATION").ok()?;
+        let path = std::env::var_os("FRACTAL_TUI_OPEN_TRACE_FILE")?;
+        let target = std::env::var("FRACTAL_TUI_OPEN_TRACE_CONVERSATION").ok()?;
         match Self::create(started, Path::new(&path), target) {
             Ok(trace) => Some(trace),
             Err(_) => {

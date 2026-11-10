@@ -287,6 +287,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     const readArguments = (id, options) => {
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
+            case 'attention-budget': return ['mission/example', undefined, undefined, options];
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
             case 'arrangements.list': return ['person/example', {}, options];
@@ -1039,6 +1040,27 @@ test('reads bounded seat status history through the paired gateway', async () =>
     assert.equal(result.value.items[0].reset, true);
 });
 
+test('reads semantic related mission rows without joining agent work', async () => {
+    const calls = [];
+    const rows = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/agent-related-runs.json'), 'utf8'));
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : rows));
+    } });
+    const result = await client.agentRelatedRunsGet('agent/example');
+    assert.equal(calls[1], 'https://example.test/v1/client/agent-related-runs/agent%2Fexample');
+    assert.deepEqual(result.value, rows);
+});
+
+test('related runs on old daemons are typed unsupported, not an empty list', async () => {
+    for (const body of ['', JSON.stringify({ code: 'not-found', message: 'unknown route' })]) {
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async url =>
+            url.endsWith('/capabilities') ? response(envelope(capabilities)) : new Response(body, { status: 404 }) });
+        await assert.rejects(client.agentRelatedRunsGet('agent/example'),
+            error => error instanceof ClientError && error.response.code === 'unsupported-capability' && error.status === 404);
+    }
+});
+
 test('canonical publication read encodes mission and schedule subjects and preserves defaults', async () => {
     const calls = [];
     const declaration = { max_active_runs: 1, revision_cutover: 'restart-active', steps: { inspect: { retry: { attempts: 1, backoff_ms: 0 } } } };
@@ -1065,6 +1087,19 @@ test('mission declaration read encodes exact revisions and preserves served text
     assert.equal(calls.at(-1), 'https://example.test/v1/client/mission-declaration?mission=' + encodeURIComponent(value.mission) + '&revision=' + encodeURIComponent(value.revision));
     await client.missionDeclarationGet(value.mission);
     assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
+});
+
+test('mission detail run read names the requested run and leaves the plain detail unbounded by it', async () => {
+    const calls = [];
+    const mission = 'mission/example/readback';
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : { kind: 'mission', id: mission }));
+    } });
+    await client.missionsGetRun(mission, 'mission-run/old&one');
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/missions/' + encodeURIComponent(mission) + '?run=' + encodeURIComponent('mission-run/old&one'));
+    await client.missionsGet(mission);
+    assert.equal(new URL(calls.at(-1)).searchParams.has('run'), false);
 });
 
 test('terminal exact filters encode subjects and refuse an old server ignoring filters', async () => {
@@ -1187,4 +1222,19 @@ test('human error sentences match the shared Rust cases without mutating wire en
             assert.equal(JSON.stringify(error.response), before);
         }
     }
+});
+
+test('internal notice descriptors do not register public server or client support', () => {
+    const schema = require('../../../docs/st3/client-v0/schemas/client-v0.schema.json');
+    const operations = require('../../../docs/st3/client-v0/schemas/operations.json');
+    assert.deepEqual(schema['x-st-internal-resources'], { NoticeSnapshot: { collection: 'notices' } });
+    assert.ok(!schema.$defs.Resource.oneOf.some(branch => branch.$ref === '#/$defs/NoticeSnapshot'));
+    const internalOnly = manifest => assert.doesNotMatch(JSON.stringify(manifest), /NoticeSnapshot|notice\.(?:seen|dismiss|snooze)|\"notices\"/);
+    internalOnly(operations);
+    const copy = structuredClone(operations);
+    copy.actions['notice.seen'] = {};
+    assert.throws(() => internalOnly(copy), assert.AssertionError);
+    delete copy.actions['notice.seen'];
+    internalOnly(copy);
+    assert.ok(!Object.getOwnPropertyNames(FractalClient.prototype).some(name => /notice/i.test(name)));
 });

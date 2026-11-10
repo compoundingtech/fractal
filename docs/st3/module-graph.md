@@ -12,7 +12,7 @@ A module is a top-level file or directory under `crates/fractal/src` (and, once 
 under the source directories of the crates it is split into). A reference from module A to module B
 is a path in non-test code that starts `crate::B` or `fractal_daemon::B`, or a name inside a `crate::{...}`
 group. Left out: comments, `#[cfg(test)]` items, `*_tests.rs`, `tests/` and `test_support.rs`.
-Items the library re-exports at its root (`parse_intent`, `St3Error`, the `cli_print` macros)
+Items the library re-exports at its root (`parse_intent`, `FractalError`, the `cli_print` macros)
 count toward the module that defines them. Binary-side modules (those `main.rs` declares) refer to
 the library as `fractal_daemon::X` and are part of the graph.
 

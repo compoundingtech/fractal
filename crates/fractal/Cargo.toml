@@ -21,6 +21,7 @@ convergence-audit = []
 anyhow = "1"
 fractal-daemon = { path = "../fractal-daemon" }
 fractal-store = { path = "../fractal-store" }
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
 ciborium = "0.2"
@@ -51,6 +52,7 @@ opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_u
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
 pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
+qrcode = { version = "0.14", default-features = false }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"

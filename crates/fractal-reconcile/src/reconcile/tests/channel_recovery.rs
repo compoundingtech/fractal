@@ -833,6 +833,98 @@ fn rolling_expiry_and_explicit_reset_reopen_zero_through_three_attempts() {
     }
 }
 
+fn explicit_restart(store: &Store, incarnation: &str) {
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/eval".into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!("restart")),
+                ("operation".into(), json!(crate::handoff::RESTART_NOW_OPERATION)),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: vec![store.selected_desired_token(SEAT).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// #5523: an operator's restart of a blocked seat opens a new budget, and the incarnation it is
+/// replacing, still running until that restart stops it, is not the new budget's first failure.
+#[test]
+fn an_explicit_restart_in_flight_owns_the_incarnation_it_replaces() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    assert!(!recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert!(attempts(&store).is_empty());
+    assert!(
+        reconciler
+            .reconcile_requested_restart(
+                &desired,
+                desired.member.as_ref().unwrap(),
+                Some(&claude_seat_pty("orchid", "running", "orchid-one")),
+                None
+            )
+            .unwrap()
+    );
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    // The replacement's own failure is the budget's first.
+    let since = attachment(&store, "orchid-two", false);
+    assert!(recover(&reconciler, &desired, "orchid-two", since + 10_000).unwrap());
+    let claims = attempts(&store);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claim_incarnation(&claims[0]), Some("orchid-two"));
+    assert!(claims[0].body["fields"]["reason"].as_str().unwrap().contains("attempt 1 of 3"));
+}
+
+/// An explicit restart that completed without replacing the incarnation owns it no longer.
+#[test]
+fn a_failed_explicit_restart_leaves_its_incarnation_to_recovery() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    let failure = reconciler
+        .reconcile_requested_restart(
+            &desired,
+            desired.member.as_ref().unwrap(),
+            Some(&claude_seat_pty("orchid", "running", "orchid-one")),
+            Some(&anyhow::anyhow!("rendering failed")),
+        );
+    assert!(failure.is_err());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert_eq!(claim_incarnation(&attempts(&store)[0]), Some("orchid-one"));
+}
+
+/// Nor does one a newer restart-when-idle superseded: the restart path carries out only the newest
+/// request, and a blocked seat may never reach the idle boundary that one waits for.
+#[test]
+fn a_superseded_explicit_restart_leaves_its_incarnation_to_recovery() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some(SEAT.into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!(crate::restart::WHEN_IDLE)),
+                ("incarnation_id".into(), json!("orchid-one")),
+            ]),
+            evidence: vec![store.selected_desired_token(SEAT).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert_eq!(claim_incarnation(&attempts(&store)[0]), Some("orchid-one"));
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
 #[test]
 fn adopting_the_window_never_spends_historical_requests_or_uses_their_park_fault() {
     for same_incarnation in [false, true] {

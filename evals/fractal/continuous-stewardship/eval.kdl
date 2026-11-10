@@ -50,7 +50,7 @@ mission "eval/continuous-stewardship" state="ready" timeout="20m" {
       }
       step "publish-result" {
         depends-on { step "record" completed }
-        goal "Run: st3 claim resource/mission-run/$ST_MISSION_RUN/cycle-one resource.observed --actor agent/${ST_MISSION_RUN}/fabric.steward --field kind=custom.st3.stewardship-cycle --field state=published --field record=cycle-one.md. Complete this step after the claim."
+        goal "Run: fractal claim resource/mission-run/$ST_MISSION_RUN/cycle-one resource.observed --actor agent/${ST_MISSION_RUN}/fabric.steward --field kind=custom.st3.stewardship-cycle --field state=published --field record=cycle-one.md. Complete this step after the claim."
         produces {
           resource "mission-run/${ST_MISSION_RUN}/cycle-one" {
             kind "custom.st3.stewardship-cycle"
@@ -86,7 +86,7 @@ mission "eval/continuous-stewardship" state="ready" timeout="20m" {
       }
       step "publish-result" {
         depends-on { step "record" completed }
-        goal "Run: st3 claim resource/mission-run/$ST_MISSION_RUN/cycle-two resource.observed --actor agent/${ST_MISSION_RUN}/fabric.steward --field kind=custom.st3.stewardship-cycle --field state=published --field record=cycle-two.md. Complete this step after the claim."
+        goal "Run: fractal claim resource/mission-run/$ST_MISSION_RUN/cycle-two resource.observed --actor agent/${ST_MISSION_RUN}/fabric.steward --field kind=custom.st3.stewardship-cycle --field state=published --field record=cycle-two.md. Complete this step after the claim."
         produces {
           resource "mission-run/${ST_MISSION_RUN}/cycle-two" {
             kind "custom.st3.stewardship-cycle"

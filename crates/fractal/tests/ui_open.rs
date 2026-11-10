@@ -151,6 +151,7 @@ fn state(root: &Path, node: &str) -> AppState {
     // locked: claims` from `st work ask`.
     let store = Store::open(&root.join("claims.sqlite3"), node).unwrap();
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(store),

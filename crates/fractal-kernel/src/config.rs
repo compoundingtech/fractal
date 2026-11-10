@@ -30,9 +30,26 @@ pub enum WorkerIngressGenerationCheck {
     Enforce,
 }
 
+/// Temporary migration allowance for one exact existing pairing completion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPairingAllowance {
+    pub completion_id: String,
+    pub record_hash: String,
+    pub until_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_source: Option<QuotaSourceConfig>,
+    /// Local quota/credit append and fold writers; absent/empty excludes all, never storage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_limits: Option<UsageLimitsConfig>,
+    /// Inactive host-envelope declaration; absent uses CONFIG/host-envelope.json if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_envelope_file: Option<PathBuf>,
     pub node: String,
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,6 +79,12 @@ pub struct Config {
     pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_pairing_login: Option<String>,
+    /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
@@ -93,9 +116,21 @@ pub struct Config {
     pub planner: PlannerSpec,
     /// The local observation log of this node.
     pub observations: ObservationsConfig,
+    /// Opt-in, operator-bound evidence for the rolling API-readiness objective.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_slo: Option<ReadinessSloConfig>,
+    /// Opt-in native agent-list SLO fault delivery; only the matching store origin may deliver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents_request_slo_fault: Option<AgentsRequestSloFaultConfig>,
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
+    /// Deployment opt-in for population and attention metrics; off until rollout prerequisites pass.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_population_enabled: bool,
+    /// Closed repository registry R for population metrics; empty maps every repo to unattributed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_population_repositories: Vec<String>,
     /// Git change pilot: explicit repositories and one designated discovery owner.
     #[serde(skip_serializing_if = "changes::Config::is_default")]
     pub changes: changes::Config,
@@ -136,6 +171,71 @@ pub struct Config {
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageLimitsConfig {
+    /// Agent identities admitted for local appends and included in read-time usage folds.
+    pub writers: Vec<String>,
+}
+
+impl UsageLimitsConfig {
+    pub fn validate(&self) -> Result<()> {
+        for writer in &self.writers {
+            let subject = fractal_schema::registry().validate_subject(writer)
+                .map_err(|error| anyhow::anyhow!("usage_limits.writers: {}", error.message))?;
+            anyhow::ensure!(subject.family == "agent", "usage_limits.writers must contain only agent identities");
+        }
+        Ok(())
+    }
+}
+
+/// Deployment opt-in, pinned for the lifetime of this daemon; absent means disabled.
+#[derive(Default)]
+pub struct AgentPopulationEnabled(pub std::sync::OnceLock<bool>);
+
+/// Validated population repository registry, pinned for the lifetime of this daemon.
+#[derive(Default)]
+pub struct AgentPopulationRepositories(pub std::sync::OnceLock<Vec<String>>);
+
+/// A single operator-selected readiness source, execution member and response owner.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessSloConfig {
+    pub executor: String,
+    pub member: String,
+    pub reviewer: String,
+    pub evidence_file: PathBuf,
+    /// Optional, root-owned retained short readings for the read-only Usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_pairs_file: Option<PathBuf>,
+    /// Replace independent weekly routing with a durable early/weekly readiness case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_case: bool,
+    /// Optional informational recipient; never becomes the actionable owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
+}
+
+/// The only member and explicit reviewer authorized for agent-list SLO delivery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsRequestSloFaultConfig {
+    /// The daemon's exact store origin; other members continue measuring without delivery.
+    pub member: String,
+    /// An explicitly reviewed agent subject; delivery also requires its declaration to be live.
+    pub reviewer: String,
+}
+
+/// An operator-selected external quota source; clients cannot override its URL.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaSourceConfig {
+    pub url: String,
+    #[serde(default = "quota_refresh_seconds")]
+    pub refresh_seconds: u64,
+}
+fn quota_refresh_seconds() -> u64 { 30 }
 
 /// `[github]`: an explicit token file, or gateway-authorized requests with a sekrets profile.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -493,6 +593,11 @@ pub fn set_daemon_config(path: Option<&Path>) {
     let _ = DAEMON_CONFIG.set(path.map(Path::to_path_buf));
 }
 
+pub fn reload_daemon_quota() -> Result<Option<QuotaSourceConfig>> {
+    let Some(path) = DAEMON_CONFIG.get() else { return Ok(None) };
+    Ok(Config::load_unvalidated(path.as_deref())?.quota_source)
+}
+
 /// The daemon's `[limits]` as the config file says now, so an edit applies without a restart.
 /// `None` outside a daemon.
 pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
@@ -643,6 +748,9 @@ impl Default for Config {
         let socket = runtime_dir.join("fractal.sock");
         let client_gateway_socket = runtime_dir.join("fractal-client.sock");
         Self {
+            quota_source: None,
+            usage_limits: None,
+            host_envelope_file: None,
             node: host_name(),
             access_mode: None,
             claude_primary_ownership: None,
@@ -653,6 +761,8 @@ impl Default for Config {
             seat_admission: None,
             lanes: None,
             person: None,
+            browser_pairing_login: None,
+            pairing_legacy_allowances: Vec::new(),
             fleet_id: None,
             shared_secret_file: None,
             state_dir,
@@ -668,7 +778,11 @@ impl Default for Config {
             peers: Vec::new(),
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
+            readiness_slo: None,
+            agents_request_slo_fault: None,
             github: GithubConfig::default(),
+            agent_population_enabled: false,
+            agent_population_repositories: Vec::new(),
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
             trim: TrimConfig::default(),
@@ -736,6 +850,24 @@ impl Config {
 
     pub fn default_path() -> PathBuf {
         fractal_client::product_dirs::config_dir().join("config.toml")
+    }
+
+    /// Read and validate only: no admission policy or cgroup changes.
+    pub fn read_host_envelope(&self) -> Result<Option<fractal_runtime::host_envelope::HostEnvelope>> {
+        let default = fractal_client::product_dirs::config_dir().join("host-envelope.json");
+        let path = self.host_envelope_file.as_deref().unwrap_or(&default);
+        match fractal_runtime::host_envelope::HostEnvelope::read(path) {
+            Ok(envelope) if envelope.host != self.node => Err(
+                fractal_runtime::host_envelope::Error::HostMismatch {
+                    node: self.node.clone(),
+                    host: envelope.host,
+                }
+            ).with_context(|| format!("validate inactive host envelope {}", path.display())),
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(fractal_runtime::host_envelope::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound && self.host_envelope_file.is_none() => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("validate inactive host envelope {}", path.display())),
+        }
     }
 
     pub fn load(path: Option<&Path>) -> Result<Self> {
@@ -892,6 +1024,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(usage_limits) = &self.usage_limits {
+            usage_limits.validate()?;
+        }
         if let Some(directory) = &self.store_dir {
             anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
             anyhow::ensure!(
@@ -900,9 +1035,35 @@ impl Config {
                 directory.display()
             );
         }
+        if let Some(fault) = &self.agents_request_slo_fault {
+            anyhow::ensure!(!fault.member.is_empty(), "agents_request_slo_fault.member must name a member");
+            let reviewer = fractal_schema::registry().validate_subject(&fault.reviewer)
+                .map_err(|error| anyhow::anyhow!("agents_request_slo_fault.reviewer: {}", error.message))?;
+            anyhow::ensure!(
+                reviewer.family == "agent",
+                "agents_request_slo_fault.reviewer must name an agent"
+            );
+        }
         self.reconcile.validate()?;
         self.asks.validate()?;
         self.github.validate()?;
+        anyhow::ensure!(
+            self.agent_population_repositories.len() <= 8,
+            "agent_population_repositories permits at most eight canonical owner/repo names"
+        );
+        for (index, repository) in self.agent_population_repositories.iter().enumerate() {
+            anyhow::ensure!(
+                repository.split_once('/').is_some_and(|(owner, repo)| {
+                    [owner, repo].into_iter().all(|part| !part.is_empty()
+                        && !matches!(part, "." | "..")
+                        && part.bytes().all(|byte| byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit() || b"-_.".contains(&byte)))
+                })
+                    && !repository.ends_with(".git")
+                    && !self.agent_population_repositories[..index].contains(repository),
+                "agent_population_repositories requires unique canonical lowercase owner/repo names, without URLs, paths or .git suffixes"
+            );
+        }
         anyhow::ensure!(
             self.private_notes_catalogs.iter().all(|path| path.is_absolute()
                 && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))),
@@ -1227,6 +1388,127 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_writer_configuration_is_explicit_and_agent_only() {
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.usage_limits.is_none());
+        let empty: super::Config = toml::from_str("[usage_limits]\nwriters=[]").unwrap();
+        assert!(empty.usage_limits.unwrap().writers.is_empty());
+        let configured: super::Config = toml::from_str("[usage_limits]\nwriters=['agent/sample/usage-producer']").unwrap();
+        configured.usage_limits.as_ref().unwrap().validate().unwrap();
+        let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.usage_limits, configured.usage_limits);
+        for writer in ["person/ada", "harness/sample", "agent/"] {
+            let config: super::Config = toml::from_str(&format!("[usage_limits]\nwriters=['{writer}']")).unwrap();
+            assert!(config.usage_limits.unwrap().validate().is_err());
+        }
+    }
+
+    #[test]
+    fn agents_request_slo_fault_delivery_requires_explicit_member_and_agent_reviewer() {
+        let default = super::Config::default();
+        assert!(default.agents_request_slo_fault.is_none());
+        assert!(!toml::to_string(&default).unwrap().contains("agents_request_slo_fault"));
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.agents_request_slo_fault.is_none());
+
+        let configured: super::Config = toml::from_str(
+            "[agents_request_slo_fault]\nmember='dev5'\nreviewer='agent/sample/slo-reviewer'\n",
+        ).unwrap();
+        configured.validate().unwrap();
+        let restored: super::Config =
+            toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(restored.agents_request_slo_fault, configured.agents_request_slo_fault);
+
+        for reviewer in ["person/ada", "harness/sample", "agent/", "agent/invalid reviewer"] {
+            let mut config = configured.clone();
+            config.agents_request_slo_fault.as_mut().unwrap().reviewer = reviewer.into();
+            assert!(config.validate().is_err(), "{reviewer}");
+        }
+        let mut config = configured;
+        config.agents_request_slo_fault.as_mut().unwrap().member.clear();
+        assert!(config.validate().is_err());
+
+        for fields in [
+            "member='dev5'",
+            "reviewer='agent/sample/slo-reviewer'",
+            "member='dev5'\nreviewer='agent/sample/slo-reviewer'\nfallback=true",
+        ] {
+            assert!(toml::from_str::<super::Config>(
+                &format!("[agents_request_slo_fault]\n{fields}\n")
+            ).is_err(), "{fields}");
+        }
+    }
+
+    #[test]
+    fn population_export_requires_explicit_configuration_opt_in() {
+        let default = super::Config::default();
+        assert!(!default.agent_population_enabled);
+        assert!(!toml::to_string(&default).unwrap().contains("agent_population_enabled"));
+        let legacy: super::Config = toml::from_str("").unwrap();
+        assert!(!legacy.agent_population_enabled);
+        for enabled in [false, true] {
+            let config: super::Config = toml::from_str(&format!("agent_population_enabled = {enabled}")).unwrap();
+            assert_eq!(config.agent_population_enabled, enabled);
+            let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(restored.agent_population_enabled, enabled);
+        }
+    }
+
+    #[test]
+    fn population_repository_registry_is_explicit_bounded_and_canonical() {
+        let mut config = super::Config::default();
+        assert!(config.agent_population_repositories.is_empty());
+        assert!(!toml::to_string(&config).unwrap().contains("agent_population_repositories"));
+        config.agent_population_repositories = vec!["example/repo".into()];
+        config.validate().unwrap();
+        let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.agent_population_repositories, config.agent_population_repositories);
+        for invalid in ["", "repo", "Example/repo", "example/repo.git", "/example/repo",
+            "https://example.invalid/repo", "example/../repo", "example/..", "example/repo "] {
+            config.agent_population_repositories = vec![invalid.into()];
+            assert!(config.validate().unwrap_err().to_string().contains("agent_population_repositories"));
+        }
+        config.agent_population_repositories = vec!["example/repo".into(); 2];
+        assert!(config.validate().unwrap_err().to_string().contains("agent_population_repositories"));
+        config.agent_population_repositories = (0..8).map(|index| format!("example/repo{index}")).collect();
+        config.validate().unwrap();
+        config.agent_population_repositories.push("example/extra".into());
+        assert!(config.validate().unwrap_err().to_string().contains("at most eight"));
+    }
+
+    #[test]
+    fn inactive_host_envelope_path_roundtrips_and_is_read_strictly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("envelope.json");
+        let config = super::Config {
+            host_envelope_file: Some(path.clone()),
+            node: "fixture-capped".into(),
+            ..super::Config::default()
+        };
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: super::Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.host_envelope_file, Some(path.clone()));
+        assert!(decoded.read_host_envelope().is_err());
+        std::fs::write(&path, include_bytes!("../../fractal-runtime/tests/host-envelope/capped.json")).unwrap();
+        assert_eq!(decoded.read_host_envelope().unwrap().unwrap().host, "fixture-capped");
+        let wrong_host = super::Config { node: "fixture-other".into(), ..decoded.clone() };
+        let error = wrong_host.read_host_envelope().unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<fractal_runtime::host_envelope::Error>(),
+            Some(fractal_runtime::host_envelope::Error::HostMismatch { node, host })
+                if node == "fixture-other" && host == "fixture-capped"
+        )));
+        std::fs::write(&path, br#"{"schema_version":99}"#).unwrap();
+        // An inactive declaration is inspected only by the explicit reader, never startup validation.
+        decoded.validate().unwrap();
+        let error = decoded.read_host_envelope().unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<fractal_runtime::host_envelope::Error>(),
+            Some(fractal_runtime::host_envelope::Error::UnsupportedVersion(99))
+        )));
+    }
+
     #[test]
     fn store_directory_defaults_to_state_root_and_roundtrips_explicit_configuration() {
         let state = tempfile::tempdir().unwrap();

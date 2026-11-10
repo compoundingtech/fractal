@@ -446,8 +446,8 @@ mod tests {
         let legacy = socket.with_file_name("st3-client.sock");
         assert!(legacy.as_os_str().len() < 104, "{}", legacy.display());
         let binding = crate::config::socket_binding_path(&socket);
-        assert!(fractal_client::unix_socket_path_fits(&binding), "{}", binding.display());
-        if !fractal_client::unix_socket_path_fits(&socket) {
+        assert!(fractal_socket_discovery::unix_socket_path_fits(&binding), "{}", binding.display());
+        if !fractal_socket_discovery::unix_socket_path_fits(&socket) {
             assert_eq!(binding.as_ref(), legacy);
         }
     }

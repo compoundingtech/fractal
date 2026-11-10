@@ -47,6 +47,13 @@ use Column::{Identity, Integer, Text};
 /// Every ledger the archive carries. Restore refuses any other table name.
 const LEDGERS: &[Ledger] = &[
     Ledger {
+        table: "replica_restore_quarantine",
+        columns: &[("writer", Text), ("sequence", Integer), ("envelope_hash", Identity)],
+        key: 3,
+        implied: None,
+        union: /* sqlite-large-value: allow-for-now lv-h48a46332d4fa owner=fractal_store::store::backup_ledgers TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_restore_quarantine(writer, sequence, envelope_hash) VALUES ({0}, {1}, {2})",
+    },
+    Ledger {
         table: "retired_claim_ids",
         columns: &[("id", Identity)],
         key: 1,

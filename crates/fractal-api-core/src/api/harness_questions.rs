@@ -44,7 +44,7 @@ pub fn live_input_session(
 ) -> Result<LiveSession, ApiError> {
     let session = live_session(state, subject, Some(incarnation))?;
     if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-capability",
             "session input requires a terminal session",
         )));

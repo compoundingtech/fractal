@@ -1,10 +1,6 @@
-//! The two framing helpers every stdio native channel shares.
+//! JSON framing and message content for the Claude MCP watcher.
 //!
-//! A native channel is a child of the interactive harness, speaking newline-delimited JSON over
-//! stdio: the Claude MCP watcher ([`crate::claude_mcp`]) and the pi-family channel
-//! ([`crate::pi_channel`]). What a delivered inbox message looks like to the model, and how a
-//! frame is terminated on the wire, are st2's decisions rather than each channel's — so they are
-//! decided once, here.
+//! The watcher ([`crate::claude_mcp`]) uses these helpers for newline-delimited JSON over stdio.
 
 use std::io::Write;
 

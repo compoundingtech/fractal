@@ -32,9 +32,9 @@ pub struct WaitingOnQuery {
 }
 
 /// The published state both reads use, or why it cannot be served now.
-struct Sources {
-    work: Arc<Publication<WorkRows>>,
-    missions: Arc<Publication<MissionRows>>,
+pub(crate) struct Sources {
+    pub(crate) work: Arc<Publication<WorkRows>>,
+    pub(crate) missions: Arc<Publication<MissionRows>>,
 }
 
 fn unavailable() -> ApiError {
@@ -47,7 +47,7 @@ fn unavailable() -> ApiError {
     }
 }
 
-fn sources(store: &Store) -> Result<Sources, ApiError> {
+pub(crate) fn sources(store: &Store) -> Result<Sources, ApiError> {
     let list = store.published_work_list();
     let work = match list.current() {
         ListRead::Served(publication, _) => publication,

@@ -18,7 +18,7 @@ pub(super) async fn whole_text(
     let Some(body) = message.body_attachment() else {
         return Ok(message.content.clone());
     };
-    let gone = |text: String| blob_error(St3Error::new("blob-not-found", text));
+    let gone = |text: String| blob_error(FractalError::new("blob-not-found", text));
     let bytes = if body.origin == client_host_id(&state.node) {
         let bodies = message_body::bodies(&state.state_dir);
         match bodies
@@ -97,7 +97,7 @@ pub(super) async fn whole_text(
 /// The typed refusal for a body that aged out: `blob-expired`, which clients already read as
 /// "removed after its retention window; the message text remains".
 pub fn expired_error(origin: &str) -> ApiError {
-    blob_error(St3Error::new(
+    blob_error(FractalError::new(
         "blob-expired",
         format!(
             "the full text of this message expired and was removed from {origin} after its retention; only the preview remains"

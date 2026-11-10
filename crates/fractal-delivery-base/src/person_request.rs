@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use crate::model::AnswerInput;
-use crate::model::St3Error;
+use crate::model::FractalError;
 
 pub const REQUEST_VERSION: u32 = 1;
 const MAX_ANSWERS: usize = 5;
@@ -136,15 +136,15 @@ pub struct AnswerOption {
     pub conditions: Vec<String>,
 }
 
-fn invalid(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-person-request", message.into())
+fn invalid(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-person-request", message.into())
 }
 
-fn invalid_answer(message: impl Into<String>) -> St3Error {
-    St3Error::new("invalid-person-answer", message.into())
+fn invalid_answer(message: impl Into<String>) -> FractalError {
+    FractalError::new("invalid-person-answer", message.into())
 }
 
-fn line(name: &str, value: &str) -> Result<(), St3Error> {
+fn line(name: &str, value: &str) -> Result<(), FractalError> {
     if value.trim().is_empty() {
         return Err(invalid(format!("{name} must not be empty")));
     }
@@ -182,7 +182,7 @@ pub fn client_view(request: &Value) -> Value {
 
 impl StructuredRequest {
     /// Parses and checks a request, returning its canonical JSON for the ask claim.
-    pub fn parse(value: &Value) -> Result<(Self, Value), St3Error> {
+    pub fn parse(value: &Value) -> Result<(Self, Value), FractalError> {
         let request: Self = serde_json::from_value(value.clone())
             .map_err(|error| invalid(format!("the request is malformed: {error}")))?;
         request.validate()?;
@@ -191,7 +191,7 @@ impl StructuredRequest {
         Ok((request, canonical))
     }
 
-    pub fn validate(&self) -> Result<(), St3Error> {
+    pub fn validate(&self) -> Result<(), FractalError> {
         if self.version != REQUEST_VERSION {
             return Err(invalid(format!(
                 "this daemon reads request version {REQUEST_VERSION}"
@@ -368,7 +368,7 @@ impl StructuredRequest {
     /// Resolves a submitted answer to the typed answer the done claim records. A feedback
     /// request also accepts a bare summary as its text, so a client that only sends text can
     /// still answer it.
-    pub fn answer(&self, input: Option<&AnswerInput>, summary: &str) -> Result<Value, St3Error> {
+    pub fn answer(&self, input: Option<&AnswerInput>, summary: &str) -> Result<Value, FractalError> {
         if self.request_type == RequestType::Update {
             // Opening an update or pressing read clears it; any summary is only history.
             if input.is_some_and(|input| {
@@ -412,7 +412,7 @@ impl StructuredRequest {
                 &fallback
             }
             None => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "answer-required",
                     format!(
                         "this {} needs one of its named answers: {}",
@@ -446,7 +446,7 @@ impl StructuredRequest {
             }
             (RequestType::Choice, None) => {
                 if !self.custom {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "answer-required",
                         format!(
                             "this choice needs one of its options: {}",
@@ -460,7 +460,7 @@ impl StructuredRequest {
                 return Ok(answer);
             }
             (RequestType::Decision, None) => {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "answer-required",
                     format!(
                         "this decision needs one of its named answers: {}",
@@ -505,8 +505,8 @@ impl StructuredRequest {
 
     /// Checks that `id` can stand in for the person at the deadline: one of this request's
     /// named answers that needs no words of theirs.
-    pub fn check_default(&self, id: &str) -> Result<(), St3Error> {
-        let invalid_default = |message: String| St3Error::new("invalid-default-answer", message);
+    pub fn check_default(&self, id: &str) -> Result<(), FractalError> {
+        let invalid_default = |message: String| FractalError::new("invalid-default-answer", message);
         if matches!(self.request_type, RequestType::Feedback | RequestType::Update) {
             return Err(invalid_default(format!(
                 "a {} has no named answers to default to",

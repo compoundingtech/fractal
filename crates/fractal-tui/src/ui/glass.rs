@@ -367,6 +367,7 @@ struct TabDrag {
 enum DragFrom {
     /// A border between splits: it resizes them as it moves.
     Border(super::layout::Divider),
+    Sidebar,
     /// A tab: its group and place in the strip.
     Tab(usize, usize),
     /// A subject from the sidebar, which opens where it is let go.
@@ -455,6 +456,8 @@ pub(crate) struct Sidebar {
     pub(crate) focused: bool,
     pub(crate) section: usize,
     pub(crate) selected: [usize; 5],
+    /// A border click may be followed by a second click to reset its width.
+    last_resize: Option<std::time::Instant>,
 }
 
 impl Default for Sidebar {
@@ -465,6 +468,7 @@ impl Default for Sidebar {
             focused: false,
             section: 1,
             selected: [0; 5],
+            last_resize: None,
         }
     }
 }
@@ -673,6 +677,12 @@ impl Glass {
 }
 
 impl Glasses {
+    pub(crate) fn sidebar_resizing(&self) -> bool {
+        self.drag
+            .as_ref()
+            .is_some_and(|drag| matches!(drag.from, DragFrom::Sidebar))
+    }
+
     pub(crate) fn palette_open(&self) -> bool {
         self.palette.is_some()
     }
@@ -1577,6 +1587,32 @@ impl Ui {
         scored.into_iter().map(|(choice, _)| choice).collect()
     }
 
+    /// Preserve the responsive default; chosen widths keep the main pane usable.
+    fn sidebar_columns(&self, total: u16, wanted: Option<u16>) -> u16 {
+        let Some(wanted) = wanted else {
+            return if total > 40 {
+                (total / 3).clamp(28, 44)
+            } else {
+                0
+            };
+        };
+        fn terminal(layout: &Layout) -> bool {
+            match layout {
+                Layout::Group(group) => group
+                    .tabs
+                    .get(group.current)
+                    .is_some_and(|tab| tab.pane.starts_with("terminal:")),
+                Layout::Split { children, .. } => children.iter().any(terminal),
+            }
+        }
+        let terminal = terminal(&self.glasses.glass().layout);
+        let maximum = total.saturating_sub(if terminal { 83 } else { 25 });
+        if maximum < 24 {
+            return 0;
+        }
+        wanted.clamp(24, maximum)
+    }
+
     pub(crate) fn render_glass(&self, buf: &mut Buffer, area: Rect) {
         let glasses = &self.glasses;
         let glass = glasses.glass();
@@ -1588,9 +1624,17 @@ impl Ui {
             ..area
         };
         // The sidebar takes the left of the glass, beside the splits rather than over them.
-        if glasses.sidebar.shown && body.width > 40 {
-            let width = (body.width / 3).clamp(28, 44);
+        let width = self.sidebar_columns(body.width, self.sidebar_width);
+        if glasses.sidebar.shown && width > 0 {
             self.draw_sidebar(buf, Rect { width, ..body }, &glasses.sidebar);
+            self.hit(
+                Rect {
+                    x: body.x + width,
+                    width: 1,
+                    ..body
+                },
+                Hit::SidebarResize,
+            );
             for y in body.y..body.y + body.height {
                 buf[(body.x + width, y)]
                     .set_symbol("│")
@@ -1749,6 +1793,18 @@ impl Ui {
         {
             return false;
         }
+        let resized = if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+            && self
+                .glasses
+                .drag
+                .as_ref()
+                .is_some_and(|drag| matches!(drag.from, DragFrom::Sidebar))
+        {
+            let area = self.frame.borrow().area;
+            self.sidebar_columns(area.width, Some(mouse.column.saturating_sub(area.x)))
+        } else {
+            0
+        };
         let glasses = &mut self.glasses;
         let point = (mouse.column, mouse.row);
         match mouse.kind {
@@ -1767,6 +1823,23 @@ impl Ui {
                     at: point,
                     moving: false,
                 };
+                if matches!(hit, Some(Hit::SidebarResize)) {
+                    let now = std::time::Instant::now();
+                    let again = glasses
+                        .sidebar
+                        .last_resize
+                        .is_some_and(|at| now.duration_since(at).as_millis() < 400);
+                    if again {
+                        glasses.sidebar.last_resize = None;
+                        glasses.drag = None;
+                        self.sidebar_width = None;
+                        self.save_prefs();
+                    } else {
+                        glasses.sidebar.last_resize = Some(now);
+                        glasses.drag = Some(start(DragFrom::Sidebar));
+                    }
+                    return true;
+                }
                 // A border between splits: drag to resize; press twice quickly to even it out.
                 let border = self
                     .frame
@@ -1826,6 +1899,13 @@ impl Ui {
                 };
                 drag.at = point;
                 drag.moving |= point != drag.start;
+                if matches!(drag.from, DragFrom::Sidebar) {
+                    if drag.moving {
+                        glasses.sidebar.last_resize = None;
+                        self.sidebar_width = Some(resized);
+                    }
+                    return true;
+                }
                 if let DragFrom::Border(divider) = drag.from {
                     let (at, start, total) = match divider.side {
                         Side::Right => (point.0, divider.area.x, divider.area.width),
@@ -1845,6 +1925,10 @@ impl Ui {
                 let Some(drag) = glasses.drag.take() else {
                     return false;
                 };
+                if matches!(drag.from, DragFrom::Sidebar) {
+                    self.save_prefs();
+                    return true;
+                }
                 if let DragFrom::Border(_) = drag.from {
                     // Kept on this device: the graph's glass does not carry sizes yet.
                     self.glasses.save();
@@ -2107,7 +2191,7 @@ impl Ui {
         else {
             return;
         };
-        if !drag.moving || matches!(drag.from, DragFrom::Border(_)) {
+        if !drag.moving || matches!(drag.from, DragFrom::Border(_) | DragFrom::Sidebar) {
             return;
         }
         let mark = Style::default().bg(theme::SURFACE1);
@@ -2171,7 +2255,7 @@ impl Ui {
             DragFrom::Subject(id) => pane_for(id)
                 .map(|pane| self.pane_title(&pane))
                 .unwrap_or_else(|| id.clone()),
-            DragFrom::Border(_) => return,
+            DragFrom::Border(_) | DragFrom::Sidebar => return,
         };
         let label = format!(" ⇄ {name} ");
         let x = drag.at.0.saturating_add(1);
@@ -2245,6 +2329,17 @@ impl Ui {
     /// The sidebar's keys while it has them; `false` for a key it leaves to the glass.
     fn sidebar_key(&mut self, key: KeyEvent) -> bool {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Home) {
+            let total = self.frame.borrow().area.width;
+            let width = self.sidebar_columns(total, self.sidebar_width);
+            self.sidebar_width = match key.code {
+                KeyCode::Left => Some(self.sidebar_columns(total, Some(width.saturating_sub(2)))),
+                KeyCode::Right => Some(self.sidebar_columns(total, Some(width.saturating_add(2)))),
+                _ => None,
+            };
+            self.save_prefs();
+            return true;
+        }
         let section = self.glasses.sidebar.section;
         if section != 4 && self.resource_sidebar_key(key) { return true; }
         let count = self.listing_for(section, 40).ids.len();
@@ -2519,8 +2614,13 @@ impl Ui {
     fn status_line(&self, buf: &mut Buffer, area: Rect, glass: &Glass) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
         let bar = |style: Style| style.bg(theme::CRUST);
-        // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
-        let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
+        let name = format!(" ▢ {} ▾ ", glass.name);
+        let selector_width = (text::width(&name) as u16).min(area.width);
+        let left_width = area.width.saturating_sub(selector_width);
+        let mut hits = [None, None, None, None, None];
+        let mut next_hit = hits.iter_mut();
+        let mut record_hit = |target| *next_hit.next().expect("five status actions") = Some(target);
+        let mut spans = vec![Span::raw(" ")];
         let (glyph, word, color) = match &self.world.link {
             Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
             // Stale says which list: the word alone sent the person hunting for why.
@@ -2532,14 +2632,14 @@ impl Ui {
         };
         let link_text = format!("{glyph} {word}");
         // The connection opens what is known of it: this machine, or why it is not reached.
-        self.hit(
+        record_hit((
             Rect {
                 x: area.x + Line::from(spans.clone()).width() as u16,
                 width: text::width(&link_text) as u16,
                 ..area
             },
             Hit::Connection,
-        );
+        ));
         spans.push(Span::styled(link_text, bar(theme::fg(color))));
         // Now opens over the glass from its count of alerts (Nathan, 2026-10-04: one way in,
         // named as `st now` is). No alert prints nothing at all (Nathan, 2026-10-10).
@@ -2576,14 +2676,14 @@ impl Ui {
                     "◆ {alerts} alert{}",
                     if alerts == 1 { "" } else { "s" }
                 );
-                self.hit(
+                record_hit((
                     Rect {
                         x,
                         width: text::width(&alerts_text) as u16,
                         ..area
                     },
                     Hit::Home,
-                );
+                ));
                 spans.push(Span::styled(alerts_text, bar(theme::strong(theme::PERSON))));
             }
             let working = self
@@ -2596,14 +2696,14 @@ impl Ui {
             spans.push(Span::styled(" · ", bar(theme::dim())));
             x = area.x + Line::from(spans.clone()).width() as u16;
             let working_text = format!("{} {working} working", self.spinner());
-            self.hit(
+            record_hit((
                 Rect {
                     x,
                     width: text::width(&working_text) as u16,
                     ..area
                 },
                 Hit::PaletteSection(1),
-            );
+            ));
             spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
             // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
             // missions list keeps them.
@@ -2631,14 +2731,14 @@ impl Ui {
             }
             let end = area.x + Line::from(spans.clone()).width() as u16;
             if machines_shown {
-                self.hit(
+                record_hit((
                     Rect {
                         x,
                         width: end.saturating_sub(x),
                         ..area
                     },
                     Hit::PaletteSection(3),
-                );
+                ));
             }
         }
         // Usage beside the fleet, floating over the glass as Now does (Nathan, 2026-10-04).
@@ -2656,19 +2756,42 @@ impl Ui {
                 theme::fg(theme::YELLOW)
             }),
         ));
-        self.hit(
+        record_hit((
             Rect {
                 x,
                 width: text::width(usage_text) as u16,
                 ..area
             },
             Hit::Usage,
-        );
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        ));
+        // The optional shortcut must not displace an existing status action.
+        // Reserve the glass selector before deciding whether the prefix fits.
+        let sidebar_width = text::width("sidebar · ") as u16;
+        let show_sidebar = Line::from(spans.clone()).width() + usize::from(sidebar_width)
+            <= usize::from(left_width);
+        if show_sidebar {
+            let style = if self.glasses.sidebar.shown {
+                theme::strong(theme::ACCENT)
+            } else {
+                theme::dim()
+            };
+            spans.insert(1, Span::styled("sidebar", bar(style)));
+            spans.insert(2, Span::styled(" · ", bar(theme::dim())));
+            self.hit(Rect::new(area.x + 1, area.y, 7, area.height), Hit::SidebarToggle);
+        }
+        for (mut rect, hit) in hits.into_iter().flatten() {
+            if show_sidebar {
+                rect.x += sidebar_width;
+            }
+            // A truncated label is not an actionable pointer target.
+            if rect.right() <= area.x + left_width {
+                self.hit(rect, hit);
+            }
+        }
+        buf.set_line(area.x, area.y, &Line::from(spans), left_width);
         // ▢: one space.
-        let name = format!(" ▢ {} ▾ ", glass.name);
-        let width = text::width(&name) as u16;
-        let x = area.x + area.width.saturating_sub(width);
+        let width = selector_width;
+        let x = area.x + left_width;
         buf.set_stringn(
             x,
             area.y,
@@ -4112,7 +4235,7 @@ impl Ui {
             Some(group) if group != focus => {
                 // A click on another split's message box focuses the split and the box.
                 let composer = self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
-                    matches!(hit, Hit::Composer) && contains(*rect, column, row)
+                    matches!(hit, Hit::Composer | Hit::ChatComposer) && contains(*rect, column, row)
                 });
                 self.focus_group(group);
                 !composer
@@ -4747,8 +4870,8 @@ pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
     })
 }
 
-/// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
-/// ratio; an older st is never sent one.
+/// The glasses capability version Fractal grants this TUI. From version 2 (#958) a split carries its
+/// ratio; an older daemon is never sent one.
 static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn set_glasses_version(version: u64) {
@@ -4955,6 +5078,82 @@ fn stale_word(stale: &[String]) -> String {
 mod tests {
     use super::*;
 
+    // Generate only from the pre-extraction renderer; later widgets must match this baseline.
+    #[test]
+    fn sidebar_golden_buffer_and_stable_hits() {
+        use resource_sidebar::Row;
+        use serde_json::{Value, json};
+        let row_id = |row: &Row| match row {
+            Row::Group { id, .. } => id.strip_prefix("folder/").map_or_else(
+                || format!("group:{id}"), |id| format!("folder:{id}")),
+            Row::Resource(row) => format!("subject:{}", row.id),
+            Row::Welcome => "welcome".into(),
+            Row::Notice(message) => format!("notice:{message}"),
+        };
+        let rect = |r: Rect| json!([r.x, r.y, r.width, r.height]);
+        let mut cases = Vec::new();
+        for state in ["reserved", "legacy", "retired", "unfocused", "fold", "search",
+            "scroll", "narrow", "zero-width", "zero-height", "zero"] {
+            let mut ui = glass();
+            ui.resource_sidebar = resource_sidebar::golden_sidebar(state);
+            ui.glasses.sidebar.focused = false;
+            let (width, height) = match state {
+                "scroll" => (38, 4),
+                "narrow" => (7, 6), "zero-width" => (0, 10),
+                "zero-height" => (38, 0), "zero" => (0, 0), _ => (38, 10),
+            };
+            let area = Rect::new(2, 1, width, height);
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 44, 14));
+            ui.draw_sidebar(&mut buffer, area, &ui.glasses.sidebar);
+            let rows = ui.resource_sidebar.rows();
+            let selected = rows.get(ui.resource_sidebar.selected).map(&row_id);
+            let frame = ui.frame.borrow();
+            let hits: Vec<_> = frame.hits.iter().map(|(r, hit)| {
+                let (action, id) = match hit {
+                    Hit::ResourceFilter => ("filter", None),
+                    Hit::ResourceNewFolder => ("new", None),
+                    Hit::ResourceRow(index) => ("row", Some(row_id(&rows[*index]))),
+                    Hit::ResourceAdd(id) => ("add", Some(format!("folder:{id}"))),
+                    Hit::ResourceFolderMenu(id) => ("menu", Some(format!("folder:{id}"))),
+                    Hit::ResourceFolderDrag(id) => ("drag", Some(format!("folder:{id}"))),
+                    other => panic!("unexpected sidebar hit: {other:?}"),
+                };
+                json!([rect(*r), action, id])
+            }).collect();
+            let contexts: Vec<_> = frame.context_rows.iter()
+                .map(|(r, id, layer)| json!([rect(*r), format!("subject:{id}"), layer])).collect();
+            // Lossless row-major RLE: symbols and complete cell metadata, including styles.
+            let mut cells: Vec<Value> = Vec::new();
+            for cell in &buffer.content {
+                let value = json!([cell.symbol(), format!("{cell:?}")]);
+                if cells.last().is_some_and(|run| run[1] == value) {
+                    let run = cells.last_mut().unwrap();
+                    run[0] = json!(run[0].as_u64().unwrap() + 1);
+                } else { cells.push(json!([1, value])); }
+            }
+            let chosen = ui.resource_sidebar.arrangement().map(|a| a.header.id.as_str());
+            let expected = match state {
+                "retired" => None,
+                "legacy" => Some("arrangement/person/test/00000000-0000-7000-8000-000000000002"),
+                _ => Some("arrangement/person/test/00000000-0000-7000-8000-000000000001"),
+            };
+            assert_eq!(chosen, expected, "{state}");
+            cases.push(json!({"state": state, "area": rect(area), "arrangement": chosen,
+                "selected": selected, "rows": rows.iter().map(&row_id).collect::<Vec<_>>(),
+                "cells": cells, "hits": hits, "contexts": contexts}));
+        }
+        let actual = json!({"format": "tui-sidebar-v1", "size": [44, 14],
+            "generatedBy": "STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --features fractal-daemon/test-support sidebar_golden",
+            "cases": cases});
+        let path = test_env!("CARGO_MANIFEST_DIR", "/../../fixtures/clients/sidebar/tui-v1.snapshot");
+        if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(path, serde_json::to_string_pretty(&actual).unwrap() + "\n").unwrap();
+        } else {
+            let expected: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
     #[test]
     fn sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys() {
         use resource_sidebar::PaletteMode as Mode;
@@ -4987,6 +5186,7 @@ mod tests {
         let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
         ui.resource_sidebar.arrangements.push(serde_json::from_value(serde_json::json!({
             "id": format!("arrangement/{}/{}", ui.world.person, uuid::Uuid::now_v7()), "revision":"claim/test", "updated_at":"2026-10-11T00:00:00Z", "owner":ui.world.person, "deleted":false,
+            "resolved":{"parents":{first.clone():null,second.clone():null},"folders":{}},
             "body":{"version":1,"name":{"value":"Sidebar","revision":"claim/test"},"folders":{
                 first.clone():{"name":{"value":"First","revision":"claim/test"},"position":{"value":{"key":"a0","parent":null},"revision":"claim/test"},"tombstone":null},
                 second.clone():{"name":{"value":"Second","revision":"claim/test"},"position":{"value":{"key":"a1","parent":null},"revision":"claim/test"},"tombstone":null}
@@ -5104,6 +5304,148 @@ mod tests {
         let mut ui = Ui::new(demo::test_world());
         ui.glasses.sidebar.shown = false;
         ui
+    }
+
+    #[test]
+    fn sidebar_border_drag_resizes_live_clamps_and_resets_without_dragging_rows() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut ui = glass();
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let border = |ui: &Ui| {
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches!(hit, Hit::SidebarResize).then_some(*rect))
+                .unwrap()
+        };
+        let rect = border(&ui);
+        let (x, y) = (rect.x, rect.y);
+        assert_eq!((rect.x, rect.width), (44, 1));
+        let background = terminal.backend().buffer()[(rect.x, rect.y)].bg;
+        mouse(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_ne!(terminal.backend().buffer()[(rect.x, rect.y)].bg, background);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), x, y);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 60, rect.y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(border(&ui).x, 60, "resize is visible before release");
+        assert_eq!(terminal.backend().buffer()[(60, rect.y)].symbol(), "│");
+        println!(
+            "sidebar resized to 60 columns:\n{:?}",
+            terminal.backend().buffer()
+        );
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 0, rect.y);
+        assert_eq!(ui.sidebar_width, Some(24));
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 139, y);
+        assert_eq!(ui.sidebar_width, Some(115));
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 139, rect.y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let Rect { x, y, .. } = border(&ui);
+        for _ in 0..2 {
+            mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), x, y);
+            mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), x, y);
+        }
+        assert_eq!(ui.sidebar_width, None);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(border(&ui).x, 44);
+        ui.glasses.sidebar.focused = true;
+        ui.resource_sidebar.focused = true;
+        press(&mut ui, KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(ui.sidebar_width, Some(46));
+        press(&mut ui, KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(ui.sidebar_width, Some(44));
+        press(&mut ui, KeyCode::Home, KeyModifiers::CONTROL);
+        assert_eq!(ui.sidebar_width, None);
+        assert!(ui.glasses.drag.is_none());
+    }
+
+    #[test]
+    fn sidebar_width_restores_from_preferences_and_reserves_terminal_columns() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prefs.json");
+        prefs::save(
+            &path,
+            &prefs::Prefs {
+                sidebar_width: Some(36),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut ui = terminal_details_fixture();
+        ui.apply_prefs(prefs::load(&path));
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 36);
+        let y = ui.frame.borrow().glass_sidebar.y;
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), 36, y);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 139, y);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.sidebar_width, Some(57));
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 57);
+        assert_eq!(ui.frame.borrow().glass_leaves[0].width, 82);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 139, y);
+        terminal.backend_mut().resize(120, 24);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(ui.frame.borrow().glass_sidebar.width, 37);
+        assert_eq!(ui.frame.borrow().glass_leaves[0].width, 82);
+        ui.sidebar_width = None;
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(
+            ui.frame.borrow().glass_sidebar.width,
+            40,
+            "reset keeps the original default"
+        );
+        for total in [0, 40, 82, 106] {
+            assert_eq!(ui.sidebar_columns(total, Some(36)), 0);
+        }
+        assert_eq!(ui.sidebar_columns(107, Some(36)), 24);
+        assert_eq!(ui.sidebar_columns(200, Some(36)), 36);
+    }
+
+    #[test]
+    fn sidebar_resize_owns_drag_and_release_over_a_mouse_enabled_terminal() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+        use std::{io::{Read as _, Write as _}, os::unix::net::UnixStream};
+        let mut ui = terminal_details_fixture();
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
+            client, "agent/example/atlas/builder", "one".into(), 24, 80,
+        ));
+        peer.write_all(&encode_packet(MessageType::Screen, b"\x1b[?1000h\x1b[?1006h")).unwrap();
+        let start = Instant::now();
+        while !ui.native_terminal().unwrap().mode()
+            .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+        {
+            assert!(start.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(140, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let body = ui.terminal_body.get().unwrap();
+        let y = body.y + 1;
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), 44, y);
+        assert!(ui.glasses.sidebar_resizing());
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), 100, y);
+        assert_eq!(ui.sidebar_width, Some(57));
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), 100, y);
+        assert!(!ui.glasses.sidebar_resizing(), "release finishes and persists resize");
+        peer.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let mut reader = PacketReader::new();
+        let mut bytes = [0; 1024];
+        while let Ok(count) = peer.read(&mut bytes) {
+            if count == 0 { break; }
+            for packet in reader.feed(&bytes[..count]).unwrap() {
+                assert_ne!(packet.type_, MessageType::Data, "resize never reaches child");
+            }
+        }
     }
 
     fn terminal_details_fixture() -> Ui {
@@ -8059,6 +8401,101 @@ mod tests {
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!ui.home_open());
         assert_eq!(ui.inventories_wanted().usage_hours, None);
+    }
+
+    #[test]
+    fn the_top_bar_reserves_the_selector_before_showing_the_sidebar_shortcut() {
+        let mut ui = glass();
+        ui.world.link = Link::Live;
+        ui.world.settled = true;
+        ui.world.agents = Load::Ready(vec![]);
+        ui.world.machines = Load::Ready(vec![]);
+        ui.world.inbox_alerts = Some(1);
+        ui.refresh_tab_statuses();
+        let selector = format!(" ▢ {} ▾ ", ui.glasses.glass().name);
+        let baseline = " ● live · ◆ 1 alert · ◐ 0 working · $ usage";
+        let threshold = (text::width(baseline) + text::width("sidebar · ")
+            + text::width(&selector)) as u16;
+        for width in [20, 30, threshold - 1, threshold, 80] {
+            ui.frame.borrow_mut().hits.clear();
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            ui.status_line(&mut buffer, area, ui.glasses.glass());
+            let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+            let sidebar = width >= threshold;
+            assert_eq!(top.starts_with(" sidebar · "), sidebar, "{width}: {top}");
+            let offset = if sidebar { 10 } else { 0 };
+            assert!(top.contains("● live"), "{width}: {top}");
+            assert_eq!(top.contains("◆ 1 alert"), width >= 30, "{width}: {top}");
+            let frame = ui.frame.borrow();
+            let winning = |x| frame.hits.iter().rev()
+                .find(|(rect, _)| super::super::contains(*rect, x, 0))
+                .map(|(_, hit)| hit.clone());
+            for x in 1 + offset..7 + offset {
+                assert_eq!(winning(x), Some(Hit::Connection), "{width}: {x}");
+            }
+            if width >= 30 {
+                for x in 10 + offset..19 + offset {
+                    assert_eq!(winning(x), Some(Hit::Home), "{width}: {x}");
+                }
+            } else {
+                assert!(!frame.hits.iter().any(|(_, hit)| *hit == Hit::Home));
+            }
+            assert_eq!(frame.hits.iter().any(|(_, hit)| *hit == Hit::SidebarToggle), sidebar);
+            if sidebar {
+                for x in 1..8 {
+                    assert_eq!(winning(x), Some(Hit::SidebarToggle));
+                }
+            }
+            let selector_x = width - text::width(&selector) as u16;
+            for (rect, hit) in &frame.hits {
+                if *hit != Hit::GlassMenu {
+                    assert!(rect.right() <= selector_x, "{width}: {hit:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_top_bar_sidebar_item_toggles_the_sidebar_like_ctrl_s() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut ui = glass();
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let target = ui.frame.borrow().hits.iter()
+            .find(|(_, hit)| *hit == Hit::SidebarToggle)
+            .map(|(rect, _)| *rect)
+            .expect("the top bar has a sidebar toggle");
+        assert_eq!(target, Rect::new(1, 0, 7, 1));
+        let top = screen(&ui);
+        assert!(top.lines().next().unwrap().starts_with(" sidebar · "));
+        assert_eq!(terminal.backend().buffer()[(target.x, target.y)].fg, theme::dim().fg.unwrap());
+        let click = |ui: &mut Ui| {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                ui.mouse(MouseEvent {
+                    kind,
+                    column: target.x + target.width / 2,
+                    row: target.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+            }
+        };
+        click(&mut ui);
+        assert!(ui.glasses.sidebar.shown && ui.glasses.sidebar.focused);
+        assert!(ui.glasses.sidebar.configured && ui.resource_sidebar.focused);
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(target.x, target.y)].fg, theme::ACCENT);
+        assert!(terminal.backend().buffer()[(target.x, target.y)].modifier.contains(Modifier::BOLD));
+        click(&mut ui);
+        assert!(!ui.glasses.sidebar.shown && !ui.glasses.sidebar.focused);
+        assert!(!ui.resource_sidebar.focused);
+        ctrl(&mut ui, 's');
+        assert!(ui.glasses.sidebar.shown && ui.glasses.sidebar.focused);
+        click(&mut ui);
+        assert!(!ui.glasses.sidebar.shown);
     }
 
     #[test]

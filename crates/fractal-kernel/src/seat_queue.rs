@@ -101,6 +101,30 @@ pub fn replay(joins: &[QueueJoin], moves: &[QueueMove]) -> Vec<String> {
     order
 }
 
+/// The runs outside `live` that the live runs' order can depend on: the anchors of the live
+/// runs' moves, then the anchors of those anchors' own moves, and so on. Every join and move
+/// changes only its own run's place, so a run that no kept run is ever placed against cannot
+/// change the order of the others. [`replay`] gives the live runs the same order whether or
+/// not it knows such a run's join.
+pub fn order_anchors(moves: &[QueueMove], live: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut anchors = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for movement in moves {
+        if let Some(anchor) = movement.anchor.as_deref() {
+            anchors.entry(movement.run.as_str()).or_default().push(anchor);
+        }
+    }
+    let mut needed = BTreeSet::new();
+    let mut placed = live.iter().map(String::as_str).collect::<Vec<_>>();
+    while let Some(run) = placed.pop() {
+        for anchor in anchors.get(run).into_iter().flatten() {
+            if !live.contains(*anchor) && needed.insert((*anchor).to_owned()) {
+                placed.push(anchor);
+            }
+        }
+    }
+    needed
+}
+
 fn join_run(order: &mut Vec<String>, run: &str) {
     if !order.iter().any(|queued| queued == run) {
         order.push(run.to_owned());
@@ -331,6 +355,80 @@ mod tests {
             moved("b", Placement::Before, Some("b"), 6),
         ];
         assert_eq!(replay(&joins, &moves), ["a", "b"]);
+    }
+
+    #[test]
+    fn order_anchors_follow_anchors_from_the_live_runs_only() {
+        let live = BTreeSet::from(["a".to_owned(), "b".to_owned()]);
+        let moves = [
+            moved("ended-1", Placement::Top, None, 1),
+            moved("ended-2", Placement::After, Some("a"), 2),
+            moved("a", Placement::Before, Some("ended-3"), 3),
+            moved("ended-3", Placement::After, Some("ended-4"), 4),
+            moved("ended-4", Placement::Before, Some("b"), 5),
+            moved("ended-5", Placement::Before, Some("ended-6"), 6),
+        ];
+        assert_eq!(
+            order_anchors(&moves, &live),
+            BTreeSet::from(["ended-3".to_owned(), "ended-4".to_owned()])
+        );
+    }
+
+    #[test]
+    fn the_live_order_is_the_same_without_the_runs_no_live_run_is_placed_against() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let runs = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let placements = [
+            Placement::Top,
+            Placement::Bottom,
+            Placement::Before,
+            Placement::After,
+        ];
+        for case in 0..5_000 {
+            let mut joins = Vec::new();
+            for run in runs {
+                if next(5) != 0 {
+                    joins.push(join(run, u128::from(next(40))));
+                }
+            }
+            let mut at = 0;
+            let moves = (0..next(14))
+                .map(|_| {
+                    at += u128::from(next(6));
+                    let run = runs[next(8) as usize];
+                    let anchor = (next(4) != 0).then(|| runs[next(8) as usize]);
+                    moved(run, placements[next(4) as usize], anchor, at)
+                })
+                .collect::<Vec<_>>();
+            let live = joins
+                .iter()
+                .filter(|_| next(2) == 0)
+                .map(|join| join.run.clone())
+                .collect::<BTreeSet<_>>();
+            let live_order = |joins: &[QueueJoin]| {
+                replay(joins, &moves)
+                    .into_iter()
+                    .filter(|run| live.contains(run))
+                    .collect::<Vec<_>>()
+            };
+            let anchors = order_anchors(&moves, &live);
+            let kept = joins
+                .iter()
+                .filter(|join| live.contains(&join.run) || anchors.contains(&join.run))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                live_order(&kept),
+                live_order(&joins),
+                "case {case}: joins {joins:?}, moves {moves:?}, live {live:?}"
+            );
+        }
     }
 
     #[test]

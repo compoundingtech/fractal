@@ -13,6 +13,7 @@
 
 mod environment;
 pub mod host;
+pub mod host_envelope;
 mod isolate;
 mod lane;
 mod priority;
@@ -21,6 +22,8 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+#[cfg(test)]
+mod test_executable;
 pub mod seat_admission;
 pub mod seat_admission_status;
 pub use seat_placement::UnlanedSeatPlacement;
@@ -51,6 +54,8 @@ pub use lane::{
     set_enforced as set_lanes_enforced,
 };
 pub use peer_process::PeerProcessIdentity;
+#[cfg(target_os = "macos")]
+pub use peer_process::{macos_process_identity, macos_process_owner};
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token, process_generation_alive,
 };

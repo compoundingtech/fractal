@@ -4,7 +4,7 @@ set -euo pipefail
 requester=person/eval-requester
 if [ -s controller-state.json ]; then
   while IFS= read -r agent; do
-    st3 agents stop "$agent" --as "$requester" >/dev/null 2>&1 || true
+    fractal agents stop "$agent" --as "$requester" >/dev/null 2>&1 || true
   done < <(jq -r '.imports[]?.agent' controller-state.json)
 fi
 

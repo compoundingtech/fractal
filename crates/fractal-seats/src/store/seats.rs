@@ -96,6 +96,10 @@ pub trait SeatsStore {
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool>;
+    /// Whether this node committed a claim an agent card reads after store index `after`, through
+    /// `through`. Claims other nodes wrote, and local claims about any other subject, are false:
+    /// the roster's check for the local-commit scanner.
+    fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool>;
     /// The last claim that can change an agent's status: one about an agent, or about the run
     /// or generation that owns it, whose row decides the agent's projection layer. Steps,
     /// gates, subscriptions and diagnostics commit far more often and change no agent status.
@@ -273,13 +277,13 @@ pub trait SeatsStore {
             intent: &NormalizedIntent,
             key: &str,
             declared_agents: &BTreeSet<String>,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Append a native driver's observation, as `POST /v1/harness-events` does once it has
     /// bound the caller to its seat. The daemon tests call it directly, without a driver.
     fn append_harness_event(
             &self,
             publication: &crate::harness_events::Publication,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     /// A replicated snapshot of the local response totals affected by one timeline entry.
     /// The response itself stays in the local observation log.
     fn usage_rollup_for_timeline(
@@ -316,7 +320,7 @@ pub trait SeatsStore {
             subject: &str,
             name: Option<&str>,
             idempotency_key: &str,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Observers, subscriptions, and schedules whose owner run is terminal or whose owner
     /// generation is no longer current. They must not observe, deliver, or start work.
     fn retired_owned_intake_subjects(&self) -> Result<BTreeSet<String>>;
@@ -340,7 +344,7 @@ pub trait SeatsStore {
             operation: &str,
             host: &str,
             actor: &str,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
     /// Record facts and deliveries atomically. Scheduler completions provide a predicate checked
     /// inside the writer transaction before work and before releasing its savepoint; direct
     /// consumers pass `None`. The predicate must release its scheduler lock before returning.
@@ -356,7 +360,7 @@ pub trait SeatsStore {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<ResourceObservationOutcome, St3Error>;
+        ) -> Result<ResourceObservationOutcome, FractalError>;
     /// The observation response and whether this transaction wrote durable state, through
     /// the same preparation fence, retries and canonical fallback. An idempotency hit or an
     /// unchanged observation writes nothing. Keep this scheduler-only flag out of the stored
@@ -373,7 +377,7 @@ pub trait SeatsStore {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<(ResourceObservationOutcome, bool), St3Error>;
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError>;
     /// [`Self::record_resource_observation_outcome`] for a GitHub repository whose poller has a
     /// filled plugin mirror: each item is compared and merged with the mirror's facts, and in
     /// compact mode its change is recorded as `vcs.item.state` alone.
@@ -390,7 +394,7 @@ pub trait SeatsStore {
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
             mirrored: Option<&crate::model::MirroredPrior>,
-        ) -> Result<(ResourceObservationOutcome, bool), St3Error>;
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError>;
     /// Period spend from replicated cumulative snapshots. The snapshot immediately before the
     /// start is the baseline, so a long-lived incarnation only contributes spend in the period.
     /// Each row is one agent incarnation's spend on one model and account for one mission run
@@ -409,10 +413,9 @@ pub trait SeatsStore {
             since_ms: u64,
             until_ms: u64,
         ) -> Result<(Vec<Value>, Vec<agent_messages::DailyUsage>)>;
-    /// Resolve a terminal capability and its current-head fence with two indexed seeks, in
-    /// one SQLite snapshot. Unrelated fleet history cannot hide an unexpired capability. Both
-    /// the attachment and its head are chosen in canonical claim order, so a store that admits
-    /// an attachment after the claim that consumed or detached it never revives it.
+    /// Resolve a capability from admitted attachments and issuer-bound lifecycle records.
+    /// Canonical ordering is applied after admission, so retained unrelated records cannot
+    /// displace a current attachment and out-of-order replication cannot revive consumption.
     fn terminal_attachment_for_capability_hash(
             &self,
             digest: &str,
@@ -467,9 +470,7 @@ impl SeatsStore for Store {
             // A card reads claims about its agent, the runs, generations and steps that own or
             // queue agents, and messages; work activity is read by actor on step claims. A
             // claim about any other subject, of any kind, changes no card.
-            if !["agent/", "mission-run/", "run-generation/", "step-run/", "message/"]
-                .iter().any(|prefix| subject.starts_with(prefix))
-            {
+            if !agent_card_input_subject(&subject) {
                 continue;
             }
             if self.fractal.claim_registry().claim(&kind).is_none() {
@@ -562,6 +563,21 @@ impl SeatsStore for Store {
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?);
         }
         Ok(AgentResourcesChange::Delta(delta))
+    }
+
+    fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject FROM claims WHERE store_index>?1 AND store_index<=?2 AND origin=?3",
+        )?;
+        for subject in statement.query_map(params![after as i64, through as i64, self.origin()],
+            |row| row.get::<_, String>(0))?
+        {
+            if agent_card_input_subject(&subject?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {
@@ -717,7 +733,7 @@ impl SeatsStore for Store {
             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         let names = if history { names } else {
-            self.current_view_candidates(&connection, names, index, true)?
+            self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
         };
         drop(connection);
         let folded = previous.iter().flat_map(|previous| previous.items.iter())
@@ -1048,7 +1064,7 @@ impl SeatsStore for Store {
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
-                        self.current_view_candidates(&connection, names, index, true)?
+                        self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
                     };
                     if let Some(covered) = &previous.covered {
                         names.retain(|name| covered.contains(name));
@@ -1088,7 +1104,7 @@ impl SeatsStore for Store {
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
-                            self.current_view_candidates(&connection, names, index, true)?
+                            self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
                         };
                         changed.extend(names.difference(covered).cloned());
                         None
@@ -1375,14 +1391,14 @@ impl SeatsStore for Store {
             intent: &NormalizedIntent,
             key: &str,
             declared_agents: &BTreeSet<String>,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         let source = IntentInput {
             kdl: String::new(),
             source_name: Some("st reconciler".into()),
         };
         let mission = self.mission_at_with_declared_agents(intent, source, None, declared_agents)?;
         if !mission.blockers.is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "internal-mission-blocked",
                 mission.blockers.join("; "),
             ));
@@ -1407,7 +1423,7 @@ impl SeatsStore for Store {
     fn append_harness_event(
             &self,
             publication: &crate::harness_events::Publication,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         self.append_harness_event_publication(publication)
             .map(|(record, appended, _)| (record, appended))
     }
@@ -1589,7 +1605,7 @@ impl SeatsStore for Store {
         // Match the public status reducer's exclusions, including exact-owner reads.
         names.retain(|name| !name.starts_with("glass/") && !name.starts_with("arrangement/"));
         drop(connection);
-        self.agent_card_status_at(Some(&names), index, history)
+        self.agent_card_status_for_generic_reads_at(Some(&names), index, history)
     }
 
     fn agent_declaration(
@@ -1637,11 +1653,11 @@ impl SeatsStore for Store {
             subject: &str,
             name: Option<&str>,
             idempotency_key: &str,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         let subject = fractal_store::store::identities::resolve_reference_conn(&self.readers.get(), subject)?;
         let subject = subject.as_str();
         if name == Some("") {
-            return Err(St3Error::new("invalid-agent-name", "a seat label must be a non-empty string"));
+            return Err(FractalError::new("invalid-agent-name", "a seat label must be a non-empty string"));
         }
         let (mut desired, heads, writer) = {
             let connection = self.readers.get();
@@ -1661,10 +1677,10 @@ impl SeatsStore for Store {
                 )
                 .optional()
                 .map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-agent", format!("no agent `{subject}`")))?;
+                .ok_or_else(|| FractalError::new("missing-agent", format!("no agent `{subject}`")))?;
             // Republishing a member this build cannot read would erase it for every peer.
             if desired.2.is_some() && desired.0.member.is_none() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unreadable-agent-member",
                     format!("agent `{subject}` has a launch this build cannot read"),
                 ));
@@ -1829,27 +1845,27 @@ impl SeatsStore for Store {
             operation: &str,
             host: &str,
             actor: &str,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         self.connection.batched(|transaction| {
             let subject = fractal_store::store::identities::resolve_reference_conn(transaction, subject)?;
             let subject = subject.as_str();
             let actor = fractal_store::store::identities::resolve_reference_conn(transaction, actor)?;
             let actor = actor.as_str();
             let current = current_desired_row_tx(transaction, subject).map_err(internal)?
-                .ok_or_else(|| St3Error::new("stale-fence", "seat declaration disappeared"))?;
+                .ok_or_else(|| FractalError::new("stale-fence", "seat declaration disappeared"))?;
             let current_claim = claim_by_id_tx(transaction, &current.claim_id).map_err(internal)?.unwrap();
             if current_claim.body["evidence"].as_array().is_some_and(|items| items.iter().any(|id| id.as_str() == Some(operation))) {
                 return Ok(current_claim);
             }
-            if current.claim_id != expected { return Err(St3Error::new("stale-fence", "seat declaration changed during transfer")); }
+            if current.claim_id != expected { return Err(FractalError::new("stale-fence", "seat declaration changed during transfer")); }
             let latest: String = transaction.query_row(
                 /* sqlite-large-value: allow-for-now lv-hfb124d1f718d owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                 [subject], |row| row.get(0)).map_err(internal)?;
-            if latest != operation { return Err(St3Error::new("stale-fence", "another suspension request replaced this move")); }
+            if latest != operation { return Err(FractalError::new("stale-fence", "another suspension request replaced this move")); }
             let mut desired: DesiredSubject = serde_json::from_value(current_claim.body.clone()).map_err(internal)?;
-            let member = desired.member.as_mut().ok_or_else(|| St3Error::new("stale-fence", "seat has no member"))?;
+            let member = desired.member.as_mut().ok_or_else(|| FractalError::new("stale-fence", "seat has no member"))?;
             member.host = host.into();
-            let children = desired.desired["children"].as_array_mut().ok_or_else(|| St3Error::new("invalid-agent-declaration", "seat has no body"))?;
+            let children = desired.desired["children"].as_array_mut().ok_or_else(|| FractalError::new("invalid-agent-declaration", "seat has no body"))?;
             if let Some(child) = children.iter_mut().find(|child| child["name"] == "host") {
                 child["arguments"] = json!([host]);
             } else { children.push(json!({"name": "host", "arguments": [host]})); }
@@ -1863,7 +1879,7 @@ impl SeatsStore for Store {
             let claim = append_claim_tx(transaction, &self.origin, subject, "intent.desired", Some(actor), &body, &predecessors, None).map_err(internal)?;
             select_replicated_desired(transaction, &claim, &desired)?;
             Ok(claim)
-        }).map_err(|error| St3Error::new("internal", error))?
+        }).map_err(|error| FractalError::new("internal", error))?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1878,7 +1894,7 @@ impl SeatsStore for Store {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<ResourceObservationOutcome, St3Error> {
+        ) -> Result<ResourceObservationOutcome, FractalError> {
         self.record_resource_observation_outcome(
             observer, desired_revision, attempt, resource, cursor, facts,
             next_check_unix_ms, subscriptions, current,
@@ -1897,7 +1913,7 @@ impl SeatsStore for Store {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError> {
         self.record_resource_observation_mirrored(
             observer, desired_revision, attempt, resource, cursor, facts,
             next_check_unix_ms, subscriptions, current, None,
@@ -1917,7 +1933,7 @@ impl SeatsStore for Store {
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
             mirrored: Option<&crate::model::MirroredPrior>,
-        ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError> {
         let fence = resource_preparation::Fence::new(self);
         for pass in 0..2 {
             let prepared = fence.prepare_with_actuals(self, |connection, _| {
@@ -1974,7 +1990,7 @@ impl SeatsStore for Store {
             None,
             mirrored,
         )?
-        .ok_or_else(|| St3Error::new("internal", "canonical observation returned no outcome"))
+        .ok_or_else(|| FractalError::new("internal", "canonical observation returned no outcome"))
     }
 
     fn usage_period_rows(&self, since_ms: u64, until_ms: u64) -> Result<Vec<Value>> {
@@ -2154,24 +2170,29 @@ impl SeatsStore for Store {
         static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
-                        predecessors, accepted_at_unix_ms,
-                        NOT EXISTS (
-                            SELECT 1 FROM claims AS newer
-                            WHERE newer.subject=claims.subject AND {}
-                        )
+                        predecessors, accepted_at_unix_ms
                  FROM claims
                  WHERE kind='custom.client.terminal-attached'
                    AND json_extract(body, '$.fields.capability_hash')=?1
-                 ORDER BY {} LIMIT 1",
-                smallclaims::store::canonical::after_sql("newer", "claims"),
+                 ORDER BY {}",
                 smallclaims::store::canonical::order_sql("claims", true),
             )
         });
         let connection = self.readers.get();
-        Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h03924d7d5055 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
-            .optional()?)
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?;
+        let mut rows = statement.query([digest])?;
+        while let Some(row) = rows.next()? {
+            let attached = claim_from_row(row)?;
+            if !fractal_store::pairing::operation_is_trusted(&connection, &attached.id,
+                &attached.origin, attached.actor.as_deref(), &attached.body["fields"])? {
+                continue;
+            }
+            let current = fractal_store::pairing::terminal_head(
+                &connection, &attached.subject, &attached.origin, attached.actor.as_deref(),
+            )?.is_some_and(|head| head.id == attached.id);
+            return Ok(Some((attached, current)));
+        }
+        Ok(None)
     }
 
     fn cached_placement_fence(

@@ -471,6 +471,55 @@ fn resource_fields_and_generation_map_keys_enforce_family_references() {
 }
 
 #[test]
+fn mission_detail_step_history_eta_and_declaration_provenance_conform() {
+    let mission = fixture("mission-detail-step-history.json");
+    let retry = &mission["run_details"][0]["steps"][0]["waits"][2];
+    assert_eq!(retry["kind"], "retry");
+    assert_eq!(retry["end"], retry["until"], "this example's later claim must not extend its backoff");
+    for validator in [consumer_validator("Mission"), contract_validator("Mission")] {
+        assert_conforms(&validator, "mission detail step history fixture", &mission);
+        // Older daemons, lists and steps outside the enriched runs omit every new field.
+        let mut older = mission.clone();
+        for step in older["run_details"][0]["steps"].as_array_mut().unwrap() {
+            let step = step.as_object_mut().unwrap();
+            for field in ["attempts", "waits", "transitions", "history_complete", "eta"] {
+                step.remove(field);
+            }
+        }
+        assert_conforms(&validator, "a step without history", &older);
+        for (path, value) in [
+            ("/run_details/0/steps/0/waits/0/start", serde_json::json!("2026-11-08T10:00:00Z")),
+            ("/run_details/0/steps/1/eta/samples", serde_json::json!(0)),
+        ] {
+            let mut invalid = mission.clone();
+            *invalid.pointer_mut(path).unwrap() = value;
+            assert!(!validator.is_valid(&invalid), "{path} must be rejected");
+        }
+    }
+    // Consumers keep a future outcome, wait kind or event; this daemon emits only the known ones.
+    for path in [
+        "/run_details/0/steps/0/attempts/0/outcome",
+        "/run_details/0/steps/0/waits/0/kind",
+        "/run_details/0/steps/0/transitions/0/event",
+        "/run_details/0/steps/0/transitions/0/status",
+    ] {
+        let mut future = mission.clone();
+        *future.pointer_mut(path).unwrap() = serde_json::json!("future-word");
+        assert_conforms(&consumer_validator("Mission"), path, &future);
+        assert!(!contract_validator("Mission").is_valid(&future), "{path} is a known word");
+    }
+    let declaration = fixture("mission-declaration-provenance.json");
+    let validator = contract_validator("MissionDeclaration");
+    assert_conforms(&validator, "declaration with provenance", &declaration);
+    let mut without = declaration.clone();
+    without.as_object_mut().unwrap().remove("provenance");
+    assert_conforms(&validator, "declaration without provenance", &without);
+    let mut short = declaration.clone();
+    short["provenance"]["commit"] = serde_json::json!("abc123");
+    assert!(!validator.is_valid(&short), "a provenance commit is a full commit id");
+}
+
+#[test]
 fn mission_step_actor_references_conform_without_accepting_other_id_families() {
     let mission = fixture("person-ask-mission.json");
     let paths = [
@@ -1308,7 +1357,7 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState { seat_admission: Default::default(), owning_person: None,
+    AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
     // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
     store: Arc::new(
         Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
@@ -2255,6 +2304,12 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
     let fleet = "issuer-envelope-proof";
     issuer.store.bind_fleet(fleet).unwrap();
     receiver.store.bind_fleet(fleet).unwrap();
+    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    for state in [&issuer, &receiver] {
+        state.store.pin_fleet_anchor(key.public()).unwrap();
+    }
+    issuer.store.set_member_key(Some(key.clone())).unwrap();
+    issuer.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
     let issuer_app = fractal_daemon::api::router(issuer.clone());
     let (status, challenge) = client_post_json(
         issuer_app.clone(),
@@ -2388,7 +2443,7 @@ async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let device = paired["value"]["device_id"].as_str().unwrap();
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_client_operation_claim(&fractal_daemon::model::ClaimInput {
             subject: "custom/client/pairing-expired-inventory".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),
@@ -2562,6 +2617,18 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let (status, capabilities) =
         client_json_auth(fabric.clone(), "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let (status, denied) = client_json_auth(
+        fabric.clone(), "/v1/client/agent-declarations/agent/example", credential,
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(denied["code"], "forbidden");
+    assert!(denied["details"].get("reason").is_none(), "{denied}");
+    let (status, unknown) = client_json_auth(
+        fabric.clone(), "/v1/client/capabilities", "unknown-paired-credential",
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{unknown}");
+    assert_eq!(unknown["code"], "forbidden");
+    assert_eq!(unknown["details"]["reason"], "credential-rejected");
     let capability_state = |id: &str| {
         capabilities["value"]["capabilities"]
             .as_array()
@@ -2776,13 +2843,15 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
             idempotency_key: None,
         })
         .unwrap();
-    let (status, _) = client_json_auth(
+    let (status, expired) = client_json_auth(
         fabric.clone(),
         "/v1/client/capabilities",
         expired_credential,
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(expired["code"], "forbidden");
+    assert_eq!(expired["details"]["reason"], "credential-rejected");
 
     let (_, local_capabilities) = client_json(local.clone(), "/v1/client/capabilities").await;
     let revoke = serde_json::json!({
@@ -2793,8 +2862,10 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     });
     let (status, revoked) = client_post_json(local, "/v1/client/actions", revoke).await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
-    let (status, _) = client_json_auth(fabric, "/v1/client/capabilities", credential).await;
+    let (status, refused) = client_json_auth(fabric, "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused["code"], "forbidden");
+    assert_eq!(refused["details"]["reason"], "credential-rejected");
 }
 
 #[tokio::test]
@@ -2885,7 +2956,7 @@ async fn full_control_pairing_requires_explicit_local_person_opt_in_and_can_be_r
 }
 
 #[tokio::test]
-async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_actions() {
+async fn read_only_pairing_reads_projections_and_arrangements_but_is_denied_actions() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -2943,7 +3014,7 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
         local.clone(),
         "/v1/client/pairings",
         "person/ada",
-        begin(serde_json::json!(["terminal.read", "read.projections", "read.glasses"])),
+        begin(serde_json::json!(["terminal.read", "read.arrangements", "read.projections", "read.glasses"])),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
@@ -2964,14 +3035,14 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
     assert_eq!(status, StatusCode::OK, "{paired}");
     assert_eq!(
         paired["value"]["scopes"],
-        serde_json::json!(["read.projections", "read.glasses", "terminal.read"])
+        serde_json::json!(["read.projections", "read.glasses", "read.arrangements", "terminal.read"])
     );
     let credential = paired["value"]["credential"].as_str().unwrap();
 
     let (status, capabilities) =
         client_json_auth(gateway.clone(), "/v1/client/capabilities", credential).await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
-    for action in ["work.done", "launch.create", "message.send"] {
+    for action in ["work.done", "launch.create", "message.send", "control.arrangements", "read.declarations"] {
         let state = capabilities["value"]["capabilities"]
             .as_array()
             .unwrap()
@@ -2980,6 +3051,55 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
             .unwrap()["state"]
             .clone();
         assert_eq!(state, "ungranted", "{action}");
+    }
+
+    let subject = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+    let path = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
+    let create_arrangement = serde_json::json!({
+        "api_version": "st3.client.v0", "id": "action/read-only-arrangement-fixture",
+        "type": "arrangement.edit", "idempotency_key": "read-only-arrangement-fixture",
+        "fence": { "snapshot_id": capabilities["snapshot"]["id"] },
+        "parameters": {
+            "subject": subject, "owner": "person/ada", "version": 2,
+            "operations": [{ "op": "create", "name": "Sidebar" }]
+        }
+    });
+    let (status, created) = client_post_json_person(
+        local.clone(), "/v1/client/actions", "person/ada", create_arrangement,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+
+    let (status, arrangements) = client_json_auth(
+        gateway.clone(), "/v1/client/arrangements?person=person%2Fada", credential,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{arrangements}");
+    assert_eq!(arrangements["value"]["items"][0]["id"], subject);
+    let (status, arrangement) = client_json_auth(gateway.clone(), path, credential).await;
+    assert_eq!(status, StatusCode::OK, "{arrangement}");
+    assert_eq!(arrangement["value"]["id"], subject);
+    let (status, memberships) = client_json_auth(
+        gateway.clone(), &format!("{path}/memberships?person=person%2Fada"), credential,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{memberships}");
+    assert_eq!(memberships["value"]["collection"], "ordered-memberships");
+    assert_eq!(memberships["value"]["items"], serde_json::json!([]));
+
+    for (action_type, operations) in [
+        ("arrangement.edit", serde_json::json!([{ "op": "create", "name": "Forbidden" }])),
+        ("arrangement.membership.edit", serde_json::json!([
+            { "op": "place", "member": format!("agent/{}.asker", store.origin()), "bucket": null, "key": "a0" }
+        ])),
+    ] {
+        let denied_edit = serde_json::json!({
+            "api_version": "st3.client.v0", "id": format!("action/read-only-{action_type}"),
+            "type": action_type, "idempotency_key": format!("read-only-{action_type}"),
+            "fence": { "snapshot_id": arrangement["snapshot"]["id"] },
+            "parameters": { "subject": subject, "owner": "person/ada", "operations": operations }
+        });
+        let (status, denied) = client_post_json_auth(
+            gateway.clone(), "/v1/client/actions", credential, denied_edit,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
     }
 
     let (status, attention) =

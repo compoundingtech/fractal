@@ -1,5 +1,23 @@
 # Operational queries
 
+## Single-subject status reads
+
+`GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain
+the full canonical claim ID vector. Subject `show`, `inspect`, and successful non-verdict
+`trace wait` output therefore retain claim provenance; `claims=[]` still proves an empty
+history, not a skipped reduction. Bounded `recent_claims` reads are unchanged. There is no
+`omit_claims` HTTP mode.
+
+Owned-set preview and resource/member reads use an internal `Fields` reduction instead.
+It skips claim IDs, counts and session boundaries, then returns only actual state across
+the store boundary. No `SubjectStatus` or unenumerated `claims=[]` is serialized on that path;
+owned-set wire shapes remain unchanged. This avoids provenance work under those snapshots,
+but actual-state and harness folding can still depend on history.
+A desired-only caller should use `GET /v1/desired/SUBJECT`,
+which reads the desired record without reducing actual state or claims.
+
+## Published operational lists
+
 Mission lists page mission IDs and return compact cards with at most three recent runs and
 twenty step previews per run. Progress counts cover every step; a larger total signals an
 incomplete step preview.
@@ -43,9 +61,9 @@ rebuild duration includes failed attempts. The background rebuild still reduces 
 runtime collection; publication removes that work from ordinary list requests.
 
 ```sh
-st missions ls --all
-st missions ls --all --cursor 'CURSOR'
-st missions show mission/example/build
+fractal missions ls --all
+fractal missions ls --all --cursor 'CURSOR'
+fractal missions show mission/example/build
 ```
 
 Showing a mission with multiple runs prints counts by state, the ten newest runs, and the ten
@@ -55,9 +73,9 @@ requires choosing an exact run when the mission has multiple runs.
 To investigate outcomes in a time window:
 
 ```sh
-st missions ls --since 6h --status failed
-st work ls --since 6h --status timed-out
-st work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
+fractal missions ls --since 6h --status failed
+fractal work ls --since 6h --status timed-out
+fractal work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
 ```
 
 `--since` and `--until` accept RFC3339 timestamps or durations in milliseconds, seconds,
@@ -96,9 +114,9 @@ of ranking the complete transport history. Original success timestamps, clock-sk
 expiry, and dial-out membership exclusions still decide whether that evidence is usable.
 
 ```sh
-st doctor
-st doctor --performance
-st doctor --performance --json
+fractal doctor
+fractal doctor --performance
+fractal doctor --performance --json
 ```
 
 The daemon always keeps bounded request, background task, and SQL timing aggregates for the

@@ -12,7 +12,7 @@ For Fractal claims, missions, replication, runtime ownership, or recovery, start
 
 ## CLI actor contract
 
-`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+`fractal actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
@@ -68,7 +68,7 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
@@ -80,7 +80,7 @@ if an alias changes. Supplement coverage also compares the reviewed setup/UI,
 note and changes paths, including every descendant, against the real clap
 inventory. Additions or removals require reviewing the identity handlers named
 beside `implicit_person`; mutation tests exercise added setup/UI descendants and
-a removed UI descendant. `st ui open` resolves the configured person before
+a removed UI descendant. `fractal ui open` resolves the configured person before
 queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
@@ -97,8 +97,16 @@ nix profile install .
 For local development, enter `nix develop`. The shell provides Rust, sccache,
 cargo-nextest, and mold on Linux. Cargo uses mold for Linux links and the system
 linker on macOS; dev and test builds keep line tables for workspace crates and
-omit dependency debug info. On both platforms the shell sets `RUSTC_WRAPPER` to
-sccache. Run tests with `cargo nextest run --workspace --locked`.
+omit dependency debug info. Both Rust shells provide sccache 0.19.0 (including
+client-side compilation) and default `RUSTC_WRAPPER` only when it is unset.
+An inherited wrapper, including an explicitly empty value, is preserved.
+`SCCACHE_CLIENT_SIDE`, `SCCACHE_SERVER_UDS`, and host cache settings pass through
+unchanged. GitHub Actions still defaults to the CI wrapper, except when a host
+client-side configuration is inherited. Run tests with
+`cargo nextest run --workspace --locked`. The shell's environment contract can
+be checked without building it: `python3 scripts/sccache-shell-env-test`.
+The `ci-script-tests` lane runs its `--offline` mode, evaluating the shared hook
+with fixture package paths and no flake inputs or network access.
 The default and perf shells can opt into an owner-provisioned read-only WebDAV
 cache with `ST_SCCACHE_READ_ENDPOINT` and `ST_SCCACHE_READ_SERVER_PORT`. Leave
 both unset for the existing cache behavior. The port must be separate from the
@@ -515,7 +523,7 @@ wording consistent when both describe the same change.
 | `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
+The `fractal-tui` package is a library embedded in `fractal`; it has no standalone executable. Its existing
 Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

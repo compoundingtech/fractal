@@ -15,7 +15,7 @@ import { SyncFailureDetails } from '../../../../packages/fractal-ui/src/assistan
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { HumanTime } from '@fractal/ui/human-time'
 import { useConversation, useConversationSync, useDataSource } from '../data/react.tsx'
-import { unavailable, waiting, type DataSource, type Feed } from '../data/source.ts'
+import { credentialNotice, unavailable, waiting, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { resourceState, resourceTitle, type ResourcePage } from '../resources/agent/model.ts'
 import { systemEventsPreference } from './conversationPreferences.ts'
@@ -92,10 +92,10 @@ export const ConversationHeaderActions = ({ agentRef, ux, resourcesDock }: {
   /** Closing releases UI demand, but the intent-created wrapper retains its poll for 60 seconds. */
   const resources = useAtomValue(source.resources === undefined ? unsupportedResources
     : resourcesOpen ? atoms.resources(agentRef) : unopenedResources)
-  const disabledReason = resources._tag === 'Unavailable'
+  const disabledReason = credentialNotice(resources) ?? (resources._tag === 'Unavailable'
     ? resources.reason === 'ungranted' ? 'Read access to agent resources has not been granted.'
       : resources.reason === 'unsupported' ? 'This connection does not support agent resources.' : undefined
-    : undefined
+    : undefined)
   const panel = resourcesOpen ? <SidePanel ref={shellCommit} id={panelId} placement={resourcesDock === undefined ? 'overlay' : 'dock'} aria-label="Agent resources" heading="Resources" actions={<Aria.Button aria-label="Close resources" onPress={() => changeResourcesOpen(false)} {...stylex.props(styles.button, narrow && styles.touchItem)}>Close resources</Aria.Button>} onClose={() => changeResourcesOpen(false)}>
     <ResourceContents agentRef={agentRef} resources={resources} opening={opening} cache={cache} />
   </SidePanel> : null
@@ -163,7 +163,7 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
     </section>
     <section aria-label="Agent queue">
       <h2 {...stylex.props(styles.sectionTitle)}>Agent queue</h2>
-      {queue._tag !== 'Observed' ? <ReadNotice feed={queue} label="Agent queue" /> : <>
+      {credentialNotice(queue) ? <p role="status">{credentialNotice(queue)}</p> : queue._tag !== 'Observed' ? <ReadNotice feed={queue} label="Agent queue" /> : <>
         {queue.freshness === 'stale' ? <p role="status">Showing the last verified agent queue while reconnecting.</p> : null}
         <p>{queue.value.current_work_ids.length} current work {queue.value.current_work_ids.length === 1 ? 'item' : 'items'}</p>
         {queue.value.current_work_ids.length === 0 ? null : <ul>{queue.value.current_work_ids.map(id => <li key={id}>{id}</li>)}</ul>}
@@ -172,7 +172,7 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
     </section>
     <section aria-label="Observed resources">
       <h2 {...stylex.props(styles.sectionTitle)}>Observed resources</h2>
-      {resources._tag !== 'Observed' ? <ReadNotice feed={resources} label="Agent resources" /> : <>
+      {credentialNotice(resources) ? <p role="status">{credentialNotice(resources)}</p> : resources._tag !== 'Observed' ? <ReadNotice feed={resources} label="Agent resources" /> : <>
         {resources.freshness === 'stale' ? <p role="status">Showing the last verified resources while reconnecting.</p> : null}
         {resources.value.items.length === 0 ? <p>No resources observed for this agent.</p> : <ul {...stylex.props(styles.list)}>{resources.value.items.map(resource => {
           const state = resourceState(resource)
@@ -184,13 +184,13 @@ const ResourceContents = ({ agentRef, resources, opening, cache }: {
         {resources.value.pagingError === undefined ? null : <p role="status" data-wf-resource-paging="failed">More resources could not be loaded; refresh to try again.</p>}
         {resources.value.nextCursor === null ? null : <Aria.Button isDisabled={resources.value.loadingMore === true} onPress={() => source.resources?.loadMore(agentRef)} {...stylex.props(styles.button)}>{resources.value.loadingMore ? 'Loading more resources…' : 'Load more resources'}</Aria.Button>}
       </>}
-      {source.resources === undefined ? null : <Aria.Button onPress={() => source.resources?.refresh(agentRef)} {...stylex.props(styles.button)}>Refresh resources</Aria.Button>}
+      {source.resources === undefined || credentialNotice(resources) || credentialNotice(queue) ? null : <Aria.Button onPress={() => source.resources?.refresh(agentRef)} {...stylex.props(styles.button)}>Refresh resources</Aria.Button>}
     </section>
   </div>
 }
 
 const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>; readonly label: string }) =>
-  <p role="status" data-wf-read-reason={feed._tag === 'Unavailable' ? feed.reason : undefined}>{feed._tag === 'Waiting' ? `Loading ${label.toLowerCase()}…` : feed.reason === 'ungranted' ? `Read access to ${label.toLowerCase()} has not been granted.` : feed.reason === 'unsupported' ? `This connection does not support ${label.toLowerCase()}.` : `${label} could not be loaded; reconnect and try again.`}</p>
+  <p role="status" data-wf-read-reason={feed._tag === 'Unavailable' ? feed.reason : undefined}>{credentialNotice(feed) ?? (feed._tag === 'Waiting' ? `Loading ${label.toLowerCase()}…` : feed.reason === 'ungranted' ? `Read access to ${label.toLowerCase()} has not been granted.` : feed.reason === 'unsupported' ? `This connection does not support ${label.toLowerCase()}.` : `${label} could not be loaded; reconnect and try again.`)}</p>
 
 const styles = stylex.create({
   actions: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },

@@ -60,7 +60,7 @@ pub trait SubagentsStore {
     fn running_subagents(&self, now: u64) -> Result<Vec<SubagentView>>;
     /// End each subagent recorded on this node from `low_water` on whose seat was stopped or
     /// removed, whose harness exited or restarted, or whose lease ran out.
-    fn end_stale_subagents(&self, now: u64, low_water: u64) -> Result<SubagentSweep, St3Error>;
+    fn end_stale_subagents(&self, now: u64, low_water: u64) -> Result<SubagentSweep, FractalError>;
 }
 
 impl SubagentsStore for Store {
@@ -76,7 +76,7 @@ impl SubagentsStore for Store {
         Ok(running)
     }
 
-    fn end_stale_subagents(&self, now: u64, low_water: u64) -> Result<SubagentSweep, St3Error> {
+    fn end_stale_subagents(&self, now: u64, low_water: u64) -> Result<SubagentSweep, FractalError> {
         let mut sweep = SubagentSweep {
             low_water,
             ..SubagentSweep::default()
@@ -116,7 +116,7 @@ impl SubagentsStore for Store {
             }
         }
         // A subagent that failed to end below stays in the next sweep.
-        let mut failed = None::<St3Error>;
+        let mut failed = None::<FractalError>;
         for (subagent, outcome, reason) in stale {
             let mut fields = BTreeMap::from([
                 (

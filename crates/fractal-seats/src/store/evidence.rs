@@ -17,7 +17,7 @@ pub trait EvidenceSeatsStore {
     fn append_harness_event_publication(
             &self,
             publication: &crate::harness_events::Publication,
-        ) -> Result<(ClaimRecord, bool, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool, bool), FractalError>;
 }
 
 impl EvidenceSeatsStore for Store {
@@ -55,7 +55,7 @@ impl EvidenceSeatsStore for Store {
     fn append_harness_event_publication(
             &self,
             publication: &crate::harness_events::Publication,
-        ) -> Result<(ClaimRecord, bool, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool, bool), FractalError> {
         let mut input = publication.claim.clone();
         if publication.sequence == 0
             || publication.runtime_incarnation.is_empty()
@@ -67,7 +67,7 @@ impl EvidenceSeatsStore for Store {
             || input.actor.as_deref() != Some(input.subject.as_str())
             || input.idempotency_key.is_none()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-harness-event",
                 "invalid native observation envelope",
             ));
@@ -79,7 +79,7 @@ impl EvidenceSeatsStore for Store {
                 &input.fields,
                 input.actor.as_deref(),
             )
-            .map_err(|error| St3Error::new(error.code, error.message))?;
+            .map_err(|error| FractalError::new(error.code, error.message))?;
         // A context event can yield two independently acknowledged usage semantics. Its slot
         // is stable even if a caller mistakenly changes its body on retry.
         let source_runtime = input
@@ -88,7 +88,7 @@ impl EvidenceSeatsStore for Store {
             .and_then(Value::as_str)
             .filter(|runtime| !runtime.is_empty())
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-harness-event",
                     "event has no source runtime provenance",
                 )

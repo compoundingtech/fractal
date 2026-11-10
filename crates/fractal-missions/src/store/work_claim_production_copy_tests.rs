@@ -1,9 +1,9 @@
 //! How long claiming and completing one step holds the writer on a production-size store copy
 //! (#5010). Ignored: set `ST3_WORK_CLAIM_PRODUCTION_COPY` to a disposable, checkpointed copy of
-//! a store. The test writes to it. For each of the agents the copy holds the most mail for, it
-//! starts one spontaneous step, claims it and completes it, twice, and prints one JSON receipt
-//! with each action's longest writer hold, the SQLite work its writer job did, and how long the
-//! step's wake took to read on a reader.
+//! a store. The test writes to it. For each of the agents the copy holds the most mail for, and
+//! the agent that has moved its queue most (#5215), it starts one spontaneous step, claims it
+//! and completes it, twice, and prints one JSON receipt with each action's longest writer hold,
+//! the SQLite work its writer job did, and how long the step's wake took to read on a reader.
 
 use super::*;
 use crate::model::WorkStartRequest;
@@ -23,7 +23,7 @@ fn work_claim_writer_hold_on_production_copy() {
         .expect("ST3_WORK_CLAIM_PRODUCTION_COPY names a disposable store copy");
     let store = Store::open(Path::new(&path), "work-claim-copy").unwrap();
     store.project_replication_backlog().unwrap();
-    let assignees = {
+    let mut assignees = {
         let connection = store.readers.get();
         let mut statement = connection
             .prepare(
@@ -38,6 +38,24 @@ fn work_claim_writer_hold_on_production_copy() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap()
     };
+    // And the seat that has moved its queue most (#5215), whose claim reads its whole queue history.
+    let moved: Option<(String, i64)> = store
+        .readers
+        .get()
+        .query_row(
+            "SELECT subject, COUNT(*) FROM claims WHERE kind=?1 GROUP BY subject ORDER BY COUNT(*) DESC, subject LIMIT 1",
+            [seat_queue::MOVED_CLAIM],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+    let mut queue_moves = BTreeMap::new();
+    if let Some((seat, moves)) = moved {
+        queue_moves.insert(seat.clone(), moves);
+        if !assignees.iter().any(|(assignee, _)| *assignee == seat) {
+            assignees.push((seat, 0));
+        }
+    }
     let probe = std::env::var("ST3_WORK_CLAIM_PROBE").unwrap_or_else(|_| "work-claim-copy-probe".into());
     let mut actions = Vec::new();
     for (index, (assignee, mail)) in assignees.iter().enumerate() {
@@ -52,7 +70,7 @@ fn work_claim_writer_hold_on_production_copy() {
                 evidence: vec!["doc/work-claim-copy".into()],
                 idempotency_key: format!("{key}:{action}"),
             };
-            let mut receipt = json!({"assignee": index, "mail": mail, "pass": pass});
+            let mut receipt = json!({"assignee": index, "mail": mail, "queue_moves": queue_moves.get(assignee), "pass": pass});
             let started = store.start_work(&WorkStartRequest {
                 actor: assignee.clone(),
                 title: "Measure a work claim".into(),

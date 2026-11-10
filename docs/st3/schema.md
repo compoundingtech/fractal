@@ -13,7 +13,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `account` | `account/NAME` | no | A model account: its provider, owner, plan and where its login lives. |
 | `agent` | `agent/RUN/LOCAL_ID` | no | A mission-run agent runtime. |
 | `arrangement` | `arrangement/person/NAME/UUIDv7` | no | A permanently person-owned shared folder arrangement. |
-| `assistant` | `assistant/chatgpt[/session/assistant-grant/ID]` | no | An external assistant principal or its grant-bound audit session, never a person. |
+| `assistant` | `assistant/{chatgpt\|mcp}[/session/assistant-grant/ID]` | no | An external assistant principal or its grant-bound audit session, never a person. |
 | `attention` | `attention/ID` | yes | An explicit request for human attention. |
 | `checkpoint` | `checkpoint/DAY` | no | A checkpoint that trims replicated history dated before a UTC day. |
 | `checkpoint-excusal` | `checkpoint-excusal/ID` | no | A person's excusal of an unreachable writer from checkpoints. |
@@ -93,6 +93,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `client.js-error` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
 | `client.launch` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
 | `client.native-crash` | `client` | `system-only` | `append` | `local` | `app_version!:string`, `capture_source!:string`, `captured_at_unix_ms!:integer`, `event_id!:string`, `launch_id!:string`, `launch_id_basis!:string`, `native_build!:string`, `occurred_at_unix_ms!:integer`, `occurrence_time_basis!:string`, `os_version!:string`, `paired_device!:string`, `pairing_grant!:string`, `payload!:object`, `person_id!:string`, `platform!:string`, `runtime_version!:string`, `sequence!:integer`, `severity!:string`, `update_id!:string` |  |
+| `client.operation-authorized` | `custom` | `system-only` | `append` | `durable` | `completion_id:string`, `record_hash!:string`, `record_id!:string` |  |
 | `custom.client.action-result` | `custom` | `system-only` | `append` | `durable` | `authority_actor:string`, `request_digest!:string`, `result!:object` |  |
 | `daemon.diagnostic` | `daemon` | `system-only` | `append` | `local` | `code!:string`, `reason!:string`, `severity!:string`, `status:string` |  |
 | `daemon.started` | `daemon` | `system-only` | `append` | `durable` | `features:object`, `pid:integer`, `schema:string`, `schema_digest:string`, `status!:string`, `version:string` | `reset` |
@@ -236,6 +237,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |
+| `usage.limits.observed` | `agent` | `same-subject-actor` | `append` | `durable` | `credit_readings!:array`, `readings!:array` |  |
 | `vcs.item.state` | `resource` | `system-only` | `append` | `durable` | `checks_state:string`, `draft:boolean`, `head_sha:string`, `item_kind!:string`, `merge_queue:object`, `merged:boolean`, `observer!:subject-reference(observer)`, `required_checks:object`, `review_decision:string`, `state!:string`, `version!:integer` |  |
 | `work.claimed` | `step-run` | `authorized-participant` | `state-transition` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.extended` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
@@ -255,6 +257,40 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 `resource.observed` validates facts against the resource kind. Custom resource facts remain open.
 
 A `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.
+
+## Observed usage limits and credits
+
+`usage.limits.observed` is observational only. Daemon configuration controls local append
+admission and read-time folds: `[usage_limits] writers = ["agent/sample/usage-producer"]`.
+Each configured agent writes as itself on its own subject. Absent or empty writers deny
+local producer appends and exclude all usage observations from folds, not storage.
+Replication and backup restore retain every schema-valid observation regardless of local
+writers, checking hashes, signatures and same-agent authorship through ordinary admission.
+Folds select only currently configured writers before merging quotas or credits. Changing
+configuration, including after restart, folds already stored claims without re-replication;
+it never changes stored evidence or graph and claim-source digests.
+Both `readings` and `credit_readings` arrays are required; empty arrays assert no readings,
+not zero usage or successful credit disposition. Every nested object is closed.
+
+Each reading requires `account` (the st.account digest), `account_ref`, `provider`,
+`window`, nullable `used_percent` (0–100), nullable `resets_at`, `measured_at`,
+`coverage` (`reported`, `unreported`, `unsupported`), `source` (`omp-usage`) and `host`.
+Reported readings require a percentage; other coverage requires null, never invented zero.
+
+Each credit reading requires `account`, `account_ref`, `provider`, durable `credit_id`,
+nullable `expires_at`, `measured_at`, `state` (`available`, `redeemed`, `forfeited`, `unknown`),
+`disposition`, `coverage`, `source` and `host` with the same provenance semantics.
+Each credit represents one window-equivalent. Disposition is exactly
+`{kind, at, evidence_ref}`: kind is `redeemed`, `declined`, `planned` or `unknown`;
+`at` is nullable and `evidence_ref` is nullable nonblank text.
+Every nonnull timestamp is RFC3339; `measured_at` is required provider time.
+Unknown, missing and stale evidence never implies successful use or disposition.
+
+The complete claim is durable: checkpoints must not prune credit history by keeping
+only the newest quota snapshot. Older members retain this unknown kind as retryable
+`unknown-claim-kind` evidence, without projecting it or granting authority. Known
+claims continue replicating, and an upgraded member replays the retained observations.
+
 
 ## Agent principal grammar
 
@@ -302,6 +338,7 @@ Replication retains unknown operation tags and unknown placement subject familie
 - `folder.move`
 - `folder.delete`
 - `subject.place`
+- `membership.migrate`
 - `retire`
 
 ## Harness todo snapshots

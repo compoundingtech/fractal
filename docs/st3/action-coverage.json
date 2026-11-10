@@ -866,6 +866,15 @@
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
+    {
+      "command": "st budgets attention",
+      "description": "Read a mission's attention budget without charging it",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart",
+        "crates/fractal/src/main_tests.rs::attention_budget_generated_unix_client_requires_an_acting_identity"
+      ],
+      "verification": "real CLI over private Unix socket with an explicit agent actor and recipient filter; published mission budget remains readable after disk-store reopen; generated Unix client rejects actorless reads"
+    },
     {"command": "st changes list", "description": "List bounded Git changes with explicit inventory and index freshness", "tests": ["crates/fractal/tests/action_coverage.rs::cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart"], "verification": "real CLI over private Unix socket; disabled fallback and configured non-owner offline receipts survive disk-store reopen; sync stays unavailable without writes"},
     {"command": "st changes show", "description": "Show one full Change-Id with exact source and PR fallback", "tests": ["crates/fractal/tests/action_coverage.rs::cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart", "crates/fractal/tests/action_coverage.rs::cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart"], "verification": "real CLI over private Unix socket; disabled fallback and configured non-owner offline receipts survive disk-store reopen; sync stays unavailable without writes; real owner CLI sync fetches private Git objects, writes the derived receipt, and repeats without reimport after restart"},
     {"command": "st changes sync", "description": "Request owner-controlled metadata synchronization or typed unavailable admission", "tests": ["crates/fractal/tests/action_coverage.rs::cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart", "crates/fractal/tests/action_coverage.rs::cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart"], "verification": "real CLI over private Unix socket; disabled fallback and configured non-owner offline receipts survive disk-store reopen; sync stays unavailable without writes; real owner CLI sync fetches private Git objects, writes the derived receipt, and repeats without reimport after restart"},
@@ -1110,6 +1119,15 @@
         "crates/fractal/tests/action_coverage.rs::cli_devices_and_native_import_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st devices renew-stage",
+      "description": "Stage a key-bound replacement for one audited device grant",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::device_renewal_staging_posts_sealed_terms_and_returns_only_receipt",
+        "crates/fractal/src/main_tests.rs::device_renewal_staging_refuses_remote_endpoints_without_connecting"
+      ],
+      "verification": "CLI parsing and Unix request contract; renewal handler and writer-transaction tests"
     },
     {
       "command": "st devices revoke",
@@ -2356,6 +2374,18 @@
       "verification": "real CLI over private Unix socket; registered reads and fenced person replies across restart"
     },
     {
+      "command": "st subject decisions",
+      "description": "Fold an atomic, authority-validated canonical effective decision.tree snapshot without writes.",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::decision_tree_manifest_cards_fences_retries_damage_and_restarts",
+        "crates/fractal/tests/action_coverage.rs::decision_reads_converge_across_opposite_arrival_orders",
+        "crates/fractal/tests/action_coverage.rs::decision_reader_rejects_unregistered_or_unauthorized_approval",
+        "crates/fractal/tests/action_coverage.rs::registered_v2_denies_agent_answers_but_accepts_nonapproving_owner_recordings",
+        "crates/fractal/tests/action_coverage.rs::decision_reader_excludes_repaired_originals"
+      ],
+      "verification": "real CLI and GET /v1/custom/decision-inputs over private Unix sockets; opposite replication arrival orders converge, invalid recipient/registration/source authority is rejected, owner recordings never approve, and repaired originals remain historical but do not influence the effective basis or fold"
+    },
+    {
       "command": "st subject history",
       "description": "Show bounded immutable history for one subject",
       "tests": [
@@ -2611,7 +2641,7 @@
     },
     {
       "command": "st work ask",
-      "description": "Ask a person through a runtime step owned by live work",
+      "description": "Ask a person independently, or block specific work with --step",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],

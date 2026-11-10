@@ -44,6 +44,22 @@
     {"state": "unavailable", "manifest_state": "missing", "reason": "missing-registration"},
     {"state": "conflicted", "manifest_state": "conflicted", "creation_claims": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]}
   ],
+  "valid_timestamps": [
+    "2026-01-01T10:00:59Z",
+    "2026-01-01T10:00:59.123456Z",
+    "2026-01-01T10:00:59.123456789012Z",
+    "2026-01-01T23:59:60Z",
+    "2026-01-01T23:59:60.5Z",
+    "2024-02-29T00:00:00.000001Z"
+  ],
+  "invalid_timestamps": [
+    "2026-02-30T10:00:00Z",
+    "2026-01-01T10:00:60Z",
+    "2026-01-01T23:58:60Z",
+    "2026-01-01T23:59:61Z",
+    "2026-01-01T24:00:00Z",
+    "2026-01-01T23:59:60+00:00"
+  ],
   "invalid_snapshot": [
     {"pointer": "/extra", "value": true},
     {"pointer": "/input/extra", "value": true},

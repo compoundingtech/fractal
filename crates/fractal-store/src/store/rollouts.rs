@@ -1,7 +1,7 @@
 use super::*;
 use crate::rollout::{Operation, Policy, Selection};
 
-pub fn selection(connection: &Connection, subject: &str) -> Result<Option<Selection>, St3Error> {
+pub fn selection(connection: &Connection, subject: &str) -> Result<Option<Selection>, FractalError> {
     selection_at(connection, subject, None)
 }
 
@@ -10,7 +10,7 @@ fn selection_at(
     connection: &Connection,
     subject: &str,
     at: Option<u64>,
-) -> Result<Option<Selection>, St3Error> {
+) -> Result<Option<Selection>, FractalError> {
     owned_sets::guard_member(connection, subject)?;
     let Some(row) = desired_row_at(connection, subject, at).map_err(internal)? else {
         return Ok(None);
@@ -69,7 +69,7 @@ fn selection_at(
     Ok(None)
 }
 
-pub fn operation(connection: &Connection, subject: &str) -> Result<Option<Operation>, St3Error> {
+pub fn operation(connection: &Connection, subject: &str) -> Result<Option<Operation>, FractalError> {
     let Some(selected) = selection(connection, subject)? else {
         return Ok(None);
     };
@@ -80,7 +80,7 @@ fn operation_for_selection(
     connection: &Connection,
     subject: &str,
     selected: &Selection,
-) -> Result<Option<Operation>, St3Error> {
+) -> Result<Option<Operation>, FractalError> {
     operation_for_selection_at(connection, subject, selected, None)
 }
 
@@ -90,7 +90,7 @@ fn operation_for_selection_at(
     subject: &str,
     selected: &Selection,
     at: Option<u64>,
-) -> Result<Option<Operation>, St3Error> {
+) -> Result<Option<Operation>, FractalError> {
     smallclaims::touched::note_read(|| subject.to_owned());
     let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h7e7d5bb183d4 owner=fractal_store::store::rollouts TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
@@ -217,7 +217,7 @@ fn operation_for_selection_at(
 pub fn retiring_ask_live(
     connection: &Connection,
     ask: &ClaimRecord,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let Some(subject) = ask.actor.as_deref() else {
         return Ok(false);
     };
@@ -268,7 +268,7 @@ pub fn intake_held(
     connection: &Connection,
     subject: &str,
     step: &str,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let Some(operation) = operation(connection, subject)?.filter(|o| o.holds_intake()) else {
         return Ok(false);
     };
@@ -286,7 +286,7 @@ pub fn intake_held(
 pub fn message_allowed(
     connection: &Connection,
     message: &MessageView,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     if message.status != "sent" {
         return Ok(true);
     }
@@ -294,7 +294,7 @@ pub fn message_allowed(
     message_allowed_under(connection, hold.as_ref(), message)
 }
 
-pub fn intake_hold(connection: &Connection, subject: &str) -> Result<Option<Operation>, St3Error> {
+pub fn intake_hold(connection: &Connection, subject: &str) -> Result<Option<Operation>, FractalError> {
     Ok(operation(connection, subject)?.filter(|o| o.holds_intake()))
 }
 
@@ -303,7 +303,7 @@ pub fn message_allowed_under(
     connection: &Connection,
     hold: Option<&Operation>,
     message: &MessageView,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let Some(operation) = hold else {
         return Ok(true);
     };
@@ -359,10 +359,10 @@ pub fn message_allowed_under(
 }
 
 impl Store {
-    pub fn rollout_message_allowed(&self, message: &MessageView) -> Result<bool, St3Error> {
+    pub fn rollout_message_allowed(&self, message: &MessageView) -> Result<bool, FractalError> {
         message_allowed(&self.readers.get(), message)
     }
-    pub fn rollout_selection(&self, subject: &str) -> Result<Option<Selection>, St3Error> {
+    pub fn rollout_selection(&self, subject: &str) -> Result<Option<Selection>, FractalError> {
         selection(&self.readers.get(), subject)
     }
     /// `rollout_selection` at a client snapshot.
@@ -370,7 +370,7 @@ impl Store {
         &self,
         subject: &str,
         at: Option<u64>,
-    ) -> Result<Option<Selection>, St3Error> {
+    ) -> Result<Option<Selection>, FractalError> {
         selection_at(&self.readers.get(), subject, at)
     }
     /// The rollout of the declaration selected at a client snapshot, from claims accepted by then.
@@ -378,7 +378,7 @@ impl Store {
         &self,
         subject: &str,
         at: Option<u64>,
-    ) -> Result<Option<Operation>, St3Error> {
+    ) -> Result<Option<Operation>, FractalError> {
         if at.is_none() {
             return self.rollout(subject);
         }
@@ -388,7 +388,7 @@ impl Store {
         };
         operation_for_selection_at(&connection, subject, &selected, at)
     }
-    pub fn rollout(&self, subject: &str) -> Result<Option<Operation>, St3Error> {
+    pub fn rollout(&self, subject: &str) -> Result<Option<Operation>, FractalError> {
         self.rollout_and_selection(subject)
             .map(|(operation, _)| operation)
     }
@@ -397,7 +397,7 @@ impl Store {
     pub fn rollout_and_selection(
         &self,
         subject: &str,
-    ) -> Result<(Option<Operation>, Option<Selection>), St3Error> {
+    ) -> Result<(Option<Operation>, Option<Selection>), FractalError> {
         let connection = self.readers.get();
         let selected = selection(&connection, subject)?;
         let mut operation = selected

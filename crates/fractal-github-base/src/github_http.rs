@@ -68,14 +68,6 @@ impl GithubAuth {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn test(token: &str) -> Self {
-        Self::Local {
-            token: Arc::new(token.into()),
-            cache: None,
-        }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub fn local_token(&self) -> &Arc<String> {
         match self {
             Self::Local { token, .. } => token,
@@ -288,12 +280,41 @@ fn token_cache() -> &'static Arc<TokenCache> {
 
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
-pub fn configure(config: &crate::config::Config) -> Result<()> {
+/// Observes every actual HTTP response, before replay or redirect handling.
+pub struct ResponseObserver(fn(reqwest::StatusCode, &reqwest::header::HeaderMap));
+
+impl ResponseObserver {
+    pub const fn new(record: fn(reqwest::StatusCode, &reqwest::header::HeaderMap)) -> Self {
+        Self(record)
+    }
+
+    fn record(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+        (self.0)(status, headers);
+    }
+}
+
+static RESPONSE_OBSERVER: OnceLock<&'static ResponseObserver> = OnceLock::new();
+
+/// Install the process-wide observer; accounting cannot be replaced after construction.
+pub fn observe_responses(observer: &'static ResponseObserver) -> Result<()> {
+    let known = RESPONSE_OBSERVER.get_or_init(|| observer);
+    anyhow::ensure!(
+        std::ptr::eq(*known, observer),
+        "GitHub response observer was already configured"
+    );
+    Ok(())
+}
+
+pub fn configure(
+    config: &crate::config::Config,
+    observer: &'static ResponseObserver,
+) -> Result<()> {
     let mut config = config.clone();
     if let Some(root) = std::env::var_os("ST3_GITHUB_APP_TOKEN_ROOT") {
         config.github.app_token_root = Some(root.into());
     }
     config.github.validate()?;
+    observe_responses(observer)?;
     if let Some(known) = SOURCE.get() {
         anyhow::ensure!(
             known.as_ref() == &config,
@@ -578,6 +599,9 @@ async fn send_once(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
+    let observer = RESPONSE_OBSERVER
+        .get()
+        .context("GitHub response observer was not configured; no request was sent")?;
     // Admission precedes both the credential-bearing local send and the
     // authorized RPC. A failed send remains spent; there is no HTTP retry.
     let reservation = if let Some(config) = SOURCE.get() {
@@ -616,7 +640,7 @@ async fn send_once(
         }
     }}.await;
     if let Ok(response) = &result {
-        crate::resource::record_github_response(response.status(), response.headers());
+        observer.record(response.status(), response.headers());
     }
     if let Some(reservation) = reservation {
         crate::github_admission::after_send(
@@ -1192,6 +1216,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_mutation_is_sent_once_and_invalidates_its_cache() {
+        let _ = GithubAuth::test("fixture-observer");
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
         let app = axum::Router::new().fallback(move |request: axum::extract::Request| {

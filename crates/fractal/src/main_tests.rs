@@ -120,6 +120,26 @@ fn demo_environment_excludes_both_tui_configuration_spellings() {
 }
 
 #[test]
+fn assistant_pairing_principal_defaults_to_chatgpt_and_accepts_mcp() {
+    for (flag, expected) in [
+        (None, AssistantPrincipal::Chatgpt),
+        (Some("assistant/chatgpt"), AssistantPrincipal::Chatgpt),
+        (Some("assistant/mcp"), AssistantPrincipal::Mcp),
+    ] {
+        let cli = Cli::try_parse_from(
+            ["fractal", "devices", "--as", "person/robin", "pair", "--assistant"]
+                .into_iter().chain(flag),
+        ).unwrap();
+        assert!(matches!(cli.command, Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Pair { assistant: Some(principal), .. }), ..
+        }) if principal == expected));
+    }
+    assert!(Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/robin", "pair", "--assistant", "assistant/forged",
+    ]).is_err());
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",
@@ -365,6 +385,21 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
 }
 
 #[test]
+fn slo_list_and_explanation_show_observation_source_host_and_unsupported() {
+    let row = json!({"id":"claude/example/5h","kind":"budget","status":"unsupported",
+        "current":"unsupported","target":"100% allowance","window":"5-hour",
+        "source":"omp-usage","host":"example-host","remaining_percent":null,
+        "explain":"The provider does not support this window."});
+    let list = render_slo_list(std::slice::from_ref(&row));
+    assert!(list.contains("SOURCE"));
+    assert!(list.contains("HOST"));
+    assert!(list.contains("unsupported"));
+    assert!(list.contains("omp-usage"));
+    assert!(list.contains("example-host"));
+    assert!(render_slo_explanation(&row).contains("SOURCE   omp-usage · example-host"));
+}
+
+#[test]
 fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
     let row = json!({"id": "person-read", "kind": "objective"});
     let history = json!({
@@ -599,6 +634,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -1043,6 +1079,116 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
         Some("a".into())
     );
     assert!(leave_receipt_confirmation(Some(&removed)).is_err());
+}
+
+#[test]
+fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
+    let missing = Cli::try_parse_from(["fractal", "budgets", "attention"])
+        .err()
+        .expect("attention budget requires a mission");
+    assert_eq!(missing.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(Cli::try_parse_from([
+        "fractal", "budgets", "attention", "--mission", "mission/example",
+    ]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "fractal", "budgets", "attention", "mission/example",
+    ]).expect("positional mission parses without optional filters");
+    assert!(!cli.json);
+    let Command::Budgets {
+        command: BudgetsCommand::Attention { mission, actor: _, person, at },
+    } = cli.command else {
+        panic!("expected budgets attention");
+    };
+    assert_eq!(mission, "mission/example");
+    assert_eq!(person, None);
+    assert_eq!(at, None);
+
+    for arguments in [
+        vec![
+            "fractal", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000", "--json",
+        ],
+        vec![
+            "fractal", "--json", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments)
+            .expect("attention budget filters and global JSON parse");
+        assert!(cli.json);
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(mission, "mission/example");
+        assert_eq!(actor.as_deref(), Some("agent/node.desk"));
+        assert_eq!(person.as_deref(), Some("person/operator"));
+        assert_eq!(at, Some(1_794_182_400_000_u128));
+    }
+    for actor in ["person/operator", "agent/node.desk"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "budgets", "attention", "mission/example", "--as", actor,
+        ]).expect("attention budget accepts a concrete acting person or agent");
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { actor: parsed, person, .. },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(parsed.as_deref(), Some(actor));
+        assert_eq!(person, None, "acting identity is not the recipient filter");
+    }
+}
+
+#[tokio::test]
+async fn attention_budget_generated_unix_client_requires_an_acting_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = fractal_daemon::api::tests_shared::state(directory.path());
+    let source = r#"version 2
+agent "desk" { workspace "."; command "true"; restart always; }
+mission "example/budget" state="ready" {
+  goal "Gather decisions."
+  step "work" { assigned-to "agent/node.desk"; goal "Ask the recipient." }
+}
+"#;
+    let intent = fractal_daemon::graph::parse_intent(source, "node").unwrap();
+    let preview = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply_as(
+        &intent, &preview.subject_tokens, "budget-cli-fixture", Some("person/operator"),
+    ).unwrap();
+
+    let socket = directory.path().join("budget.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = fractal_daemon::api::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let actor = fractal_drivers::contracts::env("ST_AGENT")
+        .filter(|actor| actor.starts_with("agent/"))
+        .unwrap_or_else(|| "agent/node.desk".into());
+    let response = attention_budget_client(
+        &endpoint, Some(&actor), Some("person/operator"),
+    ).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap();
+    assert_eq!(response.value.mission, "mission/example/budget");
+    assert_eq!(response.value.person, "person/operator");
+    assert_eq!(response.value.inclusive, 0);
+
+    let error = generated_client(&endpoint, None).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap_err();
+    let GeneratedClientError::Api(ClientErrorCode::Forbidden, message, envelope) = error else {
+        panic!("expected the actorless client's revalidation error, got {error:?}");
+    };
+    assert_eq!(message, "the client session grant is absent");
+    assert_eq!(envelope.code, ClientErrorCode::Forbidden);
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
@@ -1825,15 +1971,15 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 }
 
 #[test]
-fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
+fn harness_actor_rejection_uses_fractal_work_ask_at_the_error_rendering_boundary() {
     let cli = Cli::try_parse_from([
         "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
     ]).unwrap();
     let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
     for native_driver in [false, true] {
         let output = cli_error_message(&error, native_driver);
-        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
-        assert!(!output.contains("fractal work ask"), "{output}");
+        assert!(output.contains("`fractal work ask --as \"$ST_AGENT\"`"), "{output}");
+        assert!(!output.contains("`st work ask"), "{output}");
     }
 }
 
@@ -2428,6 +2574,24 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 }
 
 #[test]
+fn declared_admission_human_output_is_explicitly_not_enforced() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
+    // Historical agent responses still decode and display mission-only numeric
+    // budgets; this is read compatibility, not a new-authoring fixture.
+    agent.declared_admission = Some(serde_json::from_value(serde_json::json!({
+        "priority": "normal", "lane": "check",
+        "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
+    })).unwrap());
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("Declared admission — declared, not enforced.\n"));
+    assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.\n"));
+    for field in ["priority: normal", "lane: check", "cpu_seconds: 300", "memory_max: 8G", "disk_max: 20G", "token_budget: 100000"] {
+        assert!(rendered.contains(field), "{rendered}");
+    }
+}
+
+#[test]
 fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
     let parked = stopped_agent(serde_json::json!({
         "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
@@ -2768,6 +2932,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -2865,6 +3030,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -2945,6 +3111,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -4713,14 +4880,14 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
         // Agent-only continuations deliberately keep the executable available in agent seats.
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
-            "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
+            "the wait stopped because agent/worker has a new message: message/new. Run `fractal conversations ls`"
                 .into()
         )
     );
     assert_eq!(
         wait_interruption_reason(actor, true, &["step-run/new".into()], &[]),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4732,7 +4899,7 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
             &["message/new".into()]
         ),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4769,7 +4936,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
             text.starts_with("people do not have inboxes: print your answer in the chat"),
             "{to}: {text}"
         );
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     // Even a preview of the message is refused.
     let mut preview = args("person/ada");
@@ -6157,6 +6325,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
@@ -6257,6 +6426,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
@@ -6762,6 +6932,130 @@ fn human_mutations_reject_missing_or_shorthand_identity() {
             Cli::try_parse_from(&argv).is_err(),
             "accepted shorthand human identity: {argv:?}"
         );
+    }
+}
+
+#[test]
+fn device_renewal_staging_requires_audited_terms_without_key_or_scope_overrides() {
+    let base = [
+        "fractal", "devices", "renew-stage", "device/phone",
+        "--migration-epoch", "phone-renewal", "--allow", "audited-digest",
+    ];
+    let cli = Cli::try_parse_from(base).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::RenewStage {
+            device_id, migration_epoch, allow_digest, expires_in_hours,
+        }), ..
+    }) = cli.command else { panic!("expected renewal staging") };
+    assert_eq!(device_id, "device/phone");
+    assert_eq!(migration_epoch, "phone-renewal");
+    assert_eq!(allow_digest, "audited-digest");
+    assert_eq!(expires_in_hours, 72);
+    for missing in [
+        vec!["fractal", "devices", "renew-stage", "device/phone"],
+        vec!["fractal", "devices", "renew-stage", "device/phone", "--migration-epoch", "epoch"],
+        vec!["fractal", "devices", "renew-stage", "device/phone", "--allow", "digest"],
+    ] {
+        assert!(Cli::try_parse_from(missing).is_err());
+    }
+    for extra in [
+        ["--scope", "control.messages"],
+        ["--candidate-public-key", "key"],
+        ["--expires-in-hours", "0"],
+        ["--expires-in-hours", "169"],
+    ] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--expires-in-hours", "168"])).is_ok());
+}
+
+#[tokio::test]
+async fn device_renewal_staging_refuses_remote_endpoints_without_connecting() {
+    for endpoint in [
+        Endpoint::Http("http://127.0.0.1:1".into()),
+        Endpoint::parse("fabric://devbox/st3-client-v0").unwrap(),
+    ] {
+        let error = stage_device_renewal(&endpoint, "person/alex", DeviceRenewalStageRequest {
+            api_version: CLIENT_V0_API_VERSION,
+            device_id: "device/phone".into(),
+            migration_epoch: "phone-renewal".into(),
+            allow_digest: "audited-digest".into(),
+            expires_in_hours: 72,
+        }).await.err().expect("remote staging must fail");
+        assert!(error.to_string().contains("trusted local Unix socket"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("renewal.sock");
+    let server_socket = socket.clone();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings/renewals/stage",
+        axum::routing::post(move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send((headers, body)).unwrap();
+                let mut envelope = json!({
+                    "api_version": CLIENT_V0_API_VERSION,
+                    "request_id": "request/renew-stage",
+                    "snapshot": {
+                        "id": "snapshot/host-a/1844/44cd", "host_id": "host/host-a", "store_index": 1844,
+                        "projection_version": "client-projection.v0", "created_at": "2026-09-20T12:00:02Z"
+                    },
+                });
+                envelope["value"] = json!({
+                    "kind": "device-renewal-staged",
+                    "renewal_id": "renewal/phone",
+                    "expires_at": "2026-11-11T12:00:00Z",
+                    "allow_digest": "audited-digest",
+                    "credential": "not-a-receipt-field",
+                });
+                axum::Json(envelope)
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !socket.exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let receipt = stage_device_renewal(&Endpoint::Unix(socket), "agent/deployer", DeviceRenewalStageRequest {
+        api_version: CLIENT_V0_API_VERSION,
+        device_id: "device/phone".into(),
+        migration_epoch: "phone-renewal".into(),
+        allow_digest: "audited-digest".into(),
+        expires_in_hours: 72,
+    }).await.unwrap();
+    let (headers, body) = received.await.unwrap();
+    assert_eq!(headers["x-st3-person"], "agent/deployer");
+    assert_eq!(body, json!({
+        "api_version": CLIENT_V0_API_VERSION,
+        "device_id": "device/phone",
+        "migration_epoch": "phone-renewal",
+        "allow_digest": "audited-digest",
+        "expires_in_hours": 72,
+    }));
+    assert_eq!(serde_json::to_value(receipt).unwrap(), json!({
+        "kind": "device-renewal-staged",
+        "renewal_id": "renewal/phone",
+        "expires_at": "2026-11-11T12:00:00Z",
+        "allow_digest": "audited-digest",
+    }));
+    server.abort();
+}
+
+#[test]
+fn device_renewal_staging_requires_the_callers_literal_agent_actor() {
+    let command = |actor: &str| Cli::try_parse_from([
+        "fractal","devices","renew-stage","--as",actor,"device/phone",
+        "--migration-epoch","phone-renewal","--allow","audited-digest",
+    ]).unwrap().command;
+    assert!(guard_mutating_cli_actor(&command("agent/deployer"),Some("agent/deployer"),None).is_ok());
+    for actor in ["person/alex","agent/other"] {
+        assert!(guard_mutating_cli_actor(&command(actor),Some("agent/deployer"),None).is_err());
     }
 }
 
@@ -8233,6 +8527,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -9318,7 +9613,7 @@ async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
 
 #[test]
 fn github_watch_continuation_keeps_the_agent_executable() {
-    assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
+    assert_eq!(GH_UNWATCH_HINT, "To stop: fractal gh unwatch");
 }
 
     #[test]
@@ -9443,6 +9738,7 @@ impl MovedSeat {
             cedar.apply_internal(&fractal_daemon::parse_intent(source, "cedar").unwrap(), "moved-seat").unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),

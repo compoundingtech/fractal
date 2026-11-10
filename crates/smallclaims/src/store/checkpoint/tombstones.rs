@@ -53,9 +53,9 @@ impl CheckpointManifest {
     pub fn append(
         &mut self,
         page: CheckpointManifestPage,
-    ) -> Result<Option<CheckpointManifestCursor>, St3Error> {
+    ) -> Result<Option<CheckpointManifestCursor>, FractalError> {
         if page.checkpoint != self.checkpoint || page.cut_unix_ms != self.cut_unix_ms {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "checkpoint-manifest-invalid",
                 format!(
                     "a manifest page for `{}` does not continue `{}`",
@@ -69,8 +69,8 @@ impl CheckpointManifest {
     }
 }
 
-pub fn invalid_manifest(message: impl Into<String>) -> St3Error {
-    St3Error::new("checkpoint-manifest-invalid", message)
+pub fn invalid_manifest(message: impl Into<String>) -> FractalError {
+    FractalError::new("checkpoint-manifest-invalid", message)
 }
 
 /// Check a manifest against the `drop_digest` that a stable checkpoint's participants verified,
@@ -79,7 +79,7 @@ pub fn invalid_manifest(message: impl Into<String>) -> St3Error {
 pub fn verify_checkpoint_manifest(
     manifest: &CheckpointManifest,
     expected_drop_digest: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mut envelopes = BTreeSet::new();
     for envelope in &manifest.envelopes {
         if envelope.accepted_at_unix_ms >= manifest.cut_unix_ms {
@@ -127,7 +127,7 @@ pub fn verify_checkpoint_manifest(
     }
     let digest = drop_digest(&manifest.envelopes, &manifest.claims);
     if digest != expected_drop_digest {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "checkpoint-manifest-mismatch",
             format!(
                 "the manifest of `{}` does not match the drop its participants verified",
@@ -204,6 +204,25 @@ pub fn checkpointed_operations(connection: &Connection) -> Result<Vec<(String, S
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+/// What one `Store::mark_payloads_trimmed` did, for the line a trim logs at each patch.
+#[derive(Debug, Default)]
+pub struct SnapshotPatch {
+    /// Deleted envelopes the patch was given.
+    pub envelopes: usize,
+    /// Of those, the ones the snapshot listed with their payload, now marked payloadless.
+    pub marked: usize,
+    /// A snapshot was cached to patch.
+    pub cached: bool,
+    /// An exchange still held the cached snapshot, so the patch copied all of it first.
+    pub cloned: bool,
+    /// How long the patch waited for the snapshot build lock.
+    pub lock_wait: std::time::Duration,
+    /// How long it held that lock: the copy, if any, and the marks.
+    pub held: std::time::Duration,
+    /// The replica generation after the patch moved it.
+    pub generation: u64,
 }
 
 impl Store {
@@ -401,6 +420,41 @@ impl Store {
             *snapshot = None;
         }
         self.replica_inventory_changed();
+    }
+
+    /// A trim deleted the payloads of `trimmed`, envelopes its checkpoint still lists: mark them
+    /// payloadless in the cached replication snapshot, as a load from nothing would, instead of
+    /// forgetting it. Identities and digests are unchanged, so the next snapshot builds on from
+    /// this one. Under the build lock, so a build that read the store before the deletes cannot
+    /// publish its snapshot after this patch. A trim that deleted the newest envelope row has
+    /// already moved the inventory generation, and the next snapshot is built from nothing.
+    pub fn mark_payloads_trimmed(&self, trimmed: &[ReplicaEnvelopeId]) -> Result<SnapshotPatch> {
+        let mut patch = SnapshotPatch { envelopes: trimmed.len(), ..SnapshotPatch::default() };
+        {
+            let waiting = std::time::Instant::now();
+            let _building = crate::read_budget::lock_sync(&self.replication_snapshot_build)?;
+            patch.lock_wait = waiting.elapsed();
+            let held = std::time::Instant::now();
+            let mut cached = crate::read_budget::lock_sync(&self.replication_snapshot)?;
+            if let Some(previous) = cached.take() {
+                patch.cached = true;
+                let mut snapshot = Arc::try_unwrap(previous).unwrap_or_else(|shared| {
+                    patch.cloned = true;
+                    (*shared).clone()
+                });
+                for identity in trimmed {
+                    if snapshot.inventory.mark_payloadless(identity) {
+                        snapshot.envelope_rows = snapshot.envelope_rows.saturating_sub(1);
+                        patch.marked += 1;
+                    }
+                }
+                *cached = Some(Arc::new(snapshot));
+            }
+            patch.held = held.elapsed();
+        }
+        self.replica_inventory_changed();
+        patch.generation = self.replica_generation.load(Ordering::Acquire);
+        Ok(patch)
     }
 
     /// Whether evidence may cite this claim: it is stored, or a checkpoint dropped it.

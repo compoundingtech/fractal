@@ -1324,7 +1324,7 @@ mod tests {
             initialize["result"]["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("people have no inbox, so do not reply with st")
+                .contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION)
         );
         let tools = request(
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,

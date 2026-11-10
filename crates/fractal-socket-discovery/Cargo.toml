@@ -1,0 +1,9 @@
+[package]
+name = "fractal-socket-discovery"
+version = "0.1.0"
+edition = "2024"
+description = "Local Unix control socket discovery without transport dependencies"
+license = "MIT"
+
+[dependencies]
+libc.workspace = true

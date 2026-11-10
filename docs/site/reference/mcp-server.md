@@ -8,7 +8,7 @@ order: 6
 
 The Fractal MCP server connects an MCP client to the daemon's paired-client gateway. It exposes a closed set of tools for alerts, missions, agents, conversations, and explicitly scoped writes. It does not expose daemon control or give an assistant person authority.
 
-The Rust package is `fractal-chatgpt`; its binary is `fractal-chatgpt` (`st-chatgpt` kept as an alias binary). The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
+The Rust package and binary are `fractal-chatgpt`. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
 
 The [external-assistant contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md) defines the authority and wire behavior. Remote access is a restricted dogfood path, not an authenticated public service.
 
@@ -19,16 +19,29 @@ Install and configure [Fractal](../getting-started/install.md) first. The daemon
 Build the adapter from the repository root with Rust and the repository's build prerequisites:
 
 ```sh
-cargo build --release -p fractal-chatgpt --bin st-chatgpt
+cargo build --release -p fractal-chatgpt --bin fractal-chatgpt
 ```
 
-The binary is `target/release/st-chatgpt`. The source package also provides the canonical `fractal-chatgpt` binary via `--bin fractal-chatgpt`; the examples here use `st-chatgpt`, which both installation methods provide. Alternatively, obtain the current Nix package:
+The binary is `target/release/fractal-chatgpt`. Alternatively, obtain the current Nix package:
 
 ```sh
-nix build github:compoundingtech/fractal#st-chatgpt
+nix build github:compoundingtech/fractal#fractal-chatgpt
 ```
 
-That binary is `result/bin/st-chatgpt`. Use a matching Fractal revision. The shell examples below assume `st-chatgpt` is on `PATH`; in the MCP client configuration, use the absolute path to the binary produced by your chosen installation method.
+That binary is `result/bin/fractal-chatgpt`. Use a matching Fractal revision. The shell examples below assume `fractal-chatgpt` is on `PATH`; in the MCP client configuration, use the absolute path to the binary produced by your chosen installation method.
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+The legacy executable `st-chatgpt` and Nix attribute `packages.st-chatgpt` remain bridged aliases for existing deployments. New installations use `fractal-chatgpt`.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias -->
+
+Call telemetry uses the `fractal_chatgpt::call` target and is disabled by default. Set
+`RUST_LOG=off,fractal_chatgpt::call=info` to enable content-free call summaries on stderr.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+During a mixed-version rollout, set
+`RUST_LOG=off,fractal_chatgpt::call=info,st_chatgpt::call=info` before upgrading.
+The hard allowlist accepts both targets, but this release emits only `fractal_chatgpt::call`;
+an old-target-only environment filter does not enable the renamed events.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target -->
 
 ## Pair and prepare a grant
 
@@ -83,7 +96,7 @@ CLI pairing selects `caller-bound-allow`: reads within the sealed scopes, consen
 Use stdio when the MCP client launches a local process:
 
 ```sh
-st-chatgpt --transport stdio \
+fractal-chatgpt --transport stdio \
   --socket /PATH/TO/fractal-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
@@ -99,7 +112,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 {
   "mcpServers": {
     "fractal": {
-      "command": "/PATH/TO/st-chatgpt",
+      "command": "/PATH/TO/fractal-chatgpt",
       "args": [
         "--transport", "stdio",
         "--socket", "/PATH/TO/fractal-client.sock",
@@ -115,7 +128,7 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 HTTP is the default transport. The default listen address is `127.0.0.1:8787`:
 
 ```sh
-st-chatgpt --transport http --listen 127.0.0.1:8787 \
+fractal-chatgpt --transport http --listen 127.0.0.1:8787 \
   --socket /PATH/TO/fractal-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
@@ -150,7 +163,7 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
 
-The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the `st-chatgpt` alias binary.
+The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the bridged executable alias.
 
 ## Limits and grant lifecycle
 

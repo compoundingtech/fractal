@@ -8,7 +8,7 @@ version 2
       workspace "${ST_WORKSPACE}"
       command "sh -c 'while :; do sleep 60; done'"
       restart "always"
-      exec "ding" { argv "st3" "driver" "ding" }
+      exec "ding" { argv "fractal" "driver" "ding" }
     }
 
     step "contract" timeout="1m" {

@@ -2,6 +2,10 @@ use super::*;
 
 /// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
+    fractal_client::set_client_name(format!(
+        "fractal-driver-hook {}",
+        fractal_drivers::version::machine_version()
+    ));
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
@@ -747,7 +751,7 @@ async fn drive_st2_native_loop(
             if completion_announced && crate::fixture()
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
             {
-                fs::write(PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
+                fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
             }
         }
         tokio::select! {
@@ -757,8 +761,8 @@ async fn drive_st2_native_loop(
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
-                    fs::write(PathBuf::from(root).join("fence-received"),
-                        if task.is_finished() { "finished" } else { "pending" })?;
+                    fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("fence-received"),
+                        if task.is_finished() { "finished" } else { "pending" }.as_bytes())?;
                 }
                 // The subscription can reopen after the provider has ended, and the daemon then
                 // fences it as terminal. With the provider's task returned there is nothing left
@@ -1223,7 +1227,7 @@ async fn fixture_terminal_completion_barrier(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let deferred = observations.drain_live(client, subject, driver, ready).await?;
-    fs::write(root.join("observation-drained"), if deferred { "deferred" } else { "published" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("observation-drained"), if deferred { "deferred" } else { "published" }.as_bytes())?;
     let after = fs::read_to_string(root.join("order"))? == "after";
     if after {
         while !task.is_finished() {
@@ -1233,7 +1237,7 @@ async fn fixture_terminal_completion_barrier(
     } else {
         anyhow::ensure!(!task.is_finished(), "fixture must retain pending provider JoinHandle");
     }
-    fs::write(root.join("join-phase"), if after { "finished" } else { "pending" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("join-phase"), if after { "finished" } else { "pending" }.as_bytes())?;
     while !root.join("poll-driver").exists() {
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "fixture driver release timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2466,8 +2470,8 @@ async fn drive_codex_native_loop(
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
-                    fs::write(PathBuf::from(root).join("fence-received"),
-                        if task.is_finished() { "finished" } else { "pending" })?;
+                    fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("fence-received"),
+                        if task.is_finished() { "finished" } else { "pending" }.as_bytes())?;
                 }
                 let mail_changed = matches!(&frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
@@ -2836,7 +2840,7 @@ async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "Codex fixture provider completion timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    fs::write(root.join("observation-drained"), b"deferred")?;
+    fractal_daemon::test_support::publish_barrier(&root.join("observation-drained"), b"deferred")?;
     let after = fs::read_to_string(root.join("order"))? == "after";
     if after {
         while !task.is_finished() {
@@ -2846,7 +2850,7 @@ async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()
     } else {
         anyhow::ensure!(!task.is_finished(), "Codex fixture must retain pending provider JoinHandle");
     }
-    fs::write(root.join("join-phase"), if after { "finished" } else { "pending" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("join-phase"), if after { "finished" } else { "pending" }.as_bytes())?;
     while !root.join("poll-driver").exists() {
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "Codex fixture driver release timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2992,7 +2996,8 @@ mod tests {
         let clock = Arc::new(AtomicU64::new(0));
         let deadline = Arc::new(AtomicU64::new(600));
         let failed = Arc::new(AtomicBool::new(false));
-        let root = tempfile::tempdir().unwrap();
+        // macOS TMPDIR can exceed the Unix socket path limit.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("renew.sock");
         let step = json!({
             "subject":"step-run/test/work", "run":"mission-run/test",
@@ -3061,7 +3066,7 @@ mod tests {
     /// note keeps its own 10 s limit, so the outage note still follows the error's (#4733).
     #[tokio::test]
     async fn a_stopping_daemons_error_does_not_hide_the_outage_note_after_it() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let unreachable = Client::unix(root.path().join("absent.sock"))
             .get::<serde_json::Value>("/v1/health")
             .await
@@ -3092,7 +3097,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let subject = "agent/eval/gated";
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("control.sock");
         let reads = Arc::new(AtomicUsize::new(0));
         let count = reads.clone();

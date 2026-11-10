@@ -4,6 +4,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 // Isolate the page's transport ownership; use the real telemetry and OTLP exporter.
 const source = vi.hoisted(() => vi.fn(() => ({ dispose: vi.fn(async () => {}) })))
+const pairingStatus = vi.hoisted(() => vi.fn(async (): Promise<{ status: 'paired' | 'unpaired'; credentialChanged: boolean } | undefined> => undefined))
+const closeEarly = vi.hoisted(() => vi.fn())
+vi.mock('../data/browserPairing.ts', () => ({ browserPairingPort: () => ({ status: pairingStatus }) }))
+vi.mock('../data/sdk-browser/early.ts', () => ({ takeEarlyCollections: () => ({ close: closeEarly }), peekEarlyBootstrap: () => undefined }))
 vi.mock('../data/liveSource.ts', () => ({ liveSource: source }))
 vi.mock('virtual:build-identity', () => ({
   buildIdentity: { machineVersion: 'test' }, deploymentId: undefined,
@@ -12,6 +16,9 @@ vi.mock('virtual:build-identity', () => ({
 const frames: FrameRequestCallback[] = []
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  pairingStatus.mockReset()
+  closeEarly.mockClear()
+  source.mockClear()
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length })
   vi.stubGlobal('cancelAnimationFrame', () => {})
 })
@@ -102,6 +109,7 @@ it('uses replay transports without early adoption and closes replay with the pag
     adoptEarlyCollections: false,
     options: expect.objectContaining({
       baseUrl: 'https://example.test', maxFollows: 8, conversationSlots: 'advertised',
+      client: 'fractal-web test',
       socket: replay.socket, fetch: replay.fetch,
     }),
   }))
@@ -110,4 +118,18 @@ it('uses replay transports without early adoption and closes replay with the pag
   expect(underlying.dispose).toHaveBeenCalledOnce()
   expect(replay.close).toHaveBeenCalledOnce()
   telemetry.ux.dispose()
+})
+
+it.each(['paired', 'unpaired'] as const)('settles a %s credential change and discards the old early socket before live initialization', async status => {
+  vi.stubGlobal('window', { location: { origin: 'https://example.test' } })
+  const pending = Promise.withResolvers<{ status: 'paired' | 'unpaired'; credentialChanged: boolean }>()
+  pairingStatus.mockImplementationOnce(() => pending.promise)
+  const loading = import('./liveRuntime.ts')
+  await vi.waitFor(() => expect(pairingStatus).toHaveBeenCalledOnce())
+  expect(source).not.toHaveBeenCalled()
+  pending.resolve({ status, credentialChanged: true })
+  await loading
+  expect(closeEarly).toHaveBeenCalledOnce()
+  expect(source).toHaveBeenCalledOnce()
+  expect(closeEarly.mock.invocationCallOrder[0]).toBeLessThan(source.mock.invocationCallOrder[0]!)
 })

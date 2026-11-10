@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reverts the reconcile wake labels (#5541). A waking replication receive again counts as replication receive, without the claim kind it brought, and the launch identity wake is again unlabelled. The kind lookup scanned every claim kind since the receive's cursor, so a receive's work grew with the store.",
+  "replay": {"status": "none", "detail": "No replay trigger or recovery wait."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or migrations."},
+  "rules": {"status": "none", "detail": "No wake decision changes: a receive wakes the reconciler on exactly the claims it did before and after #5541."},
+  "compatibility": {"status": "none", "detail": "Mixed-version safe: no wire, client, claim or stored-format change. OpenTelemetry's wake registry loses launch_identity again, which only #5541's build emitted."},
+  "downtime": {"status": "none", "detail": "No storage migration or added startup work."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Nothing is stored; rolling forward to #5541's build restores the labels and its receive cost."}
+}
