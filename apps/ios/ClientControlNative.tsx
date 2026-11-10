@@ -64,8 +64,8 @@ class CommandSubscription extends React.Component<SubscriptionProps> {
   private stop: (() => void) | undefined;
   private start = () => {
     const { binding, feed, granted, reportError } = this.props;
-    this.stop = feed.followCommands(true, granted, command => {
-      void binding.controller.handle(command).catch(error => reportError(String(error)));
+    this.stop = feed.followCommands(true, granted, (command, snapshot) => {
+      void binding.controller.handle(command, snapshot).catch(error => reportError(String(error)));
     }, binding.controller.suspend);
   };
   componentDidMount() { this.start(); }
@@ -98,9 +98,13 @@ export const ClientControlNative = () => {
       navigate: navigation.navigate,
       result: async (binding, current) => {
         if (!current()) return;
-        if (!globalThis.crypto?.subtle) throw new Error('Client-control signing needs the generated native SHA-256 port');
-        const result = await signClientResult(binding, controlProfile.signing, signWithDeviceKey, Date.now(), base64url(Crypto.getRandomBytes(16)));
-        if (!current()) return;
+        const result = await signClientResult(binding, controlProfile.signing, signWithDeviceKey, Date.now(), base64url(Crypto.getRandomBytes(16)),
+          async bytes => {
+            const input = bytes.buffer instanceof ArrayBuffer
+              ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : Uint8Array.from(bytes);
+            return new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, input));
+          });
+        if (!result || !current()) return;
         await client.deviceResult(result);
       },
       revoke: () => revokeClientControl(client, controlProfile.identity.device),
