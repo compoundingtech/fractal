@@ -12,9 +12,8 @@ const visible = (): VisibleState | undefined => {
   const route = navigationRef.getCurrentRoute();
   if (route?.name === 'NowRoot') return { screen: 'NowRoot' };
   const params = route?.params;
-  if (route?.name !== 'Conversation' || !params || !('target' in params) || typeof params.target !== 'string') return;
-  return { screen: 'Conversation', target: params.target,
-    ...('sessionId' in params && typeof params.sessionId === 'string' ? { sessionId: params.sessionId } : {}) };
+  if (route?.name !== 'Attention' || !params || !('id' in params) || typeof params.id !== 'string') return;
+  return { screen: 'Attention', id: params.id };
 };
 
 export const ClientControlNative = () => {
@@ -26,7 +25,7 @@ export const ClientControlNative = () => {
     navigate: args => {
       if (!navigationRef.isReady()) return;
       if (args.screen === 'NowRoot') navigationRef.navigate('Now', { screen: 'NowRoot' });
-      else if (args.screen === 'Conversation') navigationRef.navigate('Now', { screen: 'Conversation', params: args.params, initial: false });
+      else if (args.screen === 'Attention') navigationRef.navigate('Now', { screen: 'Attention', params: args.params, initial: false });
     },
   }), [feed]);
   useEffect(() => feed?.followCommands(testMode, granted, command => { void controller.handle(command); }), [feed, testMode, granted, controller]);

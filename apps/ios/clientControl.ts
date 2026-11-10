@@ -4,7 +4,7 @@ import { authorizeClientControl, revokeClientControl } from './clientControlWire
 /** App-local committed route; item IDs are present only when actually observed. */
 export type VisibleState =
   | { readonly screen: 'NowRoot'; readonly itemIds?: readonly string[] }
-  | { readonly screen: 'Conversation'; readonly target: string; readonly sessionId?: string; readonly itemIds?: readonly string[] };
+  | { readonly screen: 'Attention'; readonly id: string; readonly itemIds?: readonly string[] };
 
 /** UI projection only. This is not a wire grant and cannot establish authority. */
 export interface ActiveControlGrant {
@@ -18,6 +18,21 @@ export interface ClientControlPorts {
   foreground(): boolean;
 }
 
+/** Pure navigation only: no answer, close, read-state or result capability. */
+export const navigateClientControl = (args: PhoneNavigateArgs, navigate: ClientControlPorts['navigate']): boolean => {
+  if (args.screen !== 'NowRoot' && args.screen !== 'Attention') return false;
+  navigate(args);
+  return true;
+};
+
+/** Local policy only; the wire adapter must independently establish grant authority. */
+export const applyGrantedClientControl = (command: DeviceCommand, scope: { verbs: readonly string[]; screens: readonly string[] }, ports: ClientControlPorts): void => {
+  if (!scope.verbs.includes(command.command_kind) || !ports.foreground()) return;
+  if (command.command_kind === 'phone.inspect') { ports.visible(); return; }
+  if (command.command_kind !== 'phone.navigate' || !scope.screens.includes(command.args.screen)) return;
+  navigateClientControl(command.args, ports.navigate);
+};
+
 export class ClientControlController {
   constructor(private readonly ports: ClientControlPorts) {}
 
@@ -29,19 +44,8 @@ export class ClientControlController {
   readonly handle = async (command: DeviceCommand): Promise<void> => {
     const grant = this.getGrant();
     if (!authorizeClientControl(command, { grant, foreground: this.ports.foreground })) return;
-    if (!grant || !this.ports.foreground()) return;
-    switch (command.command_kind) {
-      case 'phone.inspect':
-        this.ports.visible();
-        break;
-      case 'phone.navigate':
-        if (command.args.screen !== 'NowRoot' && command.args.screen !== 'Conversation') return;
-        this.ports.navigate(command.args);
-        break;
-      case 'phone.message.read':
-        // Message bodies are outside this controller's visible-route ports.
-        break;
-    }
+    if (!grant) return;
+    applyGrantedClientControl(command, { verbs: ['phone.inspect', 'phone.navigate'], screens: ['NowRoot', 'Attention'] }, this.ports);
     // No result is posted: signing/encoding must come from #6274 codegen.
   };
 

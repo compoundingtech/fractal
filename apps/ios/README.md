@@ -51,6 +51,8 @@ The fifteen-second collections opening deadline includes the WebSocket handshake
 
 Commands use this same session-scoped socket only when Expo extra `testClientMode` is exactly `true` and `phone-commands` v1 is granted. Missing test mode means the normal app: no commands subscription. Client control currently fails closed: the generated grant lifecycle, enrollment revoke and canonical signed-result contract are unavailable, so delivered commands neither navigate nor post results. The single `clientControlWire.ts` boundary owns those bindings. The internal run indicator stays hidden without an active grant; route observation reads committed navigation, not a requested destination. Pending codegen tests document the unavailable wire behaviors.
 
+The local v1 policy permits only inspect and navigation to `NowRoot` (inbox) or `Attention` with `params: {id}`. Conversation and answer/read/close operations are excluded. The seeded request uses the normal request renderer, not a test-only view: plain single-paragraph text renders as one containing native text root; rich Markdown or JSON reports can render multiple elements. Source-level JSX tests cover the fixture body and request title; native accessibility-tree observation remains a separate XCUITest proof.
+
 Observation reporting holds one send slot during both batch preparation and transport. Closing a measured minute can synchronously notify the reporter; that notification cannot prepare a second batch while the first is being formed. A null or empty batch releases the slot without delaying the next measurement.
 
 ## Layout
