@@ -80,6 +80,7 @@ public struct ClientResultBinding: Codable, Sendable, Equatable {
 public struct ClientControlGrant: Codable, Sendable, Equatable {
     public var grant_id: String; public var run_id: String; public var device: String; public var session: String; public var actor_agent: String
     public var verbs: [String]; public var screens: [String]; public var max_commands: UInt64; public var expires_at: String; public var state: String
+    public var item_id: String?
 }
 private func clientResultQuote(_ text: String) -> String {
     var result = "\""

@@ -16,6 +16,7 @@ pub mod propagation;
 pub mod quota;
 pub mod scenarios;
 pub use contract::*;
+pub use fractal_schema::client_control::*;
 pub use generated::*;
 mod identities;
 pub use identities::*;
@@ -3687,6 +3688,14 @@ impl Client {
         result: &DeviceResult,
     ) -> Result<Envelope<DeviceCommand>, ClientError> {
         self.post("/v1/client/device-results", result).await
+    }
+
+    pub async fn client_test_revoke(&self, device: &str) -> Result<serde_json::Value, ClientError> {
+        self.post(
+            "/v1/client/test-clients/revoke",
+            &serde_json::json!({"device": device}),
+        )
+        .await
     }
 
     pub async fn pairing_begin(
