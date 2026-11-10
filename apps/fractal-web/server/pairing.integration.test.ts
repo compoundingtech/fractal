@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { createServer } from 'node:http'
+import { createServer, request } from 'node:http'
 import type { Server } from 'node:http'
 import { once } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -56,10 +56,30 @@ const fixture = async (admitted = false) => {
   if (address === null || typeof address === 'string') throw new TypeError('Missing listener')
   listening = `127.0.0.1:${address.port}`
   const headers = { host: new URL(origin).host, origin, 'tailscale-user-login': login }
-  const call = (action: string, cookie?: string, overrides: Record<string, string | undefined> = {}) => fetch(`http://127.0.0.1:${address.port}/_fractal/pair/${action}`, {
-    method: action === 'status' ? 'GET' : 'POST', headers: Object.fromEntries(Object.entries({ ...headers, ...(cookie === undefined ? {} : { cookie }), ...overrides }).filter((entry): entry is [string, string] => entry[1] !== undefined)),
-    ...(action === 'start' ? { body: JSON.stringify({ deviceLabel: 'Personal browser' }) } : {}),
-  })
+  // Use the HTTP transport so Host is preserved. Node fetch may replace it with the
+  // loopback URL's host, which is not the HTTPS origin published by the proxy.
+  const call = (action: string, cookie?: string, overrides: Record<string, string | undefined> = {}): Promise<Response> => {
+    const { promise, resolve, reject } = Promise.withResolvers<Response>()
+    const upstream = request({
+      hostname: '127.0.0.1', port: address.port, path: `/_fractal/pair/${action}`,
+      method: action === 'status' ? 'GET' : 'POST',
+      headers: Object.fromEntries(Object.entries({ ...headers, ...(cookie === undefined ? {} : { cookie }), ...overrides }).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    }, response => {
+      const chunks: Buffer[] = []
+      response.on('data', (chunk: Buffer) => chunks.push(chunk))
+      response.once('error', reject)
+      response.once('end', () => {
+        const responseHeaders = new Headers()
+        for (const [name, values] of Object.entries(response.headersDistinct)) {
+          for (const value of values ?? []) responseHeaders.append(name, value)
+        }
+        resolve(new Response(Buffer.concat(chunks), { status: response.statusCode, headers: responseHeaders }))
+      })
+    })
+    upstream.once('error', reject)
+    upstream.end(action === 'start' ? JSON.stringify({ deviceLabel: 'Personal browser' }) : undefined)
+    return promise
+  }
   return { call, received, setStatus: (value: string) => { status = value }, setGrantStatus: (value: number) => { grantStatus = value } }
 }
 
