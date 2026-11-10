@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The isolated terminal test client consumes bounded device commands, signs purpose-bound visible-state results, displays the active run, and offers a global enrollment revoke key.",
+  "replay": {"status": "none", "detail": "No replay changes; commands remain ephemeral."},
+  "schema": {"status": "none", "detail": "Consumes the shared client-control result and grant schema."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes or enrollment effects."},
+  "compatibility": {"status": "none", "detail": "Normal terminal clients do not subscribe to commands; fixture control requires an explicit separate paired profile."},
+  "downtime": {"status": "none", "detail": "No daemon restart or activation."},
+  "manual": {"status": "changed", "detail": "Fixture setup and initial test-client enrollment require separate approvals. Use the isolated client socket, dedicated profile and narrow read-plus-command scopes."},
+  "recovery": {"status": "none", "detail": "Revoke test-client enrollment and revert the source change; preserve normal pairings."}
+}

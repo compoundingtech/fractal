@@ -5419,6 +5419,15 @@ fn plain_ui_requested(arguments: usize, stdin: bool, stdout: bool, seat: bool) -
 /// The TUI owns its runtime and terminal restoration; never enter it from run_cli.
 fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> ExitCode {
     let result = (|| -> Result<()> {
+        if options.client_control_profile.is_some() {
+            anyhow::ensure!(fractal_daemon::instance::current()
+                .is_some_and(|instance| instance.name() == "client-control-fixture"),
+                "Client control is restricted to client-control-fixture");
+            let config = Config::load_client_unvalidated(None)?.0;
+            let socket = config.client_gateway_socket;
+            anyhow::ensure!(socket != config.socket, "Client control cannot use the privileged socket");
+            options = options.with_client_control_socket(socket);
+        }
         if let Some(endpoint) = endpoint {
             match Endpoint::parse(endpoint)? {
                 Endpoint::Unix(path) => options = options.with_endpoint(path),

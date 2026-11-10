@@ -4,6 +4,7 @@
 mod ci_test_paths;
 
 mod connection;
+mod client_control;
 mod environment;
 mod ui;
 mod version;
@@ -751,6 +752,11 @@ pub struct Args {
     #[arg(skip)]
     endpoint: Option<PathBuf>,
     #[arg(skip)]
+    client_control_socket: Option<PathBuf>,
+    /// Isolated paired profile for fixture-only device commands (never a normal profile).
+    #[arg(long, conflicts_with = "local")]
+    pub client_control_profile: Option<PathBuf>,
+    #[arg(skip)]
     initial_subject: Option<String>,
     #[arg(skip)]
     playback: Option<ui::playback::Playback>,
@@ -825,6 +831,12 @@ pub struct OpenArgs {
 }
 
 impl Args {
+    /// The CLI supplies this only after selecting the named fixture instance.
+    pub fn with_client_control_socket(mut self, socket: PathBuf) -> Self {
+        self.client_control_socket = Some(socket);
+        self
+    }
+
     /// Override local socket discovery with the CLI's global endpoint option.
     pub fn with_endpoint(mut self, endpoint: PathBuf) -> Self {
         self.endpoint = Some(endpoint);
@@ -1001,7 +1013,23 @@ pub fn run(mut options: Args) -> Result<()> {
     let local = args.iter().any(|arg| arg == "--local");
     let client_only = args.iter().any(|arg| arg == "--client");
     anyhow::ensure!(!(local && client_only), "Choose --client or --local");
-    let profile = if local {
+    let control_device = if let Some(path) = options.client_control_profile.as_deref() {
+        let socket = options.client_control_socket.as_ref()
+            .context("Client control requires --instance client-control-fixture")?;
+        anyhow::ensure!(options.endpoint.as_ref() == Some(socket),
+            "Client control requires --endpoint pointing to the fixture client socket");
+        let normal = connection::profile_path()?;
+        anyhow::ensure!(path != normal && path.canonicalize()? != normal.canonicalize().unwrap_or(normal),
+            "Client control must not use the normal paired profile");
+        let profile = connection::Profile::load(path)?.context("Pair the isolated TUI profile first")?;
+        anyhow::ensure!(profile.devices.len() == 1, "Fixture profile must contain exactly one pairing");
+        let device = profile.devices.into_iter().next().unwrap();
+        client_control::validate_device(&device, socket)?;
+        Some(device)
+    } else { None };
+    let profile = if let Some(device) = &control_device {
+        Some(connection::Profile { devices: vec![device.clone()] })
+    } else if local {
         None
     } else if std::env::var_os("XDG_CONFIG_HOME").is_none() && std::env::var_os("HOME").is_none() {
         None
@@ -1088,6 +1116,7 @@ pub fn run(mut options: Args) -> Result<()> {
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
         requests,
         playback: options.playback,
+        client_control: control_device,
     })
     .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }

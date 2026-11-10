@@ -177,6 +177,7 @@ impl ReadReceipts {
 
 pub struct Context {
     pub client: Client,
+    pub client_control: Option<fractal_client::device::Device>,
     pub runtime: tokio::runtime::Runtime,
     pub incoming: mpsc::Receiver<feed::Update>,
     pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
@@ -509,6 +510,7 @@ fn save_glass(
 pub fn run(context: Context) -> Result<()> {
     let Context {
         mut client,
+        client_control,
         runtime,
         incoming,
         commands,
@@ -551,6 +553,21 @@ pub fn run(context: Context) -> Result<()> {
     // Messages sent from here, shown at once until st reports them back.
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
+    let fixture_client = client_control.is_some();
+    let mut control = client_control.map(crate::client_control::Control::new);
+    let (control_tx, control_rx) = mpsc::channel();
+    let mut control_queue = std::collections::VecDeque::new();
+    let mut control_pending: Option<serde_json::Value> = None;
+    let mut revoke_sent = false;
+    if control.is_some() {
+        let tx = control_tx.clone();
+        let client = client.clone();
+        runtime.spawn(async move {
+            let result = crate::client_control::subscribe(client, tx.clone()).await;
+            let _ = tx.send(serde_json::json!({"kind":"control-offline",
+                "error":result.err().map(|error| error.to_string())}));
+        });
+    }
     ui.load_prefs();
     // A demo's agents are scripted stand-ins whose terminals stay empty: they open on their
     // conversation, without changing this device's choice.
@@ -703,6 +720,52 @@ pub fn run(context: Context) -> Result<()> {
             sync_due = None;
             sync_read_at = Some(Instant::now());
             read_sync(&runtime, &client, &fetched_tx);
+        }
+        if let Some(control) = &mut control {
+            if ui.client_control.revoke_requested && !revoke_sent {
+                control.stop();
+                control_queue.clear();
+                control_pending = None;
+                revoke_sent = true;
+                let device = control.device.session.device_id.clone();
+                let client = client.clone();
+                let tx = control_tx.clone();
+                runtime.spawn(async move {
+                    let result = client.client_test_revoke(&device).await;
+                    let _ = tx.send(serde_json::json!({"kind":"control-revoked",
+                        "error":result.err().map(|error| error.to_string())}));
+                });
+            }
+            while let Ok(frame) = control_rx.try_recv() {
+                match frame["kind"].as_str() {
+                    Some("control-offline") => {
+                        control.stop();
+                        control_queue.clear();
+                        control_pending = None;
+                        ui.flash("Client control disconnected; no commands will be applied");
+                    }
+                    Some("control-revoked") if frame["error"].is_null() => {
+                        ui.client_control.revoke_requested = false;
+                        ui.flash("Test-client enrollment revoked");
+                    }
+                    Some("control-revoked") => {
+                        ui.flash(format!("Client control stopped; enrollment revoke failed: {}", frame["error"]));
+                    }
+                    Some("control-result-error") => {
+                        ui.flash(format!("Client result was not accepted: {}", frame["error"]));
+                    }
+                    _ => {
+                        for command in control.ingest(&frame) {
+                            if control_queue.len() < 8 { control_queue.push_back(command); }
+                        }
+                    }
+                }
+            }
+            let grant = control.active();
+            ui.client_control.run_id = grant.and_then(|grant| grant["run_id"].as_str()).map(str::to_owned);
+            ui.client_control.expires_at = grant.and_then(|grant| grant["expires_at"].as_str())
+                .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
+                .map(|stamp| stamp.with_timezone(&chrono::Utc));
         }
         while let Ok(update) = incoming.try_recv() {
             match update {
@@ -1966,6 +2029,19 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
+        if let Some(control) = &control {
+            if control_pending.is_none() {
+                while let Some(command) = control_queue.pop_front() {
+                    if ui.control_foreground() && ui.control_apply(control, &command) {
+                        control_pending = Some(command);
+                        break;
+                    }
+                }
+            }
+            if control_pending.as_ref().is_some_and(|command| !control.allows(command, ui.control_screen())) {
+                control_pending = None;
+            }
+        }
         let draw_started = Instant::now();
         terminal.draw(|frame| {
             ui.render(frame);
@@ -1974,6 +2050,25 @@ pub fn run(context: Context) -> Result<()> {
             }
         })?;
         // A message just sent is on screen from this draw on: the time from pressing send to it.
+        if let (Some(control), Some(command)) = (&mut control, &control_pending) {
+            let state = ui.control_visible();
+            if ui.control_foreground() && (command["args"]["screen"] != "Conversation" || state.opened_item.is_some()) {
+                match control.result(command, state) {
+                    Ok(Some(result)) => {
+                        let client = client.clone();
+                        let tx = control_tx.clone();
+                        runtime.spawn(async move {
+                            if let Err(error) = client.device_result(&result).await {
+                                let _ = tx.send(serde_json::json!({"kind":"control-result-error","error":error.to_string()}));
+                            }
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => ui.flash(format!("Client result not signed: {error}")),
+                }
+                control_pending = None;
+            }
+        }
         for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
             entry.echoed = true;
             super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
@@ -2080,7 +2175,7 @@ pub fn run(context: Context) -> Result<()> {
         {
             read_receipts.displayed(id, Instant::now());
         }
-        if extras.live
+        if extras.live && !fixture_client
             && let Some(id) = read_receipts.next(Instant::now())
         {
             let client = client.clone();

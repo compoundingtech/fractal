@@ -10,6 +10,7 @@ mod alerts;
 mod answers;
 mod attach;
 mod clickable;
+mod client_control;
 mod content;
 mod context;
 #[cfg(test)]
@@ -397,6 +398,7 @@ pub struct Ui {
     world: World,
     /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
     pub(super) keyboard_enhanced: bool,
+    pub(super) client_control: client_control::Status,
     triage: triage::Cursor,
     recent: recent::RecentState,
     /// Each list's selection, by the section it lists (Now, Agents, Missions, Fleet, Usage,
@@ -784,6 +786,7 @@ impl Ui {
             world,
             selected: [0; 6],
             keyboard_enhanced: false,
+            client_control: client_control::Status::default(),
             triage: triage::Cursor::default(),
             recent: recent::RecentState::default(),
             list_top: RefCell::new([0; 6]),
@@ -1967,6 +1970,11 @@ impl Ui {
 
     fn footer(&self, buf: &mut Buffer, area: Rect) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
+        if let Some(indicator) = self.client_control.indicator() {
+            buf.set_stringn(area.x + 1, area.y, indicator, area.width.saturating_sub(2) as usize,
+                Style::default().fg(theme::YELLOW).bg(theme::CRUST));
+            return;
+        }
         if let Link::Offline(message) = &self.world.link {
             buf.set_stringn(
                 area.x + 1,
@@ -4188,6 +4196,11 @@ impl Ui {
 
     /// Dispatch the outer terminal's decoded input, shared by the live and demo loops.
     fn input_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::FocusLost => self.client_control.focus_lost = true,
+            Event::FocusGained => self.client_control.focus_lost = false,
+            _ => {}
+        }
         if self.live
             && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
             && (self.editing
@@ -4350,6 +4363,9 @@ impl Ui {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
+        if self.client_control.key(key) {
+            return;
+        }
         if self.observe_recent_key(key) {
             return;
         }

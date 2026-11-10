@@ -318,3 +318,58 @@ budget left over the period. The rows come from `slo.list` and the chart from `s
 read from this member's daemon: the list is read when Usage is shown and again when a limits reading
 changes, never on a timer, and the chart once for each selected row and period. A member without
 the routes shows that its daemon needs an update.
+
+## Isolated client control
+
+The optional `--client-control-profile PATH` consumes the existing `commands`
+collection, not a terminal-input protocol. It is restricted to
+`--instance client-control-fixture`, `person/client-control-fixture`, and an
+explicit `--endpoint` equal to that instance's configured **client** Unix socket.
+The privileged socket, normal paired profile, mixed-member profiles and message
+authority are refused. Normal TUI startup does not subscribe to commands.
+
+### Ready-to-enroll packet
+
+Source preparation does not authorize setup, pairing, enrollment or a granted
+journey. Before bootstrap, bind the approved fixture setup receipt, exact release
+commit, instance client socket and dedicated profile path into the enrollment
+consent packet. The packet names kind `tui`, instance `client-control-fixture`,
+the selected host, and the native consent ask. No runtime device, session, grant,
+run or message IDs are precomputed.
+
+After the separate fixture setup and TUI enrollment approvals, use the existing
+`pairing.begin` operation with scopes exactly `read.projections` and
+`control.commands`. Complete its manually supplied code and independently pinned
+person-root fingerprint with `devices complete unix:/ABSOLUTE/CLIENT/SOCKET
+PAIRING_ID --algorithm p256 --profile DEDICATED_PROFILE --fingerprint SHA256`.
+The client generates and privately stores its P-256 key; the local enrollment
+operation binds that existing device, pairing session and public key. It does
+not create keys, pair a normal device, or grant `control.messages`.
+
+Launch `fractal --instance client-control-fixture --endpoint
+unix:/ABSOLUTE/CLIENT/SOCKET tui --client-control-profile DEDICATED_PROFILE`.
+The status line names the active run and `ctrl+alt+x` revokes enrollment.
+The key stops command execution locally before requesting revocation; a failed
+network request remains visibly pending and does not resume control. Re-enrollment
+requires fresh consent and a new launch. Grant expiry, ended/revoked lifecycle
+events and a disconnected control subscription stop execution/signing. Only
+`phone.inspect` and `phone.navigate` to `NowRoot` or an agent `Conversation` are
+supported; explicit historical `sessionId` navigation produces no result.
+Read receipts are disabled for the entire isolated control session, not just
+while a grant is active.
+
+### Independent terminal observation
+
+In a separate observer process, capture the actual terminal pane with
+`tmux capture-pane -p -J -t PANE`, retaining the unmodified output as evidence.
+Make the pane large enough to show the full seeded title/body. Run
+`python3 crates/fractal-tui/tests/client_control_capture.py CAPTURE --title
+'client-control fixture 0001' --body-sha256 APPROVED_SEED_DIGEST
+--body-rectangle FIRST_ROW LAST_ROW FIRST_COLUMN LAST_COLUMN`.
+Coordinates are one-based and inclusive; select only the rendered body, excluding
+borders. The helper hashes those terminal cells and checks the separately known
+title and approved digest, never the client's signed report. It rejects missing,
+truncated or different content. Preserve the capture digest, source commit,
+instance identity and rectangle alongside each independently verified receipt.
+This content check does not replace fixture payload/manifest/canary checks or
+before/after read-state and normal-pairing verification.
