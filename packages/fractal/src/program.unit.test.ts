@@ -389,7 +389,9 @@ describe('asks, child runs and worker turns', () => {
           value: {
             run: 'mission-run/child-3',
             status: 'completed',
-            products: { 'mission-run/child-3/review/verdict': { verdict: 'GO', head: 'h1' } },
+            products: {
+              'resource/mission-run/child-3/review/verdict': { verdict: 'GO', head: 'h1' },
+            },
           },
         },
       }

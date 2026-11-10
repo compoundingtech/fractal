@@ -94,7 +94,7 @@ export default Fractal.mission(
 |---|---|---|
 | `Fractal.mission(intent, program)` | a `Workflow` with `intent.input` as payload and `intent.output` as success | the success, encoded with `output`, or the typed failure fails the program step |
 | `Fractal.step({ id, success?, error? }, effect)` | an `Activity` named by its key: `id`, then `id#2`… for repeats, so `Effect.retry` runs it again under a new key | its encoded value, or its typed failure with `_tag` and fields; defects and interrupts are not journaled |
-| `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | a `DurableDeferred` | a worker turn: a linked child run of `mission`; the product `<child run>/<product>`, decoded with `success`, is the value |
+| `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | a `DurableDeferred` | a worker turn: a linked child run of `mission`; the product `resource/<child run>/<product>`, decoded with `success`, is the value |
 | `Fractal.ask({ id, for, title, request, deadline?, default? })` | a `DurableDeferred` | a native person ask on the program step, answered `AskAnswer` or failed `AskCancelled` |
 | `Fractal.run(mission, input, { id? })` | a `DurableDeferred` | a linked child run, `ChildRun` or `ChildFailed` |
 | `Fractal.command(argv, { env?, cwd?, priority? })` | — | not journaled: run it inside a step; the host runs it as a process group it ends on cancel |

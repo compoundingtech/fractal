@@ -157,7 +157,10 @@ export function mission(
   return definition
 }
 
-/** The child mission a worker turn runs, and the product below the child run that is its value. */
+/**
+ * The child mission a worker turn runs, and its product's path below the child run
+ * (`review/verdict` names `resource/mission-run/CHILD/review/verdict`), whose value is the step's.
+ */
 export class Worker extends Context.Service<
   Worker,
   {
@@ -244,7 +247,8 @@ export function step(
   return Effect.flatMap(Effect.service(Worker), (worker) =>
     Effect.flatMap(child(options.id, worker.mission, worker.input ?? {}), (done) => {
       if (success === undefined) return Effect.void
-      const subject = `${done.run}/${worker.product}`
+      // The daemon keys products by full subject: `resource/<child run>/<path>`.
+      const subject = `resource/${done.run}/${worker.product}`
       const value = worker.product === undefined ? undefined : done.products?.[subject]
       if (value === undefined)
         return Effect.die(
