@@ -22,7 +22,8 @@ import type { AlertActionPort } from './alert-action-port.ts'
 import type { PromptAnswerPort } from './prompt-answer-port.ts'
 import { fixtureSource } from '../../data/fixtureSource.ts'
 import { DataSourceProvider } from '../../data/react.tsx'
-import { handleGrantedClientControlIntent, type ClientControlIntent } from '../../client-control/grantBoundary.ts'
+import { handleGrantedDeviceCommand } from '../../client-control/grantBoundary.ts'
+import { testCommand, testGrant } from '../../client-control/command.test-support.ts'
 import type { ClientControlRouteTarget } from '../../client-control/navigation.ts'
 
 const alert = {
@@ -208,28 +209,23 @@ it.each(['decision', 'feedback'] as const)(
     }
     let target: ClientControlRouteTarget = { _tag: 'NowRoot' }
     let signatures = 0
-    const permission = {
-      verbs: new Set(['phone.inspect', 'phone.navigate']),
-      screens: new Set(['NowRoot', 'Attention']),
-      boundAskId: shown.id,
-    }
-    const commands: readonly ClientControlIntent[] = [
-      { verb: 'phone.inspect' },
-      { verb: 'phone.navigate', screenName: 'Attention', targetAskId: shown.id },
-      { verb: 'phone.inspect' },
-      { verb: 'phone.navigate', screenName: 'Attention', targetAskId: 'attention/not-bound' },
+    const permission = testGrant(shown.id)
+    const commands = [
+      { command: testCommand('phone.inspect'), refused: false },
+      { command: testCommand('phone.navigate', { screen: 'Attention', params: { id: shown.id } }), refused: false },
+      { command: testCommand('phone.inspect'), refused: false },
+      { command: testCommand('phone.navigate', { screen: 'Attention', params: { id: 'attention/not-bound' } }), refused: true },
       ...['work.done', 'prompt.respond', 'attention.answer', 'attention.close', 'phone.message.read', 'read-position.advance']
-        .map(verb => ({ verb })),
-      { verb: 'phone.navigate', screenName: 'NowRoot' },
-      { verb: 'phone.inspect' },
+        .map(verb => ({ command: testCommand(verb, verb === 'phone.message.read' ? { message_id: 'message/unit' } : {}), refused: true })),
+      { command: testCommand('phone.navigate', { screen: 'NowRoot' }), refused: false },
+      { command: testCommand('phone.inspect'), refused: false },
     ]
-    for (const command of commands) {
+    for (const { command, refused } of commands) {
       const before = signatures
       const previous = target
-      const refused = command.targetAskId === 'attention/not-bound' || !permission.verbs.has(command.verb)
       await act(async () => {
-        expect(await handleGrantedClientControlIntent({
-          intent: command, permission: () => permission, currentTarget: () => target,
+        expect(await handleGrantedDeviceCommand({
+          command, permission: () => permission, currentTarget: () => target,
           foreground: () => true, navigate: async next => { target = next },
           signVisibleState: async () => { signatures += 1 },
         })).toBe(refused ? 'Refused' : 'Applied')
