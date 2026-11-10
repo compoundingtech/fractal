@@ -289,10 +289,11 @@ Choice: a child run. It needs no standing owner and reuses §6.
 
 The data DSL compiles into programs ([data-DSL missions as programs](program-engine-data-dsl.md)).
 A data-DSL mission becomes an orchestrated mission: its native steps as the data DSL renders them,
-plus one generated `program` step that decides when each of them starts. The native step graph
-stays the substrate for worker claims, gates, products, retries and the final phase; ordering,
-parallelism (`Effect.all`), local execs and decisions over step values run in the program body.
-The KDL a person reads is the native rendering plus `orchestrated-by` and the program step.
+plus one generated `program` step, `orchestrator`, that decides when each of them starts and is not
+normal work for the run's outcome. The native step graph stays the substrate for worker claims,
+gates, products, retries, completion and the final phase; ordering, parallelism (`Effect.all`),
+settled local execs and decisions over step values run in the program body. The KDL a person reads
+is the native rendering plus `orchestrated-by` and the orchestrator.
 
 Native graph execution remains for published KDL missions until each is republished from the DSL.
 The `Fractal.steps.*` catalogue (classify, check, merge, publish, verify, revert, review) is one set
