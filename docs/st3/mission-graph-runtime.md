@@ -855,7 +855,7 @@ The command's exit status is its answer:
 | Exit | Answer | What Fractal does |
 |---|---|---|
 | 0 | pass | The boundary passes. |
-| 1 | not yet | The boundary waits. The gate checks again a minute later, then doubles the wait after each further not yet, up to every fifteen minutes. |
+| 1 | not yet | The boundary waits. The gate checks again five seconds later, then doubles the wait after each further not yet, up to every fifteen minutes. Nothing else wakes an exec gate, so a condition the graph observes (a resource, a claim, an exec's exit) belongs in a `field` or `exists` gate, which a change wakes at once. |
 | anything else | broken | The boundary waits for a revision, and the mission's publisher gets one attention item. |
 
 A check is also broken when it cannot start (its workspace is missing, for example), when something
@@ -1137,6 +1137,25 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `fractal work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask keeps no `request` field and takes no named answer.
+
+Typed answer inputs and stored answers may also carry `option_notes: [{id, text}]` for
+named options other than the selected one. Each ID must exist in the request and occur
+once, and each note must contain non-blank text of at most 8,000 characters. Invalid
+notes are refused, never discarded. The chosen option's note remains `text`.
+All option notes survive in `person_answers` and are included in the asker's
+`Answered` message and human-readable answer details.
+The persisted summary also names every other-option note, including when a caller
+supplies an explicit summary, so older readers that ignore the new field still show
+the notes. Strict older schema validators may refuse the extended answer rather
+than render incomplete data.
+
+The terminal UI requires the `person-answer-option-notes` capability (version 1,
+state `granted`) before sending notes on other options. A daemon without that capability
+cannot receive that answer: the UI explains the incompatibility and retains the draft.
+Answers without other-option notes omit `option_notes` and remain compatible with
+older daemons. This prevents an older daemon from ignoring notes while the UI claims
+they were sent.
+
 Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
 `respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
 `assistant_session_actor` expose separate server-owned provenance, not person
@@ -1272,8 +1291,12 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled.
 
-A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+A stall is measured from the run's last sign of life: its last state change and any step's last
+change or progress record. A step that a worker holds counts from the start of its current
+execution interval (its claim, or the end of its last wait), its last progress record, and a
+declared `work wait` until that wait ends. Lease renewals are not a sign of life: a live seat that
+holds a step and records no progress is reported like any other silence, so a worker on a long
+step records progress with `fractal work progress`. Activity in child runs linked from its steps,
 including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a
@@ -1504,6 +1527,8 @@ Fractal supplies these exact context names:
 | `ST_LOOP_FEEDBACK` | Exact prior feedback document, or an empty value. |
 
 The mission and step values are available for `${NAME}` KDL interpolation when the current context defines them. Step members and running gates receive those values as environment variables.
+
+Each `ST_` name in the table also has a `FRACTAL_` spelling with the same value, for example `${FRACTAL_MISSION_RUN}` for `${ST_MISSION_RUN}`. Mission KDL may use either spelling: publication stores the `ST_` spelling, so both publish the same mission revision and a rendered definition shows `${ST_…}`. Step members and running gates receive both environment variables.
 
 Loop KDL can also use `${loop.round}` and `${loop.feedback}`.
 
@@ -1829,6 +1854,8 @@ agentless
 ```
 
 `agentless` means that the reconciler performs the work without an agent claim. Subgraphs and gates can complete an agentless step.
+
+An agentless step hands off without waiting for a reconcile pass. When its exec's `driver exec` wrapper reports the exit, the daemon evaluates the run from that change, and evaluates it again at once while each evaluation writes (at most eight in a row): the step completes, the next step becomes ready, and the evaluation that declares the next step's exec also starts it. An exec that renders files, has run before or is under a rollout still starts in the next pass.
 
 A local selector replaces the inherited selector. It does not add to it.
 

@@ -9,11 +9,11 @@ use crate::api::tests_shared::{probe_claim, state};
 use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
 
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
-    fn own_seat(_pid: u32) -> Option<String> {
-        Some("agent/example-own/worker".into())
+    fn own_seat(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_api_core::api::HarnessAncestry {
+        fractal_api_core::api::HarnessAncestry::Bound("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("api.sock");

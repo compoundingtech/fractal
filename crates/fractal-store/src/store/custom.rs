@@ -3,8 +3,15 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
 
+/// Whole-history admission limits: decision snapshots are refused, never truncated.
+pub const DECISION_INPUTS_MAX_CLAIMS: u64 = 10_000;
+pub const DECISION_INPUTS_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
+/// Work budget includes repaired rows, which do not consume the effective history limits.
+/// Excessive repaired history is refused with the same typed error, never silently skipped.
+const DECISION_INPUTS_MAX_SCANNED_CLAIMS: u64 = 2 * DECISION_INPUTS_MAX_CLAIMS;
+
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h30131c291680 owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hd9bc2fa21a4c owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS custom_registrations (
  subject TEXT PRIMARY KEY, kind TEXT NOT NULL, version INTEGER NOT NULL,
  prefix TEXT NOT NULL, hash TEXT NOT NULL, manifest TEXT NOT NULL,
@@ -27,6 +34,8 @@ CREATE TABLE IF NOT EXISTS custom_dependencies (
 );
 CREATE INDEX IF NOT EXISTS custom_dependencies_input ON custom_dependencies(dependency,source);
 CREATE TABLE IF NOT EXISTS local_custom_dirty (subject TEXT PRIMARY KEY);
+-- Conflict updates intentionally wake the connection-local work notifier even when
+-- another connection already queued the subject; DO NOTHING would lose that hint.
 -- Map canonical-order changes to everything flush can consume, not the whole log.
 -- Registry subjects trigger prefix expansion; dependencies and document bindings
 -- must reach their consumers even when the changed claim is not custom/.
@@ -45,52 +54,52 @@ CREATE VIEW IF NOT EXISTS custom_claim_invalidations AS
  AND substr(json_extract(registration.body,'$.fields.document'),1,length(binding.subject)+1)=binding.subject||'@'
  WHERE +binding.kind='doc.bound';
 CREATE TRIGGER IF NOT EXISTS custom_document_insert AFTER INSERT ON documents BEGIN
- INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=NEW.name ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=NEW.name||'@'||NEW.hash ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=NEW.name ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=NEW.name||'@'||NEW.hash ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_document_delete AFTER DELETE ON documents BEGIN
- INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=OLD.name ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=OLD.name||'@'||OLD.hash ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency=OLD.name ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document')=OLD.name||'@'||OLD.hash ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_document_update AFTER UPDATE OF name,hash ON documents
 WHEN OLD.name IS NOT NEW.name OR OLD.hash IS NOT NEW.hash BEGIN
- INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.name,NEW.name) ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document') IN (OLD.name||'@'||OLD.hash,NEW.name||'@'||NEW.hash) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.name,NEW.name) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE kind='custom.st3-kinds.registered' AND json_extract(body,'$.fields.document') IN (OLD.name||'@'||OLD.hash,NEW.name||'@'||NEW.hash) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_claim_insert AFTER INSERT ON claims BEGIN
- INSERT INTO local_custom_dirty SELECT NEW.subject WHERE NEW.subject LIKE 'custom/%' AND NEW.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=NEW.batch_id AND store_index>NEW.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (NEW.subject,NEW.id) ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE NEW.kind='doc.bound' AND kind='custom.st3-kinds.registered' AND substr(json_extract(body,'$.fields.document'),1,length(NEW.subject)+1)=NEW.subject||'@' ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT NEW.subject WHERE NEW.subject LIKE 'custom/%' AND NEW.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=NEW.batch_id AND store_index>NEW.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (NEW.subject,NEW.id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM claims WHERE NEW.kind='doc.bound' AND kind='custom.st3-kinds.registered' AND substr(json_extract(body,'$.fields.document'),1,length(NEW.subject)+1)=NEW.subject||'@' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_claim_delete AFTER DELETE ON claims BEGIN
- INSERT INTO local_custom_dirty SELECT OLD.subject WHERE OLD.subject LIKE 'custom/%' AND OLD.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=OLD.batch_id AND store_index>OLD.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.subject,OLD.id) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT OLD.subject WHERE OLD.subject LIKE 'custom/%' AND OLD.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=OLD.batch_id AND store_index>OLD.store_index AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.subject,OLD.id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_claim_update AFTER UPDATE ON claims
 WHEN OLD.id IS NOT NEW.id OR OLD.subject IS NOT NEW.subject OR OLD.kind IS NOT NEW.kind
  OR OLD.body IS NOT NEW.body OR OLD.actor IS NOT NEW.actor OR OLD.origin IS NOT NEW.origin
  OR OLD.predecessors IS NOT NEW.predecessors OR OLD.accepted_at_unix_ms IS NOT NEW.accepted_at_unix_ms
  OR OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index BEGIN
- INSERT INTO local_custom_dirty SELECT OLD.subject WHERE OLD.subject LIKE 'custom/%' AND OLD.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT NEW.subject WHERE NEW.subject LIKE 'custom/%' AND NEW.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.subject,NEW.subject,OLD.id,NEW.id) ON CONFLICT(subject) DO NOTHING;
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE (OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index) AND id IN (SELECT id FROM claims WHERE ((batch_id=OLD.batch_id AND store_index>OLD.store_index) OR (batch_id=NEW.batch_id AND store_index>NEW.store_index)) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT OLD.subject WHERE OLD.subject LIKE 'custom/%' AND OLD.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT NEW.subject WHERE NEW.subject LIKE 'custom/%' AND NEW.subject NOT LIKE 'custom/client/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT source FROM custom_dependencies WHERE dependency IN (OLD.subject,NEW.subject,OLD.id,NEW.id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE (OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index) AND id IN (SELECT id FROM claims WHERE ((batch_id=OLD.batch_id AND store_index>OLD.store_index) OR (batch_id=NEW.batch_id AND store_index>NEW.store_index)) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id)) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_batch_update AFTER UPDATE OF origin,replica_sequence ON batches
 WHEN OLD.origin IS NOT NEW.origin OR OLD.replica_sequence IS NOT NEW.replica_sequence BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=NEW.id) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (SELECT id FROM claims WHERE batch_id=NEW.id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_record_insert AFTER INSERT ON replica_records WHEN NEW.claim_id IS NOT NULL BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=NEW.claim_id ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=NEW.claim_id ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_record_update AFTER UPDATE OF position,claim_id,state ON replica_records
 WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id OR OLD.state IS NOT NEW.state BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (OLD.claim_id,NEW.claim_id) ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id IN (OLD.claim_id,NEW.claim_id) ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 CREATE TRIGGER IF NOT EXISTS custom_record_delete AFTER DELETE ON replica_records BEGIN
- INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=OLD.claim_id ON CONFLICT(subject) DO NOTHING;
+ INSERT INTO local_custom_dirty SELECT subject FROM custom_claim_invalidations WHERE id=OLD.claim_id ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;
 END;
 "#;
 
@@ -99,6 +108,14 @@ END;
 pub struct RegistrationRequest {
     pub manifest: Manifest,
     pub actor: String,
+}
+
+/// Complete, authority-validated decision inputs from one database snapshot.
+/// Vector position is canonical interpretation order; store indexes are arrival cursors only.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DecisionInputs {
+    pub claims: Vec<ClaimRecord>,
+    pub basis: Value,
 }
 pub fn typed(e: fractal_schema::ValidationError) -> FractalError {
     FractalError::new(e.code, e.message)
@@ -122,6 +139,51 @@ pub fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>
          ORDER BY CANONICAL_ASC(claims)"))?
         .query_map([subject],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
+
+fn decision_inputs_preflight(
+    connection: &Connection,
+    subject: &str,
+    max_claims: u64,
+    max_body_bytes: u64,
+) -> Result<()> {
+    // No aggregate or sort: SQLite yields each subject row before visiting the next.
+    // Keep repaired rows in the cursor so even a repaired-only history has bounded work.
+    // CASE avoids measuring excluded bodies. Canonical ordering is applied only after
+    // admission, by claims(), in the caller's same read transaction.
+    let mut statement = connection.prepare(
+        "SELECT CASE WHEN NOT EXISTS(
+             SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'
+         ) THEN length(CAST(claims.body AS BLOB)) END
+         FROM claims CROSS JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 LIMIT ?2",
+    )?;
+    let mut rows = statement.query(params![subject, DECISION_INPUTS_MAX_SCANNED_CLAIMS + 1])?;
+    let mut scanned = 0;
+    let mut claim_count = 0;
+    let mut body_bytes = 0_u64;
+    while let Some(row) = rows.next()? {
+        scanned += 1;
+        let bytes: Option<u64> = row.get(0)?;
+        if let Some(bytes) = bytes {
+            claim_count += 1;
+            body_bytes = body_bytes.saturating_add(bytes);
+        }
+        if scanned > DECISION_INPUTS_MAX_SCANNED_CLAIMS
+            || claim_count > max_claims || body_bytes > max_body_bytes
+        {
+            return Err(FractalError::new(
+                "decision-inputs-too-large",
+                format!(
+                    "decision history exceeds its admission budget after scanning {scanned} claims \
+                     ({claim_count} effective claims and {body_bytes} body bytes so far); \
+                     limits are {max_claims} effective claims, {max_body_bytes} body bytes, \
+                     and {DECISION_INPUTS_MAX_SCANNED_CLAIMS} scanned claims including repaired history"
+                ),
+            ).into());
+        }
+    }
+    Ok(())
+}
 pub fn registration(
     connection: &Connection,
     subject: &str,
@@ -136,6 +198,8 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     // Upgrade installed definitions once without changing the schema cookie on reopen.
     for (kind, name, end) in [
         ("VIEW", "custom_claim_invalidations", ";"),
+        ("TRIGGER", "custom_document_insert", "\nEND;"),
+        ("TRIGGER", "custom_document_delete", "\nEND;"),
         ("TRIGGER", "custom_document_update", "\nEND;"),
         ("TRIGGER", "custom_claim_insert", "\nEND;"),
         ("TRIGGER", "custom_claim_delete", "\nEND;"),
@@ -162,6 +226,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     notice_authority::create_invalidation_triggers(connection)
 }
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    capture_work(tx)?;
     if tx
         .query_row(
             "SELECT value FROM meta WHERE key='custom_projections_version'",
@@ -174,12 +239,12 @@ pub fn open(tx: &Transaction<'_>) -> Result<()> {
     {
         rebuild(tx)
     } else {
-        flush(tx)
+        flush_pending(tx)
     }
 }
 pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hcc772813cbfc owner=fractal_store::store::custom TODO=prepare-body-and-predecessor-values */ "DELETE FROM custom_registrations; DELETE FROM custom_sources; DELETE FROM custom_dependencies; DELETE FROM local_custom_dirty; INSERT INTO local_custom_dirty SELECT DISTINCT subject FROM claims WHERE subject LIKE 'custom/%' AND subject NOT LIKE 'custom/client/%';")?;
-    flush(tx)?;
+    flush_pending(tx)?;
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-h15155f5d4e7e owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('custom_projections_version','4')",
         [],
@@ -187,6 +252,53 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 pub fn flush(tx: &Transaction<'_>) -> Result<()> {
+    if !transaction_work::custom_pending(tx) { return Ok(()); }
+    flush_pending(tx)
+}
+
+// The preparation fence uses these same exact catalog definitions. Keep notifier
+// installation and eligibility together: a trusted name alone never admits SQL.
+pub(super) fn work_notifier_definitions() -> &'static BTreeMap<String, String> {
+    static DEFINITIONS: std::sync::LazyLock<BTreeMap<String, String>> = std::sync::LazyLock::new(|| {
+        let mut definitions = BTreeMap::new();
+        for table in ["local_custom_dirty", "custom_registrations", "custom_sources",
+            "custom_dependencies", "identity_names", "identity_heads"] {
+            for action in ["INSERT", "UPDATE", "DELETE"] {
+                let name = format!("custom_work_{table}_{action}");
+                definitions.insert(name.clone(), format!(
+                    /* sqlite-large-value: allow-for-now lv-hb43fa7777c18 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */
+                    "CREATE TRIGGER {name} AFTER {action} ON main.{table} BEGIN SELECT custom_work_pending(); END"
+                ));
+            }
+        }
+        for action in ["INSERT", "UPDATE", "DELETE"] {
+            let rows = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
+            let relevant = rows.iter().map(|row| format!(
+            "({row}.kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published')
+              OR {row}.kind_hint LIKE 'custom.%' OR {row}.kind_hint IS NULL)"
+            )).collect::<Vec<_>>().join(" OR ");
+            let name = format!("custom_work_lifecycle_{action}");
+            definitions.insert(name.clone(), format!(
+                /* sqlite-large-value: allow-for-now lv-hc38ba81818b8 owner=fractal_store::store::custom TODO=chunk-or-reference-exact-wire-values */
+                "CREATE TRIGGER {name} AFTER {action} ON main.replica_records WHEN {relevant} BEGIN SELECT custom_work_pending(); END"
+            ));
+        }
+        definitions
+    });
+    &DEFINITIONS
+}
+
+fn capture_work(connection: &Connection) -> Result<()> {
+    transaction_work::install(connection)?;
+    // Lease renewals do not change declaration liveness or wake this finalizer.
+    for definition in work_notifier_definitions().values() {
+        let body = definition.strip_prefix(/* sqlite-large-value: allow-for-now lv-h248251de0d26 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER ").expect("native notifier definition");
+        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h4711b40b27f6 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER IF NOT EXISTS {body}"))?;
+    }
+    Ok(())
+}
+
+fn flush_pending(tx: &Transaction<'_>) -> Result<()> {
     notice_authority::refresh_binding(tx)?;
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM local_custom_dirty)", [], |r| {
         r.get::<_, bool>(0)
@@ -519,6 +631,13 @@ pub fn slots(m: &Manifest, history: &[ClaimRecord]) -> BTreeMap<String, ClaimRec
 }
 fn basis_revision(connection: &Connection, subject: &str, kinds: &[String]) -> Result<String> {
     let history = claims(connection, subject)?;
+    basis_revision_from_history(subject, kinds, &history)
+}
+fn basis_revision_from_history(
+    subject: &str,
+    kinds: &[String],
+    history: &[ClaimRecord],
+) -> Result<String> {
     let mut kinds = kinds.to_vec();
     kinds.sort();
     kinds.dedup();
@@ -887,6 +1006,96 @@ impl Store {
     pub fn custom_basis_revision(&self, subject: &str, kinds: &[String]) -> Result<String> {
         basis_revision(&self.readers.get(), subject, kinds)
     }
+    /// Read the same repaired-filtered canonical inputs as the basis, never raw log pages.
+    /// Invalid or unavailable authority rejects the entire read rather than granting approval.
+    pub fn decision_inputs(&self, subject: &str) -> Result<DecisionInputs> {
+        self.decision_inputs_with_limits(
+            subject,
+            DECISION_INPUTS_MAX_CLAIMS,
+            DECISION_INPUTS_MAX_BODY_BYTES,
+        )
+    }
+
+    fn decision_inputs_with_limits(
+        &self,
+        subject: &str,
+        max_claims: u64,
+        max_body_bytes: u64,
+    ) -> Result<DecisionInputs> {
+        let version = if subject.starts_with("custom/decision/tree/v1/") {
+            1
+        } else if subject.starts_with("custom/decision/tree/v2/") {
+            2
+        } else {
+            anyhow::bail!("expected a decision.tree v1 or v2 subject");
+        };
+        let connection = self.readers.get();
+        let snapshot = connection.unchecked_transaction()?;
+        let (hash, manifest, state) = registration(&snapshot, subject)?
+            .ok_or_else(|| anyhow::anyhow!("decision registration is unavailable"))?;
+        anyhow::ensure!(
+            state == "ready" && manifest.kind == "decision.tree" && manifest.version == u32::from(version),
+            "decision registration is not ready or does not match the subject"
+        );
+        let answered = format!("custom.decision.tree.v{version}.answered");
+        anyhow::ensure!(
+            manifest.creation_kind == format!("custom.decision.tree.v{version}.opened")
+                && manifest.attention.as_ref()
+                    .is_some_and(|attention| attention.recipient_field == "recipient")
+                && manifest.claims.get(&answered)
+                    .is_some_and(|spec| matches!(spec.authority, Authority::Recipient)),
+            "decision registration must authorize answers only from the addressed recipient"
+        );
+        let source_status: Option<(String, Option<String>)> = snapshot.query_row(
+            "SELECT state,person FROM custom_sources WHERE subject=?1",
+            [subject], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let (source_state, source_recipient) = source_status
+            .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
+        // Stale derived status must not prevent its importer from reading fresh raw inputs.
+        anyhow::ensure!(matches!(source_state.as_str(), "ready" | "stale"),
+            "decision source authority is not ready");
+        let source_body = source(&snapshot, subject)?
+            .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
+        decision_inputs_preflight(&snapshot, subject, max_claims, max_body_bytes)?;
+        let history = claims(&snapshot, subject)?;
+        anyhow::ensure!(
+            history.iter().all(|claim| fields(claim).get("_registration") == Some(&json!(hash))),
+            "decision history contains mismatched registration pins"
+        );
+        let creation = history.iter().find(|claim| claim.kind == manifest.creation_kind)
+            .ok_or_else(|| anyhow::anyhow!("decision creation is unavailable"))?;
+        let creation_fields = fields(creation);
+        let seat = creation_fields.get("seat").and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("decision creation has no seat"))?;
+        let seat_path = seat.strip_prefix("agent/")
+            .ok_or_else(|| anyhow::anyhow!("decision seat must be an agent"))?;
+        anyhow::ensure!(
+            creation.actor.as_deref() == Some(seat)
+                && (subject == format!("custom/decision/tree/v{version}/{seat_path}")
+                    || (version == 2 && subject.strip_prefix("custom/decision/tree/v2/legacy/")
+                        .is_some_and(|spelling| !spelling.is_empty()))),
+            "decision creation actor, seat, and subject identity must match"
+        );
+        let recipient = creation_fields.get("recipient").and_then(Value::as_str)
+            .filter(|recipient| recipient.starts_with("person/"))
+            .ok_or_else(|| anyhow::anyhow!("decision recipient must be a person"))?;
+        fractal_schema::registry().validate_subject(recipient)?;
+        anyhow::ensure!(
+            source_recipient.as_deref() == Some(recipient)
+                && source_body.pointer("/fields/recipient").and_then(Value::as_str) == Some(recipient),
+            "decision source recipient must match the creation recipient"
+        );
+        for claim in &history {
+            validate_fact(&snapshot, subject, &manifest, &claim.kind,
+                claim.actor.as_deref(), &fields(claim), Some(creation))?;
+        }
+        let kinds = schema::decisions::input_kinds(version);
+        let revision = basis_revision_from_history(subject, &kinds, &history)?;
+        let claims = history.into_iter().filter(|claim| kinds.contains(&claim.kind)).collect();
+        snapshot.commit()?;
+        Ok(DecisionInputs { claims, basis: json!({"subject":subject,"kinds":kinds,"revision":revision}) })
+    }
     pub fn custom_attention_items(
         &self,
         person: Option<&str>,
@@ -913,6 +1122,53 @@ impl Store {
             .collect()
     }
 }
+/// Metadata of the canonical, registration-pinned creation that owns the custom projection.
+/// Replies and repaired claims cannot change the source publisher.
+pub(super) fn attention_creation_owners(
+    connection: &Connection,
+    subjects: &BTreeSet<String>,
+) -> Result<BTreeMap<String, (String, Option<String>)>> {
+    if subjects.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut registrations = connection.prepare(
+        "SELECT requested.value, hash, manifest, state
+         FROM json_each(?1) requested JOIN custom_registrations registration
+           ON registration.subject=(SELECT subject FROM custom_registrations
+             WHERE substr(requested.value,1,length(prefix))=prefix ORDER BY subject LIMIT 1)",
+    )?;
+    let rows = registrations.query_map([serde_json::to_string(subjects)?], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+    })?;
+    let mut pinned = Vec::new();
+    for row in rows {
+        let (subject, hash, manifest, state) = row?;
+        // Decode even an unready registration, as the keyed reader does.
+        let manifest: Manifest = serde_json::from_str(&manifest)?;
+        if state == "ready" {
+            pinned.push(json!({"subject": subject, "kind": manifest.creation_kind, "hash": hash}));
+        }
+    }
+    let mut statement = connection.prepare(
+        /* sqlite-large-value: allow-for-now lv-hf5c43701d222 owner=fractal_store::store::custom TODO=trace-statement-and-value-representation */
+        &canonical_sql(
+            "SELECT claims.subject, claims.origin, claims.actor FROM json_each(?1) requested
+             JOIN claims ON claims.id=(
+               SELECT claims.id FROM claims JOIN batches ON batches.id=claims.batch_id
+               WHERE claims.subject=json_extract(requested.value,'$.subject')
+                 AND claims.kind=json_extract(requested.value,'$.kind')
+                 AND json_extract(claims.body,'$.fields._registration')=json_extract(requested.value,'$.hash')
+                 AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+               ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+        ),
+    )?;
+    let owners = statement.query_map([serde_json::to_string(&pinned)?], |row| {
+        Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+    })?.collect::<rusqlite::Result<_>>()?;
+    Ok(owners)
+}
+
 /// One canonical custom source, shared by the collection reader and keyed maintenance.
 pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
     let a = &body["attention"];

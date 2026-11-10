@@ -289,10 +289,6 @@ pub trait DeliveryStore {
     /// work wake (the reconciler reads no other message). Other projection changes must
     /// still run the reconciler, including a recovered stale projection.
     fn claims_since_only_quiet_notifications(&self, after_index: u64) -> Result<bool>;
-    /// Whether any claim is new since `after_index`, and the kind of most of the new claims that
-    /// are not quiet notifications (`None` when every one is): the answer of
-    /// [`Self::claims_since_only_quiet_notifications`], with the kind that names the wake.
-    fn claims_since_waking_kind(&self, after_index: u64) -> Result<(bool, Option<String>)>;
 }
 
 impl DeliveryStore for Store {
@@ -773,7 +769,7 @@ impl DeliveryStore for Store {
             through: u64,
             limit: usize,
         ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        self.messages_page_inner(Some(recipient), false, after, through, limit, true)
+        self.messages_page_for_seat(recipient, after, through, limit)
     }
 
     fn operational_messages(
@@ -1151,17 +1147,10 @@ impl DeliveryStore for Store {
     }
 
     fn claims_since_only_quiet_notifications(&self, after_index: u64) -> Result<bool> {
-        let (any, waking) = self.claims_since_waking_kind(after_index)?;
-        Ok(any && waking.is_none())
-    }
-
-    fn claims_since_waking_kind(&self, after_index: u64) -> Result<(bool, Option<String>)> {
         let connection = self.readers.get();
-        Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE store_index > ?1), (
-                 SELECT kind FROM claims
-                 WHERE store_index > ?1
-                   AND kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
+        let (total, other): (u64, u64) = connection.query_row(
+            "SELECT COUNT(*), COUNT(*) FILTER (
+                 WHERE kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
                                     'sekret.called', 'sekret.exited', 'sekret.refused',
                                     'sekret.changed')
                    AND NOT (
@@ -1177,11 +1166,12 @@ impl DeliveryStore for Store {
                          AND (instr(sent.body, 'st3-work:')>0 OR instr(sent.body, 'fractal-work:')>0)
                      )
                    )
-                 GROUP BY kind ORDER BY COUNT(*) DESC, kind LIMIT 1
-             )",
+             )
+             FROM claims WHERE store_index > ?1",
             [after_index],
             |row| Ok((row.get(0)?, row.get(1)?)),
-        )?)
+        )?;
+        Ok(total != 0 && other == 0)
     }
 }
 

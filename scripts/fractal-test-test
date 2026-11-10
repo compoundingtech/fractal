@@ -53,8 +53,9 @@ DATE = '2026-10-14T12:00:00Z'
 # XDG_RUNTIME_DIR is a private one: a run takes a tree only when a build slot is free, and the host's own cargo slots (busy while this
 # suite runs as a check on a build host) are no test's business; a test that wants slots makes its own.
 # Each fixture selects its own scheduling mode, independently of the enclosing signing run.
-GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS', 'BUILD_ADMISSION_BIN', 'ST_EVIDENCE_SERIAL')},
-               XDG_RUNTIME_DIR=PRIVATE_TMPDIR, GIT_CONFIG_GLOBAL=str(PRIVATE_GIT_CONFIG), GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
+GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS', 'BUILD_ADMISSION_BIN', 'ST_EVIDENCE_SERIAL', st_test.RUN_ADMITTED)},
+               XDG_RUNTIME_DIR=PRIVATE_TMPDIR, ST_EVIDENCE_GOVERN='off',
+               GIT_CONFIG_GLOBAL=str(PRIVATE_GIT_CONFIG), GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
                GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='gc.auto', GIT_CONFIG_VALUE_0='0', GIT_CONFIG_KEY_1='maintenance.auto', GIT_CONFIG_VALUE_1='false',
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
                GIT_COMMITTER_EMAIL='t@example.invalid', GIT_AUTHOR_DATE=DATE, GIT_COMMITTER_DATE=DATE)
@@ -695,7 +696,7 @@ class PoolIdentityTest(unittest.TestCase):
 
 
 class GovernedTest(unittest.TestCase):
-    """A building check stays inside a kernel-verified build, lane or gate-slot cap; otherwise it takes builds.slice."""
+    """Heavy checks take gate-slot when installed; standalone checks retain their kernel-verified cap selection."""
 
     LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
     BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
@@ -736,7 +737,7 @@ class GovernedTest(unittest.TestCase):
             with mock.patch.dict(os.environ, environment, clear=True), \
                     mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
                     mock.patch.object(st_test, 'seat_lane', lambda: real_lane(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
-                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: None if program == 'gate-slot' else f'/usr/bin/{program}'), \
                     contextlib.redirect_stderr(io.StringIO()) as err:
                 governed = st_test.governed(['check'], 'linux-gate')
             if Path(tmp, 'asked').exists():
@@ -752,6 +753,41 @@ class GovernedTest(unittest.TestCase):
         # In place, and marked as in a build cap for a cargo front door that would otherwise move cargo into builds.slice.
         self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
         self.assertEqual(Path(governed[0]).name, 'env', why)
+
+    def test_gate_slot_heavy_argv_needs_no_optional_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate = Path(tmp, 'gate-slot')
+            calls, ran = Path(tmp, 'calls'), Path(tmp, 'ran')
+            gate.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > ' + shlex.quote(str(calls)) + '\n'
+                            'echo "gate-slot: waiting: all heavy slots occupied" >&2\n'
+                            'while [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+            gate.chmod(0o755)
+            argv = st_test.heavy_admission(['/bin/sh', '-c', f': > {shlex.quote(str(ran))}'], str(gate))
+            done = subprocess.run(argv, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue(ran.exists())
+            self.assertEqual(calls.read_text().splitlines(), ['--class', 'heavy', '--', '/bin/sh', '-c', f': > {shlex.quote(str(ran))}'])
+            self.assertIn('gate-slot: waiting: all heavy slots occupied', done.stderr)
+
+    def test_run_admission_is_not_reacquired_for_a_continuation_or_disabled_or_light_run(self):
+        for environment, checks in (({st_test.RUN_ADMITTED: '1'}, ['linux-gate']),
+                                    ({'ST_EVIDENCE_GOVERN': 'off'}, ['linux-gate']), ({}, ['ci-script-tests'])):
+            with self.subTest(environment=environment, checks=checks), \
+                    mock.patch.object(st_test.shutil, 'which', side_effect=AssertionError('must not acquire admission')):
+                self.assertIsNone(st_test.admit_run([], checks, environment))
+
+    def test_help_describes_run_wide_admission_and_standalone_behavior(self):
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            st_test.main(['--help'])
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertIn('one gate-slot', output.getvalue())
+        self.assertIn('standalone use retains', output.getvalue())
+
+    def test_explicit_govern_off_preserves_the_unwrapped_command(self):
+        with mock.patch.dict(os.environ, {'ST_EVIDENCE_GOVERN': 'off'}, clear=True), \
+                mock.patch.object(st_test.shutil, 'which', side_effect=AssertionError('wrapping explicitly disabled')):
+            self.assertEqual(st_test.governed(['check'], 'linux-gate'), ['check'])
 
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
         self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
@@ -908,9 +944,43 @@ class LaneBurstTest(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        # Publish complete records: existence is the reader's readiness signal.
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'append_record() (\n'
+            '  exec 9>"$1.lock"\n'
+            '  flock -x 9\n'
+            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
+            '  mv "$1.tmp.$$" "$1"\n'
+            ')\n'
+            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
+            f'append_record {shlex.quote(str(self.released))} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
+
+    def test_concurrent_fake_holders_preserve_every_call_and_release(self):
+        for fake in (LaneBurstTest.fractal, BurstAtTheTree.fractal):
+            with self.subTest(fake=fake.__qualname__):
+                for record in (self.calls, self.released):
+                    record.unlink(missing_ok=True)
+                env = fake(self, 'echo granted')
+                holders = [subprocess.Popen([env['ST3_BIN'], str(index)], stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE, text=True) for index in range(16)]
+                try:
+                    for holder in holders:
+                        self.assertEqual(holder.stdout.readline(), 'granted\n')
+                    self.assertEqual(sorted(self.calls.read_text().splitlines()), sorted(map(str, range(16))))
+                    for holder in holders:
+                        holder.stdin.close()
+                    for holder in holders:
+                        self.assertEqual(holder.wait(timeout=10), 0)
+                    self.assertEqual(self.released.read_text().splitlines(), ['released'] * len(holders))
+                finally:
+                    for holder in holders:
+                        if not holder.stdin.closed:
+                            holder.stdin.close()
+                        holder.wait(timeout=10)
+                        holder.stdout.close()
 
     def burst(self, body, size=(8, '24G'), limit=10, env=None):
         said = io.StringIO()
@@ -4004,6 +4074,71 @@ finally:
                          ['typescript-client', 'genie-freshness', 'ci-script-tests', 'linux-gate', 'linux-clippy', 'linux-fleet-compat',
                           'fractal-web', 'rust-tests'])
 
+    def test_several_heavy_checks_share_one_admission_until_the_run_ends(self):
+        self.commit('b.txt', 'two')
+        gate = Path(self.tmp.name) / 'gate-slot'
+        gate.write_text('#!/bin/sh\nexit 99\n')  # the fake scoped-launch boundary below keeps fixture state in this process
+        gate.chmod(0o755)
+        calls, held, ran = [], [], []
+        checks = {name: ['sh', '-c', f'echo {name}'] for name in ('demo', 'second', 'third')}
+        real_run = st_test.run_limited
+
+        def launch(executable, command, env):
+            calls.append(command)
+            self.assertEqual(executable, str(gate))
+            self.assertEqual(command[:4], [str(gate), '--class', 'heavy', '--'])
+            self.assertEqual(command[4:6], [sys.executable, str(ROOT / 'scripts/st-test')])
+            self.assertEqual(env[st_test.RUN_ADMITTED], '1')
+            held.append(True)
+            try:
+                with mock.patch.dict(os.environ, env, clear=True):
+                    return st_test.main(command[6:])
+            finally:
+                held.pop()
+
+        def run(command, *args, **kwargs):
+            self.assertEqual(held, [True], 'every check must run while the single admission is held')
+            self.assertEqual(os.environ.get(st_test.RUN_ADMITTED), '1')
+            self.assertNotIn(str(gate), command, 'no per-check admission')
+            ran.append(command[command.index('--check') + 1])
+            return real_run(command, *args, **kwargs)
+
+        with mock.patch.dict(st_test.LOCAL, checks, clear=True), mock.patch.object(st_test, 'BUILDS', frozenset(checks)), \
+                mock.patch.object(st_test, 'own_cap', return_value='app-capped-heavy.slice'), \
+                mock.patch.object(st_test.os, 'execve', side_effect=launch), \
+                mock.patch.object(st_test, 'run_limited', side_effect=run):
+            code, out, err = self.run_st_test(extra_env={'PATH': f'{gate.parent}:{os.environ["PATH"]}',
+                                                       'ST_EVIDENCE_GOVERN': 'on', 'ST_EVIDENCE_SERIAL': '1'})
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(len(calls), 1)
+        self.assertCountEqual(ran, checks)
+        self.assertEqual(held, [])
+
+    def test_heavy_admission_refusal_is_reported_and_signs_nothing(self):
+        self.commit('b.txt', 'two')
+        tmp = Path(self.tmp.name)
+        bin_dir, ran = tmp / 'admission-bin', tmp / 'payload-ran'
+        bin_dir.mkdir()
+        reason = 'gate-slot: refusing admission: heavy queue wait expired'
+        gate = bin_dir / 'gate-slot'
+        gate.write_text(f'#!/bin/sh\nprintf "%s\\n" {shlex.quote(reason)} >&2\nexit 75\n')
+        gate.chmod(0o755)
+        env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'ST_EVIDENCE_GOVERN': 'on'}
+        def launch(executable, command, env):
+            done = subprocess.run(command, env=env, capture_output=True, text=True)
+            sys.stderr.write(done.stderr)
+            return done.returncode
+
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), \
+                mock.patch.object(st_test.os, 'execve', side_effect=launch), \
+                mock.patch.object(st_test, 'fetch_base', side_effect=AssertionError('refuse before fetching or taking a pool tree')):
+            code, out, err = self.run_st_test('--check', 'demo', extra_env=env,
+                                            command=['sh', '-c', f': > {shlex.quote(str(ran))}', 'scripts/ci-local'])
+        self.assertEqual(code, 75, out + err)
+        self.assertIn(reason, err)
+        self.assertFalse(ran.exists())
+        self.assertEqual(self.statements(), [])
+
     def test_a_check_that_builds_runs_in_a_builds_slice_scope_without_holding_a_stage_slot(self):
         self.commit('b.txt', 'two')
         tmp = Path(self.tmp.name)
@@ -4020,7 +4155,9 @@ finally:
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
         # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None):
+        real_which = shutil.which
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None), \
+                mock.patch.object(st_test.shutil, 'which', lambda program: None if program == 'gate-slot' else real_which(program)):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
@@ -4756,14 +4893,30 @@ class PoolQueue(unittest.TestCase):
         holder = open(self.root / 'tree-1.lock', 'w')
         fcntl.flock(holder, fcntl.LOCK_EX)                                     # tree-1 in use: tree-0 is the only free one of two
         got = []
+        waiting, resume = threading.Event(), threading.Event()
+        passes = 0
+
+        def size():
+            nonlocal passes
+            passes += 1
+            if passes == 2:
+                # The next pass starts after the first probe released tree-0. Park here so
+                # our free-tree assertion cannot race the waiter's next temporary flock.
+                waiting.set()
+                resume.wait()
+            return 2
+
         with contextlib.redirect_stderr(io.StringIO()) as told:
-            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=st_test.POOL_LAST_RANK)))
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, size, rank=st_test.POOL_LAST_RANK)))
             last.start()
-            time.sleep(0.5)
-            self.assertEqual(got, [])
-            self.assertTrue(st_test.another_tree_free(self.root, 2, 1))         # the waiter's probe let tree-0 go again
-            holder.close()                                                      # two free now
-            last.join(5)
+            try:
+                self.assertTrue(waiting.wait(5), 'the last waiter did not finish its first probe')
+                self.assertEqual(got, [])
+                self.assertTrue(st_test.another_tree_free(self.root, 2, 1))
+            finally:
+                holder.close()                                                  # two free now
+                resume.set()
+                last.join(5)
         self.assertIn('leaves it to a seat', told.getvalue())
         self.assertIn(got[0][0], (0, 1))
         got[0][1].close()
@@ -4998,7 +5151,17 @@ class BurstAtTheTree(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records each call, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        # Publish complete records: existence is the reader's readiness signal.
+        path.write_text(
+            '#!/usr/bin/env bash\n'
+            'append_record() (\n'
+            '  exec 9>"$1.lock"\n'
+            '  flock -x 9\n'
+            '  { if [ -f "$1" ]; then cat "$1"; fi; printf "%s\\n" "$2"; } > "$1.tmp.$$"\n'
+            '  mv "$1.tmp.$$" "$1"\n'
+            ')\n'
+            f'append_record {shlex.quote(str(self.calls))} "$*"\n{body}\ncat > /dev/null\n'
+            f'append_record {shlex.quote(str(self.released))} released\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 

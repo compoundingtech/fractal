@@ -116,8 +116,13 @@ pub(crate) fn own_unsigned_envelopes(
     } else {
         "FROM replica_envelopes AS envelopes WHERE envelopes.writer=?1 AND envelopes.rowid>?2 AND envelopes.rowid<=?4"
     };
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9a397347cb41 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h900c9ea8feaa owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
         "SELECT envelopes.sequence, envelopes.envelope_hash {from}
+           AND NOT EXISTS (
+             SELECT 1 FROM replica_restore_quarantine AS quarantine
+             WHERE quarantine.writer=envelopes.writer AND quarantine.sequence=envelopes.sequence
+               AND quarantine.envelope_hash=envelopes.envelope_hash
+           )
            AND NOT EXISTS (
              SELECT 1 FROM replica_envelope_signatures AS signatures
              WHERE signatures.writer=envelopes.writer

@@ -207,11 +207,34 @@ pub fn validate_delegated_answer(
                 .get("text")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            option_notes: submitted
+                .get("option_notes")
+                .map(|notes| serde_json::from_value(notes.clone()))
+                .transpose()
+                .map_err(|_| FractalError::new(
+                    "delegation-refused",
+                    "the answer contains invalid option notes",
+                ))?
+                .unwrap_or_default(),
         };
         if request.answer(Some(&input), fields["summary"].as_str().unwrap())? != *submitted {
             return Err(FractalError::new(
                 "delegation-refused",
                 "the answer does not match the offered structured answer",
+            ));
+        }
+        // Generic claim validation cannot rewrite the submitted fields. Require the same
+        // text-only history that the person-answer API appends before persisting a claim.
+        let mut notes_summary = String::new();
+        crate::person_request::append_option_notes_summary(&mut notes_summary, submitted);
+        if !fields["summary"]
+            .as_str()
+            .unwrap()
+            .contains(notes_summary.trim_start())
+        {
+            return Err(FractalError::new(
+                "delegation-refused",
+                "the summary must include every option note in answer history format",
             ));
         }
     } else if fields.contains_key("answer") {
@@ -232,7 +255,7 @@ const STEP_QUERY: &str = "SELECT subject, run_id, step_path, definition_hash, st
 pub fn step(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
     smallclaims::touched::note_read(|| subject.to_owned());
     memoized(connection, |memo| &mut memo.steps, subject.to_owned(), || Ok(connection
-        .query_row(/* sqlite-large-value: allow-for-now lv-he9da72925547 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ STEP_QUERY, [subject], step_run_from_row)
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h77019adc789b owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ STEP_QUERY)?.query_row( /* sqlite-large-value: allow-for-now lv-hfc8b121073e7 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ [subject], step_run_from_row)
         .optional()?))
 }
 
@@ -355,14 +378,16 @@ fn desired_row(connection: &Connection, subject: &str) -> Result<Option<DesiredR
 }
 
 pub fn request(connection: &Connection, subject: &str) -> Result<Option<ClaimRecord>> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
+        "SELECT id, store_index, batch_id, subject, kind,
+         origin, actor, body, predecessors, accepted_at_unix_ms FROM claims
+         WHERE subject=?1 AND kind='work.person-asked' ORDER BY CANONICAL_ASC(claims) LIMIT 1",
+    ));
     Ok(connection
-        .query_row(
-            /* sqlite-large-value: allow-for-now lv-h43a8ecb87729 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT id, store_index, batch_id, subject, kind,
-        origin, actor, body, predecessors, accepted_at_unix_ms FROM claims
-        WHERE subject=?1 AND kind='work.person-asked' ORDER BY CANONICAL_ASC(claims) LIMIT 1",
-            ),
-            [subject],
+        .prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h7ba5b1a68d8c owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &QUERY,
+        )?.query_row(
+            /* sqlite-large-value: allow-for-now lv-hc73724d99cfd owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ [subject],
             claim_from_row,
         )
         .optional()?)
@@ -540,6 +565,12 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         return Ok(false);
     }
     let fields = &ask.body["fields"];
+    // Pairing is a five-minute capability request even when ordinary ask deadlines are off.
+    if ask.actor.as_deref() == Some("daemon/browser-pairing")
+        && fields["deadline_unix_ms"].as_u64().is_none_or(|deadline| u128::from(deadline) <= as_of)
+    {
+        return Ok(false);
+    }
     let Some(view) = step(connection, &ask.subject)? else {
         return Ok(false);
     };
@@ -816,14 +847,14 @@ pub fn project_minimal_run(
     reason: &str,
 ) -> Result<(), FractalError> {
     let at = claim.accepted_at_unix_ms.to_string();
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hca41158cfea1 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
-                VALUES(?1,?2,'ready',?3,?4,?5)", params![mission.id, mission.revision, serde_json::to_string(&mission).map_err(internal)?, claim.id, claim.store_index]).map_err(internal)?;
+    tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hca41158cfea1 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id,revision,state,body,claim_id,created_index)
+                VALUES(?1,?2,'ready',?3,?4,?5)").map_err(internal)?.execute( /* sqlite-large-value: allow-for-now lv-h02e44b418bcb owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![mission.id, mission.revision, serde_json::to_string(&mission).map_err(internal)?, claim.id, claim.store_index]).map_err(internal)?;
     // Independent daemons can create the same update revision. Retained revision history
     // survives replay, so its source must follow canonical claim order rather than arrival.
     let previous: String = tx
-        .query_row(
-            "SELECT claim_id FROM mission_revisions WHERE mission_id=?1 AND revision=?2",
-            params![mission.id, mission.revision],
+        .prepare_cached(
+            "SELECT claim_id FROM mission_revisions WHERE mission_id=?1 AND revision=?2").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-hd58e59ffadfb owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![mission.id, mission.revision],
             |row| row.get(0),
         )
         .map_err(internal)?;
@@ -831,25 +862,25 @@ pub fn project_minimal_run(
         && canonical::claim_key(tx, &claim.id).map_err(internal)?
             < canonical::claim_key(tx, &previous).map_err(internal)?
     {
-        tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h4249b590ecda owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
-            params![mission.id, mission.revision, claim.id],
+        tx.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h4249b590ecda owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_revisions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h7acb721a77a0 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![mission.id, mission.revision, claim.id],
         )
         .map_err(internal)?;
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-hc66679f685d8 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)", params![mission.id, mission.revision, claim.id]).map_err(internal)?;
+    tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc66679f685d8 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)").map_err(internal)?.execute( /* sqlite-large-value: allow-for-now lv-h63c7229392d4 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![mission.id, mission.revision, claim.id]).map_err(internal)?;
     // A run-tree rebuild retains this definition too, and a full replay keeps the canonically
     // first claim's. Independent daemons can write different revisions of one internal mission:
     // each words an ended ask's reason from its own view. So the canonically first claim gives
     // the revision as well as the source, over a definition another minimal run wrote; this
     // does not change definition state, and a published definition, of any revision, stays.
     let definition_source: Option<(String, bool)> = tx
-        .query_row(
+        .prepare_cached(
             "SELECT claim_id, EXISTS(SELECT 1 FROM claims
                  WHERE claims.id=mission_definitions.claim_id
                  AND claims.kind IN ('work.person-asked','mission-run.created'))
-             FROM mission_definitions WHERE mission_id=?1",
-            [&mission.id],
+             FROM mission_definitions WHERE mission_id=?1").map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-hc243e0d38752 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ [&mission.id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -860,29 +891,32 @@ pub fn project_minimal_run(
         && canonical::claim_key(tx, &claim.id).map_err(internal)?
             < canonical::claim_key(tx, &previous).map_err(internal)?
     {
-        tx.execute(
-            /* sqlite-large-value: allow-for-now lv-h5397dfc4c7e7 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET revision=?2, claim_id=?3 WHERE mission_id=?1",
-            params![mission.id, mission.revision, claim.id],
+        tx.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h5397dfc4c7e7 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_definitions SET revision=?2, claim_id=?3 WHERE mission_id=?1").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h8833f2091d49 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![mission.id, mission.revision, claim.id],
         )
         .map_err(internal)?;
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h540720b8262b owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
+    tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h540720b8262b owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id,mission_id,initial_revision,current_generation_id,root_revision,root_run_id,
                 workspace,requester,inputs,mode,status,phase,created_at_unix_ms,updated_at_unix_ms)
-                VALUES(?1,?2,?3,?4,?3,?5,'.',?6,'{}','run','running','normal',?7,?7)",
-                params![run, mission.id, mission.revision, generation, root, claim.actor, at]).map_err(internal)?;
-    tx.execute(/* sqlite-large-value: allow-for-now lv-he893baab2fb0 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
-                VALUES(?1,?2,?3,'running',?4,?6,?5,?5)", params![generation, run, mission.revision, claim.actor, at, reason]).map_err(internal)?;
+                VALUES(?1,?2,?3,?4,?3,?5,'.',?6,'{}','run','running','normal',?7,?7)").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-hf999d2f67df9 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![run, mission.id, mission.revision, generation, root, claim.actor, at]).map_err(internal)?;
+    tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-he893baab2fb0 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO run_generations(id,run_id,revision,status,actor,reason,created_at_unix_ms,updated_at_unix_ms)
+                VALUES(?1,?2,?3,'running',?4,?6,?5,?5)").map_err(internal)?.execute( /* sqlite-large-value: allow-for-now lv-h45dacb7b8a3f owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![generation, run, mission.revision, claim.actor, at, reason]).map_err(internal)?;
     Ok(())
 }
 
 pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, FractalError> {
     let fields = &claim.body["fields"];
     if claim.kind == "work.person-reassigned" {
-        let accepted: bool = tx.query_row(
-            /* sqlite-large-value: allow-for-now lv-hfbb687ae03ed owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */
-            &format!("SELECT {} FROM claims reassignment WHERE reassignment.id=?1",
-                person_rename::accepted_reassignment_sql("reassignment", "previous_person", "person")),
-            [&claim.id], |row| row.get(0)).map_err(internal)?;
+        static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+            "SELECT {} FROM claims reassignment WHERE reassignment.id=?1",
+            person_rename::accepted_reassignment_sql("reassignment", "previous_person", "person"),
+        ));
+        let accepted: bool = tx.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h41b006e9c464 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */
+            &QUERY).map_err(internal)?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h89ab0ff0fd4b owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get(0)).map_err(internal)?;
         if !accepted { return Ok(true); }
         let Some(view) = step(tx, &claim.subject).map_err(internal)? else {
             return Ok(true);
@@ -898,11 +932,11 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
         {
             return Ok(true);
         }
-        tx.execute(
+        tx.prepare_cached(
             /* sqlite-large-value: allow-for-now lv-hf6f5b79d7be9 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */
             "UPDATE step_runs SET assignee=?2,updated_at_unix_ms=?3
-             WHERE subject=?1 AND assignee=?4 AND status IN ('ready','pending')",
-            params![claim.subject, fields["person"].as_str(), claim.accepted_at_unix_ms.to_string(),
+             WHERE subject=?1 AND assignee=?4 AND status IN ('ready','pending')").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h7942ba074b64 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![claim.subject, fields["person"].as_str(), claim.accepted_at_unix_ms.to_string(),
                 fields["previous_person"].as_str()],
         ).map_err(internal)?;
         return Ok(true);
@@ -924,23 +958,23 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
                 .trim_start_matches("mission-run/");
             project_minimal_run(tx, claim, &mission, run, generation, root, "person ask")?;
         }
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hfddcac254de6 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,
+        tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfddcac254de6 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs(subject,run_id,generation_id,step_path,definition_hash,status,
             attempt,assignee,available_to,agentless,title,goals,created_at_unix_ms,updated_at_unix_ms,constraints)
-            VALUES(?1,?2,?3,?4,?5,'ready',1,?6,'[]',0,?7,?8,?9,?9,'[]')",
-            params![claim.subject, run, generation, claim.subject.rsplit('/').next(), claim.id,
+            VALUES(?1,?2,?3,?4,?5,'ready',1,?6,'[]',0,?7,?8,?9,?9,'[]')").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-hcd263a451d78 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![claim.subject, run, generation, claim.subject.rsplit('/').next(), claim.id,
                 fields["person"].as_str(), fields["title"].as_str(), serde_json::to_string(&vec![fields["reason"].as_str().unwrap_or_default()]).map_err(internal)?, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
         if step_owner_is_terminal_tx(tx, &claim.subject)? {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-he796c14d0fd2 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled',blocked_reason='the owning run ended' WHERE subject=?1", [&claim.subject]).map_err(internal)?;
+            tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-he796c14d0fd2 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='cancelled',blocked_reason='the owning run ended' WHERE subject=?1").map_err(internal)?.execute( /* sqlite-large-value: allow-for-now lv-h0310fcb0097b owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ [&claim.subject]).map_err(internal)?;
             return Ok(true);
         }
         if let Some(origin) = fields["origin_step"].as_str() {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h2c813e50cf88 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='waiting-person',lease_owner=NULL,lease_incarnation=NULL,
+            tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2c813e50cf88 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='waiting-person',lease_owner=NULL,lease_incarnation=NULL,
                 lease_expires_at_unix_ms=NULL,blocked_reason=?3,updated_at_unix_ms=?4
-                WHERE subject=?1 AND attempt=?2 AND status IN ('claimed','working','ready','blocked')",
-                params![origin, fields["origin_attempt"].as_u64(), claim.subject, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
-            tx.execute(
-                /* sqlite-large-value: allow-for-now lv-h6462186c014f owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_work_lease_renewals WHERE subject=?1",
-                [origin],
+                WHERE subject=?1 AND attempt=?2 AND status IN ('claimed','working','ready','blocked')").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-he6c79429ef0c owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, fields["origin_attempt"].as_u64(), claim.subject, claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
+            tx.prepare_cached(
+                /* sqlite-large-value: allow-for-now lv-h6462186c014f owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_work_lease_renewals WHERE subject=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-h4fa571431ee9 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ [origin],
             )
             .map_err(internal)?;
         }
@@ -952,10 +986,10 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
     ) {
         return Ok(false);
     }
-    tx.execute(
+    tx.prepare_cached(
         /* sqlite-large-value: allow-for-now lv-ha5f213f5faef owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2,worker_reported=1,updated_at_unix_ms=?3
-        WHERE subject=?1 AND attempt=?4 AND status IN ('ready','pending')",
-        params![
+        WHERE subject=?1 AND attempt=?4 AND status IN ('ready','pending')").map_err(internal)?.execute(
+        /* sqlite-large-value: allow-for-now lv-h3e5d60c5f48a owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![
             claim.subject,
             fields["status"].as_str(),
             claim.accepted_at_unix_ms.to_string(),
@@ -965,14 +999,14 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
     .map_err(internal)?;
     if let Some(ask) = request(tx, &claim.subject).map_err(internal)? {
         if ask.body["fields"].get("mission_spec").is_some() {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-hbbd28d35da4a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2,phase='terminal',updated_at_unix_ms=?3 WHERE id=?1",
-                params![ask.body["fields"]["run"].as_str().unwrap_or_default().trim_start_matches("mission-run/"), fields["status"].as_str(), claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
+            tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbbd28d35da4a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2,phase='terminal',updated_at_unix_ms=?3 WHERE id=?1").map_err(internal)?.execute(
+                /* sqlite-large-value: allow-for-now lv-he50bebd64535 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![ask.body["fields"]["run"].as_str().unwrap_or_default().trim_start_matches("mission-run/"), fields["status"].as_str(), claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
         }
         if let Some(origin) = ask.body["fields"]["origin_step"].as_str() {
             if !step_owner_is_terminal_tx(tx, origin)? {
-                tx.execute(/* sqlite-large-value: allow-for-now lv-h4a39c8232ed5 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='ready',blocked_reason=NULL,readiness_epoch=readiness_epoch+1,
-                    activated_at_unix_ms=?3,updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4",
-                    params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject]).map_err(internal)?;
+                tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4a39c8232ed5 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='ready',blocked_reason=NULL,readiness_epoch=readiness_epoch+1,
+                    activated_at_unix_ms=?3,updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4").map_err(internal)?.execute(
+                    /* sqlite-large-value: allow-for-now lv-hfe5b780e197e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject]).map_err(internal)?;
             }
         }
     }

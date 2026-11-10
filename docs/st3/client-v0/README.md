@@ -30,6 +30,21 @@ preserves full immutable producer input; its recipient is the addressed person.
 Delivery/integrity use tagged states, and person controls are explicitly nullable.
 Unicode limits are schema-enforced; admission must additionally enforce the 64 KiB
 serialized claim-field budget and cross-field provenance/receipt consistency.
+Immutable source lineage authenticates the stored source creation claim and its
+reviewed manifest digest; it does not authenticate external git commits named in
+`input.source`. Execution-context provenance remains informational, not
+authenticated sender evidence. Notice finalization is SQL-free when no notice
+work is pending; touched authority or custom state still triggers revalidation.
+This is a finalization contract, not a checked performance result.
+Generic seat-summary visibility and reduction use one pinned read snapshot and
+effective claim cut. Exact incarnation summaries neither use nor advance the shared
+subject cache; unrelated claim backlogs do not trigger its maintenance. The reduction
+independently excludes reserved notice kinds from actual fields and source attribution.
+Managed-session owner
+visibility and identity selection also share one read snapshot and read routing
+identities uncached on its connection; a shared map keyed only by the numeric
+claim cut cannot pin mutable identity and repair state.
+
 Swift's `NoticeModels.generated.swift` derives from the same closed `$defs` graph.
 Its public immutable `Codable`/`Sendable`/`Equatable` values validate in throwing
 constructors and decoding, including Unicode-scalar lengths, URI references and
@@ -247,13 +262,30 @@ Revoking or expiring the pairing removes it. Fractal does not send pushes yet.
 ### Person ask respondents
 
 Work `person_answers[].respondent` uses `SenderRef`: `agent/...`, `assistant/...`,
-`person/...`, or `step/...`. An assistant answer identifies `assistant/chatgpt` as
-the respondent, never the grant's owning person. Optional `sender_class`,
+`person/...`, or `step/...`. An assistant answer identifies its grant principal,
+`assistant/chatgpt` or `assistant/mcp`, as the respondent, never the grant's owning person. Optional `sender_class`,
 `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor` carry
 server-owned provenance separately; `assistant_owner` is a concrete `PersonId`.
 These fields do not confer person authority or replace an agent's `acted_for`
 delegation proof. `ActorRef`, `ParticipantRef`, and recipient contracts remain
 narrower; accepting an assistant respondent does not make assistants recipients.
+
+The [external-assistant operator guide](../external-assistants.md) covers explicit
+owner pairing, scoped writes, protected profiles, stdio MCP client configuration,
+and revocation. Both principals use `external-assistant` provenance and the same
+assistant-only routes; neither is a person or recipient. Historical grants that
+omit their stored principal remain ChatGPT grants. MCP pairing is an explicit
+choice, not a reinterpretation of a ChatGPT profile. Older servers that do not
+recognize `assistant/mcp` reject it; clients must not retry as a person or ChatGPT.
+
+Assistant challenge storage uses the member-local keyed verifier, bound to the
+stored full `assistant-grant/<hex>` grant ID. Request/response shapes and bearer
+credential digests are unchanged. Unknown verifier markers or key replacement
+require HTTP 403 `pairing-restart-required` (`start pairing again`), without
+changing BEGUN or writing GRANTED, credentials, or completion state; the denied
+completion audit is retained. Unmarked legacy challenges have a bounded
+five-minute lifetime. See [assistant verifier recovery](../external-assistants.md#pairing-verifier-and-recovery)
+for secret storage, logical-backup exclusions, and restart/downgrade guidance.
 
 ### Mission run timing
 
@@ -277,6 +309,55 @@ Step timing events are read in one batch for the selected runs, not once per ste
 open runs and the latest finished run. Published cards restrict that batch to their actual
 20-step previews; detail retains all steps. Older detail steps retain null timing. These are
 lifecycle timestamps, not elapsed execution time or an ETA.
+
+#### Step history and the requested run
+
+A mission detail read also folds each step's `attempts`, `waits` and `transitions`, with
+`history_complete`, on the runs it enriches: open runs, the latest finished run, and the run named
+by `GET /v1/client/missions/{id}?run=<mission run id>`. `run` takes `mission-run/<id>` or `<id>`
+and lifts the timing and enrichment bound for that one run only (its `started_at`,
+`completed_at`, loop and wake fields fill in as for the latest finish); a run of another mission is
+`not-found`, and an empty `run` is ignored. Typed clients send it with `missionsGetRun(id, run)`
+(Rust `missions_get_run`); `missionsGet(id)` keeps its signature and never sends `run`. Lists,
+pages and collection windows never carry these fields, and other runs' steps omit them: absence is
+not proof of a single attempt or no waits.
+
+- `attempts[]`: `{n, claimant, started_at, ended_at, outcome, reason?}`, oldest first. An attempt
+  opens at its first claim or `working`/`claimed` state (a reclaim keeps it) and ends at its
+  `work.failed`, its terminal state, or the `step-run.retried` that opened the next attempt.
+  `outcome` is `done`, `failed`, `cancelled` or `running`; a submission awaiting verification is
+  still `running`. `reason` is the failure's or the retry's.
+- `waits[]`: `{kind, attempt, start, end, until?, reason?}` by start; `end` is null while open.
+  `you` runs from a person ask by this step (or by the runtime person step that names it as origin)
+  to its answer or cancellation; `paused` from a declared wait to its resume, a new claim or its
+  deadline (`until`); `retry` from a retry to the next claim or its not-before time (`until`);
+  `dependency` from `pending` to `ready`; `queue` from `ready` (or the end of a retry backoff) to
+  the claim. Waits of different kinds may overlap.
+- `transitions[]`: `{at, status, attempt, event, reason?, idle_since?}`, oldest first, from
+  `step-run.state`, `step-run.carried`, `step-run.retried` and the `work.*` claims that move a step,
+  in the `state` vocabulary (an open word: it replays durable claims). A repeated state of the same
+  attempt is listed once. `event: nudged` is a stall marker from `work.nudged`; its `status` repeats
+  the state st found, and consecutive nudges at that state stand as one marker with the latest
+  `at` and the earliest `idle_since`, since when the holder was idle.
+  Terminal `work.person-done` and `work.person-cancelled` responses use `event: state` and close
+  any remaining waits, just like terminal `step-run.state` claims.
+
+The fold seeks a bounded suffix of each lifecycle kind for every enriched current-generation step:
+128 claims plus one older boundary event per kind, at most 1,548 bodies per step. The accepted-time
+index limits input before bodies are read or sorted. Each kind retains its own boundary context,
+so frequent progress notes do not displace sparse state, claim or person-ask events. Equal-time
+claims at a truncated boundary may be omitted; retained events are folded in canonical order.
+Lease renewals are never read. Clockless progress notes count toward their input bound but do not
+move the fold. A truncated input sets `history_complete: false`; missing starts or intervals are
+not evidence of their absence. Output also keeps only the newest 20 attempts, 40 waits and 60
+transitions and marks incompleteness if those caps drop older entries. Terminal person-step
+states (including run cancellation) close foreign person holds. All read kinds are durable.
+A step carried from an earlier generation shows only its current `step-run` subject's history.
+
+A detail step of an open run may also carry `eta: {low_ms, high_ms, samples}`, its own p25/p75
+duration from the same completed-run samples as the run `eta`. It is present for each remaining
+step that has samples even when another step's missing samples keep the run `eta` null, and
+absent for finished steps, finished runs, list reads and older daemons.
 
 Run summaries also expose optional nullable `eta` on published cards and detail reads.
 Its exact shape is `{remaining_low_ms, remaining_high_ms, basis: {method, samples}, as_of}`.
@@ -982,6 +1063,30 @@ the rate was fitted to) and, only when the allowance would run out first, `runs_
 `explain` says the same in words. A budget with too little history has none of the three. The list is
 computed on each read from live windows and readings; it writes nothing.
 
+The same list includes observational credit objectives `CAM-R01/PROVIDER` (zero forfeited
+window-equivalents in rolling seven days, by expiry) and `CAM-R02/PROVIDER` (a documented
+planned/redeemed/declined disposition for every credit expiring within 24 hours). One durable
+credit is one window-equivalent. Their evidence comes from replicated, durable
+`usage.limits.observed` claims, folded by provider/account digest/credit ID across writers and
+hosts. Terminal states are absorbing: `redeemed` wins over `forfeited`, and `forfeited` wins over
+`available` or `unknown`, regardless of timestamp. Within the same state class (`available` and
+`unknown` share one), newest full-precision provider measurement time then claim ID wins, not
+delivery order. Missing/unknown/unreported/unsupported evidence is
+`no-data`, stale evidence is `stale`; neither proves success. These rows describe observed
+credits only and do not enforce quotas or redeem credits.
+
+The durable usage kind has no numeric retention bound. Opening a store never scans retained
+usage history or waits for credit initialization. A missing inventory remains uninitialized
+with no configured writers; configuring writers or directly reading the inventory starts
+asynchronous, bounded catch-up batches with a persisted resumable cursor and a released writer
+lock between batches. Until complete, **both** CAM rows have `status: "no-data"` and null
+`remaining_percent`, never success from partial evidence. Their `current` and `explain` display
+text explicitly say `catching-up through store index N of M`; these are claim-store progress
+indices, not counts of decoded credits. The status enum is unchanged. Clients show the supplied
+text rather than parsing it. An empty writer configuration still returns unknown credit rows
+without credit SQL. Once caught up, reads use incremental per-identity/per-writer heads rather
+than folding the retained observation history.
+
 `GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
 across a period, from the daemon's local observation log (one reading a minute, kept seven days;
 it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
@@ -993,8 +1098,8 @@ never "spent". A daemon that has run for less than the period has fewer readings
 id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
 error: a client that remembers an id should check it against the list.
 
-The objectives are this daemon's own: each member reports the targets and limits it measures, and
-nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+The live-window objectives are this daemon's own: each member reports the targets and limits it
+measures; unlike credit evidence, live measurement windows do not replicate. The wording in `about`, `target`, `current`, `window` and
 `explain` is display text built by the daemon for a person to read; it may change between builds,
 so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
 the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
@@ -1036,7 +1141,7 @@ and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
-for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
+for example `fractal-tui 0.1.0+a0c135e3`, `fractal-ios 1.0 (42)` or `fractal 0.1.0+a0c135e3`. The Rust
 crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
 its options, and Swift `client:` in its initializer. The header is optional, and Fractal shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
@@ -1769,6 +1874,13 @@ The coverage query reads interval bounds only; it does not materialize older tra
 
 ## Pairing and remote access
 
+Person-scoped commands, including `fractal devices ... --as person/<id>`, pairing begin,
+and Fabric enable, are supported only from a local terminal on the daemon host.
+SSH sessions have no verifiable caller ancestry, so the daemon cannot distinguish a person
+from an agent and refuses these requests with `foreign-agent-actor`. Run them from a local
+terminal on the same host, not through SSH. Paired remote device access described below is
+unchanged.
+
 Person pairing is device-to-person. Its begin request names the concrete initiating `person/*` identity and
 is accepted only on the trusted local Unix API; the daemon persists that person as the delegator.
 The response shows a short-lived single-use code and pairing ID. A remote device reaches the
@@ -1791,6 +1903,37 @@ must use `fractal devices --as person/alex pair --full-control "Alex iPhone"` on
 socket. The selected concrete scopes are sealed into that pairing; existing limited devices are
 not silently upgraded and must be re-paired, then revoked when no longer needed. Revocation takes
 effect for every subsequent request, including a new bounded terminal WebSocket exchange.
+
+Person challenges use 40-bit random codes with a 300-second expiry and independent random
+128-bit pairing IDs and begin-claim subjects, not IDs derived from the code. New
+`custom.client.pairing-begun` claims carry `verifier: "hmac-sha256-v1"`:
+`code_hash` holds HMAC-SHA-256, and
+`verifier_key_id` holds the SHA-256 fingerprint of the member-local secret. The secret lives
+at `state_dir/pairing-verifier/key` (0600, parent directory 0700), never in claims or backups.
+The MAC input is the domain bytes `fractal/pairing-code-verifier/v1` (no NUL),
+then the full prefixed pairing ID's UTF-8 bytes, then the code's UTF-8 bytes, each
+prefixed by its byte length as an unsigned big-endian u32, without normalization.
+Verifiers are bound to the stored pairing ID, including its namespace prefix.
+Replicated claims alone cannot support offline guessing against this keyed verifier.
+The threat bound remains a 40-bit code valid for 300 seconds, not a high-entropy credential;
+use an encrypted path and independently verify the person-root fingerprint.
+
+Reopening the same state directory with the same secret preserves live challenges. After a
+claim-only restore or a missing, replaced, or rotated verifier secret, old pending challenges
+require a fresh trusted-local begin. Completion returns HTTP 403 `pairing-restart-required`,
+`retryable: false`, with message `start pairing again`; retrying the old code cannot recover it.
+A wrong code with the matching verifier secret still returns the existing `forbidden` error.
+Legacy challenges without the marker are accepted only if unexpired and their expiry minus
+the claim timestamp is at most 300,000 ms; a longer legacy lifetime returns
+`pairing-restart-required`. Existing completed person pairings remain usable.
+Downgrading to a pre-keyed-verifier binary makes in-flight keyed pairings fail with
+HTTP 403 `forbidden`, message `the pairing code is invalid, expired, or already used`:
+the older binary ignores the marker and compares the stored HMAC with the unkeyed
+code digest. Restart those pairings on the downgraded member; no stored claims or
+verifier state need cleanup.
+There is no rollback protection when both secret and claims are restored to an earlier state:
+a previously consumed challenge can become usable again until its original expiry. This is
+an accepted limitation, not a guarantee of preserved single-use history across such a restore.
 
 ### External assistant grants
 
@@ -1911,9 +2054,9 @@ frontend-auth boundary and does not alter tool arguments or daemon grants. No ge
 runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 405; unknown
 paths return an empty 404.
 
-The flake's `packages.st-chatgpt` builds only the adapter executable with the shared locked
-Cargo dependencies. Run `nix build .#st-chatgpt` from a checkout, or
-`nix build github:compoundingtech/fractal/<commit>#st-chatgpt` at a published commit.
+The flake's `packages.fractal-chatgpt` builds only the adapter executable with the shared locked
+Cargo dependencies. Run `nix build .#fractal-chatgpt` from a checkout, or
+`nix build github:compoundingtech/fractal/<commit>#fractal-chatgpt` at a published commit.
 The shared `checks.st3` suite includes the adapter's Rust tests.
 
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
@@ -1952,6 +2095,16 @@ desired state, not a recovery of authored whitespace or comments.
 Read-only scope permits snapshots, details, timelines, and event feeds. `terminal.control` adds
 terminal input and resize; other control scopes are action-family-specific. A capabilities response
 must distinguish unavailable, ungranted, and unsupported features.
+
+Native claim writes derive attribution from the connected agent, native writer, or paired
+person authority. Supplied actor, requester, and message sender values must agree with that
+attribution. An omitted claim actor uses the derived identity; ordinary local writes without
+such an identity retain their nullable actor. Native drivers and active Claude hooks retain
+seat attribution, including initial-message, seed, and subagent receipts. Paired native claim
+writes require the claim family's control scope (`control.work` for other generic kinds);
+message claims use `control.messages`. Legacy ask completion (`/v1/work/done`) and custom
+replies (`/v1/custom/reply`) use the same `control.attention` scope as their client actions.
+Session credential IDs are not claim authors.
 
 ## Conversation stream
 
@@ -2264,6 +2417,45 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
 
+Pairing records are reserved for the dedicated pairing operations: ordinary claim writes
+cannot use a `custom.client.pairing*` kind or a `custom/client/pairing*` subject.
+Each pairing operation atomically writes a native `client.operation-authorized` receipt,
+bound to the exact operation record ID, content hash, writer and issuing member.
+Authentication requires this receipt; historical numeric admission fields confer no trust.
+Unreceipted challenges require a new pairing. Unreceipted credentials also require
+a new pairing unless an operator configures a temporary migration allowance for an exact
+existing completion record. `pairing_legacy_allowances` defaults to an empty list. Each entry
+contains `completion_id`, `record_hash`, and `until_unix_ms`. The hash is
+`fractal_store::pairing::record_hash(origin, actor, fields)` over the retained completion.
+Startup refuses entries whose hash does not match an existing completion or whose writer
+is not exactly the recorded person.
+An allowance never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
+2026-11-15T23:00:00Z, regardless of its configured deadline. The allowance is member-local
+and must be configured explicitly on each member where the existing credential is used.
+An allowance entry must come from an audited record: it admits exactly the recorded
+contents, not independently verified provenance. Held terminal streams use the earlier of
+the credential expiry and allowance deadline and recheck admission at continuation.
+Revocation of a receipted credential requires a matching operation receipt from its issuing
+member. For an allowance-backed credential, any revocation from that issuer applies,
+including one received after startup. Other revocation records are counted in an operator
+warning, without credential data.
+
+Terminal attachment lifecycle records likewise require the dedicated terminal operations:
+`custom.client.terminal*` kinds and `custom/client/terminal-*` subjects are reserved.
+Attachments and their consumption/detachment records require the same native receipt.
+Unreceipted attachments require a new attach operation; they cannot provide stream authority.
+The receipt kind is registered system-only and cannot be submitted through ordinary claims;
+older schemas reject it as an unknown native kind. A receipt requires member-local operation
+proof or an envelope signed by a keyed fleet member for its issuing origin. Unsigned receipt
+envelopes are refused by both replication and backup admission. Lifecycle selection ignores
+unadmitted records before choosing the current completion or terminal transition.
+
+Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
+`retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
+access. A valid credential missing a required scope still returns ordinary `forbidden` without
+that reason; it does not mean the credential was rejected. Clients must not infer credential
+expiry from status, code, or message text alone. Older daemons may omit the additive reason.
+
 Current runtime lists return HTTP 503 `runtime-list-not-ready` with `retryable: true`
 until their first complete publication. `runtime-list-ended` is HTTP 503 with
 `retryable: false` and requires daemon restart. Both codes are typed in the generated clients.
@@ -2274,6 +2466,21 @@ seeded store cut. A bare router refuses unpublished runtime reads rather than fo
 Revoking a pairing from a non-issuer returns HTTP 409 with `code: issuer-required`,
 `retryable: false`, and `details.issuer_host_id` naming the authoritative issuer.
 The caller must direct revocation to that issuer rather than retrying the same gateway.
+
+Completing a person pairing on a member other than the one that began it returns HTTP 403
+with `code: pairing-origin-required`, `retryable: false`, and the message
+`complete pairing on the member that began it`. This check precedes code verification and
+does not consume the challenge or issue a device grant. Complete on the beginning member,
+or start a new pairing on the desired member.
+This guarantee holds only when every member accepting pairing completion runs this
+version or later. An older member has no origin check and can still complete a replicated
+challenge begun on an upgraded member, so upgrade all members.
+
+Person pairing completion returns HTTP 403 `pairing-restart-required`, `retryable: false`,
+and message `start pairing again` when the challenge's verifier key is missing or changed,
+or a legacy challenge's expiry exceeds 300,000 ms after its claim timestamp. Begin a fresh
+pairing on the intended member; do not retry completion of the old challenge. This is
+distinct from an incorrect code, which retains the existing `forbidden` response.
 
 Adding optional fields is compatible. Removing or retyping a field, changing ordering or token
 rules, adding a required action parameter, or changing action semantics requires a new capability
@@ -2670,6 +2877,10 @@ same host without becoming shared projection or checkpoint authority.
 in `fractal agents new`. Workspace paths are absolute on the selected host; omission asks that host for
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
+`description` is the agent's charter: nonempty UTF-8 of at most 8 KiB (8,192 bytes), lines
+included. A charter over 1,000 bytes publishes only when every active fleet member advertises
+`features.agent_charter=1` (see [compatibility](../compatibility.md#agent-charter-publication));
+otherwise the action fails with `agent-charter-feature-barrier` and publishes nothing.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
 
 Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
@@ -2790,7 +3001,8 @@ Agent projections include optional `workspace` and `checkout {repository, base, 
 The agent resource exposes observed harness status as `harness_state`, `since` (RFC 3339),
 and `observation: current | stale | missing`. `since` is the start of that state in that
 runtime incarnation; repeated observations and changes to display details preserve it.
-`observation` becomes stale after 90 seconds without fresh evidence, and is missing when
+`observation` becomes stale after the shared `HARNESS_OBSERVATION_FRESHNESS` window
+(five-minute refresh plus thirty seconds) without fresh evidence, and is missing when
 this runtime has no observation. Stale idle is exposed as indeterminate, never proven idle.
 Desired runtime state and agent-declared work progress remain separate from harness evidence.
 

@@ -1,8 +1,8 @@
 # ChatGPT app: composition and install/use
 
-Design for [#2172](https://github.com/compoundingtech/smalltalk/issues/2172), building on the assistant
-principal and grants in [#2290](https://github.com/compoundingtech/smalltalk/pull/2290) and the assistant
-routes in [#2541](https://github.com/compoundingtech/smalltalk/pull/2541). This is a standalone Fractal app.
+Design for [#2172](https://github.com/compoundingtech/fractal/issues/2172), building on the assistant
+principal and grants in [#2290](https://github.com/compoundingtech/fractal/pull/2290) and the assistant
+routes in [#2541](https://github.com/compoundingtech/fractal/pull/2541). This is a standalone Fractal app.
 
 ## Composition
 
@@ -13,7 +13,7 @@ ChatGPT web (developer-mode app)        ChatGPT desktop (local plugin)
               │                                     │
     MCP Streamable HTTP                             │
               └───────────────┬─────────────────────┘
-                       st-chatgpt adapter
+                       fractal-chatgpt adapter
                               │ typed client-v0 assistant operations
                        paired Fractal gateway
                               │
@@ -24,7 +24,7 @@ ChatGPT web (developer-mode app)        ChatGPT desktop (local plugin)
 | --- | --- | --- |
 | fractal daemon (`crates/st3`) | Principal, grants, scopes, owner approvals, fences and action receipts | Speak MCP or expose the control socket to ChatGPT |
 | Typed client (`crates/st3-client`) | Client-v0 assistant operations | Widen authority |
-| Adapter (`crates/st-chatgpt`) | Both MCP transports, closed tool list, annotations and pluggable authentication | Run arbitrary commands, expose `fractal.sock` or return credentials |
+| Adapter (`crates/fractal-chatgpt`) | Both MCP transports, closed tool list, annotations and pluggable authentication | Run arbitrary commands, expose `fractal.sock` or return credentials |
 | ChatGPT app or plugin record | Connection to the adapter | Hold Fractal credentials |
 | Downstream deployment | Adapter and tunnel services for one installation | Fork the authority model or tool list |
 
@@ -75,7 +75,7 @@ For an example owner, `person/ada`:
 2. For web, create a Secure MCP Tunnel in the owner's OpenAI Platform organization, associate it with the
    ChatGPT workspace, and run its tunnel client against the adapter's HTTP endpoint. The owner creates
    the developer-mode ChatGPT app record and selects the tunnel.
-3. For desktop, configure the local plugin to launch `st-chatgpt` with the stdio transport in a Work/Codex
+3. For desktop, configure the local plugin to launch `fractal-chatgpt` with the stdio transport in a Work/Codex
    thread. It uses the same authority model and tool list as HTTP.
 4. Ask what needs attention, read the bounded alert or transcript, or send a message to an allowlisted
    agent. For a person-ask answer, request the exact option, approve the action in Fractal, then execute it once.

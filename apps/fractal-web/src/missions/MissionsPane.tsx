@@ -8,7 +8,9 @@ import * as Aria from 'react-aria-components'
 
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { useDataSource, useNow } from '../data/react.tsx'
+import { useDataSource, useMissionsDecode, useNow } from '../data/react.tsx'
+import { credentialExpiredMessage } from '../data/source.ts'
+import { DecodeNotice } from '../web/LiveRoster.tsx'
 import { hiddenByDefault, missionEta, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 
 // The Missions screen: every mission with its word and who must act, in the contract's order,
@@ -26,6 +28,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
   const source = useDataSource()
   const missions = useAtomValue(source.missions)
   const agents = useAtomValue(source.agents)
+  const missionsDecode = useMissionsDecode()
   const attention = useAtomValue(source.attention)
   const now = useNow()
   const [all, setAll] = React.useState(false)
@@ -39,6 +42,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
   const today = startOfDay(now)
   const shown = all ? rows : rows.filter((row) => !hiddenByDefault(row.presentation, today))
   const hidden = rows.length - shown.length
+  const observedIds = React.useMemo(() => new Set(missions._tag === 'Observed' ? missions.value.map((mission) => mission.id) : []), [missions])
   return (
     <section aria-label="Missions" data-testid="missions-pane" {...stylex.props(styles.pane)}>
       <header {...stylex.props(styles.header)}>
@@ -49,13 +53,14 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
             {all ? 'Hide settled and Fractal’s own' : `Show all (${hidden} more)`}
           </Aria.Button>
         ) : null}
+        {missions._tag === 'Observed' ? <DecodeNotice noun="mission" decode={missionsDecode} shown={observedIds} xstyle={styles.decode} /> : null}
       </header>
       <div {...stylex.props(styles.body)}>
         {missions._tag === 'Waiting' ? <SystemNotice kind="loading" title="Loading missions" />
           : missions._tag === 'Unavailable' ? <SystemNotice
             kind="error"
             connection={missions.reason !== 'ungranted' && missions.reason !== 'unsupported'}
-            title={missions.reason === 'ungranted' ? 'No access to missions' : missions.reason === 'unsupported' ? 'Missions not supported' : 'Missions could not load'}
+            title={missions.reason === 'unauthorized' ? credentialExpiredMessage : missions.reason === 'ungranted' ? 'No access to missions' : missions.reason === 'unsupported' ? 'Missions not supported' : 'Missions could not load'}
             {...(missions.reason === 'ungranted' ? { detail: 'Read access has not been granted' } : missions.reason === 'unsupported' ? { detail: 'This connection does not offer them' } : {})}
           />
             : shown.length === 0 ? <SystemNotice kind="empty" title={rows.length === 0 ? 'No missions' : 'Nothing running today'} />
@@ -126,7 +131,8 @@ const StepRow = ({ step, onOpenAgent }: { readonly step: PresentedStep; readonly
 
 const styles = stylex.create({
   pane: { position: 'absolute', inset: 0, zIndex: 2, display: 'flex', flexDirection: 'column', minHeight: 0, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
-  header: { display: 'flex', alignItems: 'baseline', gap: s.md, paddingInline: s.lg, paddingBlock: s.md, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border, flexShrink: 0 },
+  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: s.md, paddingInline: s.lg, paddingBlock: s.md, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border, flexShrink: 0 },
+  decode: { flexBasis: '100%', padding: 0 },
   body: { flexGrow: 1, minHeight: 0, overflowY: 'auto', padding: s.md },
   button: { marginInlineStart: 'auto', padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover } },
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },

@@ -126,12 +126,18 @@ the provider. Several Fractal processes carry the seat's messages for the whole 
 
 New seats receive `ST3_MAILBOX_TRANSPORT=push`. Each delivery component connects to `/v1/mailbox`
 over the local daemon Unix socket. The stream sends the full seat record and pushes new mail.
-Every connection starts a new automatic-delivery boundary. Pre-connection mail older than one
-hour stays held in the graph mailbox. Recent mail with no staging or delivery claim is admitted
-once so an in-flight send survives a daemon restart. Previously staged or delivered-but-unread
-mail stays held regardless of age; a missing receipt never authorizes another offer. The one-hour
-window uses the original send time and the same threshold as the unread backlog. SQLite
-fences both subscriptions and receipts to the live runtime
+Every connection starts a new automatic-delivery boundary. Never-offered pre-connection mail
+sent within the preceding seven days is eligible for recovery; older mail stays held in the graph
+mailbox. Of that recovery backlog, mail older than one hour is admitted oldest first, in batches of
+at most five. Only one batch is outstanding per connection: the next batch opens when every
+member is delivered or withdrawn. A terminally closed message is withdrawn, not delivered;
+withdrawal creates no delivery receipt. Staging or offering a message does not release a slot;
+one stuck, non-closed member holds the whole next batch. Mail at most one hour old and new live
+mail do not consume that budget. Delivery or withdrawal wakes the stream to admit the next
+batch without a reconnect.
+Both age boundaries use the original send time relative to connection start, including late imports.
+Previously staged or delivered-but-unread mail stays held regardless of age; a missing receipt
+never authorizes another offer. SQLite fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
 after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
 just before the record goes to the messages shard, so a token revoked between them can still
@@ -146,12 +152,27 @@ uncertain handoffs, and successful handoffs retry lost receipt acknowledgements 
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
 `delivered` records native transport acceptance, not model consumption. A boot or channel reconnect
-never authorizes another offer of old mail. Older polling drivers also recover recent unoffered
-pre-boot mail and retain the current boot's staging attempt until its receipts finish;
-their local archive projection removes old native inbox files without closing the graph messages.
+never authorizes another offer of previously offered mail. Polling drivers use the same seven-day
+recovery window and settlement-gated batches of at most five oldest backlog messages. Their
+connection boundary is the consumer's boot/session floor; the daemon's store keeps one bounded
+outstanding batch per recipient and replaces it when that floor changes. Pagination and filtered
+reads share that batch; a stale boot cannot refill it. Admitted mail remains visible through the
+current boot's staging attempt until its receipts finish; their local
+archive projection removes old native inbox files without closing the graph messages.
 An agent can explicitly inspect that retained mail with `fractal conversations ls --as "$ST_AGENT"`
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
 continues to arrive normally, with the channel's usual handoff deduplication and receipt handling.
+
+The registry also accepts a durable graph `message.expired` outcome, written only by
+`daemon/runtime`, with reason `cutoff-never-offered`, `cutoff-uncertain-attempt`, or
+`no-live-recipient`. This reader contract does not enable automatic expiration or change
+mailbox recovery. Expiry is not a delivered/read receipt; later actual delivery or read evidence
+supersedes the outcome without removing the expiry claim from history. Harness receipts cannot
+write expiry, and the messages shard still replicates only `message.sent`. Outcome readers,
+projections and sender surfaces must be deployed to every pinned host before any expiry writer
+is enabled; older registries retain the new kind as unknown rather than interpreting its outcome.
+The writer must also enforce original-accepting-member authority before activation; replicated
+expiry admission here checks the daemon actor, not that future writer prerequisite.
 
 Claude distinguishes native queue acceptance (`queue-operation/enqueue`, which records
 `delivered`) from consumption (a user transcript entry, including `isMeta`, or an explicit
@@ -260,8 +281,8 @@ Older OMP releases without `getSessionName` still apply the declared label witho
 Claude's status line reads the same graph authority on each render and chains the existing renderer.
 Native `/rename` is temporary: the next authority update restores the declared name.
 
-Live harness evidence is refreshed every twenty seconds, inside the client's ninety-second
-observation freshness horizon. The driver retries its durable observation outbox across daemon
+Live harness evidence is refreshed every five minutes, inside the shared
+`HARNESS_OBSERVATION_FRESHNESS` window (refresh interval plus thirty seconds). The driver retries its durable observation outbox across daemon
 outages; mailbox subscriptions reconnect under the existing incarnation and fence. Once the daemon
 returns, quiet seats recover their current observation without a provider restart or a new turn.
 Heartbeats remain evidence-gated: missing, ended, superseded, or disconnected provider observations

@@ -442,7 +442,7 @@ fn subject_claim_pages_seek_the_subject_index() {
         .unwrap();
     let connection = store.readers.get();
     for descending in [false, true] {
-        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(true, descending));
+        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(ClaimsSubject::Exact, false, descending));
         let plan = connection
             .prepare(/* sqlite-large-value: allow-for-now lv-h8911c1538a9c owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &query)
             .unwrap()
@@ -3363,7 +3363,8 @@ fn a_prefixs_subjects_are_read_one_seek_per_subject() {
 fn seat_steps_are_read_from_the_open_steps() {
     let store = Store::open_memory("node").unwrap();
     for agent in [None, Some("agent/seat")] {
-        let steps = query_plan(&store, SEAT_STEP_ROWS, params![agent, now_ms().to_string()]);
+        let spellings = agent.map(work_actor_spellings_json);
+        let steps = query_plan(&store, SEAT_STEP_ROWS, params![spellings, now_ms().to_string()]);
         assert!(
             steps
                 .iter()

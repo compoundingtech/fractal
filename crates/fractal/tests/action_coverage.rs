@@ -550,6 +550,7 @@ impl Daemon {
 
     fn state(root: &Path, node: &str) -> AppState {
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -2744,6 +2745,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["missions", "show", &run.subject],
         vec!["missions", "queued", WORKER],
         vec!["attention", "ls", "--as", PERSON],
+        vec![
+            "budgets", "attention", "mission/example/inspect",
+            "--as", WORKER, "--person", PERSON, "--at", "0",
+        ],
         vec!["work", "ls", "--as", WORKER],
         vec!["work", "show", &run.steps[0].subject],
         vec!["work", "revision", "generations", &run.subject],
@@ -2773,7 +2778,11 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["schema", "show", "runtime.observed"],
         vec!["schema", "export"],
         vec!["subject", "show", WORKER],
+        vec!["subject", "desired", WORKER],
+        vec!["subject", "desired", "--all"],
+        vec!["subject", "desired", "--kind", "mission"],
         vec!["subject", "history", WORKER],
+        vec!["claims", "ls", "--subject-prefix", &run.subject],
         vec!["documents", "ls"],
         vec!["activity"],
         vec!["import", "ls"],
@@ -2801,6 +2810,12 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(!output.stdout.is_empty(), "{command:?}: no view");
+            if command.first() == Some(&"budgets") {
+                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(response["value"]["mission"], "mission/example/inspect");
+                assert_eq!(response["value"]["person"], PERSON);
+                assert_eq!(response["value"]["inclusive"], 0);
+            }
         }
         daemon.restart().await;
         assert_eq!(
@@ -6290,6 +6305,12 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     .unwrap_err();
     assert!(matches!(denied, ClientError::Api(ErrorCode::Forbidden, ..)));
     let pending_view = daemon.store().custom_subject(TREE).unwrap().unwrap();
+    let folded = cli_value(daemon.cli(PERSON, &["subject", "decisions", TREE]).await);
+    assert_eq!(folded["requests"][0]["request"], request);
+    assert_eq!(folded["requests"][0]["status"], "pending");
+    assert_eq!(folded["requests"][0]["open"], true);
+    assert_eq!(folded["requests"][0]["needs_ask"], true);
+    assert!(folded["defects"].as_array().unwrap().is_empty());
     // A stale card fence writes nothing; the accepted answer's exact replay across restarts
     // returns the same claim without a second write.
     daemon
@@ -6303,6 +6324,11 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     assert_eq!(answers[0].actor.as_deref(), Some(DECIDER));
     assert_eq!(answers[0].body["fields"]["request"], json!(request));
     assert_eq!(answers[0].body["fields"]["selection"], json!(["keep"]));
+    let folded = cli_value(daemon.cli(PERSON, &["subject", "decisions", TREE]).await);
+    assert_eq!(folded["requests"][0]["status"], "answered");
+    assert_eq!(folded["requests"][0]["answer"], answers[0].id);
+    assert_eq!(folded["requests"][0]["approval_gate"], true);
+    assert_eq!(folded["requests"][0]["needs_ask"], false);
     assert!(
         daemon
             .client(DECIDER)
@@ -6425,6 +6451,239 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
             .items
             .is_empty()
     );
+}
+
+const DECISION_V2_TREE: &str = "custom/decision/tree/v2/example/reader";
+const DECISION_V2_FLEET: &str = "5e3c1a9b-2d4f-4b6e-8a7c-0f1e2d3c4b5a";
+
+fn decision_v2_input(kind: &str, actor: &str, fields: Value) -> ClaimInput {
+    ClaimInput {
+        subject: DECISION_V2_TREE.into(),
+        kind: format!("custom.decision.tree.v2.{kind}"),
+        actor: Some(actor.into()),
+        fields: serde_json::from_value(fields).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }
+}
+
+fn decision_v2_claim(store: &Store, kind: &str, actor: &str, fields: Value) -> String {
+    store.append_claim(&decision_v2_input(kind, actor, fields)).unwrap().id
+}
+
+fn decision_v2_sync(source: &Store, target: &Store) {
+    let exchange = source.export_replication_exchange(
+        DECISION_V2_FLEET, &target.replication_inventory().unwrap(),
+    ).unwrap();
+    target.receive_replication_exchange(source.origin(), DECISION_V2_FLEET, &exchange).unwrap();
+    target.validate_replication_backlog().unwrap();
+    target.project_replication_backlog().unwrap();
+}
+
+async fn decision_v2_fixture(node: &str) -> (Daemon, String, String) {
+    use sha2::{Digest, Sha256};
+    let daemon = Daemon::new_member(node).await;
+    daemon.store().bind_fleet(DECISION_V2_FLEET).unwrap();
+    let manifest = daemon.root.path().join("decision-tree-v2.json");
+    std::fs::write(&manifest, include_str!("../../../examples/fractal/decision-tree-v2.json")).unwrap();
+    let registered = cli_value(daemon.cli(
+        READER, &["schema", "register", manifest.to_str().unwrap(), "--as", READER],
+    ).await);
+    assert_eq!(registered["state"], "ready");
+    decision_v2_claim(daemon.store(), "opened", READER, json!({"seat": READER, "recipient": PERSON}));
+    let bytes = b"## Options\n### yes\nProceed.\n### no\nStop.\n";
+    let body_file = daemon.root.path().join("question.md");
+    std::fs::write(&body_file, bytes).unwrap();
+    cli_value(daemon.cli(PERSON, &[
+        "documents", "put", body_file.to_str().unwrap(), "--as", "doc/decision/reader-question",
+    ]).await);
+    let body = format!("doc/decision/reader-question@{}", hex::encode(Sha256::digest(bytes)));
+    let request = decision_v2_claim(daemon.store(), "requested", READER, json!({
+        "question": "Proceed?", "kind": "blocker", "body": body, "q": 1,
+    }));
+    (daemon, request, body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_reads_converge_across_opposite_arrival_orders() {
+    let (seed, request, body) = decision_v2_fixture("decision-seed").await;
+    let dependent = decision_v2_claim(seed.store(), "requested", READER, json!({
+        "question": "Which implementation?", "kind": "refinement", "body": body, "q": 2,
+        "applies_when": [{"q": 1, "selection": ["yes"]}],
+    }));
+    // Independent native writers share the exact tree and request, not synthetic fold ordinals.
+    let yes_writer = Store::open_memory("decision-yes").unwrap();
+    let no_writer = Store::open_memory("decision-no").unwrap();
+    for writer in [&yes_writer, &no_writer] {
+        writer.bind_fleet(DECISION_V2_FLEET).unwrap();
+        decision_v2_sync(seed.store(), writer);
+    }
+    let yes = decision_v2_claim(&yes_writer, "answered", PERSON, json!({
+        "request": request, "selection": ["yes"],
+    }));
+    let no = decision_v2_claim(&no_writer, "answered", PERSON, json!({
+        "request": request, "selection": ["no"],
+    }));
+    let first = Daemon::new_member("decision-first").await;
+    let second = Daemon::new_member("decision-second").await;
+    for replica in [&first, &second] {
+        replica.store().bind_fleet(DECISION_V2_FLEET).unwrap();
+        decision_v2_sync(seed.store(), replica.store());
+    }
+    decision_v2_sync(&yes_writer, first.store());
+    decision_v2_sync(&no_writer, first.store());
+    decision_v2_sync(&no_writer, second.store());
+    decision_v2_sync(&yes_writer, second.store());
+    let arrival = |replica: &Daemon, id: &str| {
+        replica.store().claims_for(DECISION_V2_TREE, None).unwrap()
+            .into_iter().find(|claim| claim.id == id).unwrap().store_index
+    };
+    assert!(arrival(&first, &yes) < arrival(&first, &no));
+    assert!(arrival(&second, &no) < arrival(&second, &yes));
+    let read = ["subject", "decisions", DECISION_V2_TREE];
+    let left = cli_value(first.cli(PERSON, &read).await);
+    let right = cli_value(second.cli(PERSON, &read).await);
+    assert_eq!(left["basis"], right["basis"]);
+    assert_eq!(left, right, "canonical answers, statuses, approvals and guards must converge");
+    assert!(left["defects"].as_array().unwrap().is_empty());
+    let requests = left["requests"].as_array().unwrap();
+    let answered = requests.iter().find(|row| row["request"] == request).unwrap();
+    assert_eq!(answered["status"], "answered");
+    assert_eq!(answered["approval_gate"], true);
+    let selected_yes = answered["answer"] == yes;
+    assert!(selected_yes || answered["answer"] == no);
+    let guarded = requests.iter().find(|row| row["request"] == dependent).unwrap();
+    assert_eq!(guarded["open"], selected_yes);
+    assert_eq!(guarded["status"], if selected_yes { "pending" } else { "moot" });
+    assert_eq!(guarded["approval_gate"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_reader_rejects_unregistered_or_unauthorized_approval() {
+    let unregistered = Daemon::new_member("decision-unregistered").await;
+    let request = decision_v2_claim(unregistered.store(), "requested", READER, json!({
+        "question": "Unregistered?", "kind": "blocker", "body": "untrusted",
+    }));
+    decision_v2_claim(unregistered.store(), "answered", PERSON, json!({
+        "request": request, "selection": ["yes"],
+    }));
+    let read = ["subject", "decisions", DECISION_V2_TREE];
+    assert!(!unregistered.cli(PERSON, &read).await.status.success());
+    for corruption in ["missing-creation", "wrong-recipient", "mismatched-pins", "invalid", "conflict"] {
+        let (daemon, request, _) = decision_v2_fixture(corruption).await;
+        let answer = decision_v2_claim(daemon.store(), "answered", PERSON, json!({
+            "request": request, "selection": ["yes"],
+        }));
+        assert_eq!(cli_value(daemon.cli(PERSON, &read).await)["requests"][0]["approval_gate"], true);
+        // Retained-history damage is injected below admission, deliberately leaving the cached
+        // source ready so the reader must independently re-establish recipient and pin authority.
+        let connection = rusqlite::Connection::open(daemon.root.path().join("graph.db")).unwrap();
+        fractal_daemon::store::configure_projection_writer(&connection).unwrap();
+        match corruption {
+            "missing-creation" => {
+                connection.execute("DELETE FROM claims WHERE subject=?1 AND kind='custom.decision.tree.v2.opened'",
+                    [DECISION_V2_TREE]).unwrap();
+            }
+            "wrong-recipient" => {
+                connection.execute("UPDATE claims SET actor='person/lichen' WHERE id=?1", [&answer]).unwrap();
+            }
+            "mismatched-pins" => {
+                connection.execute("UPDATE claims SET body=json_set(body,'$.fields._registration','other-registration') WHERE id=?1",
+                    [&answer]).unwrap();
+            }
+            "invalid" | "conflict" => {}
+            _ => unreachable!(),
+        }
+        let state = if matches!(corruption, "invalid" | "conflict") { corruption } else { "ready" };
+        connection.execute("UPDATE custom_sources SET state=?1 WHERE subject=?2",
+            rusqlite::params![state, DECISION_V2_TREE]).unwrap();
+        let output = daemon.cli(PERSON, &read).await;
+        assert!(!output.status.success(), "accepted {corruption}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid-custom-claim"),
+            "{corruption}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_v2_denies_agent_answers_but_accepts_nonapproving_owner_recordings() {
+    let (daemon, request, _) = decision_v2_fixture("decision-recorded").await;
+    let before = daemon.store().index().unwrap();
+    assert!(daemon.store().append_claim(&decision_v2_input("answered", READER, json!({
+        "request": request, "selection": ["yes"],
+    }))).is_err());
+    assert_eq!(daemon.store().index().unwrap(), before);
+    assert!(daemon.store().claims_for(DECISION_V2_TREE, Some("custom.decision.tree.v2.answered")).unwrap().is_empty());
+    let recorded = decision_v2_claim(daemon.store(), "recorded", READER, json!({
+        "request": request, "recorder": READER, "responder": PERSON,
+        "quote": "Yes, proceed.", "selection": ["yes"],
+    }));
+    let folded = cli_value(daemon.cli(PERSON, &["subject", "decisions", DECISION_V2_TREE]).await);
+    assert!(folded["defects"].as_array().unwrap().is_empty());
+    assert_eq!(folded["requests"][0]["answer"], recorded);
+    assert_eq!(folded["requests"][0]["status"], "answered");
+    assert_eq!(folded["requests"][0]["approval_gate"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decision_reader_excludes_repaired_originals() {
+    let (source, original_request, body) = decision_v2_fixture("decision-repair-source").await;
+    let replacement_request = decision_v2_claim(source.store(), "requested", READER, json!({
+        "question": "Corrected question", "kind": "blocker", "body": body, "q": 1,
+    }));
+    let replacement_answer = decision_v2_claim(source.store(), "answered", PERSON, json!({
+        "request": replacement_request, "selection": ["yes"],
+    }));
+    let original_answer = decision_v2_claim(source.store(), "answered", PERSON, json!({
+        "request": replacement_request, "selection": ["no"],
+    }));
+    let target = Daemon::new_member("decision-repair-target").await;
+    target.store().bind_fleet(DECISION_V2_FLEET).unwrap();
+    decision_v2_sync(source.store(), target.store());
+    let url = format!("/v1/custom/decision-inputs?subject={}", urlencoding::encode(DECISION_V2_TREE));
+    let before: Value = target.transport().get(&url).await.unwrap();
+    assert!(before["claims"].as_array().unwrap().iter().any(|claim| claim["id"] == original_request));
+    for (original, replacement) in [
+        (&original_request, &replacement_request), (&original_answer, &replacement_answer),
+    ] {
+        // Simulate detection/quarantine of already-retained damaged records. The replacement
+        // and the repair itself still pass the real CLI admission and repair projection path.
+        let connection = rusqlite::Connection::open(target.root.path().join("graph.db")).unwrap();
+        fractal_daemon::store::configure_projection_writer(&connection).unwrap();
+        let record: String = connection.query_row(
+            "SELECT record_ref FROM replica_records WHERE claim_id=?1", [original], |row| row.get(0),
+        ).unwrap();
+        connection.execute("UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record]).unwrap();
+        cli_value(target.cli(PERSON, &[
+            "replication", "repair", &record, "--with", replacement, "--as", PERSON,
+            "--reason", "Replace the damaged decision input.", "--idempotency-key", original,
+        ]).await);
+    }
+    let after: Value = target.transport().get(&url).await.unwrap();
+    let effective = after["claims"].as_array().unwrap();
+    for original in [&original_request, &original_answer] {
+        assert!(!effective.iter().any(|claim| claim["id"] == *original));
+        assert!(target.store().claims_for(DECISION_V2_TREE, None).unwrap().iter().any(|claim| &claim.id == original),
+            "repair must not erase retained history");
+    }
+    let folded = cli_value(target.cli(PERSON, &["subject", "decisions", DECISION_V2_TREE]).await);
+    assert_eq!(folded["basis"], after["basis"]);
+    assert_ne!(before["basis"], after["basis"]);
+    let kinds = fractal_schema::custom::decisions::input_kinds(2);
+    assert_eq!(after["basis"]["revision"],
+        target.store().custom_basis_revision(DECISION_V2_TREE, &kinds).unwrap());
+    assert!(folded["defects"].as_array().unwrap().is_empty());
+    assert_eq!(folded["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(folded["requests"][0]["request"], replacement_request);
+    assert_eq!(folded["requests"][0]["answer"], replacement_answer);
+    assert_eq!(folded["requests"][0]["approval_gate"], true);
+    // The endpoint is one atomic snapshot, not a paged two-read protocol. A repair between
+    // that snapshot and a derived status write must make the old basis visibly stale.
+    target.store().append_claim(&decision_v2_input("status", READER, json!({
+        "state": "clear", "title": "Stale", "detail": "Before repair",
+        "_basis": [before["basis"].clone()],
+    }))).unwrap();
+    assert_eq!(target.store().custom_subject(DECISION_V2_TREE).unwrap().unwrap()["state"], "stale");
 }
 
 /// Both manifests register through the CLI on isolated disk-backed daemons. Exchange the

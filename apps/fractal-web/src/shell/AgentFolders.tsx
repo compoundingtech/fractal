@@ -25,7 +25,7 @@ import {
   useFleetSelection,
   useSubjectSelection,
 } from '../data/react.tsx'
-import type { Feed, Fleet } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed, type Fleet } from '../data/source.ts'
 import { folders } from '../folders/client.ts'
 import { liveAncestor, project, type ProjectedFolder } from '../folders/core.mts'
 import { refusalText } from '../folders/edit.ts'
@@ -36,6 +36,7 @@ import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.t
 import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
 import { useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
+import { sameFolderFleet } from './sameFolderFleet.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
@@ -535,7 +536,7 @@ const LegacyAgentFolders = React.memo(
           <p {...stylex.props(styles.notice)}>No agents match these filters.</p>
         ) : null}
         <div role="status" {...stylex.props(styles.notice)}>
-          {snapshot.phase === 'fixture' ? (
+          {snapshot.reason === 'unauthorized' ? credentialExpiredMessage : snapshot.phase === 'fixture' ? (
             'Fixture folders · local preview'
           ) : snapshot.phase === 'synced' ? (
             snapshot.detail
@@ -564,48 +565,6 @@ const LegacyAgentFolders = React.memo(
 )
 const descendantCount = (folder: ProjectedFolder): number =>
   folder.members.length + folder.folders.reduce((total, child) => total + descendantCount(child), 0)
-
-/** Ignore presentation-only fields when deciding whether React Aria must rebuild its collection. */
-// oxlint-disable-next-line overeng/named-args -- Fixed positional (feed, feed, filters) comparator ABI.
-export const sameFolderFleet = (
-  left: Feed<Fleet>,
-  right: Feed<Fleet>,
-  filters: SidebarFilters,
-): boolean => {
-  if (left._tag !== 'Observed' || right._tag !== 'Observed') return left._tag === right._tag
-  const status =
-    filters.hideEnded ||
-    filters.hideRetired ||
-    filters.statuses.length > 0 ||
-    filters.sort === 'status'
-  // Facet predicates read raw reported facts; hideEnded also reads the raw lifecycle state.
-  const facets = parseSidebarQuery(filters.query).facets
-  const repo = facets.some((facet) => facet.field === 'repo')
-  const tool = facets.some((facet) => facet.field === 'tool')
-  const state = filters.hideEnded || facets.some((facet) => facet.field === 'state')
-  return (
-    left.value.agents.length === right.value.agents.length &&
-    left.value.agents.every((agent, index) => {
-      const next = right.value.agents[index]
-      return (
-        next !== undefined &&
-        agent.ref === next.ref &&
-        (!(status || state) ||
-          agentStatus({ agent, fleet: left }) === agentStatus({ agent: next, fleet: right })) &&
-        (!state || (agent.state === next.state && agent.status === next.status && agent.activity === next.activity)) &&
-        (!tool || agent.harness === next.harness) &&
-        (!repo ||
-          (agent.checkout._tag === 'Known' ? agent.checkout.value.repository : undefined) ===
-            (next.checkout._tag === 'Known' ? next.checkout.value.repository : undefined)) &&
-        (filters.query.trim() === '' || agent.description === next.description) &&
-        (filters.sort !== 'activity' ||
-          (agent.lastActivityAt._tag === next.lastActivityAt._tag &&
-            (agent.lastActivityAt._tag === 'Unknown' ||
-              (next.lastActivityAt._tag === 'Known' && agent.lastActivityAt.value === next.lastActivityAt.value))))
-      )
-    })
-  )
-}
 
 type AgentRowWorkspace = Pick<Workspace, 'id' | 'title' | 'host' | 'unread'>
 interface AgentFolderTreeItem extends SidebarTreeItem<AgentFolderTreeItem> {

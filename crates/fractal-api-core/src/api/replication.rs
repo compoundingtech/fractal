@@ -300,10 +300,14 @@ pub async fn replication_checkpoint_adopt(
 
 pub async fn replication_receive(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let correlation = headers.get("x-fractal-exchange-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
     let store = state.store.clone();
-    let (response, reconcile_changed, waking_kind, notice_visible) = blocking_action(move || {
+    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -388,40 +392,39 @@ pub async fn replication_receive(
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
-        // One read answers both whether every new claim is quiet and which kind names the wake;
-        // only a change that projected can wake the reconciler, so no other receive asks it.
-        let (any_new, waking_kind) = if changed && projected {
-            store
-                .claims_since_waking_kind(before_index)
-                .map_err(|error| FractalError::new("internal", error.to_string()))?
-        } else {
-            (false, None)
-        };
         let quiet_only = projection_was_healthy
             && projected
             && repairs == 0
             && admission.unknown == 0
             && admission.invalid == 0
-            && any_new
-            && waking_kind.is_none();
+            && store
+                .claims_since_only_quiet_notifications(before_index)
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
-        let reconcile_changed = changed && !quiet_only && projected;
         Ok((
             ReplicationReceiveResponse {
                 receipt,
                 changed,
                 store_index,
             },
-            reconcile_changed,
-            waking_kind,
+            changed && !quiet_only && projected,
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
-    .await?;
+    .await.inspect_err(|error| {
+        smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
+            smallclaims::replication_diagnostics::FailureKind::DaemonReceive,
+            || format!(
+                "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
+                correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+                error.code,
+            ),
+        );
+    })?;
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,
-            waking_kind.as_deref(),
+            None,
         );
         state.notify.notify_one();
     }
@@ -680,6 +683,20 @@ pub async fn test_shard_append(
     let mut answer = serde_json::to_value(claim).map_err(ApiError::internal)?;
     answer["appended"] = serde_json::Value::Bool(appended);
     Ok(Json(answer))
+}
+
+/// Test support: write a claim to the messages shard as a peer's replicated copy arrives, without
+/// the graph check a send makes, so a test can hold a stream item under a subject the graph has.
+#[cfg(feature = "test-support")]
+pub async fn test_shard_copy(
+    State(state): State<AppState>,
+    Json(input): Json<smallclaims::claim::ClaimInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = replication_shard(&state, crate::store::messages_shard::SHARD_ID)?;
+    let (claim, _) = blocking_action(move || crate::store::messages_shard::append_replicated_copy(&store, &input)).await?;
+    let _ = std::fs::write(state.state_dir.join("replication.wake"), b"messages-shard\n");
+    stream_admitted(&state).await;
+    Ok(Json(serde_json::to_value(claim).map_err(ApiError::internal)?))
 }
 
 /// Test support: the claims the messages shard holds about one subject.

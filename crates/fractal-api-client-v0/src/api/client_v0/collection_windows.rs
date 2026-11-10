@@ -337,7 +337,7 @@ mod tests {
             }
             let grant = "custom/client/scoped-window-reader";
             let pair = |scopes: Value| {
-                state.store.append_claim(&ClaimInput {
+                state.store.append_client_operation_claim(&ClaimInput {
                 subject:grant.into(), kind:"custom.client.pairing-completed".into(), actor:Some("person/ada".into()),
                 fields:serde_json::from_value(json!({"session_actor":"client/scoped-window-reader", "person_id":"person/ada", "expires_at_unix_ms":client_now_ms() as u64 + 60_000, "scopes":scopes})).unwrap(),
                 evidence:vec![], expected_subject:None, idempotency_key:None,
@@ -699,7 +699,7 @@ mod tests {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
-        let grant = state.store.append_claim(&ClaimInput {
+        let grant = state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cost-window-reader".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/cost-window-reader", "person_id":"person/ada", "expires_at_unix_ms":(client_now_ms()+600_000) as u64,"scopes":["read.projections","read.glasses"]})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -794,7 +794,7 @@ mod tests {
             };
             let paired = state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: grant.into(),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/ada".into()),
@@ -822,7 +822,7 @@ mod tests {
             if change == "revoked" {
                 state
                     .store
-                    .append_claim(&ClaimInput {
+                    .append_client_operation_claim(&ClaimInput {
                         subject: grant.into(),
                         kind: "custom.client.pairing-revoked".into(),
                         actor: Some("person/ada".into()),
