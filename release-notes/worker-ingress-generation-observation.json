@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Observe Linux worker-only internal requests against the supervised worker process generation and support explicit foreground worker enrollment before the daemon listens.",
+  "summary": "Observe worker-only internal requests against the supervised worker process generation and support explicit foreground worker enrollment before the daemon listens. Observation diagnostics share one fixed 60-second rate-limit window across all paths, with suppressed counts on the next emitted observation.",
   "replay": {"status": "none", "detail": "No claim or retirement format changes."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},

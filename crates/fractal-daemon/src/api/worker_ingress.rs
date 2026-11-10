@@ -2,12 +2,48 @@
 //! Same-UID service-manager takeover and ptrace of the trusted worker are not covered.
 use super::*;
 use axum::{body::Body, extract::Request, middleware::{Next, from_fn}, response::IntoResponse};
-use std::sync::Arc;
+use std::{sync::{Arc, LazyLock, Mutex}, time::{Duration, Instant}};
 use crate::config::WorkerIngressGenerationCheck;
 
 type Observe = WorkerAuthority;
 
 use fractal_api_core::api::{WorkerAuthority, authorize_worker as authorize, worker_route};
+
+const OBSERVATION_WINDOW: Duration = Duration::from_secs(60);
+static OBSERVATION_LIMITER: LazyLock<Mutex<ObservationLimiter>> =
+    LazyLock::new(|| Mutex::new(ObservationLimiter::default()));
+
+// One fixed key for all routes: arbitrary replication paths must not increase
+// either the diagnostic volume or the limiter's memory usage.
+#[derive(Default)]
+struct ObservationLimiter {
+    started: Option<Instant>,
+    suppressed: u64,
+}
+
+impl ObservationLimiter {
+    fn decide(&mut self, now: Instant) -> Option<u64> {
+        if self.started.is_some_and(|start| now.duration_since(start) < OBSERVATION_WINDOW) {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return None;
+        }
+        self.started = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+fn record_observation(path: &str, now: Instant, limiter: &Mutex<ObservationLimiter>,
+    output: &mut impl std::io::Write,
+) {
+    // Recover diagnostic state after poisoning rather than bypassing the cap.
+    // Neither a diagnostic lock nor a failed sink changes admission.
+    let suppressed = limiter.lock().unwrap_or_else(std::sync::PoisonError::into_inner).decide(now);
+    // As in ancestry diagnostics, release the guard before touching the sink.
+    if let Some(suppressed) = suppressed {
+        let _ = writeln!(output,
+            "fractal: worker authority observation would refuse {path} suppressed={suppressed}");
+    }
+}
 
 fn protect(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) -> Router {
     app.layer(from_fn(move |request: Request<Body>, next: Next| {
@@ -18,7 +54,8 @@ fn protect(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) ->
                 let admitted = tokio::task::spawn_blocking(move || authorize(peer.as_ref(), &*observe)).await;
                 if !matches!(admitted, Ok(Ok(()))) {
                     if mode == WorkerIngressGenerationCheck::Observe {
-                        eprintln!("fractal: worker authority observation would refuse {}", request.uri().path());
+                        record_observation(request.uri().path(), Instant::now(),
+                            &OBSERVATION_LIMITER, &mut std::io::stderr());
                         return next.run(request).await;
                     }
                     return (axum::http::StatusCode::FORBIDDEN,
@@ -55,6 +92,52 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tower::ServiceExt as _;
+
+    #[test]
+    fn worker_observation_volume_is_independent_of_path_cardinality() {
+        let now = Instant::now();
+        let limiter = Mutex::new(ObservationLimiter::default());
+        let mut output = Vec::new();
+        for index in 0..10_000 {
+            record_observation(&format!("/v1/internal/replication/{index}"), now,
+                &limiter, &mut output);
+        }
+        assert_eq!(String::from_utf8(output.clone()).unwrap(),
+            "fractal: worker authority observation would refuse /v1/internal/replication/0 suppressed=0\n");
+        record_observation("/v1/internal/seat-snapshot",
+            now + OBSERVATION_WINDOW - Duration::from_nanos(1), &limiter, &mut output);
+        record_observation("/v1/internal/seat-freshness",
+            now + OBSERVATION_WINDOW, &limiter, &mut output);
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.lines().count(), 2);
+        assert!(output.ends_with("/v1/internal/seat-freshness suppressed=10000\n"));
+        assert_eq!(limiter.lock().unwrap().suppressed, 0);
+    }
+
+    #[test]
+    fn worker_observation_counts_saturate_and_reset_after_emission() {
+        let now = Instant::now();
+        let mut limiter = ObservationLimiter { started: Some(now), suppressed: u64::MAX };
+        assert_eq!(limiter.decide(now), None);
+        assert_eq!(limiter.decide(now + OBSERVATION_WINDOW), Some(u64::MAX));
+        assert_eq!(limiter.decide(now + OBSERVATION_WINDOW * 2), Some(0));
+    }
+
+    #[test]
+    fn worker_observation_output_releases_limiter_lock() {
+        struct Writer<'a>(&'a Mutex<ObservationLimiter>);
+        impl std::io::Write for Writer<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                assert!(self.0.try_lock().is_ok());
+                Err(std::io::Error::other(format!("sink unavailable: {} bytes", bytes.len())))
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let limiter = Mutex::new(ObservationLimiter::default());
+        let now = Instant::now();
+        record_observation("/v1/internal/seat-snapshot", now, &limiter, &mut Writer(&limiter));
+        assert_eq!(limiter.lock().unwrap().decide(now), None);
+    }
 
     fn process(pid: u32) -> LocalPeer {
         LocalPeer { pid, ancestor: None,
@@ -138,8 +221,12 @@ mod tests {
             "/v1/internal/seat-freshness/reads", "/v1/internal/seat-snapshot", crate::peer::CLIENT_READ_FORWARD_PATH] {
             let app = protect(Router::new().route(path, axum::routing::post(|| async { "accepted" })),
                 Arc::new(|| anyhow::bail!("supervisor unavailable")), WorkerIngressGenerationCheck::Observe);
-            let response = app.oneshot(Request::post(path).body(Body::empty()).unwrap()).await.unwrap();
-            assert_eq!(response.status(), 200, "{path}");
+            // Admission stays unchanged even after repeated observations exhaust
+            // the shared diagnostic window.
+            for _ in 0..3 {
+                let response = app.clone().oneshot(Request::post(path).body(Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(), 200, "{path}");
+            }
         }
     }
 }
