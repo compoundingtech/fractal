@@ -22,6 +22,20 @@ final class ClientControlLifecycleTests: XCTestCase {
             let lifecycle = try XCTUnwrap((frame.items ?? frame.upserts)?.first)
             guard case .clientControlGrantLifecycle = lifecycle else { return XCTFail("Frame lost typed lifecycle row") }
         }
+        for trace in try XCTUnwrap(fixture["traces"] as? [[String: Any]]) {
+            for step in try XCTUnwrap(trace["steps"] as? [[String: Any]]) where step["expected"] as? String == "refuse-invalid-frame" {
+                let resource = try XCTUnwrap(step["resource"] as? [String: Any])
+                XCTAssertThrowsError(try JSONDecoder().decode(Resource.self, from: JSONSerialization.data(withJSONObject: resource)))
+                var frame = try XCTUnwrap((fixture["frames"] as? [[String: Any]])?.first)
+                frame["items"] = [resource]
+                XCTAssertThrowsError(try JSONDecoder().decode(ClientCommandsCollectionFrame.self, from: JSONSerialization.data(withJSONObject: frame)))
+            }
+        }
+        for sequence in [UInt64(0), UInt64(9_007_199_254_740_992)] {
+            var resource = try XCTUnwrap((fixture["resources"] as? [[String: Any]])?.first)
+            resource["sequence"] = sequence
+            XCTAssertThrowsError(try JSONDecoder().decode(Resource.self, from: JSONSerialization.data(withJSONObject: resource)))
+        }
         var invalid = try XCTUnwrap((fixture["resources"] as? [[String: Any]])?.first)
         invalid["state"] = "future-state"
         XCTAssertThrowsError(try JSONDecoder().decode(Resource.self, from: JSONSerialization.data(withJSONObject: invalid)))

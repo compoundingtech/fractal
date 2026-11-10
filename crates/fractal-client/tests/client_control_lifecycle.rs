@@ -21,6 +21,21 @@ fn commands_collection_decodes_typed_grant_lifecycle_vectors() {
         assert_eq!(collection, "commands");
         assert!(matches!(&rows[0], Resource::ClientControlGrantLifecycle(_)));
     }
+    for trace in vectors["traces"].as_array().unwrap() {
+        for step in trace["steps"].as_array().unwrap() {
+            if step["expected"] == "refuse-invalid-frame" {
+                assert!(serde_json::from_value::<Resource>(step["resource"].clone()).is_err());
+                let mut frame = vectors["frames"][0].clone();
+                frame["items"] = serde_json::json!([step["resource"]]);
+                assert!(serde_json::from_value::<CollectionEvent>(frame).is_err());
+            }
+        }
+    }
+    for sequence in [0, 1_u64 << 53] {
+        let mut invalid = vectors["resources"][0].clone();
+        invalid["sequence"] = sequence.into();
+        assert!(serde_json::from_value::<Resource>(invalid).is_err());
+    }
     let mut invalid = vectors["resources"][0].clone();
     invalid["state"] = "future-state".into();
     assert!(serde_json::from_value::<Resource>(invalid).is_err());
