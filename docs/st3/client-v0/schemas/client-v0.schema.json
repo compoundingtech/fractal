@@ -1201,7 +1201,7 @@
             "to": { "$ref": "#/$defs/Id" },
             "title": { "type": ["string", "null"] },
             "content": { "type": "string" },
-            "state": { "enum": ["sent", "delivered", "read", "closed"] },
+            "state": { "enum": ["sent", "delivered", "read", "closed", "expired"] },
             "sent_at": { "$ref": "#/$defs/Timestamp" },
             "session_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
             "in_reply_to": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },

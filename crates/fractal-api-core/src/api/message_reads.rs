@@ -52,6 +52,8 @@ pub enum Relayed {
         host: String,
         held: bool,
         status: Option<&'static str>,
+        /// Furthest actual delivery/read mark, retained even when status is closed.
+        consumed: Option<&'static str>,
         latest: Option<(String, u64)>,
     },
     /// The host did not answer: the reason, naming it.
@@ -221,7 +223,7 @@ fn latest_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<(S
 /// How far `answer`'s marks took the message, keeping only those of seats this member places on
 /// `host`: a host speaks for its own seats. A staging counts, below every mark: a host that
 /// records its seats' stagings as marks answers them here, and nowhere else.
-fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<&'static str> {
+fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> (Option<&'static str>, Option<&'static str>) {
     answer
         .marks
         .iter()
@@ -231,8 +233,13 @@ fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<&'
                 .chain(&message_marks::MARKS)
                 .find(|kind| **kind == mark.kind)
         })
-        .max_by_key(|kind| message_marks::rank(kind.trim_start_matches("message.")))
         .map(|kind| kind.trim_start_matches("message."))
+        .fold((None, None), |(status, consumed), phase| {
+            let further = |previous: Option<&'static str>| Some(previous.filter(|previous| {
+                message_marks::rank(previous) >= message_marks::rank(phase)
+            }).unwrap_or(phase));
+            (further(status), if matches!(phase, "delivered" | "read") { further(consumed) } else { consumed })
+        })
 }
 
 /// Ask each host about its messages, all hosts at once, within `deadline`. Every message asked
@@ -348,7 +355,7 @@ type Heard = (String, Result<MessageMarksAnswer, (String, String)>);
 /// What each message's host said, as a status over the seats this member places on that host. A
 /// close a host answered is queued for the client selectors (`relayed_closes`), which this read
 /// does not wait for.
-fn settle(
+pub(super) fn settle(
     store: &Arc<Store>,
     heard: Vec<Heard>,
 ) -> BTreeMap<String, Relayed> {
@@ -361,12 +368,13 @@ fn settle(
                     seats_on(store, &host).map_err(|error| format!("{error:#}"))
                 });
                 let relayed = match on_host {
-                    Ok(on_host) => Relayed::Answered {
-                        host,
-                        held: answer.held,
-                        status: status_of(&answer, on_host),
-                        latest: latest_of(&answer, on_host),
-                    },
+                    Ok(on_host) => {
+                        let (status, consumed) = status_of(&answer, on_host);
+                        Relayed::Answered {
+                            host, held: answer.held, status, consumed,
+                            latest: latest_of(&answer, on_host),
+                        }
+                    }
                     Err(reason) => Relayed::Unknown {
                         host,
                         reason: reason.clone(),
@@ -380,7 +388,7 @@ fn settle(
     let closes = settled
         .iter()
         .filter_map(|(subject, relayed)| match relayed {
-            Relayed::Answered { host, held: true, status: Some("closed"), latest: Some((receipt, at)) } => {
+            Relayed::Answered { host, held: true, status: Some("closed"), latest: Some((receipt, at)), .. } => {
                 Some(relayed_closes::RelayedClose {
                     message: subject.clone(),
                     host: host.clone(),

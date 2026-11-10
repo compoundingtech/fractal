@@ -125,14 +125,21 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         )?;
     }
     // Upgrade only expiry subjects once, not retained sent history on each open/read.
-    connection.execute_batch(
-        "BEGIN IMMEDIATE;
-         INSERT OR IGNORE INTO unread_mail_pending
-         SELECT subject FROM claims WHERE kind='message.expired'
-           AND NOT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1');
-         INSERT OR IGNORE INTO meta(key,value) VALUES('unread_mail_expiry_v1','1');
-         COMMIT;",
+    let expiry_migrated: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1')",
+        [],
+        |row| row.get(0),
     )?;
+    if !expiry_migrated {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             INSERT OR IGNORE INTO unread_mail_pending
+             SELECT subject FROM claims WHERE kind='message.expired'
+               AND NOT EXISTS(SELECT 1 FROM meta WHERE key='unread_mail_expiry_v1');
+             INSERT OR IGNORE INTO meta(key,value) VALUES('unread_mail_expiry_v1','1');
+             COMMIT;",
+        )?;
+    }
     Ok(())
 }
 

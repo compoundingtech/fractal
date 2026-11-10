@@ -298,7 +298,8 @@ pub(super) async fn run_message(
                         let unknown = message
                             .status_from
                             .as_ref()
-                            .is_some_and(|from| from.state == "unknown");
+                            .is_some_and(|from| from.state == "unknown")
+                            && message.status != "expired";
                         rows.push(format!(
                             "{}\t{}\t{}\t{}",
                             message.subject,
