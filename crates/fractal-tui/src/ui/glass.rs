@@ -5416,6 +5416,7 @@ mod tests {
         let (client, mut peer) = UnixStream::pair().unwrap();
         ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
             client, "agent/example/atlas/builder", "one".into(), 24, 80,
+            None,
         ));
         peer.write_all(&encode_packet(MessageType::Screen, b"\x1b[?1000h\x1b[?1006h")).unwrap();
         let start = Instant::now();
@@ -5531,6 +5532,7 @@ mod tests {
             let (client, _peer) = UnixStream::pair().unwrap();
             ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
                 client, "agent/example/atlas/builder", "one".into(), 24, 80,
+                None,
             ));
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| ui.render(frame)).unwrap();
@@ -5558,6 +5560,7 @@ mod tests {
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
                 client, "agent/example/atlas/builder", "one".into(), 24, 200,
+                None,
             ));
             peer.write_all(&encode_packet(
                 MessageType::Screen, b"\x1b[?1003h\x1b[?1006h\x1b[?1004h",
@@ -8048,7 +8051,7 @@ mod tests {
             let (client, mut peer) = UnixStream::pair().unwrap();
             peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             ui.terminal_view_mut(agent).unwrap().native = Some(
-                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80),
+                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80, None),
             );
             peer.write_all(&encode_packet(
                 MessageType::Screen,
@@ -10206,6 +10209,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         let mut reader = PacketReader::new();
@@ -10299,6 +10303,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         let mut reader = PacketReader::new();

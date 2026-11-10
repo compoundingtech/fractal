@@ -1,6 +1,7 @@
 //! Initial terminal attachment lifecycle; callbacks are fenced before any selected-view effects.
 use super::{Command, Direct, Fetched, Following, Ui, connecting_text, screen_lines};
 use crate::feed::TerminalUpdate;
+use crate::ui::attach_trace::Trace;
 use std::{collections::BTreeMap, future::Future, net::Shutdown, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -48,22 +49,32 @@ impl SetupPhase {
     }
 }
 
-pub(super) async fn phase<T>(name: &str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
-    use tracing::Instrument as _;
-    let started = Instant::now();
-    let span = tracing::debug_span!("terminal_attach_setup", phase = name);
-    async {
-        tracing::debug!(event = "start", "terminal attach setup phase");
-        let result = tokio::time::timeout(budget, future).await;
-        tracing::debug!(
-            event = "end",
-            elapsed_ms = %started.elapsed().as_millis(),
-            timed_out = result.is_err(),
-            "terminal attach setup phase"
-        );
-        result.map_err(|_| format!("{name} timed out"))?
-    }.instrument(span).await
+#[cfg(test)]
+pub(super) async fn phase<T>(name: &'static str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    traced_phase(None, name, budget, future).await
 }
+
+pub(super) async fn traced_phase<T>(trace: Option<&Trace>, name: &'static str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    let guard = trace.map(|trace| trace.start_phase(name));
+    let result = tokio::time::timeout(budget, future).await;
+    let outcome = match &result { Err(_) => "timeout", Ok(Err(_)) => "failure", Ok(Ok(_)) => "success" };
+    if let Some(guard) = guard { guard.end(outcome); }
+    result.map_err(|_| format!("{name} timed out"))?
+}
+/// Own cancellation even when a spawned setup future is never polled.
+pub(super) struct SetupOwner(Option<Trace>);
+
+impl SetupOwner {
+    pub(super) fn new(trace: Option<Trace>) -> Self { Self(trace) }
+    pub(super) fn handed_off(&mut self) { self.0 = None; }
+}
+
+impl Drop for SetupOwner {
+    fn drop(&mut self) {
+        if let Some(trace) = &self.0 { trace.finish("setup-dropped"); }
+    }
+}
+
 
 #[derive(Default)]
 pub(super) struct State {
@@ -76,16 +87,23 @@ pub(super) struct State {
     wanted: BTreeMap<String, Arc<AtomicBool>>,
     pub(super) tasks: BTreeMap<String, JoinHandle<()>>,
     pub(super) opens: BTreeMap<String, Instant>,
+    traces: BTreeMap<String, Trace>,
 }
 
 impl Drop for State {
     fn drop(&mut self) {
+        for trace in self.traces.values() { trace.finish("state-dropped"); }
         for task in self.tasks.values() { task.abort(); }
     }
 }
 
 impl State {
     pub(super) fn cancel(&mut self, agent: &str) {
+        self.cancel_reason(agent, "cancelled");
+    }
+
+    fn cancel_reason(&mut self, agent: &str, reason: &'static str) {
+        if let Some(trace) = self.traces.remove(agent) { trace.finish(reason); }
         self.pending.remove(agent);
         if let Some(task) = self.tasks.get(agent) { task.abort(); }
         if let Some(wanted) = self.wanted.remove(agent) { wanted.store(false, Ordering::Relaxed); }
@@ -95,7 +113,7 @@ impl State {
         if self.selected.as_deref() == selected { return; }
         self.generation += 1;
         if let Some(previous) = self.selected.take() {
-            self.cancel(&previous);
+            self.cancel_reason(&previous, "selection-changed");
             if let Some(view) = ui.terminal_view_mut(&previous)
                 && view.native.is_none()
                 && view.stale.as_deref().is_some_and(|status| status.starts_with("connecting"))
@@ -123,8 +141,11 @@ impl State {
         self.opens.insert(agent.to_owned(), Instant::now());
         let wanted = Arc::new(AtomicBool::new(true));
         self.wanted.insert(agent.to_owned(), wanted.clone());
+        self.traces.insert(agent.to_owned(), Trace::new(agent));
         (self.generation, wanted, serial)
     }
+
+    pub(super) fn trace(&self, agent: &str) -> Option<Trace> { self.traces.get(agent).cloned() }
 
     pub(super) fn resume_fallback(&mut self, view: &mut crate::ui::TerminalView, runtime_ids: &[String], commands: &mpsc::UnboundedSender<Command>) {
         // A shell has no runtime-resolved fallback. Only Ctrl+R may restart its failed setup.
@@ -162,6 +183,7 @@ impl State {
     pub(super) fn tick(&mut self, ui: &mut Ui) {
         for (agent, task) in &self.tasks {
             if ui.terminal_view(agent).is_none() {
+                if let Some(trace) = self.traces.remove(agent) { trace.finish("view-closed"); }
                 task.abort();
                 self.pending.remove(agent);
                 if let Some(wanted) = self.wanted.remove(agent) { wanted.store(false, Ordering::Relaxed); }
@@ -171,7 +193,7 @@ impl State {
         let Some(started) = self.started else { return; };
         if started.elapsed() >= DEADLINE {
             if let Some(agent) = self.selected.take() {
-                self.cancel(&agent);
+                self.cancel_reason(&agent, "outer-deadline");
                 if let Some(view) = ui.terminal_view_mut(&agent) { view.stale = Some(failed("attach setup timed out")); }
                 self.selected = Some(agent);
             }
@@ -205,9 +227,10 @@ impl State {
                 if let Some(view) = ui.terminal_view_mut(&agent).filter(|view| view.native.is_none()) {
                     view.name = format!("{} · {route}", view.name);
                     view.title = view.name.clone();
-                    view.native = Some(crate::ui::pty::NativeTerminal::spawn(direct.stream, &direct.name, direct.incarnation, rows, columns));
+                    view.native = Some(crate::ui::pty::NativeTerminal::spawn(direct.stream, &direct.name, direct.incarnation, rows, columns, self.traces.get(&agent).cloned()));
                     view.stale = None;
                 } else {
+                    if let Some(trace) = self.traces.remove(&agent) { trace.finish("view-unavailable"); }
                     close(direct);
                 }
                 if current { ui.flash(format!("Attached · {route}")); }
@@ -218,6 +241,7 @@ impl State {
             }
             Fetched::NativeFailed { agent, generation, runtime_ids, reason } => {
                 if !self.current(&agent, generation) { return; }
+                if let Some(trace) = self.traces.remove(&agent) { trace.finish("setup-failed"); }
                 self.note = None;
                 self.started = None;
                 if self.opens.remove(&agent).is_some() { crate::ui::slo::METRICS.add("terminal_open_errors", 1); }
@@ -319,6 +343,72 @@ mod tests {
     use super::*;
     use crate::ui::{Pane, TerminalView, glass::Open};
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn dropping_unpolled_setup_finishes_while_state_retains_trace() {
+        let (trace, events) = Trace::captured("agent/A");
+        let owner = SetupOwner::new(Some(trace.clone()));
+        let future = async move { let _owner = owner; std::future::pending::<()>().await; };
+        drop(future);
+        trace.finish("state-dropped");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] != "start").count(), 1);
+        assert_eq!(events.last().unwrap()["outcome"], "setup-dropped");
+    }
+
+    fn poll_setup(future: std::pin::Pin<&mut impl Future<Output = Result<(), String>>>) {
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(future.poll(&mut context).is_pending());
+    }
+
+    #[tokio::test]
+    async fn every_setup_phase_expires_with_correlated_outcome() {
+        for name in ["terminal discovery", "direct open", SetupPhase::Capability.name(), SetupPhase::Upgrade.name(), SetupPhase::FirstFrame.name()] {
+            let (trace, events) = Trace::captured("agent/test");
+            // A zero budget and a permanently pending operation deterministically expires;
+            // no wall-clock sleep or Tokio test-util feature is needed.
+            let result = traced_phase(Some(&trace), name, Duration::ZERO, std::future::pending::<Result<(), String>>()).await;
+            assert_eq!(result.unwrap_err(), format!("{name} timed out"));
+            trace.finish("setup-failed");
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|event| event["phase"] == name && event["outcome"] == "timeout" && event["level"] == "INFO"));
+            assert!(events.iter().all(|event| event["attempt_id"] == events[0]["attempt_id"] && event["agent"] == "agent/test"));
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_deadline_ends_every_active_phase_once() {
+        for name in ["terminal discovery", "direct open", SetupPhase::Capability.name(), SetupPhase::Upgrade.name(), SetupPhase::FirstFrame.name()] {
+            let (mut state, mut ui, _, _) = selected("agent/A");
+            let (trace, events) = Trace::captured("agent/A");
+            state.traces.insert("agent/A".into(), trace.clone());
+            let mut setup = Box::pin(traced_phase(Some(&trace), name, DEADLINE, std::future::pending::<Result<(), String>>()));
+            poll_setup(setup.as_mut());
+            state.started = Some(Instant::now() - DEADLINE);
+            state.tick(&mut ui);
+            drop(setup);
+            let events = events.lock().unwrap();
+            assert_eq!(events.iter().filter(|event| event["phase"] == name && event["outcome"] != "start").count(), 1);
+            assert!(events.iter().any(|event| event["phase"] == name && event["outcome"] == "outer-deadline"));
+            assert_eq!(events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] == "outer-deadline").count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn selecting_another_agent_finishes_before_setup_abort() {
+        let (mut state, mut ui, _, _) = selected("agent/A");
+        let (trace, events) = Trace::captured("agent/A");
+        state.traces.insert("agent/A".into(), trace.clone());
+        let mut setup = Box::pin(traced_phase(Some(&trace), SetupPhase::Upgrade.name(), GATEWAY, std::future::pending::<Result<(), String>>()));
+        poll_setup(setup.as_mut());
+        state.select(&mut ui, Some("agent/B"));
+        drop(setup);
+        trace.finish("dropped");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] != "start").count(), 1);
+        assert!(events.iter().any(|event| event["phase"] == SetupPhase::Upgrade.name() && event["outcome"] == "selection-changed"));
+    }
 
     fn view(agent: &str) -> TerminalView {
         TerminalView { agent: agent.into(), title: agent.into(), name: agent.into(), lines: Vec::new(), cursor: None, stale: Some("connecting".into()), ended: None, native: None }
