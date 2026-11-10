@@ -228,6 +228,7 @@ use smallclaims::windows::holds;
 
 
 pub mod accounts;
+pub mod declared_objectives;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
@@ -4318,9 +4319,27 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        self.claims_page_matching_with_kinds(
+            filter, owner_run, after_index, before_index, descending, limit, None,
+        )
+    }
+
+    /// Match `filter` and restrict allowed kinds in SQL before selecting or decoding page rows.
+    /// `None` leaves kinds unrestricted; an empty allowlist selects no claims.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claims_page_matching_with_kinds(
+        &self,
+        filter: ClaimsFilter<'_>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+        allowed_kinds: Option<&[&str]>,
+    ) -> Result<ClaimsPage> {
         let (subject, lower, upper) = claim_pages::subject_match(filter)?;
         let connection = self.readers.get();
-        let query = claims_page_query(subject, filter.kind.is_some(), descending);
+        let query = claims_page_query(subject, filter.kind.is_some(), descending, allowed_kinds.is_some());
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4329,8 +4348,9 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
-        let values: [&dyn rusqlite::ToSql; 6] =
-            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper];
+        let allowed_kinds_json = allowed_kinds.map(serde_json::to_string).transpose()?;
+        let values: [&dyn rusqlite::ToSql; 7] =
+            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper, &allowed_kinds_json];
         // Each query names its highest parameter; the unused ones below it stay NULL.
         let bound = statement.parameter_count();
         let rows = statement.query_map(
