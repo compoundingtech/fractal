@@ -24,7 +24,7 @@ class FixtureSeedTests(unittest.TestCase):
                 seed.validate_text(f'No {char} syntax')
 
     def test_exact_own_operator_socket_only(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir='/tmp') as temporary:
             home = Path(temporary)
             own = home / '.st-instance' / seed.INSTANCE / 'run/fractal.sock'
             own.parent.mkdir(parents=True)
@@ -41,6 +41,7 @@ class FixtureSeedTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     seed.operator_socket(alias, home)
             own.unlink()
+            alias.unlink()
             other = home / 'outside'
             other.mkdir()
             own.symlink_to(other / 'normal.sock')
