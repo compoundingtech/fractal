@@ -262,6 +262,15 @@ fn known_members(
     Ok(members)
 }
 
+/// The agent a nested `exec` or `pty` task belongs to. A set carries such tasks as members with
+/// their agent; standalone tasks stay outside sets.
+fn task_parent(desired: &DesiredSubject) -> Option<&str> {
+    if !matches!(desired.kind.as_str(), "exec" | "pty") {
+        return None;
+    }
+    desired.member.as_ref()?.tags.get("st3.agent").map(String::as_str)
+}
+
 fn stop_declaration(subject: &str) -> Result<DesiredSubject, FractalError> {
     let source = if let Some(name) = subject.strip_prefix("schedule/") {
         format!(
@@ -644,14 +653,17 @@ pub fn plan_tx(
         || !input.replica_repairs.is_empty()
         || input.subjects.values().any(|s| {
             (!matches!(s.kind.as_str(), "agent" | "schedule")
-                && !(s.kind == "resource" && crate::graph::declared_uri(&s.desired).is_some()))
+                && !(s.kind == "resource" && crate::graph::declared_uri(&s.desired).is_some())
+                && task_parent(s).is_none_or(|parent| {
+                    input.subjects.get(parent).is_none_or(|p| p.kind != "agent")
+                }))
                 || s.owner_run.is_some()
                 || s.owner_step.is_some()
         })
     {
         return Err(FractalError::new(
             "unsupported-set-member",
-            "owned sets manage top-level agents, missions and schedules only",
+            "owned sets manage top-level agents with their exec and pty tasks, missions and schedules only",
         ));
     }
     let old = selected(transaction, None)?
@@ -690,34 +702,40 @@ pub fn plan_tx(
             blockers.push(format!("{}: manual rollout needs a typed native harness launch", desired.subject));
         }
     }
+    // Older daemons refuse replicated set revisions whose members include agent tasks.
+    let tasks = input.subjects.values().any(|s| task_parent(s).is_some())
+        || old.as_ref().is_some_and(|view| {
+            view.receipt
+                .members
+                .values()
+                .chain(view.receipt.retired.values())
+                .any(|m| matches!(m.kind.as_str(), "exec" | "pty"))
+        });
     let membership = fleet_membership_tx(transaction).map_err(internal)?;
     for member in membership.incarnations().filter(|m| m.end.is_none()) {
-        let supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h3aa13911c459 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(body,'$.fields.features.owned_sets')=1 FROM claims
-             WHERE subject=?1 AND kind='daemon.started' AND origin=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-            params![format!("daemon/{}",member.name),member.name],|row|row.get(0)).optional().map_err(internal)?.flatten();
-        if options.rollout.is_some() || manual_seats {
-            let rollout_supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h188e337d37e4 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT json_extract(body,'$.fields.features.seat_rollout')=1 FROM claims
+        let advertised = |feature: &str| -> Result<bool, FractalError> {
+            let supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h8f1e878eb088 owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT json_extract(body,?3)=1 FROM claims
                  WHERE subject=?1 AND kind='daemon.started' AND origin=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                params![format!("daemon/{}",member.name),member.name],|row|row.get(0)).optional().map_err(internal)?.flatten();
-            if rollout_supported != Some(true) {
-                blockers.push(format!(
-                    "host/{} has not advertised seat-rollout support; upgrade before activation",
-                    member.name
-                ));
-            }
+                params![format!("daemon/{}",member.name),member.name,format!("$.fields.features.{feature}")],|row|row.get(0)).optional().map_err(internal)?.flatten();
+            Ok(supported == Some(true))
+        };
+        if (options.rollout.is_some() || manual_seats) && !advertised("seat_rollout")? {
+            blockers.push(format!(
+                "host/{} has not advertised seat-rollout support; upgrade before activation",
+                member.name
+            ));
         }
-        if manual_seats {
-            let supported: Option<bool> = transaction.query_row(/* sqlite-large-value: allow-for-now lv-h4a66e5fad33d owner=fractal_store::store::owned_sets TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT json_extract(body,'$.fields.features.seat_rollout_manual')=1 FROM claims
-                 WHERE subject=?1 AND kind='daemon.started' AND origin=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                params![format!("daemon/{}",member.name),member.name],|row|row.get(0)).optional().map_err(internal)?.flatten();
-            if supported != Some(true) {
-                blockers.push(format!("host/{} has not advertised manual seat-rollout support; upgrade before activation", member.name));
-            }
+        if manual_seats && !advertised("seat_rollout_manual")? {
+            blockers.push(format!("host/{} has not advertised manual seat-rollout support; upgrade before activation", member.name));
         }
-        if supported != Some(true) {
+        if tasks && !advertised("owned_set_tasks")? {
+            blockers.push(format!(
+                "host/{} has not advertised owned-set agent task support; upgrade before activation",
+                member.name
+            ));
+        }
+        if !advertised("owned_sets")? {
             blockers.push(format!(
                 "host/{} has not advertised owned-set support; upgrade before activation",
                 member.name
@@ -782,7 +800,14 @@ pub fn plan_tx(
             intent_leaves_tx(transaction, s).map_err(internal)?
         };
         if own.is_none() && !tokens.is_empty() {
-            if !options.adopt.contains(s) {
+            // An agent's tasks are adopted with the agent that declares them.
+            let adopted = options.adopt.contains(s)
+                || input
+                    .subjects
+                    .get(s)
+                    .and_then(task_parent)
+                    .is_some_and(|parent| options.adopt.contains(parent));
+            if !adopted {
                 blockers.push(format!("explicit adoption required: {s}"));
             } else {
                 adoptions.insert(s.clone(), tokens.clone());
@@ -816,7 +841,9 @@ pub fn plan_tx(
                     (Some(new), Some(old)) => {
                         let changed = new.launch_changes(&old);
                         let manual = input.subjects.get(s).is_some_and(crate::rollout::manual);
-                        if (options.rollout.is_some() || manual) && !changed.is_empty() {
+                        // Tasks have no native session to drain: a launch change restarts them.
+                        let rollout = options.rollout.is_some() && s.starts_with("agent/");
+                        if (rollout || manual) && !changed.is_empty() {
                             if old_subject
                                 .as_ref()
                                 .and_then(|d| crate::accounts::harness_binding(&d.desired))
@@ -853,7 +880,7 @@ pub fn plan_tx(
                                 "{}: {}",
                                 if manual {
                                     "publish declaration; rollout pending (manual)"
-                                } else if options.rollout.is_some() {
+                                } else if rollout {
                                     "drain and resume native session"
                                 } else {
                                     "restart runtime"
@@ -942,7 +969,7 @@ pub fn plan_tx(
                     } else {
                         if manual {
                             "publish retirement; rollout pending (manual)"
-                        } else if options.rollout.is_some() {
+                        } else if options.rollout.is_some() && m.kind == "agent" {
                             "drain and retire runtime; retain conversation and history"
                         } else {
                             "stop runtime; retain conversation and history"
@@ -1096,12 +1123,7 @@ pub fn commit_tx(
                         .get(s)
                         .is_some_and(crate::rollout::manual)
                 },
-                kind: if s.starts_with("agent/") {
-                    "agent"
-                } else {
-                    "schedule"
-                }
-                .into(),
+                kind: s.split_once('/').map_or("schedule", |(kind, _)| kind).into(),
                 claim: row.claim_id,
                 revision: row.revision,
             }
@@ -1237,7 +1259,7 @@ pub fn validate_receipt(subject_name: &str, body: &Value) -> Result<(), FractalE
         ));
     }
     for (s, m) in revision.members.iter().chain(&revision.retired) {
-        if !matches!(m.kind.as_str(), "agent" | "mission" | "schedule")
+        if !matches!(m.kind.as_str(), "agent" | "mission" | "schedule" | "exec" | "pty")
             || !s.starts_with(&format!("{}/", m.kind))
             || m.claim.is_empty()
             || m.revision.is_empty()
