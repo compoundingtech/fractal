@@ -114,8 +114,12 @@ const GATE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// time limit is still enforced.
 const GATE_POLL_PASS_INTERVAL: Duration = Duration::from_secs(60);
 /// An exec gate whose check said not yet checks again this long after its first check, doubling
-/// the wait after each further not yet up to [`GATE_RECHECK_MAX_MS`].
-const GATE_RECHECK_BASE_MS: u128 = 60_000;
+/// the wait after each further not yet up to [`GATE_RECHECK_MAX_MS`]. An exec gate answers about
+/// state the graph does not observe, such as a remote host going idle, so nothing else wakes it
+/// when that state changes. Starting short keeps the unseen wait within about the time already
+/// waited, while the doubling keeps a gate that waits for hours as cheap as before. A condition
+/// the graph observes belongs in a field or `exists` gate, which a change wakes at once.
+const GATE_RECHECK_BASE_MS: u128 = 5_000;
 const GATE_RECHECK_MAX_MS: u128 = 15 * 60_000;
 /// How much of a gate check's output its result and attention item keep, from the end.
 pub const GATE_OUTPUT_LINES: usize = 40;
@@ -18521,7 +18525,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// When an exec gate checks again after check `check` said not yet: a minute after the
+    /// When an exec gate checks again after check `check` said not yet: five seconds after the
     /// first, doubling each time, and at most every fifteen minutes.
     fn gate_recheck_delay_ms(&self, check: u64) -> u128 {
         let doublings = u32::try_from(check.saturating_sub(1))
@@ -29217,7 +29221,7 @@ mission "proof" state="ready" {{
             "node".into(),
             Arc::new(Notify::new()),
         );
-        // Check again on the next pass rather than a minute later.
+        // Check again on the next pass rather than five seconds later.
         reconciler.gate_recheck_base_ms = 0;
         for _ in 0..4 {
             reconciler.reconcile_once().unwrap();
@@ -29271,7 +29275,7 @@ mission "proof" state="ready" {{
     }
 
     #[test]
-    fn a_not_yet_gate_waits_a_minute_and_doubles_its_wait_to_fifteen_minutes() {
+    fn a_not_yet_gate_waits_five_seconds_and_doubles_its_wait_to_fifteen_minutes() {
         let reconciler = Reconciler::new(
             Arc::new(Store::open_memory("node").unwrap()),
             Arc::new(FakeRuntime::default()),
@@ -29281,7 +29285,7 @@ mission "proof" state="ready" {{
         let waits = [1, 2, 3, 4, 5, 6, 100].map(|check| reconciler.gate_recheck_delay_ms(check));
         assert_eq!(
             waits,
-            [60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]
+            [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 900_000]
         );
     }
 
