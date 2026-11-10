@@ -1280,6 +1280,13 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::PairingKeyBindingRequired
         | ErrorCode::PairingAlreadyClaimed
         | ErrorCode::PairingClaimInvalid
+        | ErrorCode::PairingRouteNotAllowed
+        | ErrorCode::PairingResultPending
+        | ErrorCode::PairingResultExpired
+        | ErrorCode::PairingRequestConflict
+        | ErrorCode::PairingWaitBusy
+        | ErrorCode::PairingRejected
+        | ErrorCode::PairingExpired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
