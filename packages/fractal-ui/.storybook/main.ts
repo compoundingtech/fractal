@@ -36,8 +36,9 @@ const config: StorybookConfig = {
       ...(config.plugins ?? []),
       englishAriaLocales(),
       tailwindcss(),
-      // Keep compiled rules on the eager preview entry, not a lazy app pane's CSS asset.
-      ...createStylexVitePlugins({ entries: [new URL('./preview.ts', import.meta.url).pathname] }),
+      // Keep compiled rules on the eager preview entry, not a lazy app pane's CSS asset. The developer-bar
+      // stories render the kit, which ships uncompiled StyleX source like it does for the app build.
+      ...createStylexVitePlugins({ externalPackages: ['@overeng/devbar'], entries: [new URL('./preview.ts', import.meta.url).pathname] }),
     ],
   }),
 }
