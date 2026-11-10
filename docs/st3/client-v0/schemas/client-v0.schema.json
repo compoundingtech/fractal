@@ -4466,7 +4466,7 @@
         { "if": { "properties": { "state": { "enum": ["S4", "S5"] } }, "anyOf": [{ "required": ["confirm_receipt"] }, { "required": ["grant_id"] }] }, "then": { "required": ["confirm_receipt", "committed_at", "policy_revision"] } },
         { "if": { "properties": { "state": { "const": "S5" } }, "required": ["confirm_receipt"] }, "then": { "required": ["remove_peer_receipt"] } },
         { "if": { "properties": { "state": { "const": "S5" } }, "required": ["grant_id"] }, "then": { "required": ["revoke_receipt"] } },
-        { "if": { "required": ["refused"] }, "then": { "properties": { "state": { "const": "S5" }, "confirm_receipt": false, "committed_at": false, "policy_revision": false, "grant_id": false, "completion": false } } }
+        { "if": { "required": ["refused"], "properties": { "refused": { "const": true } } }, "then": { "properties": { "state": { "const": "S5" }, "confirm_receipt": false, "committed_at": false, "policy_revision": false, "grant_id": false, "completion": false } } }
       ]
     },
     "PairingChallenge": {
