@@ -50,8 +50,10 @@ export default githubRepoSettings({
           merge_method: 'MERGE',
           // The live queue's tuning (ruleset 20563764, 2026-10-22): a group merges when its head is green.
           grouping_strategy: 'HEADGREEN',
-          // Start three groups with Namespace overflow; retain shared capacity for PRs.
-          max_entries_to_build: 3,
+          // Five groups build at once. Measured 2026-11-06..10 at three: 26% of entries waited over 20 minutes for a build
+          // slot while merge-group jobs on the owned pool started within 2.6 minutes (p99); a group beyond the owned pool's
+          // idle minimum overflows to Namespace at priority 1.
+          max_entries_to_build: 5,
           max_entries_to_merge: 6,
           min_entries_to_merge: 1,
           min_entries_to_merge_wait_minutes: 1,
