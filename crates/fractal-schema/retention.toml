@@ -152,6 +152,8 @@
 "planning-session.started" = { class = "durable" }
 "principal.key-granted" = { class = "durable" }
 "principal.key-revoked" = { class = "durable" }
+# A program run's journal: replay reads every completed and failed entry of its step run.
+"program.step" = { class = "durable" }
 "publication.operation" = { class = "durable" }
 "reconcile.fault" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "record.repaired" = { class = "durable" }
