@@ -1123,6 +1123,36 @@ pub struct CanonicalNode {
     pub children: Vec<CanonicalNode>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionBudgetReport {
+    pub mission: String,
+    pub person: String,
+    pub window_start_exclusive_unix_ms: u128,
+    pub window_end_inclusive_unix_ms: u128,
+    pub local_claim_index: u64,
+    pub declared: AttentionBudgetDeclared,
+    pub charged: usize,
+    pub inclusive: usize,
+    pub not_charged: usize,
+    pub unattributed_for_person: usize,
+    pub fleet_complete: bool,
+    pub request_refs: Vec<AttentionBudgetRequestRef>,
+    pub request_refs_complete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AttentionBudgetDeclared {
+    Declared { asks: u64 },
+    Undeclared,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AttentionBudgetRequestRef {
+    pub claim_id: String,
+    pub subject: String,
+}
+
 /// Canonical compiler values of an applied seat, mission, or schedule publication.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PublicationDefinition {

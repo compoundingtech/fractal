@@ -121,8 +121,7 @@ Typed entries are strict objects `{"person":"person/reviewer","asks":3}` in the
 `declared_budgets.attention` array. Authored order is preserved; an empty array is
 omitted. Semantic errors identify `declared_budgets.attention` or
 `declared_budgets.attention[<person>].asks`. A missing person entry is undeclared,
-never zero or unlimited. These declarations do not implement counting, comparison,
-admission or enforcement; the existing local report above is unchanged.
+never zero or unlimited. These declarations do not implement admission or enforcement.
 
 **Agents.** New agent declarations accept only `memory-max` and `disk-max` in
 `declared-budgets`; `cpu-seconds`, `token-budget` and `attention` refuse publication
@@ -185,6 +184,47 @@ members or fence old peers before publishing attention. Remove attention using
 supporting readers before a mixed-version rollback. Old KDL and typed authoring
 already reject unknown budget members rather than silently dropping attention.
 There is no database, replay or enforcement change.
+
+### Attention report
+
+The client-v0 operation
+`GET /v1/client/attention-budget?mission=M[&person=P][&at=UNIX_MS]`
+reads the [attention window and declaration](#declared-admission) for one mission and person.
+Embedded-web recipient sessions may read their own report. Local agents and ordinary
+paired clients with `read.projections` may also read reports, including over
+Fabric. External assistant grants cannot read the report.
+Missing scope and expired sessions are refused; a raw Unix person header
+does not establish recipient authority. Existing `person_filter` restrictions
+limit person sessions to their own report: omitted person defaults to the session
+person, and another person is refused. Agents without a session person must specify
+`person`; omission never reads all people.
+
+The CLI uses the same client operation:
+`fractal budgets attention MISSION [--as ACTOR] [--person PERSON] [--at UNIX_MS] [--json]`.
+For Unix calls, `--as` names the acting person or agent (default: `ST_AGENT`, including
+the existing `FRACTAL_AGENT` alias, then the configured person); `--person` selects
+the budget recipient and never establishes acting identity. A harness cannot name
+another agent as its actor. Fabric calls use their paired credential instead.
+
+The report distinguishes declared asks from undeclared, charged from inclusive usage,
+not-charged requests, and unattributed requests for the person. It identifies the canonical
+mission and person, exclusive window start, inclusive end, and local claim index.
+The window is `(at - 7 days, at]`. `declared` reads the current revision; charging
+uses each originating or ancestor run's initial revision, so adding a limit later
+does not charge older runs. Every declaring ancestor is charged independently.
+`fleet_complete` is always false. At most 128 newest request references expose only claim
+IDs and subjects, never request text; `request_refs_complete` states whether all fit.
+This is data only: no limit enforcement, delivery decision, write, or fleet-complete promise.
+
+Reads examine at most 10,001 retained lifetime native ask claim rows for the
+recipient through the existing recipient index, newest local admission first;
+more than 10,000 refuses the whole report before applying the weekly window.
+This includes updates and expired asks, not just distinct current-window requests.
+Retained history therefore grows toward refusal even when weekly usage is low;
+the report does not silently discard older history. Unrelated recipients and other
+claim kinds are not scanned. A valid ancestry continuation beyond 64 vertices also
+refuses the whole report, even if the mission was already found; missing provenance
+remains distinct and may be reported as unattributed.
 
 ## Linux
 

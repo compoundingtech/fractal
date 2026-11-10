@@ -23,6 +23,32 @@
     { "$ref": "#/$defs/ClientDiagnosticsBatch" }
   ],
   "$defs": {
+    "AttentionBudgetDeclared": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["state", "asks"], "properties": {"state": {"const": "declared"}, "asks": {"type": "integer", "minimum": 0}}},
+        {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"const": "undeclared"}}}
+      ]
+    },
+    "AttentionBudgetRequestRef": {
+      "type": "object", "additionalProperties": false, "required": ["claim_id", "subject"],
+      "properties": {"claim_id": {"type": "string"}, "subject": {"type": "string"}}
+    },
+    "AttentionBudgetReport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mission", "person", "window_start_exclusive_unix_ms", "window_end_inclusive_unix_ms", "local_claim_index", "declared", "charged", "inclusive", "not_charged", "unattributed_for_person", "fleet_complete", "request_refs", "request_refs_complete"],
+      "properties": {
+        "mission": {"type": "string"}, "person": {"type": "string"},
+        "window_start_exclusive_unix_ms": {"type": "integer", "minimum": 0},
+        "window_end_inclusive_unix_ms": {"type": "integer", "minimum": 0},
+        "local_claim_index": {"type": "integer", "minimum": 0},
+        "declared": {"$ref": "#/$defs/AttentionBudgetDeclared"},
+        "charged": {"type": "integer", "minimum": 0}, "inclusive": {"type": "integer", "minimum": 0},
+        "not_charged": {"type": "integer", "minimum": 0}, "unattributed_for_person": {"type": "integer", "minimum": 0},
+        "fleet_complete": {"const": false},
+        "request_refs": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/AttentionBudgetRequestRef"}},
+        "request_refs_complete": {"type": "boolean"}
+      }
+    },
     "AgentRelatedRuns": {
       "type": "object", "required": ["kind", "agent_id", "as_of", "work_cut", "missions_cut", "total_rows", "truncated", "rows"],
       "properties": {
@@ -867,6 +893,7 @@
             { "$ref": "#/$defs/DocumentReferences" },
             { "$ref": "#/$defs/SubjectDefinition" },
             { "$ref": "#/$defs/PublicationDefinition" },
+            { "$ref": "#/$defs/AttentionBudgetReport" },
             { "$ref": "#/$defs/MissionDeclaration" },
             { "$ref": "#/$defs/AgentWorkspace" },
             { "$ref": "#/$defs/Page" },
