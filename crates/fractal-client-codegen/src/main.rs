@@ -310,6 +310,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    pub async fn usage_hub_quota(&self) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {{ self.get(\"/v1/client/usage/quota\").await }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -530,6 +532,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    public func usageHubQuota() async throws -> Envelope<UsageHubQuota> {{ try await get(\"v1/client/usage/quota\") }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -1715,6 +1719,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    async usageHubQuota(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<UsageHubQuota>> {{ return this.get('/v1/client/usage/quota', undefined, requestOptions) }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
