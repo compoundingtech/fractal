@@ -11,8 +11,12 @@ import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
 import type * as AlertsTabModule from './AlertsTab.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
-import { retainPane, workspaceHref, workspaceView, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
-import { MISSIONS_REF, paneTabLabel } from './workspaceView.ts'
+import { missionTabMarkersAtom } from './missionsTab.ts'
+import { isMissionRef, missionPaneId } from '../missions/missionTitle.ts'
+import { isTerminalRef, retainPane, workspaceHref, workspaceView, type RetainedPane, type TerminalRef, type WorkspaceView } from './workspaceView.ts'
+import { MISSIONS_REF, alertIdOfPane, alertPaneId, isAlertRef, paneTabLabel } from './workspaceView.ts'
+import { AlertFlashBand } from './AlertFlashBand.tsx'
+import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -39,7 +43,7 @@ import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents, useAttention } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
@@ -215,7 +219,7 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
   }
 }
 
-// Inline alert answers import Markdown; load the tab on demand, not with the shell.
+// Load the tab on demand, not with the shell.
 const makeAlertsTab = () => React.lazy(() => import('./AlertsTab.tsx').then(module => ({ default: module.AlertsTab })))
 const AlertsTab = makeAlertsTab()
 class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof AlertsTabModule.AlertsTab>> {
@@ -275,6 +279,9 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
     </React.Suspense>
   }
 }
+const AlertDetailsPane = React.lazy(() => import('./AlertDetailsPane.tsx').then((module) => ({ default: module.AlertDetailsPane })))
+const SidebarMissionsList = (props: React.ComponentProps<typeof SidebarMissionsListModule.SidebarMissionsList>) => <React.Suspense fallback={<SystemNotice kind="loading" title="Loading missions" />}><LazySidebarMissionsList {...props} /></React.Suspense>
+const LazySidebarMissionsList = React.lazy(() => import('../missions/SidebarMissionsList.tsx').then((module) => ({ default: module.SidebarMissionsList })))
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
 const makeUsagePane = () => React.lazy(() => import('../monitor/UsagePane.tsx'))
@@ -543,8 +550,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const sidebarSettings = (folderSource.mode === 'fixtures' ? fixtureSidebarState : sidebarState)(folderSource.gateway ?? folderSource.mode)
   const [filters, setFilters] = useAtom(sidebarSettings.filters)
   const [sidebarTab, setSidebarTab] = useAtom(sidebarSettings.tab)
-  const attention = useAttention()
-  const showSidebarTab = React.useCallback((tab: 'agents' | 'alerts') => {
+  const attention = useVisibleAttention()
+  const showSidebarTab = React.useCallback((tab: 'agents' | 'alerts' | 'missions') => {
     setSidebarTab(tab)
     if (narrow) agentsDrawer.current?.open()
     else setCollapsed(false)
@@ -630,7 +637,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       ? { ref: selectedPane.slice(0, separator), presentation: urlPresentation }
       : undefined
   const chosen = panes.find((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ?? urlPane
-  const visiblePanes = chosen && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...panes, chosen] : panes
+  // An alert's details are a passing view: reached by URL, never a tab.
+  const tabPanes = panes.filter(row => !isTerminalRef(row.ref))
+  const visiblePanes = chosen && !isAlertRef(chosen.ref) && !isMissionRef(chosen.ref) && !isTerminalRef(chosen.ref) && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...tabPanes, chosen] : tabPanes
   const phoneTabs = React.useMemo(() => {
     const names = new Map(agents.map(agent => [agent.ref, agent.name]))
     return [
@@ -679,9 +688,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </header>
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
-  // The toolbar/tree and the persistent footer provide tab stops even while loading or empty, on either tab.
-  const sidebarBody = <SidebarTabs panelHasTabbableContent selectedId={sidebarTab === 'alerts' ? 'alerts' : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' ? 'alerts' : 'agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', ...alertTabMarkers(attention) }]}>
-    {sidebarTab === 'alerts' ? <AlertsTabCodeBoundary onOpen={ref => { if (ref.startsWith('agent/')) select(ref); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
+  const sidebarHeaderActions = <>
+    <SettingsControl scheme={scheme} onSchemeChange={setScheme} build={build} />
+  </>
+  // The Agents toolbar and tree provide tab stops even while loading or empty; Alerts may have none, so its panel takes focus itself.
+  const sidebarBody = <SidebarTabs panelHasTabbableContent={sidebarTab === 'agents' || sidebarTab === 'fleet'} selectedId={sidebarTab === 'alerts' || sidebarTab === 'missions' ? sidebarTab : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')} tabs={[{ id: 'agents', label: 'Agents', icon: 'person', count: agents.length, questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', icon: 'bell', ...alertTabMarkers(attention) }, { id: 'missions', label: 'Missions', icon: 'checklist', ...missionMarkers }]}>
+    {sidebarTab === 'missions' ? <SidebarMissionsList {...(isMissionRef(address.ref) ? { current: address.ref } : {})} onOpen={focusMission} /> : sidebarTab === 'alerts' ? <AlertsTabCodeBoundary {...(alertIdOfPane(selectedPane) === undefined ? {} : { selected: alertIdOfPane(selectedPane)! })} onSelect={openAlert} onOpen={ref => { if (ref.startsWith('agent/')) select(ref, 'thread'); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {credentialNotice(fleet) ? <RosterUnavailable reason="unauthorized" onRetry={undefined} /> : fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
       : fleet._tag !== 'Observed' ? null
@@ -729,7 +741,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
                 {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} terminalOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} terminalOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
                 <GatewayConnectionStatus />
-                {!narrow && visiblePanes.length > 0 ? (
+                <AlertFlashBand onOpen={openAlert} />
+                {!narrow && !terminalOpen && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
                     <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
                       Thread
@@ -771,7 +784,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === 'changes'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={view} hidden={narrow && selectedPane === 'changes'} focusShownView={focusShownView} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={ref => select(ref, 'thread')} onFocusMission={focusMission} alertControls={{ onOpenAlert: openAlert, onOpenRef: ref => { if (ref.startsWith('agent/')) select(ref, 'thread'); else open({ ref }) }, onClose: () => navigate(current), onBack: () => showSidebarTab('alerts') }} ux={ux} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
   </NarrowLayoutContext.Provider>)
 }
@@ -816,7 +829,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agentName, onOpenTool, onOpenDocument, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focusShownView, agentName, onOpenTool, onOpenDocument, onOpenAgent, onFocusMission, alertControls, ux }: { readonly onFocusMission?: (ref: string | undefined) => void; readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly focusShownView?: React.RefObject<boolean>; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly alertControls?: Omit<React.ComponentProps<typeof AlertDetailsPane>, 'id' | 'ux'>; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -899,7 +912,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
           <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
         </React.Suspense>
       ) : null}
-      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
+      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' && view._tag !== 'Alert' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
         : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
           : null}
     </div>

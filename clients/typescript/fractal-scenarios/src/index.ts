@@ -1,7 +1,7 @@
 import { scenarioDomainFixture } from './domain-fixture.ts'
 import { nowMs } from './kit/time.ts'
 import { genericVariants } from './kit/variants.ts'
-import { buildWorld, type World, type WorldDefinition } from './kit/world.ts'
+import { buildWorld, type World, type WorldDefinition, type WorldOverrides } from './kit/world.ts'
 import { worldDefinitions } from './worlds/index.ts'
 
 export * from './kit/asciicast.ts'
@@ -71,11 +71,13 @@ const definition = (id: string): WorldDefinition => {
 export interface LoadWorldOptions {
   /** The instant offsets are relative to; defaults to the load time. Screenshots and tests pin it. */
   readonly now?: number | Date | string
+  /** Named slice variants in place of the world's own, for a dev page's URL. */
+  readonly overrides?: WorldOverrides
 }
 
 /** The world `id` with every instant relative to `now`. */
 export const loadWorld = (id: WorldId | (string & {}), options: LoadWorldOptions = {}): World =>
-  buildWorld(definition(id), genericVariants, nowMs(options.now ?? new Date()))
+  buildWorld(definition(id), genericVariants, nowMs(options.now ?? new Date()), options.overrides)
 export { foldSlice, syncStatusAt, absolute } from './kit/fold.ts'
 export { manualClock, realClock, type Clock, type ManualClock } from './clock.ts'
 
