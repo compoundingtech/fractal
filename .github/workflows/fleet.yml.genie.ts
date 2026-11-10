@@ -83,6 +83,10 @@ const rustTestJunitUpload = (name: string) => [
   },
 ]
 
+// Project the flake's immutable input into checkout: signing jobs need Python, not a Nix shell.
+const shadowLock = JSON.parse(readFileSync(new URL('../../flake.lock', import.meta.url), 'utf8'))
+const shadowSource = shadowLock.nodes[shadowLock.nodes.root.inputs.mergemaster].locked
+
 // Run before Rust fixture consumers; the required freshness lane also covers all client lanes.
 const sidebarFixtureStep = nixDevelopStep({
   name: 'Validate public sidebar fixtures and scrubber self-tests',
@@ -853,19 +857,39 @@ git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warni
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
   --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"`,
         },
-        // Shadow verification: what would a gate that fetched these refs from the remote say about each lane? Reported
-        // in the job summary only; it gates nothing, runs from the BASE commit's scripts (absent there: skipped), and
-        // is fail-soft like every other step of this job.
+        // Live decision comparison is report-only; no required job depends on this producer.
+        // main-upkeep projects these same steps into proof-evidence-note-linux-gate.
+        { name: 'Remove the key before shadow comparison', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
+        {
+          name: 'Check out the flake-pinned mergemaster shadow source',
+          if: "${{ always() && steps.configure.outcome == 'success' }}",
+          'continue-on-error': true,
+          uses: 'actions/checkout@v4',
+          with: { repository: `${shadowSource.owner}/${shadowSource.repo}`, ref: shadowSource.rev, path: '.mergemaster-shadow', 'persist-credentials': false },
+        },
         {
           name: 'Shadow-verify the published notes',
           if: "${{ always() && steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
 [ -f "$shadow" ] || { echo "no ci-evidence-shadow at the base commit; skipped"; exit 0; }
+comparison=()
+if grep -q -- --compare-shadow "$shadow"; then
+  comparison=(--compare-shadow "$GITHUB_WORKSPACE/.mergemaster-shadow/scripts/ci-evidence-shadow" --comparison-out "$RUNNER_TEMP/evidence-shadow-comparison")
+else
+  echo "::notice::accepted base predates mergemaster comparison; no comparison cases"
+fi
 python3 "$shadow" --publish-result "$RUNNER_TEMP/evidence-publish.json" --keys "$RUNNER_TEMP/evidence-keys" \\
-  --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --optional "${evidenceLaneNames.join(',')}" --remote origin`,
+  --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --optional "${evidenceLaneNames.join(',')}" --remote origin \\
+  "\${comparison[@]}"`,
         },
-        { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
+        {
+          name: 'Retain shadow decisions and lane counts',
+          if: 'always()',
+          'continue-on-error': true,
+          uses: 'actions/upload-artifact@v4',
+          with: { name: 'evidence-shadow-comparison-${{ github.run_attempt }}', path: '${{ runner.temp }}/evidence-shadow-comparison/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+        },
       ],
     },
     // CI's per-crate rust-tests notes (docs/per-crate-test-signing.md, section 14), signed with the `evidence-signing` key from the test
