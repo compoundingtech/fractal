@@ -63,6 +63,10 @@ elif args[:2] == ['release', 'create']:
     # A release create must use the tag already pushed through Git.
 elif args[:2] == ['release', 'upload']:
     files = [a for a in args[args.index('--clobber') + 1:]]
+    if 'assets_before_first_alias' not in state and any(
+            pathlib.Path(f).name.startswith(('fractal-', 'smalltalk-'))
+            or pathlib.Path(f).name in ('SHA256SUMS', 'RELEASE.json') for f in files):
+        state['assets_before_first_alias'] = dict(state['release']['assets'])
     for f in files: state['release']['assets'][pathlib.Path(f).name] = pathlib.Path(f).read_bytes().decode('latin1')
 elif args[:2] == ['release', 'delete-asset']:
     del state['release']['assets'][args[3]]
@@ -314,6 +318,16 @@ with tempfile.TemporaryDirectory() as temporary:
              if call[:2] == ['release', 'upload'] and Path(call[-1]).name in first['release']['assets']]
     assert staged and fixed and moved < staged[0] < min(fixed), recorded
     assert json.loads(current()['release']['assets']['RELEASE.json'])['source'] == commits[2]
+    staged_assets = current()['assets_before_first_alias']
+    ledger_name = commits[2] + '-STAGING-LEDGER.sha256'
+    expected_names = {commits[2] + '-' + name for name in first['release']['assets']}
+    assert set(staged_assets) == expected_names | {ledger_name}, staged_assets
+    ledger_entries = [line.split('  ', 1) for line in staged_assets[ledger_name].splitlines()]
+    assert len(ledger_entries) == len(expected_names)
+    assert {commits[2] + '-' + name for _, name in ledger_entries} == expected_names
+    for digest, name in ledger_entries:
+        assert hashlib.sha256(staged_assets[commits[2] + '-' + name].encode('latin1')).hexdigest() == digest
+    print('passed: test_complete_staged_set_and_ledger_digests_before_first_fixed_alias')
     manifest_writes = [index for index in fixed if Path(recorded[index][-1]).name == 'RELEASE.json']
     assert manifest_writes == [max(fixed)], recorded
     final_ref_reads = [index for index, call in enumerate(recorded)
