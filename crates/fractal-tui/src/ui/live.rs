@@ -458,6 +458,12 @@ enum Fetched {
         key: String,
         outcome: Result<Option<String>, String>,
     },
+    /// st's read positions for the person, on the connection `generation`: `None` from a daemon
+    /// that keeps none (positions stay on this device), or why they could not be read.
+    ReadPositions { generation: u64, outcome: Result<Option<Vec<(String, i64)>>, fractal_client::ClientError> },
+    /// st answered the advance of a read position to `at_ms`: the position it keeps now, if it
+    /// said, or why it failed.
+    ReadPositionAdvanced { generation: u64, conversation: String, at_ms: i64, outcome: Result<Option<i64>, String> },
 }
 
 /// Send one glass write to st; its answer comes back as `Fetched::GlassSaved`.
@@ -560,6 +566,8 @@ pub fn run(context: Context) -> Result<()> {
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
+    ui.reads = super::read_store::ReadPositions::load(super::read_store::path(cache_path.as_deref()));
+    ui.refresh_tab_statuses();
     ui.quality = super::slo::Draw::new(process_started);
     if earlier.is_some() {
         super::slo::METRICS.add("drafts_restored_unclean", ui.drafts_saved.len() as u64);
@@ -738,11 +746,17 @@ pub fn run(context: Context) -> Result<()> {
                     sessions_requested.clear();
                     body_requested.clear();
                     changed = true;
+                    ui.reads.connected(Instant::now());
                 }
                 feed::Update::InventorySupport { granted, member_build } => {
                     extras.inventory_supported = Some(granted);
                     model.member_build = member_build;
                     changed = true;
+                }
+                // An invalidation: st's list is read again (`read_store`), not the frame's rows.
+                feed::Update::Window { window: Window::ReadPositions, .. } => {
+                    ui.reads.stream_frame(Instant::now());
+                    changed |= extras.window_errors.remove(&window_label(Window::ReadPositions)).is_some();
                 }
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
                     ui.resource_sidebar.writable = true;
@@ -856,7 +870,7 @@ pub fn run(context: Context) -> Result<()> {
                             Inventory::Usage(hours) if hours == ui.usage_hours => model.usage = Some(model::inventory_usage(collection.items)),
                             Inventory::Usage(_) => {},
                         },
-                        Window::Glasses | Window::Summary | Window::Arrangements => {}
+                        Window::Glasses | Window::Summary | Window::Arrangements | Window::ReadPositions => {}
                     }
                     extras.live = true;
                     extras.offline = None;
@@ -1234,6 +1248,25 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
+                Fetched::ReadPositions { generation, outcome } => {
+                    if generation == resources_generation {
+                        if let Err(error) = &outcome {
+                            extras.window_errors.insert("ReadPositionsList".into(), error.human());
+                            changed = true;
+                        } else {
+                            changed |= extras.window_errors.remove("ReadPositionsList").is_some();
+                        }
+                        if ui.reads.listed(outcome, Instant::now()) {
+                            ui.refresh_tab_statuses();
+                        }
+                    }
+                }
+                Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome } => {
+                    if generation != resources_generation { continue; }
+                    if ui.reads.sent(&conversation, at_ms, outcome, Instant::now()) {
+                        ui.refresh_tab_statuses();
+                    }
+                }
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 msg @ (Fetched::Native { .. } | Fetched::NativeFailed { .. } | Fetched::AttachWaiting { .. }) => {
                     attach.apply_fetched(&mut ui, msg, &commands);
@@ -1492,6 +1525,17 @@ pub fn run(context: Context) -> Result<()> {
                 if extras.live {
                     save_glass(&runtime, &client, &fetched_tx, write);
                 }
+                continue;
+            }
+            // Only queued while live against a daemon that keeps positions; a failure is sent
+            // again after a growing wait (`read_store`), never flashed.
+            if let Effect::AdvanceReadPosition { conversation, at_ms } = effect {
+                let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone();
+                let generation = resources_generation;
+                runtime.spawn(async move {
+                    let outcome = advance_read_position(&client, &person, &conversation, at_ms).await.map_err(|error| plain(&error));
+                    let _ = tx.send(Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome });
+                });
                 continue;
             }
             if let Effect::EditArrangement(write) = &effect {
@@ -2056,6 +2100,20 @@ pub fn run(context: Context) -> Result<()> {
         });
         for at in landed_answers.drain(..) {
             super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
+        }
+        ui.read_presented_conversations(&timelines);
+        ui.queue_read_advances(Instant::now(), extras.live);
+        if extras.live
+            && let Some(check) = ui.reads.list_due(Instant::now())
+        {
+            let client = client.clone();
+            let person = person.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = read_positions(&client, &person, check).await;
+                let _ = tx.send(Fetched::ReadPositions { generation, outcome });
+            });
         }
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
@@ -2734,6 +2792,45 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
     Ok(())
 }
 
+/// The person's read positions st keeps, every page, as ms since the epoch; `None` when the daemon
+/// keeps none (asked first when `check`) or the session is no person's.
+async fn read_positions(client: &Client, person: &str, check: bool) -> Result<Option<Vec<(String, i64)>>, fractal_client::ClientError> {
+    if !person.starts_with("person/") {
+        return Ok(None);
+    }
+    if check && !client.capabilities().await?.value.grants(super::read_store::CAPABILITY, 1) {
+        return Ok(None);
+    }
+    let mut positions = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = client.read_positions_list(person, cursor.as_deref(), None).await?.value;
+        positions.extend(page.items.into_iter().filter(|item| item.owner == person).filter_map(|item| {
+            let at = super::read_store::at_ms(&item.at)?;
+            Some((item.conversation, at))
+        }));
+        match page.page.next_cursor {
+            Some(next) if page.page.has_more => cursor = Some(next),
+            _ => return Ok(Some(positions)),
+        }
+    }
+}
+
+/// Advance the person's read position in st, fenced like a sidebar edit. st keeps the larger, so
+/// each send may use a fresh identity; the position st keeps afterwards, if it says.
+async fn advance_read_position(client: &Client, person: &str, conversation: &str, at_ms: i64) -> Result<Option<i64>> {
+    let at = super::read_store::timestamp(at_ms).ok_or_else(|| anyhow::anyhow!("read position {at_ms} is not a time"))?;
+    let snapshot = client.capabilities().await?.snapshot;
+    let key = uuid::Uuid::now_v7();
+    let reply = client.read_position_advance(
+        format!("action/read-{key}"), format!("read-{key}"),
+        Fence { snapshot_id: snapshot.id, ..Default::default() },
+        fractal_client::ReadPositionAdvanceParameters { owner: person.to_owned(), conversation: conversation.to_owned(), at },
+    ).await?;
+    anyhow::ensure!(matches!(reply.value.status, fractal_client::ActionStatus::Completed), "Read position advance is not completed.");
+    Ok(reply.value.read_position_at.as_deref().and_then(super::read_store::at_ms))
+}
+
 async fn perform(
     client: &Client,
     person: &str,
@@ -2744,7 +2841,7 @@ async fn perform(
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
         Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
-        | Effect::Forget { .. } | Effect::LoadContent(_) => {
+        | Effect::Forget { .. } | Effect::LoadContent(_) | Effect::AdvanceReadPosition { .. } => {
             Ok((String::new(), None))
         }
         Effect::EditArrangement(write) => {
@@ -3189,6 +3286,16 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refused_read_position_stream_is_visible_without_an_inventory() {
+        let extras = Extras {
+            window_errors: BTreeMap::from([("ReadPositions".into(), "subscription refused".into())]),
+            ..Extras::default()
+        };
+        assert_eq!(adapt::world(&Model::default(), "person/robin", &extras).stale,
+            ["ReadPositions: subscription refused"]);
+    }
+
     #[test]
     fn a_polled_inventory_that_fails_briefly_says_nothing_and_one_that_keeps_failing_is_said() {
         let start = Instant::now();
@@ -4143,6 +4250,50 @@ mod tests {
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
         // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
         assert!(found.v1().placements.contains_key("agent/example/atlas"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn read_positions_advance_in_st_and_list_by_the_larger_from_any_device() {
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("read.sock");
+        let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "read-position-test").unwrap());
+        let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "read-position-test".into(), state_dir: root.path().into(), pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+            fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+        };
+        let path = socket.clone();
+        let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
+        for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+        let client = Client::unix_as(&socket, "person/avery");
+        let other_device = Client::unix_as(&socket, "person/avery");
+        let conversation = "agent/example/atlas";
+        let at = 1_790_000_000_000_i64;
+        assert_eq!(read_positions(&client, "person/avery", true).await.unwrap(), Some(Vec::new()), "st keeps positions, none yet");
+        assert_eq!(advance_read_position(&client, "person/avery", conversation, at + 20_000).await.unwrap(), Some(at + 20_000));
+        assert_eq!(
+            advance_read_position(&other_device, "person/avery", conversation, at + 10_000).await.unwrap(),
+            Some(at + 20_000),
+            "an older read on another device moves nothing back"
+        );
+        advance_read_position(&other_device, "person/avery", conversation, at + 30_000).await.unwrap();
+        let listed = read_positions(&client, "person/avery", false).await.unwrap().unwrap();
+        assert_eq!(listed, [(conversation.to_owned(), at + 30_000)]);
+        // Merged here, the larger position from st wins over this device's.
+        let mut reads = super::super::read_store::ReadPositions::default();
+        reads.advance(conversation, at + 25_000);
+        let now = Instant::now();
+        reads.connected(now);
+        assert_eq!(reads.list_due(now), Some(true));
+        assert!(reads.listed(Ok(Some(listed)), now));
+        assert!(!reads.unread(conversation, Some(at + 30_000)));
+        assert!(reads.due(now, true).is_empty(), "nothing st does not already keep");
+        assert!(read_positions(&client, "person/robin", false).await.is_err(), "another person's positions are refused");
         server.abort();
     }
 

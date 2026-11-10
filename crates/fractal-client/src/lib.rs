@@ -532,6 +532,15 @@ impl CollectionStream {
         }
         self.send(&command).await
     }
+    /// Follow the person's read positions; frames are invalidations, so re-list `read_positions_list`.
+    pub async fn subscribe_read_positions(
+        &mut self,
+        id: &str,
+        person: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"read-positions", "person":person, "limit":limit})).await
+    }
 
     pub async fn subscribe_ordered_memberships(
         &mut self,
@@ -2896,6 +2905,24 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn read_positions_list(
+        &self,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ReadPositionPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/read-positions?person={}",
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
     pub async fn glasses_list(
         &self,
         cursor: Option<&str>,
@@ -3354,6 +3381,17 @@ impl Client {
         parameters: PromptRespondParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::prompt_respond(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn read_position_advance(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ReadPositionAdvanceParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::read_position_advance(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }

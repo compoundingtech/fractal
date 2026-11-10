@@ -3909,6 +3909,15 @@ fn client_agent_cards_presented(
                     .as_ref()
                     .map(|harness| harness.incarnation_id.as_str()),
             )?;
+            // The agent's own newest words, for clients' "new since you last looked".
+            let last_prose_at = store.agent_last_prose_at(
+                &subject.subject,
+                subject
+                    .harness
+                    .as_ref()
+                    .map(|harness| harness.incarnation_id.as_str()),
+                snapshot_index,
+            )?;
             let silent_since = if harness_state.as_deref() == Some("working") {
                 let working_since = match subject.harness.as_ref() {
                     Some(harness) => store
@@ -4157,6 +4166,7 @@ fn client_agent_cards_presented(
                     .or_else(|| desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace)),
                 "checkout": desired_agents.get(&subject.subject).and_then(|(_, _, checkout)| checkout.as_ref()),
                 "last_activity_at": last_activity_at.map(client_timestamp),
+                "last_prose_at": last_prose_at.map(client_timestamp),
                 "silent_since": silent_since.map(client_timestamp),
                 "fault": fault,
                 "incarnation_id": incarnation_id,

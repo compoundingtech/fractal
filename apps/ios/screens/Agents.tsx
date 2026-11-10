@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { FlatList, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
-import { quality } from '../qualityNative';
+import { quality, readPositions } from '../qualityNative';
+import { UNREAD_LABEL, unreadMark } from '../readPosition';
 import { saidRows, type SaidRow } from '../conversationSearch';
 import { AGENT_LEGEND, agentGlyph, agentRows, OLDER_ST_NOTE, agentSections, agentTreeLines, filterAgentRows, harnessColor, UNMANAGED_GROUP, type AgentRowView, type TreeLine } from '../agentsView';
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
@@ -16,8 +17,8 @@ import { Button, Legend, ListRow, Note, Screen, SectionHeader, T } from '../ui';
 
 const legend = AGENT_LEGEND.map(entry => ({ ...agentGlyph(entry.state), word: entry.word }));
 
-function Right({ row }: { row: AgentRowView }) {
-  return <><T color={harnessColor(row.harness)}>{row.harness}</T><T dim>{row.activity.padStart(4)}</T></>;
+function Right({ row, unread }: { row: AgentRowView; unread?: string }) {
+  return <>{unread ? <T color={theme.accent} bold>{unread} </T> : null}<T color={harnessColor(row.harness)}>{row.harness}</T><T dim>{row.activity.padStart(4)}</T></>;
 }
 
 // Agents: every seat, grouped and sorted as the Fractal terminal UI's Agents tab, or as a tree of their paths. The
@@ -56,6 +57,7 @@ export function AgentsScreen() {
     return () => { live = false; clearTimeout(timer); };
   }, [query, status]); // eslint-disable-line react-hooks/exhaustive-deps
   const rows = useMemo(() => filterAgentRows(agentRows(data.agents, data.sessions, gatewayHost || '?', Date.now(), data.missions), filter), [data.agents, data.sessions, data.missions, gatewayHost, filter]);
+  useSyncExternalStore(readPositions.subscribe, () => readPositions.revision);
   const open = (row: AgentRowView) => navigation.navigate('Conversation', { target: row.target, ...(row.unmanaged ? { sessionId: row.id } : {}), title: row.name });
   const menu = (row: AgentRowView): MenuAction[] => {
     const agent = data.agents.find(candidate => candidate.id === row.id);
@@ -94,18 +96,21 @@ export function AgentsScreen() {
     <View style={{ paddingHorizontal: 12 }}><Button label="past sessions" onPress={() => navigation.navigate('History')} /></View>
   </View>;
   const empty = <Empty text={filter ? `No agent matches “${filter}”.` : loadErrors.agents ? `Agents could not be loaded: ${loadErrors.agents}` : hasSynced ? 'No agents yet.' : 'Loading agents…'} />;
-  const row = (item: AgentRowView, indent = 0, second?: string) => <ContextMenu title={item.name} actions={menu(item)}>
-    <ListRow
-      indent={indent}
-      glyph={agentGlyph(item.state).glyph}
-      glyphColor={agentGlyph(item.state).color}
-      title={item.name}
-      right={<Right row={item} />}
-      second={second}
-      onPress={() => open(item)}
-      accessibilityLabel={`${item.name}, ${item.unmanaged ? UNMANAGED_GROUP : item.state}, ${item.harness}`}
-    />
-  </ContextMenu>;
+  const row = (item: AgentRowView, indent = 0, second?: string) => {
+    const unread = unreadMark(readPositions.read(item.target), item.lastProseAt);
+    return <ContextMenu title={item.name} actions={menu(item)}>
+      <ListRow
+        indent={indent}
+        glyph={agentGlyph(item.state).glyph}
+        glyphColor={agentGlyph(item.state).color}
+        title={item.name}
+        right={<Right row={item} unread={unread} />}
+        second={second}
+        onPress={() => open(item)}
+        accessibilityLabel={`${item.name}, ${unread ? `${UNREAD_LABEL}, ` : ''}${item.unmanaged ? UNMANAGED_GROUP : item.state}, ${item.harness}`}
+      />
+    </ContextMenu>;
+  };
   if (treeView) {
     return <Screen>
       <Banners />

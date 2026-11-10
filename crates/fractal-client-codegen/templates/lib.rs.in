@@ -510,6 +510,10 @@ impl CollectionStream {
         if let Some(subject) = subject { command["subject"] = serde_json::json!(subject); }
         self.send(&command).await
     }
+    /// Follow the person's read positions; frames are invalidations, so re-list `read_positions_list`.
+    pub async fn subscribe_read_positions(&mut self, id: &str, person: &str, limit: usize) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"read-positions", "person":person, "limit":limit})).await
+    }
 
     pub async fn subscribe_ordered_memberships(&mut self, id: &str, person: &str, subject: &str, limit: usize) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"ordered-memberships", "person":person, "subject":subject, "limit":limit})).await

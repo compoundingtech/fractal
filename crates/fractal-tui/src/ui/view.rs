@@ -80,6 +80,11 @@ pub struct World {
     /// another. Not part of the shared contract.
     #[serde(skip)]
     pub settled: bool,
+    /// The agents whose conversation has prose newer than where the person last read it on this
+    /// device (`read_store`). Kept by the UI from its read positions, never by st. Not part of
+    /// the shared contract.
+    #[serde(skip)]
+    pub unread: std::collections::BTreeSet<String>,
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,
@@ -466,6 +471,10 @@ pub struct Agent {
     /// The client shows it as reported and derives nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reported: Option<String>,
+    /// When it last said something (st's `last_prose_at`), in ms since the epoch: what unread
+    /// compares with the read position. Absent from an older st.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_prose_ms: Option<i64>,
 }
 
 /// A subagent an agent's harness runs inside its own session. It belongs to the agent and is not
