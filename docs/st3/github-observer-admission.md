@@ -383,11 +383,13 @@ GraphQL floor, as a declared refresh does.
 
 **Coalescing.** The poller decides, on its own replica, so a delivery that
 arrives while a poll runs is never lost to replication lag. Requests are taken
-oldest first. When the oldest pending request is a webhook refresh, the poll
-takes the newest pending webhook refresh written by the same member instead, and
-its answer also answers every earlier webhook refresh from that member: each was
-written after the change it announced and before the poll started. A burst of
-deliveries during one poll thus costs one more poll, not one per delivery.
+oldest first, and a poll is named for the request it took, so later requests
+never retire a running poll. Under the observer's look lock, right before its
+reads, a poll taken for a webhook refresh answers the newest pending webhook
+refresh written by the same member instead; that answer also answers every
+earlier webhook refresh from that member, since each was written after the
+change it announced and before those reads. A burst of deliveries during one
+poll thus costs one more poll, not one per delivery.
 
 **Backstop cadence.** A repository observer with a webhook refresh claim
 accepted within the last 30 minutes is webhook-covered. The member that polls it
