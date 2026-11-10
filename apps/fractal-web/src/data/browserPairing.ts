@@ -6,6 +6,7 @@ const decodeStatus = Schema.decodeUnknownSync(Schema.Struct({
   displayCode: Schema.optional(Schema.String),
   deviceKeyFingerprint: Schema.optional(Schema.String),
   credentialChanged: Schema.optional(Schema.Boolean),
+  credentialRejected: Schema.optional(Schema.Boolean),
 }))
 const decodeStarted = Schema.decodeUnknownSync(Schema.Struct({ requestId: Schema.String, displayCode: Schema.String, deviceKeyFingerprint: Schema.optional(Schema.String) }))
 
@@ -26,8 +27,8 @@ export const browserPairingPort = ({ baseUrl, fetch: fetchImpl = (input, init) =
   readonly baseUrl: string
   readonly fetch?: (input: URL, init: RequestInit) => Promise<Response>
 }): BrowserPairingPort => {
-  const request = (path: 'start' | 'status' | 'forget', body?: unknown) => fetchImpl(new URL(`/_fractal/pair/${path}`, baseUrl), {
-    method: body === undefined ? 'GET' : 'POST',
+  const request = (path: 'start' | 'status' | 'forget' | 'redeem', body?: unknown) => fetchImpl(new URL(`/_fractal/pair/${path}`, baseUrl), {
+    method: path === 'status' ? 'GET' : 'POST',
     credentials: 'same-origin',
     cache: 'no-store',
     headers: body === undefined ? { accept: 'application/json' } : { accept: 'application/json', 'content-type': 'application/json' },
@@ -40,7 +41,12 @@ export const browserPairingPort = ({ baseUrl, fetch: fetchImpl = (input, init) =
   return {
     status: async () => {
       const response = await request('status')
-      return response.status === 404 ? undefined : decodeStatus(await json(response))
+      if (response.status === 404) return undefined
+      const status = decodeStatus(await json(response))
+      // Reads never adopt or discard credentials. Explicit same-origin POSTs do that work.
+      return status.status === 'pending' || status.credentialRejected === true
+        ? decodeStatus(await json(await request('redeem', {})))
+        : status
     },
     start: async (deviceLabel) => decodeStarted(await json(await request('start', { deviceLabel }))),
     forget: async () => {

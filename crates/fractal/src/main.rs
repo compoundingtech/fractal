@@ -7542,7 +7542,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7628,7 +7628,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
         client_relay: fractal_daemon::peer::ClientRelay::from_config(&config)?
             .map(|relay| relay.with_links(store.clone())),
-        native_session_home: std::env::var_os("HOME").map(PathBuf::from),
+        native_session_home: fractal_daemon::instance::native_session_home()?,
         planner_default: config.planner.clone(),
         harness_question_sink: None,
         assistant_receipts: Default::default(),
@@ -7707,6 +7707,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
@@ -10964,7 +10965,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
-                    row["id"].as_str().unwrap_or_default().replace('/', "%2F"),
+                    urlencoding::encode(row["id"].as_str().unwrap_or_default()),
                 ))
                 .await?;
             if json_output {
@@ -18740,7 +18741,7 @@ fn tolerate_driver_api_outage(
     last_warning: &mut Option<Instant>,
 ) -> Result<()> {
     let outage = fractal_daemon::client::daemon_unreachable(&error).map(|outage| outage.summary());
-    let transient = outage.is_some()
+    let transient = daemon_is_unreachable(&error)
         || error.chain().any(|cause| {
             let message = cause.to_string();
             message.contains("incomplete HTTP response")

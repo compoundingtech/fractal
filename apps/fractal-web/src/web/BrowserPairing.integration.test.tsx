@@ -274,8 +274,27 @@ describe('browserPairingPort', () => {
     expect(await paired.port.status()).toEqual({ status: 'pending', displayCode: 'K7Q-4MX' })
     expect(paired.calls[0]!.url.href).toBe('https://fractal.example/_fractal/pair/status')
     expect(paired.calls[0]!.init).toMatchObject({ method: 'GET', credentials: 'same-origin', cache: 'no-store' })
+    expect(paired.calls[1]!.url.pathname).toBe('/_fractal/pair/redeem')
+    expect(paired.calls[1]!.init).toMatchObject({ method: 'POST', credentials: 'same-origin', body: '{}' })
     expect(await recorded(() => new Response('', { status: 404 })).port.status()).toBeUndefined()
     await expect(recorded(() => new Response('', { status: 500 })).port.status()).rejects.toBeInstanceOf(PairingHttpError)
+  })
+
+  it.each([
+    [{ status: 'pending', displayCode: 'K7Q-4MX' }, { status: 'paired', credentialChanged: true }],
+    [{ status: 'unpaired', credentialRejected: true }, { status: 'unpaired', credentialChanged: true }],
+  ])('adopts or clears credentials by POST after reading %j', async (status, redeemed) => {
+    const { port, calls } = recorded(url => Response.json(url.pathname.endsWith('/status') ? status : redeemed))
+    expect(await port.status()).toEqual(redeemed)
+    expect(calls.map(call => [call.url.pathname, call.init.method])).toEqual([
+      ['/_fractal/pair/status', 'GET'], ['/_fractal/pair/redeem', 'POST'],
+    ])
+  })
+
+  it.each(['paired', 'unpaired'])('does not POST for an ordinary %s status', async status => {
+    const { port, calls } = recorded(() => Response.json({ status }))
+    expect(await port.status()).toEqual({ status })
+    expect(calls).toHaveLength(1)
   })
 
   it('starts with the device label and forgets with a POST', async () => {

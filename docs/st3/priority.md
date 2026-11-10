@@ -96,6 +96,7 @@ Declared priority accepts the complete set `background < normal`; declared lane 
 **Budget window.** A mission's `token-budget` is the total cost-weighted tokens for
 one mission run, including all attempts and retries; retrying does not start a new window.
 `cpu-seconds` is accumulated CPU seconds over that same mission-run window.
+See the [CPU reservation ledger contract](#cpu-reservation-ledger-contract) for the intended accounting.
 A step-run window is a future extension, not an accepted declaration location.
 
 Cost-weighted tokens are `sum(tokens * (class price / base input price))` across
@@ -231,6 +232,108 @@ the report does not silently discard older history. Unrelated recipients and oth
 claim kinds are not scanned. A valid ancestry continuation beyond 64 vertices also
 refuses the whole report, even if the mission was already found; missing provenance
 remains distinct and may be reported as unattributed.
+
+### CPU reservation ledger (contract)
+
+Status: contract only, data only. No code implements it yet. Owner of the semantics:
+st-budgets. Implementer: the gate-slot retirement program (job reserve/settle hooks
+and the cgroup v2 `cpu.stat` collector), after its durable-job work. Decision: Johannes,
+`step-run/ask-139e87e814cd8ef4cc9b64262722413d/ask` (R5), with inclusive charging from
+`step-run/ask-ba7954f15024216f4209fa4f421b3f2a/ask` (R2).
+
+**Purpose.** A mission's `cpu-seconds` becomes a total cap on the CPU seconds that its
+jobs use in one mission run. One authoritative ledger per mission run records
+reservations and settlements.
+
+**Order of delivery.**
+
+1. Report: a per-run CPU report (settled, reserved, unknown) ships and is observed on real runs.
+2. Admission: then the ledger can refuse to start a job whose reservation does not fit.
+
+The first stage, reporting, changes no behavior. Turning admission on for real missions
+needs Johannes's explicit approval, because budget declarations are data only until then.
+
+**Unit and measurement.**
+
+- One CPU second is 10^6 `usage_usec` from cgroup v2 `cpu.stat` of the job attempt's own scope.
+- The collector reads the scope at start and at end, and records the delta, the physical
+  host and the observation timestamps. `usage_usec` includes descendant cgroups.
+- A transient scope's cgroup disappears at exit. The collector reads it before removal,
+  or uses the unit's `CPUUsageNSec` with `CPUAccounting=yes`.
+- A job attempt without its own cgroup v2 scope has unknown usage. This includes macOS
+  hosts, remote builders and a lost host. Unknown is never zero.
+
+**Ledger records** (append-only, one ledger per mission run, fields named for the contract):
+
+- `reservation`: ledger run, job id, attempt, host, `reserved_cpu_seconds`, the list of
+  charged mission runs, and the time.
+- `settlement`: the reservation id, then `measured_cpu_seconds` or `unknown` with a reason,
+  coverage, and the time.
+
+**Reservation size.**
+
+- The reservation is the job attempt's provable CPU upper bound, in CPU seconds: the
+  wall-clock deadline × min(the `cpu.max` rate of the attempt's scope and of every ancestor
+  cgroup, the CPU count of the scope's `cpuset.cpus.effective`).
+- The cgroup hierarchy enforces that minimum. The implementer records which cgroup
+  supplied the bound.
+- A job attempt without a deadline, or on a host without cgroup v2 (macOS, remote
+  builders), has no provable bound. It can run in report mode only; in admission mode
+  it is refused for a capped mission.
+- The bound is conservative: an uncapped attempt reserves all of its effective CPUs for
+  its whole deadline, so a capped mission can wait for a long time in admission mode.
+  Settlement corrects the charge when the attempt ends. A per-job `cpu.max` or a shorter
+  deadline gives a tighter bound.
+
+**Reserve before each job attempt.**
+
+- Before the attempt starts, the ledger adds one reservation for that attempt.
+- The ledger charges the reservation to every mission run that declares `cpu-seconds`
+  on the job's ancestry: the job's own run and every declaring ancestor (R2). A job is
+  counted at most once in each ledger.
+- In admission mode, the attempt starts only if, for every charged run:
+  settled + open reservations + this reservation ≤ that run's `cpu-seconds`. Otherwise:
+  - If the attempt could fit after open reservations settle, it waits in its queue.
+    It is not killed and not failed.
+  - If the attempt's reservation alone exceeds a charged run's `cpu-seconds` minus that
+    run's settled usage, the attempt can never fit. The ledger refuses it with the typed
+    reason `budget-cannot-fit`, which names the run and the numbers, and the report shows it.
+
+**Settle after each job attempt.**
+
+- When the attempt ends, the settlement replaces the reservation with the measured value.
+- If the measurement is unknown, the reservation stays charged in full (R5).
+- If the measured value exceeds the reservation, the measured value is charged, and the
+  report marks a bound violation: the bound was wrong.
+
+**Retries and delegation.**
+
+- Each retry attempt is reserved and settled separately in the same mission-run window
+  (the #6092 budget window); a retry does not start a new window.
+- A delegated child run charges its own ledger and every declaring ancestor's ledger.
+
+**Limits pin and scope.** The limit comes from each run's initial revision. Only runs
+that start after the feature activates are charged (new runs only).
+
+**Running work.** No missing, late or unknown usage stops or kills running work. Only the
+admission of new attempts is affected.
+
+**Authority and failure.**
+
+- Each mission run has one authoritative ledger writer: the replica that admits the run's jobs.
+- If the ledger is unreachable in admission mode, new attempts of a capped mission wait,
+  and running attempts continue.
+- A replica never admits against a copy that it cannot prove current.
+
+**Report fields** (per mission run):
+
+- `cpu_seconds` declared, or tagged `undeclared`;
+- `charged_settled`;
+- `charged_reserved_open`;
+- `charged_unknown_retained`;
+- `inclusive_measured` (all usage in the subtree, separate from charged);
+- `unknown_attempts`;
+- `refused_cannot_fit` (attempts refused with `budget-cannot-fit`).
 
 ## Linux
 

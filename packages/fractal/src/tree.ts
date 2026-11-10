@@ -7,16 +7,19 @@ import { parse } from '@overeng/kdl'
 
 import { AgentSchema, MissionSchema, missionWire, type MissionInput, SubjectId } from './mod.ts'
 import type { PinnedMissionRef } from './define.ts'
+import { objective, validName, type Objective, type ObjectiveInput } from './objective.ts'
 import type { SubjectKind, SubjectRef } from './subject-ref.ts'
 export {
   defineAgent,
   defineMission,
   defineSchedule,
+  defineObjective,
   pinMission,
   type AgentIntent,
   type MissionIntent,
   type PinnedMissionRef,
   type ScheduleIntent,
+  type ObjectiveIntent,
 } from './define.ts'
 export type {
   SubjectKind,
@@ -55,13 +58,26 @@ export type Subject =
       readonly path: string
       readonly declaration: Declaration<typeof MissionSchema.Type>
     }
+  | {
+      readonly kind: 'objective'
+      readonly id: SubjectId
+      readonly path: string
+      readonly declaration: Declaration<Objective>
+    }
 
-const declarationFile = /^(agent|mission|schedule)\.(ts|kdl)$/u
+const declarationFile = /^(agent|mission|schedule|objective)\.(ts|kdl)$/u
 
-const scheduleMismatch: Record<Exclude<SubjectKind, 'agent'>, string> = {
+/** The subject family of a kind: missions and schedules share `mission/<id>`. */
+const family = (kind: SubjectKind) => (kind === 'schedule' ? 'mission' : kind)
+
+const scheduleMismatch: Record<'mission' | 'schedule', string> = {
   mission: 'A mission with a schedule must be declared in schedule.ts or schedule.kdl',
   schedule: 'A schedule file must declare a mission with a schedule',
 }
+
+/** A fleet declares only interval objectives named `NAMESPACE/NAME`; Fractal ships the rest. */
+const declaredObjective = (id: string) =>
+  `A declared objective is an interval over claims named NAMESPACE/NAME; objective/${id} is not`
 
 const isRef = (value: unknown): value is SubjectRef<SubjectKind> =>
   typeof value === 'object' && value !== null && '_tag' in value && value._tag === 'SubjectRef'
@@ -302,6 +318,7 @@ const loadModule = Effect.fnUntraced(function* <C>({
     try: (): unknown => (typeof source === 'function' ? source(context) : source),
     catch: (cause) => new SubjectTreeError({ path, message: 'Subject factory failed', cause }),
   })
+  if (kind === 'objective') return yield* loadObjective({ root, path, id, intent, exports })
   // Definitions take their ID from the path; an explicit `id` in the intent must still agree.
   const identified =
     definition !== undefined && typeof intent === 'object' && intent !== null
@@ -354,6 +371,64 @@ const loadModule = Effect.fnUntraced(function* <C>({
   return subject
 })
 
+/**
+ * Checks an objective module's intent: its `name`, if given, is the path ID; `onBreach` agent
+ * references resolve to `agent/<id>`; and it is an interval over claims named `NAMESPACE/NAME`,
+ * the only objective a fleet declares (the native telemetry ones ship with Fractal).
+ */
+const loadObjective = Effect.fnUntraced(function* ({
+  root,
+  path,
+  id,
+  intent,
+  exports,
+}: {
+  readonly root: string
+  readonly path: string
+  readonly id: SubjectId
+  readonly intent: unknown
+  readonly exports: Readonly<Record<string, unknown>>
+}) {
+  if (typeof intent !== 'object' || intent === null) {
+    return yield* new SubjectTreeError({ path, message: 'An objective module exports an objective' })
+  }
+  if ('name' in intent && intent.name !== undefined && intent.name !== id) {
+    return yield* new SubjectTreeError({
+      path,
+      message: `Declared name ${String(intent.name)} must equal the subject directory ${id}`,
+    })
+  }
+  const agent = (value: unknown) =>
+    isRef(value) === true
+      ? resolveRef({ root, path, ref: value, expected: 'agent' }).pipe(Effect.map((agentId) => `agent/${agentId}`))
+      : Effect.succeed(value)
+  const breach = 'onBreach' in intent ? intent.onBreach : undefined
+  const onBreach =
+    typeof breach === 'object' && breach !== null
+      ? {
+          ...breach,
+          ...('owner' in breach ? { owner: yield* agent(breach.owner) } : {}),
+          ...('backup' in breach && breach.backup !== undefined ? { backup: yield* agent(breach.backup) } : {}),
+        }
+      : breach
+  const named: unknown = { ...intent, ...(onBreach === undefined ? {} : { onBreach }), name: id }
+  const value = yield* Effect.try({
+    // The intent is untrusted module data; `objective` checks every field, unknown ones included.
+    try: () => objective(named as ObjectiveInput),
+    catch: (cause) => new SubjectTreeError({ path, message: 'Invalid objective declaration', cause }),
+  })
+  if (value.indicator.kind !== 'interval' || id.includes('/') === false) {
+    return yield* new SubjectTreeError({ path, message: declaredObjective(id) })
+  }
+  const subject: Subject = {
+    kind: 'objective',
+    id,
+    path,
+    declaration: { _tag: 'Module', intent: value, exports },
+  }
+  return subject
+})
+
 const loadKdl = Effect.fnUntraced(function* ({
   fs,
   file,
@@ -378,7 +453,7 @@ const loadKdl = Effect.fnUntraced(function* ({
     try: () => parse(text).nodes,
     catch: (cause) => new SubjectTreeError({ path, message: 'Invalid KDL declaration', cause }),
   })
-  const name = kind === 'agent' ? 'agent' : 'mission'
+  const name = family(kind)
   const [version, declaration] = nodes
   if (
     nodes.length !== 2 ||
@@ -393,23 +468,32 @@ const loadKdl = Effect.fnUntraced(function* ({
     })
   }
   const scheduled = declaration.children?.findNodeByName('schedule') !== undefined
-  if (kind !== 'agent' && scheduled !== (kind === 'schedule')) {
+  if ((kind === 'mission' || kind === 'schedule') && scheduled !== (kind === 'schedule')) {
     return yield* new SubjectTreeError({ path, message: scheduleMismatch[kind] })
+  }
+  if (
+    kind === 'objective' &&
+    (declaration.children?.findNodeByName('indicator')?.getArgument(0) !== 'interval' ||
+      id.includes('/') === false ||
+      validName(id) === false)
+  ) {
+    return yield* new SubjectTreeError({ path, message: declaredObjective(id) })
   }
   const subject: Subject = { kind, id, path, declaration: { _tag: 'Kdl', text } }
   return subject
 })
 
 /**
- * Loads `<root>/<id>/{agent,mission,schedule}.{ts,kdl}` declarations in path order.
+ * Loads `<root>/<id>/{agent,mission,schedule,objective}.{ts,kdl}` declarations in path order.
  *
  * The ID is the POSIX directory path of the file's realpath below `root`'s realpath, so symlinked
  * aliases load once and links leaving the tree are rejected. Seats use the `agent/<id>` namespace; missions
- * and schedules share `mission/<id>`, so one directory declares at most one of them. KDL files must
- * hold `version 2` and one node whose kind and ID match the path. A TS module's default export is a
- * `define*` definition for its own path and kind, a plain intent, or a factory; factories receive
- * `context`. Typed references are lowered, then intents are decoded with `AgentSchema` or
- * `MissionSchema`. Subject modules are trusted code and are imported.
+ * and schedules share `mission/<id>`, so one directory declares at most one of them; objectives use
+ * `objective/<id>`. KDL files must hold `version 2` and one node whose kind and ID match the path. A
+ * TS module's default export is a `define*` definition for its own path and kind, a plain intent, or
+ * a factory; factories receive `context`. Typed references are lowered, then intents are decoded
+ * with `AgentSchema` or `MissionSchema`, or checked by `Fractal.objective`. A declared objective is an
+ * interval over claims. Subject modules are trusted code and are imported.
  */
 export const loadSubjectTree = Effect.fn('fractal.loadSubjectTree')(function* <C>({
   root,
@@ -452,7 +536,7 @@ export const loadSubjectTree = Effect.fn('fractal.loadSubjectTree')(function* <C
     loaded.add(file)
     const id = yield* subjectId({ root: tree.real, file, path: discovered })
     const path = relative(tree.real, file).split(sep).join('/')
-    const key = `${kind === 'agent' ? 'agent' : 'mission'}/${id}`
+    const key = `${family(kind)}/${id}`
     if (seen.has(key) === true) {
       return yield* new SubjectTreeError({ path, message: `Duplicate subject ${key}` })
     }

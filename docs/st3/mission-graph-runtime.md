@@ -194,6 +194,7 @@ mission "MISSION_ID"
   assigned-to "agent/${ST_MISSION_RUN}/owner"
   // Or repeat available-to. A mission cannot declare agentless.
   capacity cores=2 memory="4G"   // the lane of each agent here that declares none
+  authority { start "factory/publish"; write "resource/factory/*" }   // top-level only
 
   completion { when "all-steps-exhausted" }
   // Or: completion { depends-on { step "publish" completed } }
@@ -234,6 +235,21 @@ An exact idempotent retry returns its existing run before the capacity check. A 
 `revisions="human-only"` is optional and inherited by child steps. `revision-reviewer` requires that protection.
 
 The reviewer defaults to the mission run requester. `revision-cutover` is `restart-active` by default or `when-idle` when declared. The value in the current generation controls how its successor starts; a candidate cannot select its own cutover.
+
+`authority` is optional and belongs on a top-level mission only. It says what the mission's runs
+may do as the actor `mission-run/RUN` when a program step acts as the run
+([program engine §3](program-engine.md#3-declaration-and-authority)): one `VERB "PATTERN"` rule per
+line, in the shape of an agent's `*-authority` blocks. `publish`, `start`, `revise` and `cancel` take
+a mission ID without `mission/`; `write` takes a subject, or a registered family alone, before
+`/*`. A pattern is exact or ends in `/*`, which covers everything under it. Parsing refuses an empty
+block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
+mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
+is. A mission without the block grants its runs nothing. The block is stored with the revision;
+the daemon does not yet bind a run actor or enforce it. An older member would quarantine a
+revision that declares it (it hashes the mission without the field), so publication holds such a
+revision until every member advertises `mission_authority=1` on its `daemon.started`
+(`mission-authority-unavailable`, also an `apply --dry-run` blocker), as for `capacity`
+([seat lanes](seat-lanes.md)).
 
 A mission can contain direct declarations. Direct agents in the mission can revise the complete mission.
 
@@ -1291,8 +1307,12 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled.
 
-A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+A stall is measured from the run's last sign of life: its last state change and any step's last
+change or progress record. A step that a worker holds counts from the start of its current
+execution interval (its claim, or the end of its last wait), its last progress record, and a
+declared `work wait` until that wait ends. Lease renewals are not a sign of life: a live seat that
+holds a step and records no progress is reported like any other silence, so a worker on a long
+step records progress with `fractal work progress`. Activity in child runs linked from its steps,
 including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a

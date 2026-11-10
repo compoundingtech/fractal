@@ -71,8 +71,14 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
   if (!options.admit(req)) { json(res, 403, { error: 'Forbidden' }); return }
   const path = req.url?.split('?')[0]
   const action = path?.slice(prefix.length)
-  if ((action === 'status' ? 'GET' : 'POST') !== req.method || !['start', 'status', 'forget'].includes(action ?? '')) {
+  if ((action === 'status' ? 'GET' : 'POST') !== req.method || !['start', 'status', 'forget', 'redeem'].includes(action ?? '')) {
     json(res, 404, { error: 'Not found' }); return
+  }
+  // Pairing cookies are HTTPS-only, including when TLS terminates at the admitted proxy.
+  const site = req.headers['sec-fetch-site']
+  if (req.method === 'POST' && (site !== undefined ? site !== 'same-origin'
+    : req.headers.origin === undefined || req.headers.origin !== `https://${req.headers.host}`)) {
+    json(res, 403, { error: 'Forbidden' }); return
   }
   try {
     if (action === 'forget') {
@@ -111,14 +117,19 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
     if (bearer !== undefined) {
       const grant = await daemonCall(gateway, '/v1/client/capabilities', undefined, `Bearer ${bearer}`, 'GET')
       if (grant.status === 401 || grant.status === 403) {
-        res.setHeader('set-cookie', secureCookie(deviceCookie, '', 0))
-        json(res, 200, { status: 'unpaired', credentialChanged: true }); return
+        if (action === 'redeem') {
+          res.setHeader('set-cookie', secureCookie(deviceCookie, '', 0))
+          json(res, 200, { status: 'unpaired', credentialChanged: true }); return
+        }
+        json(res, 200, { status: 'unpaired', credentialRejected: true }); return
       }
       if (grant.status !== 200) { json(res, 502, { error: 'Could not validate this browser' }); return }
       json(res, 200, { status: 'paired' }); return
     }
     const pending = pendingPair(req)
     if (pending === undefined) { json(res, 200, { status: 'unpaired' }); return }
+    // The daemon exposes no read-only browser-request status endpoint.
+    if (action === 'status') { json(res, 200, { status: 'pending', displayCode: pending.displayCode }); return }
     const result = await daemonCall(gateway, `/v1/client/pairing/browser-requests/${encodeURIComponent(pending.requestId)}/redeem`, { requestKey: pending.requestKey })
     const response = result.body
     if (result.status !== 200 || !record(response)) { json(res, 502, { error: 'Could not check browser pairing' }); return }
