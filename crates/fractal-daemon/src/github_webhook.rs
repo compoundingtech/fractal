@@ -272,9 +272,14 @@ observer "garden-main" { resource "resource/garden-main"; provider "github.ref";
                 "revision": revision,
             })]);
         }
-        // The pending refreshes absorb the next delivery.
-        let (status, body) = fixture.send("pull_request", "d-2", &json!({"action": "opened", "repository": {"full_name": "acme/garden"}}), SECRET).await;
+        // A refresh may already be polling, so the next delivery queues one more; that queued
+        // refresh absorbs the delivery after it.
+        let opened = json!({"action": "opened", "repository": {"full_name": "acme/garden"}});
+        let (status, body) = fixture.send("pull_request", "d-2", &opened, SECRET).await;
+        assert_eq!((status, body.as_str()), (StatusCode::ACCEPTED, r#"{"refreshed":1}"#));
+        let (status, body) = fixture.send("pull_request", "d-3", &opened, SECRET).await;
         assert_eq!((status, body.as_str()), (StatusCode::ACCEPTED, r#"{"refreshed":0}"#));
+        assert_eq!(fixture.requests("observer/garden").len(), 2);
     }
 
     #[tokio::test]
