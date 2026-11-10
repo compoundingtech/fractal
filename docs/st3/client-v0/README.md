@@ -3496,6 +3496,23 @@ If the standby restarts while the primary is down, the standby cannot take over 
 Hosted validation must run `cargo run -p fractal-client-codegen -- --check`. Generated
 files remain generated; do not hand-edit clients for open JSON observation detail.
 
+## Usage hub quota relay
+
+The daemon accepts optional `[usage_hub]` configuration with `url` (the hub's base URL: https, or
+http on loopback only; no credentials, path, query or fragment) and `refresh_seconds` (default 30,
+range 1–3600). Only the operator selects the URL, and the daemon requests only its fixed
+`/api/v1/quota` path, directly (no proxy), refusing redirects, within a five-second deadline and a
+2 MB body limit. An edit applies on the next request without a restart. A daemon older than this
+key refuses a config file that sets it, so upgrade before setting it.
+
+`GET /v1/client/usage/quota` requires `read.projections` and uses the normal client-v0 envelope.
+Its value is `{state:"disabled"}`, `{state:"unavailable",refresh_seconds,reason}` or
+`{state:"available",refresh_seconds,snapshot}`. `snapshot` is the hub's own schema version 3
+document, relayed with its additive fields. Requests share one fetch and its success or failure
+for a refresh window, and errors never return an old document as available. Unavailable reasons
+distinguish `transport` from `invalid_snapshot`. A daemon without this route answers 404, which
+clients show the same as no source configured. Existing clients and routes are unaffected.
+
 ## External quota source v1
 
 The daemon accepts optional `[quota_source]` configuration with `url` (an absolute
