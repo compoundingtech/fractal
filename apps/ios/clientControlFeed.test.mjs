@@ -62,4 +62,11 @@ test('commands feed carries golden invalid sequence to the active controller', a
   assert.deepEqual(controller.getGrant(), started, 'unchanged started snapshot restores the run indicator');
   sockets.at(-1).frame({ ...lifecycleFixture.frames[1], upserts: [invalid] });
   assert.equal(controller.getGrant(), undefined, 'sequence zero fails closed through the shipped feed path');
+  for (const identity of ['device', 'session', 'absent']) await t.test(`replacement snapshot refuses ${identity} lifecycle`, () => {
+    sockets.at(-1).frame(lifecycleFixture.frames[0]);
+    assert.deepEqual(controller.getGrant(), started);
+    const items = identity === 'absent' ? [] : [{ ...started, [identity]: 'foreign' }];
+    sockets.at(-1).frame({ ...lifecycleFixture.frames[0], items });
+    assert.equal(controller.getGrant(), undefined, 'foreign or absent lifecycle never restores authority');
+  });
 });
