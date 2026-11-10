@@ -183,7 +183,7 @@ pub async fn get(
         state.store.read_snapshot(|index| {
             Ok((
                 client_snapshot_at(&state, index),
-                detail(&state, &id, query.sha),
+                state.store.with_owned_set_snapshot_reads(|| detail(&state, &id, query.sha)),
             ))
         })
     })

@@ -1662,3 +1662,143 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
         "authored-session-mismatch",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_tasks_publish_with_their_agent_and_revision_tokens_pin_the_same_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let keys = (0..2)
+        .map(|_| Arc::new(MemberKey::generate().unwrap().0))
+        .collect::<Vec<_>>();
+    let amber = daemon(root.path(), "amber", keys[0].clone(), &keys[0]).await;
+    let ivory = daemon(root.path(), "ivory", keys[1].clone(), &keys[0]).await;
+    for (i, name) in ["amber", "ivory"].into_iter().enumerate() {
+        let mut fields = json!({"fleet_id":FLEET,"member_key":keys[i].public(),
+            "via":if i==0{"anchor"}else{"invite"},"mode":"listening"});
+        if i != 0 {
+            fields["sponsor"] = json!("host/amber");
+        }
+        append(&amber.store, &format!("host/{name}"), "fleet.member-admitted", fields);
+    }
+    let exchange = |amber: &Daemon, ivory: &Daemon| {
+        share(&amber.store, &ivory.store, "amber");
+        share(&ivory.store, &amber.store, "ivory");
+    };
+    exchange(&amber, &ivory);
+    // The full tree: an agent whose exec task compiles to its own subject, grouped `under` a
+    // sibling agent, and a schedule pinning a mission of the same publication.
+    let tree = |pump: bool| {
+        let mut kdl = bundle("tasks", false);
+        if pump {
+            kdl.push_str(
+                "agent \"garden/pump\" {\n workspace \".\"\n under \"agent/garden/orchard\" reason=\"The orchard runs its pump.\"\n exec \"flow\" { argv \"true\"; }\n}\n",
+            );
+        }
+        kdl.push_str("mission \"garden/harvest\" state=\"ready\" { goal \"Harvest\"; step \"work\" { assigned-to \"agent/garden/orchard\" } }\n\
+            schedule \"garden/daily\" { every \"6h\"; anchor \"2026-01-01T00:00:00Z\"; work { mission \"garden/harvest@ST_REVISION[garden/harvest]\"; workspace \"/tmp\"; } }\n");
+        kdl
+    };
+
+    // Older daemons refuse replicated revisions carrying tasks, so activation waits for all.
+    let mut publication = request(&amber, 10, tree(true)).await;
+    let refused: Preview = amber
+        .client
+        .post("/v1/sets/preview", &publication)
+        .await
+        .unwrap();
+    assert!(
+        refused
+            .blockers
+            .iter()
+            .any(|b| b == "host/ivory has not advertised owned-set agent task support; upgrade before activation"),
+        "{:?}",
+        refused.blockers
+    );
+    for (daemon, name) in [(&amber, "amber"), (&ivory, "ivory")] {
+        append(
+            &daemon.store,
+            &format!("daemon/{name}"),
+            "daemon.started",
+            json!({"status":"running","features":{"owned_sets":1,"owned_set_tasks":1}}),
+        );
+    }
+    exchange(&amber, &ivory);
+
+    let planned = preview(&amber, &mut publication).await;
+    for subject in [
+        "agent/garden/orchard",
+        "agent/garden/pump",
+        "exec/garden/pump/flow",
+        "mission/garden/harvest",
+        "schedule/garden/daily",
+    ] {
+        assert_eq!(planned.changes[subject], "added", "{subject}: {planned:?}");
+    }
+    let _: Value = amber
+        .client
+        .post("/v1/sets/apply", &publication)
+        .await
+        .unwrap();
+    exchange(&amber, &ivory);
+    let revision = amber
+        .store
+        .mission_spec("garden/harvest", None)
+        .unwrap()
+        .unwrap()
+        .revision;
+    for daemon in [&amber, &ivory] {
+        let selected = daemon.store.owned_sets().unwrap().remove(0);
+        assert!(selected.blockers.is_empty(), "{:?}", selected.blockers);
+        assert_eq!(selected.receipt.members["exec/garden/pump/flow"].kind, "exec");
+        assert!(
+            daemon
+                .store
+                .selected_desired_token("exec/garden/pump/flow")
+                .unwrap()
+                .is_some()
+        );
+        let schedule = daemon
+            .store
+            .desired_subject_with_writer("schedule/garden/daily")
+            .unwrap()
+            .unwrap()
+            .0;
+        let pinned = serde_json::to_string(&schedule.desired).unwrap();
+        assert!(pinned.contains(&format!("garden/harvest@{revision}")), "{pinned}");
+    }
+
+    // Omitting the agent retires its task with it; the unchanged mission keeps its revision.
+    let mut omit = request(&amber, 20, tree(false)).await;
+    let planned = preview(&amber, &mut omit).await;
+    assert_eq!(planned.changes["agent/garden/pump"], "retiring");
+    assert_eq!(planned.changes["exec/garden/pump/flow"], "retiring");
+    assert_eq!(planned.changes["mission/garden/harvest"], "unchanged");
+    assert_eq!(planned.changes["schedule/garden/daily"], "unchanged");
+    let _: Value = amber.client.post("/v1/sets/apply", &omit).await.unwrap();
+    exchange(&amber, &ivory);
+    for daemon in [&amber, &ivory] {
+        let selected = daemon.store.owned_sets().unwrap().remove(0);
+        assert!(selected.blockers.is_empty(), "{:?}", selected.blockers);
+        assert!(selected.receipt.retired.contains_key("exec/garden/pump/flow"));
+        let flow = daemon
+            .store
+            .desired_subject_with_writer("exec/garden/pump/flow")
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(flow.kind, "stop");
+    }
+
+    // A token naming a mission outside the publication refuses it outright.
+    let foreign = request(
+        &amber,
+        30,
+        tree(false).replace("ST_REVISION[garden/harvest]", "ST_REVISION[garden/elsewhere]"),
+    )
+    .await;
+    let error = amber
+        .client
+        .post::<_, Preview>("/v1/sets/preview", &foreign)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unresolved-revision-token"), "{error}");
+}

@@ -2131,10 +2131,11 @@ pub enum ClaimsSubject {
 }
 
 /// A page of claims after store index `?1` and before `?2`, at most `?4` rows, optionally of kind
-/// `?5`. Each filter reads the index that keeps the page in store-index order where it can: a kind
+/// `?5` and restricted to allowed kinds in the JSON array `?7`. Both kind restrictions intersect.
+/// Each filter reads the index that keeps the page in store-index order where it can: a kind
 /// walks `claims_kind_index` (with a prefix checked on each row), a subject `claims_subject_index`
 /// or `claims_subject_kind_index`, and a prefix alone the `claims_subject_index` range.
-pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool) -> String {
+pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool, allowed_kinds: bool) -> String {
     let (index, filter) = match (subject, kind) {
         (ClaimsSubject::Any, false) => ("", ""),
         (ClaimsSubject::Exact, false) => ("", "subject=?3 AND "),
@@ -2143,10 +2144,11 @@ pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool) -
         (ClaimsSubject::Range, false) => (" INDEXED BY claims_subject_index", "subject>=?3 AND subject<?6 AND "),
         (ClaimsSubject::Range, true) => (" INDEXED BY claims_kind_index", "kind=?5 AND subject>=?3 AND subject<?6 AND "),
     };
+    let allowed_filter = if allowed_kinds { "kind IN (SELECT value FROM json_each(?7)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
