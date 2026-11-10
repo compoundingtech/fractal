@@ -714,6 +714,10 @@ const PROBES: &[Probe] = &[
         "/v1/client/arrangements?person=person%2Fada",
     ),
     get(
+        "GET /v1/client/read-positions",
+        "/v1/client/read-positions?person=person%2Fada",
+    ),
+    get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
     ),
@@ -1472,6 +1476,23 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
         "cost-arrangement-current",
         json!([{"op":"rename","name":"Invented arrangement"}]),
     )
+}
+
+/// Retained advances grow while the projected answer stays one conversation.
+fn seed_read_positions(store: &Store, scale: f64) {
+    for advance in 0..((scale * 10_000.0).round() as u64).max(1) {
+        store.append_claim(&ClaimInput {
+            subject: fractal_schema::read_positions::subject(ARRANGEMENT_OWNER),
+            kind: fractal_schema::read_positions::KIND.into(),
+            actor: Some(ARRANGEMENT_OWNER.into()),
+            fields: BTreeMap::from([
+                ("owner".into(), json!(ARRANGEMENT_OWNER)),
+                ("conversation".into(), json!(ARRANGEMENT_PLACEMENT)),
+                ("at_ms".into(), json!(advance)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).expect("the read-position cost fixture must publish");
+    }
 }
 
 const MEMBERSHIP_OWNER: &str = "person/avery";
@@ -3041,6 +3062,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -3303,6 +3330,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = arrangement_person
+        .get("/v1/client/read-positions?person=person%2Fada")
+        .await
+        .expect("the read-position list probe must read the selected owner's projection");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["owner"], ARRANGEMENT_OWNER);
+    assert_eq!(page["items"][0]["conversation"], ARRANGEMENT_PLACEMENT);
     let page: Value = membership_person
         .get(MEMBERSHIP_PATH)
         .await
@@ -3442,7 +3476,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 let client = if path == MEMBERSHIP_PATH {
                     membership_person.clone()
-                } else if path.starts_with("/v1/client/arrangements") {
+                } else if path.starts_with("/v1/client/arrangements") || path.starts_with("/v1/client/read-positions") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
