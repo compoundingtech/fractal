@@ -94,7 +94,8 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
           <Tab id="changes" aria-label={changesCount === 0 ? 'Changes' : `Changes, ${changesCount}`} {...stylex.props(styles.tab, narrow && styles.tabTouch)}>Changes{changesCount === 0 ? null : <CountPill count={changesCount} />}</Tab>
           <Tab id="resources" aria-label={resourcesCount === 0 ? 'Resources' : `Resources, ${resourcesCount}`} {...stylex.props(styles.tab, narrow && styles.tabTouch)}>Resources{resourcesCount === 0 ? null : <CountPill count={resourcesCount} />}</Tab>
         </TabList>
-        <div ref={setAccessoryHost} data-agent-inspector-accessory {...stylex.props(styles.accessory)} />
+        {/* Only Details portals controls here; its seat is reserved up front so the tabs scroll instead of sitting under them. */}
+        <div ref={setAccessoryHost} data-agent-inspector-accessory {...stylex.props(styles.accessory, selected === 'details' && (narrow ? styles.accessorySeatTouch : styles.accessorySeat))} />
         {width === 'fill' ? null : <Button aria-label="Close agent inspector" data-agent-inspector-close onPress={onClose} {...stylex.props(styles.close, narrow && styles.closeTouch)}><Icon name="x" /></Button>}
       </div>
       <TabPanel id="details" {...stylex.props(styles.panel)}>
@@ -257,13 +258,18 @@ const styles = stylex.create({
   root: { flexShrink: 0, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.canvas, color: c.fg },
   fillRoot: { width: '100%', flexGrow: 1 },
   tabs: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  // Fixed height in every state: Details' status folds by this row's width (`pane-header`), never wraps.
+  // Fixed height in every state: Details' status folds by the accessory's width (`pane-header`), never wraps.
+  // The accessory never shrinks below its controls' seat; the tab list gives way and scrolls, so nothing paints over a tab.
   row: { display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlLg, flexShrink: 0, boxSizing: 'border-box', paddingInline: s.sm, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: c.border, minWidth: 0, containerType: 'inline-size', containerName: 'pane-header' },
   rowTouch: { height: `calc(${g.touchTarget} + 2 * ${s.xs})` },
-  tabList: { display: 'flex', alignItems: 'center', gap: s.xs2, minWidth: 0, flexShrink: 0 },
-  tab: { display: 'inline-flex', alignItems: 'center', gap: s.xs, height: g.controlSm, paddingInline: s.sm, borderRadius: r.control, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: c.fg }, ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
-  tabTouch: { height: g.touchTarget, paddingInline: s.lg },
+  tabList: { display: 'flex', alignItems: 'center', gap: s.xs2, minWidth: 0, flexShrink: 1, overflowX: 'auto', overscrollBehaviorX: 'contain', scrollbarWidth: 'none' },
+  tab: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, height: g.controlSm, paddingInline: s.sm, borderRadius: r.control, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: c.fg }, ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
+  // Below 280px of header content (a 280px phone sheet) touch tabs tighten so more of the strip shows beside Details' controls.
+  tabTouch: { height: g.touchTarget, paddingInline: { default: s.lg, '@container pane-header (width < 280px)': s.sm } },
   accessory: { marginInlineStart: 'auto', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: s.xs2, flexGrow: 1, flexShrink: 1, flexBasis: 0, alignSelf: 'stretch', minWidth: 0, containerType: 'inline-size', containerName: 'pane-header' },
+  // Details' narrowest fold: the status glyph and Visible sections, each one control wide (PaneSyncStatus, DetailsPane).
+  accessorySeat: { minWidth: `calc(2 * ${g.controlSm} + ${s.xs2})` },
+  accessorySeatTouch: { minWidth: `calc(2 * ${g.touchTarget} + ${s.xs2})` },
   close: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
   closeTouch: { width: g.touchTarget, height: g.touchTarget },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0, outline: 'none', containerType: 'inline-size', containerName: 'pane-mount' },

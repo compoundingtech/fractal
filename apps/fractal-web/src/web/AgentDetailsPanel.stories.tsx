@@ -1,12 +1,13 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { ResourceObservation, decodeUnknownSync } from '@fractal/client/schema'
 import { assistantDarkTheme, compositionLightTheme } from '@fractal/ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, type DataSource } from '../data/source.ts'
@@ -29,9 +30,10 @@ const page: ResourcePage = {
   ],
 }
 
-type Args = { readonly scheme: 'dark' | 'light'; readonly view: InspectorView; readonly width: 280 | 360; readonly onOpen: (uri: string, split: boolean) => void }
+/** `phone` mounts the panel as the phone sheet does: the narrow (touch) layout, filling its host with no close. */
+type Args = { readonly scheme: 'dark' | 'light'; readonly view: InspectorView; readonly width: 280 | 360; readonly phone?: boolean; readonly onOpen: (uri: string, split: boolean) => void }
 
-const Surface = ({ scheme, view, width, onOpen }: Args) => {
+const Surface = ({ scheme, view, width, phone = false, onOpen }: Args) => {
   const [registry] = React.useState(() => AtomRegistry.make())
   const [source] = React.useState<DataSource>(() => {
     const base = fixtureSource({ world: fixtureProjections })
@@ -40,12 +42,14 @@ const Surface = ({ scheme, view, width, onOpen }: Args) => {
   })
   const [shown, setShown] = React.useState(view)
   return <DataSourceProvider source={source} registry={registry}>
-    <main data-scheme={scheme} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
-      <header {...stylex.props(styles.header)}><ConversationHeaderActions agentRef={agentRef} /></header>
-      <div style={{ width }} {...stylex.props(styles.panel)}>
-        <AgentDetailsPanel agentRef={agentRef} width="dock" scheme={scheme} view={shown} onViewChange={setShown} onClose={() => undefined} onOpen={onOpen} />
-      </div>
-    </main>
+    <NarrowLayoutContext.Provider value={phone}>
+      <main data-scheme={scheme} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
+        <header {...stylex.props(styles.header)}><ConversationHeaderActions agentRef={agentRef} /></header>
+        <div style={{ width }} {...stylex.props(styles.panel)}>
+          <AgentDetailsPanel agentRef={agentRef} width={phone ? 'fill' : 'dock'} scheme={scheme} view={shown} onViewChange={setShown} onClose={() => undefined} onOpen={onOpen} />
+        </div>
+      </main>
+    </NarrowLayoutContext.Provider>
   </DataSourceProvider>
 }
 
@@ -75,6 +79,10 @@ export const scenarioExemptions: readonly string[] = [
   'Resources280Light:contract-fixture',
   'Resources360Dark:contract-fixture',
   'Resources360Light:contract-fixture',
+  'S1FixPhoneTabs280Dark:contract-fixture',
+  'S1FixPhoneTabs280Light:contract-fixture',
+  'S1FixPhoneTabs360Dark:contract-fixture',
+  'S1FixPhoneTabs360Light:contract-fixture',
 ]
 
 /** Whole rows open; no raw types, no Open button, no paperclip. */
@@ -125,6 +133,59 @@ export const Resources280Dark: Story = { args: { width: 280 }, play: assertSplit
 export const Resources280Light: Story = { args: { width: 280, scheme: 'light' }, play: assertSplit }
 export const Resources360Dark: Story = { args: { width: 360 }, play: assertSplit }
 export const Resources360Light: Story = { args: { width: 360, scheme: 'light' }, play: assertSplit }
+
+/** The visible middle of a tab, scrolled into the strip first, must hit the tab itself rather than anything painted over it. */
+const tabHit = async (views: HTMLElement, tab: HTMLElement) => {
+  tab.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  const strip = views.getBoundingClientRect()
+  const box = tab.getBoundingClientRect()
+  const left = Math.max(box.left, strip.left)
+  const right = Math.min(box.right, strip.right)
+  await expect(right - left).toBeGreaterThan(0)
+  const coords = { clientX: (left + right) / 2, clientY: box.top + box.height / 2 }
+  const hit = document.elementFromPoint(coords.clientX, coords.clientY)
+  await expect(hit !== null && tab.contains(hit)).toBe(true)
+  return { hit: hit!, coords }
+}
+/**
+ * Phone sheet with Details selected: its portalled status and Visible sections controls sit in their own seat beside the
+ * tab list, never over a tab. Every tab takes the pointer at its own hit point, and the keyboard walks to Resources and back.
+ */
+const assertTabsBesideDetailsControls = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  const canvas = within(canvasElement)
+  const views = canvas.getByRole('tablist', { name: 'Agent inspector views' })
+  const tab = (name: RegExp) => within(views).getByRole('tab', { name })
+  const controls = async () => {
+    await canvas.findByRole('button', { name: 'Visible sections' })
+    const strip = views.getBoundingClientRect()
+    for (const child of canvasElement.querySelector('[data-agent-inspector-accessory]')!.children)
+      await expect(child.getBoundingClientRect().left).toBeGreaterThanOrEqual(strip.right - 0.5)
+  }
+  await expect(tab(/^Details$/)).toHaveAttribute('aria-selected', 'true')
+  await controls()
+  for (const node of within(views).getAllByRole('tab')) await tabHit(views, node)
+  // Keyboard: arrows move selection along the strip, which scrolls the focused tab into view.
+  await userEvent.click(tab(/^Details$/))
+  await userEvent.keyboard('{ArrowRight}{ArrowRight}')
+  await expect(tab(/^Resources/)).toHaveAttribute('aria-selected', 'true')
+  await expect(document.activeElement).toBe(tab(/^Resources/))
+  await expect(await canvas.findByRole('heading', { name: 'Pull requests' })).toBeVisible()
+  await userEvent.keyboard('{Home}')
+  await expect(tab(/^Details$/)).toHaveAttribute('aria-selected', 'true')
+  await controls()
+  // Pointer: press wherever hit-testing lands at Resources' visible middle, as a finger would.
+  const resources = tab(/^Resources/)
+  const { hit, coords } = await tabHit(views, resources)
+  await userEvent.pointer([{ keys: '[MouseLeft]', target: hit, coords }])
+  await waitFor(() => expect(resources).toHaveAttribute('aria-selected', 'true'))
+  await expect(await canvas.findByRole('heading', { name: 'Pull requests' })).toBeVisible()
+  const panel = canvas.getByTestId('agent-details-panel')
+  await expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth)
+}
+export const S1FixPhoneTabs280Dark: Story = { args: { view: 'details', width: 280, phone: true }, play: assertTabsBesideDetailsControls }
+export const S1FixPhoneTabs280Light: Story = { args: { view: 'details', width: 280, phone: true, scheme: 'light' }, play: assertTabsBesideDetailsControls }
+export const S1FixPhoneTabs360Dark: Story = { args: { view: 'details', width: 360, phone: true }, play: assertTabsBesideDetailsControls }
+export const S1FixPhoneTabs360Light: Story = { args: { view: 'details', width: 360, phone: true, scheme: 'light' }, play: assertTabsBesideDetailsControls }
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },
