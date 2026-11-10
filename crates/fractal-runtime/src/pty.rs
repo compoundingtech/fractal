@@ -510,6 +510,16 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
+        // "." is the default terminal's home sentinel, not the daemon's working directory.
+        // Resolve it on the launching host so PTY records carry an absolute directory.
+        let home = if cwd == Path::new(".") {
+            let home = std::env::home_dir().context("resolve default terminal home directory")?;
+            anyhow::ensure!(home.is_absolute(), "default terminal home directory must be absolute");
+            Some(home)
+        } else {
+            None
+        };
+        let cwd = home.as_deref().unwrap_or(cwd);
         // The lane is the scope's, never the harness's environment.
         let mut env = env.clone();
         let capacity = crate::lane::Capacity::take(&mut env);
@@ -2203,6 +2213,35 @@ exit 0
         if crate::isolation_mode() == crate::Isolation::Scope {
             assert!(arguments.contains("st3.scope-unit=st3-work-"));
         }
+    }
+
+    #[test]
+    fn default_terminal_forwards_absolute_host_home_as_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-home-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+
+        spawn_work(&runtime, Path::new("."), &BTreeMap::new()).unwrap();
+
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments.lines().skip_while(|arg| *arg != "--cwd").nth(1).unwrap();
+        assert!(Path::new(cwd).is_absolute(), "{arguments}");
+        assert_eq!(Path::new(cwd), std::env::home_dir().unwrap());
+    }
+
+    #[test]
+    fn explicit_terminal_cwd_is_forwarded_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-explicit-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
+
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments.lines().skip_while(|arg| *arg != "--cwd").nth(1).unwrap();
+        assert_eq!(Path::new(cwd), root.path());
     }
 
     #[test]
