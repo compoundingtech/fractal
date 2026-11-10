@@ -16,6 +16,7 @@ import { UNPINNED_WARNING } from '../pairingProof';
 import { fabricTargetLabel } from '../fabricTarget';
 import { parsePairingQr } from '../pairingQr';
 import { CAMERA_DENIED, SCAN_FAILED, scanOutcome } from '../pairingScan';
+import { pairingClaimRefusal } from '../pairingClaim';
 import { scanPairingQrNative, isPairingQrPermissionDenied } from '../modules/fractal-pairing-scanner';
 
 function machineGlyph(state: string): { glyph: string; color: string } {
@@ -261,21 +262,24 @@ export function PairScreen() {
   const scan = async () => {
     setScanning(true); setScanNote('');
     try {
-      const raw = await scanPairingQrNative();
+      const raw = await actions.scanPairingQr(scanPairingQrNative);
       const outcome = scanOutcome(raw === null ? null : parsePairingQr(raw), pairDraft?.gateway ?? (url || urlDraft));
       if (outcome.kind === 'unchanged') return;
-      if (outcome.kind === 'issue') { setScanNote(outcome.text); return; }
-      const prefill = () => {
+      if (outcome.kind === 'issue') { await actions.cancelPairingScan(); setScanNote(outcome.text); return; }
+      const prefill = async () => {
+        setScanning(true);
         const { gateway, id, code } = outcome.candidate;
-        actions.prefillScannedPairing(gateway, id, code);
+        try { await actions.prefillScannedPairing(gateway, id, code); }
+        catch (error) { setScanNote(pairingClaimRefusal(error) ?? SCAN_FAILED); }
+        finally { setScanning(false); }
       };
-      if (outcome.kind === 'prefill') { prefill(); return; }
+      if (outcome.kind === 'prefill') { await prefill(); return; }
       Alert.alert('Pair with a different gateway?', 'The scanned gateway differs from the current gateway, including its base path. Only continue if you started this pairing on that machine. Your saved pairing stays unchanged until pairing succeeds.', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Use scanned gateway', onPress: prefill },
+        { text: 'Cancel', style: 'cancel', onPress: () => { void actions.cancelPairingScan(); } },
+        { text: 'Use scanned gateway', onPress: () => { void prefill(); } },
       ]);
     } catch (error) {
-      setScanNote(isPairingQrPermissionDenied(error) ? CAMERA_DENIED : SCAN_FAILED);
+      setScanNote(pairingClaimRefusal(error) ?? (isPairingQrPermissionDenied(error) ? CAMERA_DENIED : SCAN_FAILED));
     } finally { setScanning(false); }
   };
   useEffect(() => {
