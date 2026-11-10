@@ -120,6 +120,18 @@ Fractal only changes peers named `st-device-…` that it added, never a grant ma
 it never grants anything but the one client gateway service. Each member grants only
 the phones paired with it: each member is paired on its own.
 
+The reserved `client-control-fixture` instance is separate: its `devices fabric enable`
+selects only the exact `client-control-fixture` service and its configured paired-client
+socket, never a privileged socket or production's legacy socket discovery. It refuses
+production service names; other instances refuse the reserved fixture service. Fixture
+pairings use distinct `st-fixture-device-…` inbound-only peers with only that service.
+Status, revoke and disable scope cleanup to the instance's peer names, leaving normal
+`st-device-…` peers and `st3-client-v0` unchanged. Use fresh test-app Fabric identities:
+an already-trusted normal identity is never re-granted to the fixture. Native Rust and
+Node clients address it as `fabric://NODE_ID/client-control-fixture`; the iOS bridge
+already accepts an exact node/service target. Source support grants no setup, exposure,
+pairing or enrollment authority: those effects require their separate approved gates.
+
 What this does not cover yet:
 
 - **The first pairing cannot use Fabric.** Until it is paired, the phone has no grant,

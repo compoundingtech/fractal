@@ -10,6 +10,7 @@ import { FractalClient } from './Client.generated.ts';
 
 const execute = promisify(execFile);
 const protocol = 'st3-client-v0';
+const fixtureProtocol = 'client-control-fixture';
 const origin = 'http://fabric.local';
 
 // Recognize canonical NodeID encodings; Fabric validates the curve point on dial.
@@ -43,16 +44,18 @@ export class FabricTransportError extends Error {
 
 export class FabricEndpoint {
     #target;
+    #protocol;
     constructor(value) {
         // Unlike $, this end assertion also rejects a final line terminator.
-        const match = /^fabric:\/\/([A-Za-z0-9_.-]+)\/(?:st3|fractal)-client-v0(?![\s\S])/.exec(value);
+        const match = /^fabric:\/\/([A-Za-z0-9_.-]+)\/((?:st3|fractal)-client-v0|client-control-fixture)(?![\s\S])/.exec(value);
         if (!match || match[1] === '.' || match[1] === '..') {
-            throw new FabricTransportError('invalid-endpoint', 'Expected fabric://<NodeID-or-name>/st3-client-v0 or fabric://<NodeID-or-name>/fractal-client-v0');
+            throw new FabricTransportError('invalid-endpoint', 'Expected fabric://<NodeID-or-name>/st3-client-v0, fabric://<NodeID-or-name>/fractal-client-v0 or fabric://<NodeID-or-name>/client-control-fixture');
         }
         this.#target = match[1];
+        this.#protocol = match[2] === fixtureProtocol ? fixtureProtocol : protocol;
     }
     static parse(value) { return new FabricEndpoint(value); }
-    toString() { return `fabric://${this.#target}/${protocol}`; }
+    toString() { return `fabric://${this.#target}/${this.#protocol}`; }
     static validatePath(path) {
         const route = path.split('?')[0];
         const allowed = value => value.startsWith('/v1/client/') || value === '/v1/health';
@@ -95,9 +98,8 @@ export class FabricEndpoint {
             if (matches.length !== 1) throw new FabricTransportError(matches.length ? 'ambiguous-peer' : 'unknown-peer', 'Choose one unique trusted Fabric peer name or a NodeID');
             node = matches[0].node;
         }
-        // Both URI names dial the gateway's exposed st3-client-v0 service;
-        // the URI formatter and gateway exposure retain their existing default.
-        const answer = await run(['dial', node, protocol]);
+        // Only the production alias is normalized. Fixture targets stay exact.
+        const answer = await run(['dial', node, this.#protocol]);
         if (typeof answer.socket !== 'string' || !isAbsolute(answer.socket)) {
             throw new FabricTransportError('invalid-socket', 'Fabric dial returned no absolute Unix socket path');
         }

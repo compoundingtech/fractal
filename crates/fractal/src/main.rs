@@ -2235,9 +2235,9 @@ enum DevicesFabricCommand {
     /// device that sends its Fabric NodeID grants it that service, inbound-only, and revoking
     /// the pairing removes the grant. Needs fabric 0.2.41 or later.
     Enable {
-        /// The Fabric service name devices dial.
-        #[arg(long, default_value = fractal_daemon::fabric_gateway::DEFAULT_SERVICE)]
-        service: String,
+        /// The Fabric service devices dial (default st3-client-v0; fixture uses client-control-fixture).
+        #[arg(long)]
+        service: Option<String>,
     },
     /// Stop exposing the client gateway over Fabric and remove every grant Fractal made for a device.
     Disable,
@@ -9466,10 +9466,11 @@ async fn run_devices_fabric(
     let exposure = GatewayExposure::load(state_dir)?;
     match command {
         DevicesFabricCommand::Enable { service } => {
-            anyhow::ensure!(
-                !service.trim().is_empty(),
-                "the Fabric service name must not be empty"
-            );
+            let service = fractal_daemon::fabric_gateway::service_for_instance(
+                config.local_only().then_some(fractal_daemon::fabric_gateway::FIXTURE_SERVICE),
+                service.as_deref(),
+            )?;
+            let client_socket = fractal_daemon::fabric_gateway::client_socket(config)?;
             let override_path = fractal_daemon::config::FleetFile::load(state_dir)?.and_then(|file| file.fabric);
             let program = resolve_tool(override_path.as_deref(), "fabric")
                 .context("this machine cannot use Fabric: fabric is not installed")?;
@@ -9484,10 +9485,7 @@ async fn run_devices_fabric(
             fabric
                 .expose_socket(
                     &service,
-                    &fractal_socket_discovery::default_unix_socket(
-                        &config.client_gateway_socket,
-                        &config.client_gateway_socket,
-                    ),
+                    &client_socket,
                 )
                 .await
                 .context("Fabric could not expose the client gateway; nothing changed")?;
@@ -9511,7 +9509,7 @@ async fn run_devices_fabric(
             };
             let fabric = Fabric::new(exposure.fabric.clone());
             let mut removed = Vec::new();
-            for peer in granted_peers(&fabric).await? {
+            for peer in granted_peers(&fabric, &exposure.service).await? {
                 fabric.remove(&peer).await?;
                 removed.push(peer);
             }
@@ -9531,7 +9529,7 @@ async fn run_devices_fabric(
         }
         DevicesFabricCommand::Status => {
             let peers = match &exposure {
-                Some(exposure) => granted_peers(&Fabric::new(exposure.fabric.clone())).await?,
+                Some(exposure) => granted_peers(&Fabric::new(exposure.fabric.clone()), &exposure.service).await?,
                 None => Vec::new(),
             };
             if json_output {

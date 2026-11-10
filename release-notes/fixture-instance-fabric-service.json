@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Isolate the reserved fixture instance behind its own paired-client Fabric service and inbound-only peer namespace.",
+  "replay": { "status": "none", "detail": "No stored claim replay is required." },
+  "schema": { "status": "none", "detail": "The client wire protocol and generated schemas are unchanged." },
+  "rules": { "status": "changed", "detail": "Fixture exposure accepts only the client-control-fixture service and paired client socket; production exposure and fixture peer grants stay separate." },
+  "compatibility": { "status": "none", "detail": "Normal instances retain st3-client-v0 and existing client alias behavior." },
+  "downtime": { "status": "none", "detail": "Source changes do not configure or restart Fabric or daemon services." },
+  "manual": { "status": "changed", "detail": "Any fixture exposure or peer addition requires separately reviewed scope and authorization before use." },
+  "recovery": { "status": "changed", "detail": "Remove each fixture peer and the fixture exposure independently while preserving normal peers and exposure." }
+}

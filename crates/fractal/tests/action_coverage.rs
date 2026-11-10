@@ -7307,3 +7307,61 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
         format!("expose st3-client-v0 --socket {}\n", legacy.canonicalize().unwrap().display())
     );
 }
+
+#[test]
+fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = root.path().join("calls");
+    let program = bin.join("fabric");
+    std::fs::write(&program, format!(
+        "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in peers) echo '{{\"peers\":[{{\"node\":\"{}\",\"name\":\"st-device-0123456789ab\",\"allow\":[\"st3-client-v0\"]}},{{\"node\":\"{}\",\"name\":\"st-fixture-device-fedcba987654\",\"allow\":[\"client-control-fixture\"]}}]}}';; esac\n",
+        calls.display(), "0123456789abcdef".repeat(4), "fedcba9876543210".repeat(4)
+    )).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = root.path().join("config.toml");
+    let state = root.path().join("state");
+    let paired = root.path().join("paired.sock");
+    let privileged = root.path().join("privileged.sock");
+    let write_config = |socket: &std::path::Path| {
+        std::fs::write(&config, format!(
+            "state_dir = '{}'\nsocket = '{}'\nclient_gateway_socket = '{}'\n",
+            state.display(), privileged.display(), socket.display()
+        )).unwrap();
+    };
+    write_config(&paired);
+    let run = |instance: bool, arguments: &[&str]| {
+        let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+        command.env_remove("ST_AGENT").env_remove("ST_MISSION_RUN").env_remove("ST_INSTANCE")
+            .env("HOME", root.path().join("home"))
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("xdg-state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run")).env("PATH", &bin);
+        if instance { command.args(["--instance", "client-control-fixture"]); }
+        command.arg("--config").arg(&config).args(["--json", "devices", "fabric"]).args(arguments).output().unwrap()
+    };
+    assert!(!run(true, &["enable", "--service", "st3-client-v0"]).status.success());
+    assert!(!run(false, &["enable", "--service", "client-control-fixture"]).status.success());
+    assert!(!calls.exists(), "rejected service changes never invoke Fabric");
+    assert_eq!(cli_value(run(true, &["enable"])), json!({"service":"client-control-fixture","enabled":true}));
+    let expose = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(expose, format!("expose client-control-fixture --socket {}\n", paired.display()));
+    assert!(!expose.contains(privileged.to_str().unwrap()));
+    assert_eq!(cli_value(run(true, &["status"])), json!({
+        "service":"client-control-fixture","enabled":true,"granted":["st-fixture-device-fedcba987654"]
+    }));
+    assert_eq!(cli_value(run(true, &["disable"])), json!({
+        "service":"client-control-fixture","enabled":false,"removed":["st-fixture-device-fedcba987654"]
+    }));
+    let recorded = std::fs::read_to_string(&calls).unwrap();
+    assert!(recorded.ends_with("remove st-fixture-device-fedcba987654\nunexpose client-control-fixture\n"));
+    assert!(!recorded.contains("remove st-device-"));
+    write_config(&privileged);
+    assert!(!run(true, &["enable"]).status.success());
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), recorded, "privileged sockets are never exposed");
+}
