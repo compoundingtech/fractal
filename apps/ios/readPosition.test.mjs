@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
 import { ADVANCE_EVERY_MS, READ_POSITIONS_KEY, ReadPositions, ROSTER_SKEW_MS, UNREAD_DOT, UNREAD_LABEL, UNSENT_READ_POSITIONS_KEY, countsAsNew, readPositionRemote, seenTail, syncsReadPositions, unreadMark } from './readPosition.ts';
 
 const at = iso => Date.parse(iso);
@@ -272,6 +273,103 @@ test('a daemon that cannot list still receives the unsent advances', async () =>
   positions.connect('https://gw', 'person/ada', server.port);
   await flush();
   assert.deepEqual(server.sent.map(send => send.conversation), ['agent/a']);
+});
+
+test('a failed invalidation list exposes its issue and retries unreachable peers with a capped wait', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_000_000 });
+  const positions = new ReadPositions(memory().storage, { retryDelaysMs: [1_000, 2_000] });
+  await positions.load('https://gw', 'person/ada');
+  const unavailable = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example', code: 'http-error', message: 'HTTP 503', retryable: false, details: {} }, 503);
+  let calls = 0;
+  const stop = positions.connect('https://gw', 'person/ada', {
+    async list() {
+      calls++;
+      if (calls >= 2 && calls <= 4) throw unavailable;
+      return [{ conversation: 'agent/a', at: iso(calls === 1 ? 10 : 50) }];
+    },
+    async advance() { assert.fail('no local advances'); },
+  });
+  t.after(stop);
+  await flush();
+  const revision = positions.revision;
+  await positions.relist(); // Invalidation while the socket remains live.
+  assert.equal(positions.listIssue, 'HTTP 503');
+  assert.ok(positions.revision > revision, 'the error notifies state subscribers');
+  assert.equal(positions.read('agent/a'), 10, 'failure preserves the known frontier');
+  for (const delay of [1_000, 2_000, 2_000]) {
+    const before = calls;
+    await positions.relist();
+    assert.equal(calls, before, 'another invalidation cannot bypass the network backoff');
+    t.mock.timers.tick(delay - 1);
+    await flush();
+    assert.equal(calls, before, 'does not hammer an unreachable peer');
+    t.mock.timers.tick(1);
+    await flush();
+    assert.equal(calls, before + 1);
+  }
+  assert.equal(positions.read('agent/a'), 50, 'recovers without another invalidation frame');
+  assert.equal(positions.listIssue, undefined, 'success clears the observable failure');
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(calls, 5, 'successful lists are not polled');
+});
+
+test('list refusals and local defects stay visible without starting retries', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const failure of [
+    new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example', code: 'forbidden', message: 'not allowed', retryable: false, details: {} }, 403),
+    new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example', code: 'internal', message: 'local defect', retryable: true, details: {} }, 500),
+    new TypeError('local defect'),
+  ]) {
+    const positions = new ReadPositions(memory().storage);
+    await positions.load('https://gw', 'person/ada');
+    let calls = 0;
+    const stop = positions.connect('https://gw', 'person/ada', {
+      async list() { calls++; throw failure; },
+      async advance() { assert.fail('no local advances'); },
+    });
+    await flush();
+    assert.equal(positions.listIssue, failure.message);
+    t.mock.timers.tick(60_000);
+    await flush();
+    assert.equal(calls, 1);
+    stop();
+    assert.equal(positions.listIssue, undefined);
+  }
+});
+
+test('list retry timers and late failures cannot outlive their connection', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const positions = new ReadPositions(memory().storage, { retryDelaysMs: [1_000] });
+  await positions.load('https://gw', 'person/ada');
+  let calls = 0;
+  const stop = positions.connect('https://gw', 'person/ada', {
+    async list() { calls++; throw new TypeError('Network request failed'); },
+    async advance() { assert.fail('no local advances'); },
+  });
+  await flush();
+  assert.equal(positions.listIssue, 'Network request failed');
+  stop();
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(calls, 1, 'disconnect cancels the scheduled retry');
+  let rejectOld;
+  positions.connect('https://gw', 'person/ada', {
+    list: () => new Promise((resolve, reject) => { rejectOld = reject; }),
+    async advance() { assert.fail('no local advances'); },
+  });
+  await flush();
+  const current = daemon([{ conversation: 'agent/a', at: iso(50) }]);
+  const stopCurrent = positions.connect('https://gw', 'person/ada', current.port);
+  t.after(stopCurrent);
+  await flush();
+  rejectOld(new TypeError('Network request failed'));
+  await flush();
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(current.lists, 1);
+  assert.equal(positions.listIssue, undefined, 'the old failure cannot stain the new connection');
+  assert.equal(positions.read('agent/a'), 50);
 });
 
 test('a connection belongs to one gateway and person', async () => {

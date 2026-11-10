@@ -642,7 +642,7 @@ function useAppStore(proof?: FabricProfile) {
   const readPositionsSynced = syncsReadPositions(caps?.capabilities);
   const readPositionsActor = caps?.session_actor;
   useEffect(() => {
-    if (proof || !client || !feed || !readPositionsSynced || !arrangementPerson || !readPositionsActor) return;
+    if (proof || status !== 'online' || !client || !feed || !readPositionsSynced || !arrangementPerson || !readPositionsActor) return;
     const person = arrangementPerson;
     const stop = readPositions.connect(url, readPositionsActor, readPositionRemote(person, {
       list: async cursor => (await client.readPositionsList(person, cursor ? { cursor } : {})).value,
@@ -654,7 +654,7 @@ function useAppStore(proof?: FabricProfile) {
     }));
     const follow = feed.followReadPositions(person, { onChanged: () => { void readPositions.relist(); } });
     return () => { follow.close(); stop(); };
-  }, [proof, client, feed, url, readPositionsActor, arrangementPerson, readPositionsSynced]);
+  }, [proof, status, client, feed, url, readPositionsActor, arrangementPerson, readPositionsSynced]);
   const loadSidebarTerminals = useCallback(async () => {
     if (!client) return;
     if (inventoryGranted !== false) return;

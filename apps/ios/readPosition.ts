@@ -1,4 +1,5 @@
 import type { TimelineEntry } from '../../clients/typescript/fractal-client';
+import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
 import type { QualityStorage } from './quality';
 import { rememberBounded } from './boundedCache';
 
@@ -17,7 +18,7 @@ export const READ_POSITIONS_CAPABILITY = 'read-positions';
 export const ROSTER_SKEW_MS = 2_000;
 /** At most one advance per conversation is sent this often; reading moves positions many times a second. */
 export const ADVANCE_EVERY_MS = 2_000;
-/** Waits before an advance that failed is sent again. */
+/** Capped backoff while a peer is unreachable: unsent advances and failed position lists. */
 export const ADVANCE_RETRY_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 export const UNREAD_DOT = '•';
 export const UNREAD_LABEL = 'New messages';
@@ -114,8 +115,21 @@ export type ReadPositionOptions = { everyMs?: number; retryDelaysMs?: readonly n
 type Stored = Record<string, Array<[string, number]>>;
 type Send = { inFlight: boolean; lastSentAt: number; failures: number; timer?: ReturnType<typeof setTimeout> };
 /** A connection to the daemon for one owner: what it confirmed, and each conversation's send. */
-type Sync = { owner: string; remote: ReadPositionRemote; confirmed: Map<string, number>; sends: Map<string, Send>; listing: Promise<void> | null; again: boolean };
+type Sync = {
+  owner: string; remote: ReadPositionRemote; confirmed: Map<string, number>; sends: Map<string, Send>;
+  listing: Promise<void> | null; again: boolean; listIssue?: string; listFailures: number;
+  listTimer?: ReturnType<typeof setTimeout>;
+};
 const ownerKey = (gateway: string, person: string) => gateway && person ? `${gateway}|${person}` : '';
+
+/** Only an unreachable peer/transport warrants a list retry, never a local defect or a refusal. */
+const listUnreachable = (error: unknown): boolean => {
+  if (error instanceof ClientError) {
+    return error.response.code === 'remote-unavailable'
+      || error.response.code === 'http-error' && [502, 503, 504].includes(error.status);
+  }
+  return error instanceof Error && /network request failed|failed to fetch|networkerror|econnrefused|econnreset|enotfound|etimedout/i.test(error.message);
+};
 
 /** Positions per gateway and person, forward-only, merged with the daemon's when connected, cached in bounded local keys. */
 export class ReadPositions {
@@ -147,6 +161,10 @@ export class ReadPositions {
   read(conversation: string): number | undefined {
     return this.owner ? this.all.get(this.owner)?.get(conversation) : undefined;
   }
+  /** The selected owner's last list failure; remains visible until success or disconnect. */
+  get listIssue(): string | undefined {
+    return this.sync?.owner === this.owner ? this.sync.listIssue : undefined;
+  }
   advance(conversation: string, atMs: number): void {
     if (!this.owner || !Number.isFinite(atMs) || !this.raise(this.owner, conversation, atMs)) return;
     const unsent = this.unsent.get(this.owner) ?? new Set<string>();
@@ -167,7 +185,7 @@ export class ReadPositions {
     this.disconnect();
     const owner = ownerKey(gateway, person);
     if (!owner) return () => {};
-    const sync: Sync = { owner, remote, confirmed: new Map(), sends: new Map(), listing: null, again: false };
+    const sync: Sync = { owner, remote, confirmed: new Map(), sends: new Map(), listing: null, again: false, listFailures: 0 };
     this.sync = sync;
     void this.relist();
     return () => { if (this.sync === sync) this.disconnect(); };
@@ -178,14 +196,34 @@ export class ReadPositions {
     const sync = this.sync;
     if (!sync) return Promise.resolve();
     if (sync.listing) { sync.again = true; return sync.listing; }
+    // The pending read will include every invalidation received during this network backoff.
+    if (sync.listTimer !== undefined) return Promise.resolve();
     sync.listing = (async () => {
       await this.restored();
+      if (this.sync !== sync) return;
       do {
         sync.again = false;
-        let listed: readonly ListedReadPosition[] | undefined;
-        try { listed = await sync.remote.list(); } catch { listed = undefined; }
-        if (this.sync !== sync) return;
-        if (listed) this.merge(sync, listed);
+        try {
+          const listed = await sync.remote.list();
+          if (this.sync !== sync) return;
+          sync.listFailures = 0;
+          if (sync.listIssue !== undefined) { sync.listIssue = undefined; if (sync.owner === this.owner) this.emit(); }
+          this.merge(sync, listed);
+        } catch (error) {
+          if (this.sync !== sync) return;
+          const issue = error instanceof Error ? error.message : String(error);
+          if (sync.listIssue !== issue) { sync.listIssue = issue; if (sync.owner === this.owner) this.emit(); }
+          // A frame during this failed read must not bypass the unreachable peer's backoff.
+          sync.again = false;
+          if (listUnreachable(error)) {
+            const delay = this.retryDelaysMs[sync.listFailures];
+            sync.listFailures = Math.min(sync.listFailures + 1, this.retryDelaysMs.length - 1);
+            sync.listTimer = setTimeout(() => {
+              sync.listTimer = undefined;
+              if (this.sync === sync) void this.relist();
+            }, delay);
+          }
+        }
         // Unsent advances go out even when the list failed: an advance at or below the daemon's value changes nothing.
         for (const conversation of [...this.unsent.get(sync.owner) ?? []]) this.schedule(sync, conversation);
       } while (sync.again);
@@ -290,6 +328,8 @@ export class ReadPositions {
     const sync = this.sync;
     if (!sync) return;
     this.sync = undefined;
+    clearTimeout(sync.listTimer);
+    if (sync.listIssue !== undefined && sync.owner === this.owner) this.emit();
     for (const send of sync.sends.values()) { clearTimeout(send.timer); send.timer = undefined; }
   }
 
