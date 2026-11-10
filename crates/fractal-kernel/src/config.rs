@@ -254,6 +254,12 @@ pub struct GithubConfig {
     /// current usage and freshness are qualified; Factory's proposed cap is1000.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observer_requests_per_hour: Option<u32>,
+    /// Loopback address of the GitHub webhook receiver; unset runs no receiver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_listen: Option<std::net::SocketAddr>,
+    /// Absolute owner-only file holding the webhook secret, read again for every delivery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_secret_file: Option<PathBuf>,
 }
 
 impl GithubConfig {
@@ -270,6 +276,15 @@ impl GithubConfig {
         if let Some(profile) = &self.sekrets_profile {
             anyhow::ensure!(!profile.trim().is_empty() && profile.trim() == profile,
                 "github.sekrets_profile must name a non-empty profile without surrounding whitespace");
+        }
+        if let Some(listen) = self.webhook_listen {
+            anyhow::ensure!(listen.ip().is_loopback() && listen.port() != 0,
+                "github.webhook_listen must be a loopback address with a nonzero port");
+        }
+        anyhow::ensure!(self.webhook_listen.is_some() == self.webhook_secret_file.is_some(),
+            "github.webhook_listen and github.webhook_secret_file must be set together");
+        if let Some(path) = &self.webhook_secret_file {
+            anyhow::ensure!(path.is_absolute(), "github.webhook_secret_file must be absolute");
         }
         if let Some(path) = &self.token_file {
             open_token_file(path)?;
@@ -1582,6 +1597,29 @@ mod tests {
         let encoded = toml::to_string(&config).unwrap();
         let decoded: super::GithubConfig = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn github_webhook_listens_on_loopback_with_an_absolute_secret_file() {
+        let parse = |text: &str| toml::from_str::<super::GithubConfig>(text).map(|config| config.validate().map(|()| config));
+        let config = parse("webhook_listen = \"127.0.0.1:41871\"\nwebhook_secret_file = \"/run/fractal/github-webhook-secret\"\n")
+            .unwrap().unwrap();
+        assert_eq!(config.webhook_listen, Some("127.0.0.1:41871".parse().unwrap()));
+        assert_eq!(toml::from_str::<super::GithubConfig>(&toml::to_string(&config).unwrap()).unwrap(), config);
+        // The secret file need not exist at startup; the receiver reads it per delivery.
+        parse("webhook_listen = \"[::1]:41871\"\nwebhook_secret_file = \"/absent/secret\"\n").unwrap().unwrap();
+        for (text, expected) in [
+            ("webhook_listen = \"0.0.0.0:41871\"\nwebhook_secret_file = \"/s\"\n", "loopback"),
+            ("webhook_listen = \"127.0.0.1:0\"\nwebhook_secret_file = \"/s\"\n", "loopback"),
+            ("webhook_listen = \"127.0.0.1:41871\"\n", "together"),
+            ("webhook_secret_file = \"/s\"\n", "together"),
+            ("webhook_listen = \"127.0.0.1:41871\"\nwebhook_secret_file = \"relative\"\n", "absolute"),
+        ] {
+            let error = parse(text).unwrap().unwrap_err().to_string();
+            assert!(error.contains(expected), "{text}: {error}");
+        }
+        assert!(parse("webhook_listen = \"localhost:41871\"\nwebhook_secret_file = \"/s\"\n").is_err());
+        assert!(parse("webhook_url = \"x\"\n").is_err());
     }
 
     #[test]
