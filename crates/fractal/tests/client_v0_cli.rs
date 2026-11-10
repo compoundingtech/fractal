@@ -18,6 +18,7 @@ use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
@@ -2581,7 +2582,7 @@ mission "cli/child" state="ready" {
         .unwrap();
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cli-device".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),

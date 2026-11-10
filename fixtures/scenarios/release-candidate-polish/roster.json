@@ -38,6 +38,7 @@
         "reachability": "local",
         "revision": "ag14",
         "runtime_ids": [
+          "runtime/example-meadow-builder-shell",
           "runtime/example-meadow-builder"
         ],
         "since": "2030-01-01T11:58:00.000Z",

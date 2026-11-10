@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v16.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1807,14 +1807,14 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v16, including observed usage credits, shifts shared RNG draws through kind selection.
-/// Hosted run 42417346519 observed all 32 fixed seeds trimming; preserve exact equality.
-const NEVER_TRIMS: &[u64] = &[];
+/// Corpus v17 adds operation receipts to kind selection, shifting the shared RNG schedule.
+/// Hosted run 42507264532 observed seed 2 converge without trimming; the other fixed seeds trim.
+const NEVER_TRIMS: &[u64] = &[2];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v16 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }

@@ -3,8 +3,8 @@ use crate::declaration_syntax::{
     ensure_bare, ensure_no_children, ensure_no_properties, reject_unknown_children, unique_child,
 };
 use crate::model::{
-    DeclaredAdmission, DeclaredBudgets, DeclaredLane, DeclaredPriority, FractalError, MissionSpec,
-    NormalizedIntent,
+    DeclaredAdmission, DeclaredAttentionBudget, DeclaredBudgets, DeclaredLane, DeclaredPriority,
+    FractalError, MissionSpec, NormalizedIntent,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -19,11 +19,12 @@ const FIELDS: [(&str, &str); 3] = [
     ("declared-lane", "declared_lane"),
     ("declared-budgets", "declared_budgets"),
 ];
-const BUDGETS: [(&str, &str); 4] = [
+const BUDGETS: [(&str, &str); 5] = [
     ("cpu-seconds", "cpu_seconds"),
     ("memory-max", "memory_max"),
     ("disk-max", "disk_max"),
     ("token-budget", "token_budget"),
+    ("attention", "attention"),
 ];
 
 #[derive(Clone, Copy)]
@@ -68,11 +69,37 @@ impl Scope<'_> {
             return Err(self.error("declared_lane", "must be check or build"));
         }
         if let Some(b) = budgets {
+            if !b.attention.is_empty() && self.0 != "mission" {
+                return Err(self.error("declared_budgets.attention", "is allowed on missions only"));
+            }
+            let mut people = std::collections::BTreeSet::new();
+            for entry in &b.attention {
+                let field = format!("declared_budgets.attention[{}]", entry.person);
+                if !crate::model::person_subject(&entry.person)
+                    || fractal_schema::registry().validate_subject(&entry.person).is_err()
+                {
+                    return Err(self.error(&field, "must name a native person subject"));
+                }
+                if !people.insert(&entry.person) {
+                    return Err(self.error(&field, "must occur once per person"));
+                }
+                self.number(&format!("{field}.asks"), Some(entry.asks))?;
+            }
             for (field, value) in [
                 ("declared_budgets.cpu_seconds", b.cpu_seconds),
                 ("declared_budgets.token_budget", b.token_budget),
             ] {
                 if let Some(value) = value {
+                    if self.0 == "agent" {
+                        return Err(self.error(
+                            field,
+                            if field == "declared_budgets.cpu_seconds" {
+                                "cpu-seconds is allowed on missions only"
+                            } else {
+                                "token-budget is allowed on missions only"
+                            },
+                        ));
+                    }
                     self.number(field, Some(value))?;
                 }
             }
@@ -116,6 +143,19 @@ impl Scope<'_> {
                             self.number(&field, value.as_u64())?;
                         }
                         "memory_max" | "disk_max" => self.size(&field, value.as_str())?,
+                        "attention" => {
+                            let entries = value.as_array().ok_or_else(|| self.error(&field, "must be an array"))?;
+                            for entry in entries {
+                                let item = format!("{field}[{}]", entry.get("person").and_then(Value::as_str).unwrap_or("?"));
+                                let object = entry.as_object().ok_or_else(|| self.error(&field, "must contain objects"))?;
+                                if object.len() != 2 || !object.contains_key("person") || !object.contains_key("asks")
+                                    || !entry["person"].is_string()
+                                {
+                                    return Err(self.error(&item, "must contain only person and asks"));
+                                }
+                                self.number(&format!("{item}.asks"), entry["asks"].as_u64())?;
+                            }
+                        }
                         _ => return Err(self.error(&field, "is not a recognized declared budget")),
                     }
                 }
@@ -166,6 +206,24 @@ impl Scope<'_> {
             .flatten()
         {
             let name = child.get("name").and_then(Value::as_str).unwrap_or("");
+            if budget && name == "attention" {
+                let field = "declared_budgets.attention";
+                let args = child.get("arguments").and_then(Value::as_array);
+                let properties = child.get("properties").and_then(Value::as_object);
+                if args.is_none_or(|args| args.len() != 1 || !args[0].is_string())
+                    || properties.is_none_or(|p| p.len() != 1 || !p.contains_key("asks"))
+                    || child.get("type").is_some()
+                    || child.get("children").is_some()
+                {
+                    return Err(self.error(field, "needs one person and only asks, without children or annotations"));
+                }
+                fields.entry("attention").or_insert_with(|| Value::Array(Vec::new()))
+                    .as_array_mut().expect("attention array").push(serde_json::json!({
+                        "person": args.expect("validated arguments")[0],
+                        "asks": properties.expect("validated properties")["asks"],
+                    }));
+                continue;
+            }
             let rules = if budget {
                 BUDGETS.as_slice()
             } else {
@@ -296,6 +354,27 @@ pub fn parse(
                 budgets.token_budget = number("token-budget", "declared_budgets.token_budget")?;
                 budgets.memory_max = unique_child(body, "memory-max")?.map(string).transpose()?;
                 budgets.disk_max = unique_child(body, "disk-max")?.map(string).transpose()?;
+                for entry in body.nodes().iter().filter(|n| n.name().value() == "attention") {
+                    let field = "declared_budgets.attention";
+                    let person = entry.entries().iter().find(|e| e.name().is_none());
+                    let asks = entry.entries().iter().find(|e| e.name().is_some());
+                    let (Some(person), Some(asks)) = (person, asks) else {
+                        return Err(scope.error(field, "needs one person and asks"));
+                    };
+                    if entry.ty().is_some() || entry.children().is_some() || entry.entries().len() != 2
+                        || person.ty().is_some() || asks.ty().is_some()
+                        || asks.name().map(|n| n.value()) != Some("asks")
+                    {
+                        return Err(scope.error(field, "needs one person and only asks, without children or annotations"));
+                    }
+                    let person = person.value().as_string().ok_or_else(|| scope.error(field, "needs one person string"))?;
+                    let asks_field = format!("{field}[{person}].asks");
+                    let asks = match asks.value() {
+                        KdlValue::Integer(value) => scope.number(&asks_field, u64::try_from(*value).ok())?,
+                        _ => return Err(scope.error(&asks_field, INTEGER)),
+                    };
+                    budgets.attention.push(DeclaredAttentionBudget { person: person.into(), asks });
+                }
             }
             Ok::<_, FractalError>(budgets)
         })
@@ -376,14 +455,15 @@ fn validate_mission(mission: &MissionSpec) -> Result<(), FractalError> {
 }
 
 fn validate_declaration_source(source: &str, owner: &str) -> Result<(), FractalError> {
-    if !FIELDS.iter().any(|(name, _)| source.contains(name)) {
-        return Ok(());
-    }
     fn walk(document: &KdlDocument) -> Result<(), FractalError> {
         for node in document.nodes() {
             if let Some(children) = node.children() {
                 let kind = node.name().value();
-                if matches!(kind, "agent" | "mission") {
+                if matches!(kind, "agent" | "mission" | "step")
+                    && children.nodes().iter().any(|child| {
+                        FIELDS.iter().any(|(name, _)| child.name().value() == *name)
+                    })
+                {
                     let name = node
                         .entries()
                         .iter()
@@ -472,6 +552,7 @@ fn validate_mission_json(owner: &str, value: &Value) -> Result<(), FractalError>
         .into_iter()
         .flat_map(|s| s.values())
     {
+        Scope("step", step.get("path").and_then(Value::as_str).unwrap_or(subject)).fields(step)?;
         source(step)?;
         let nested = std::iter::once(step.get("nested_mission")).chain(
             ["round", "on_keep", "on_discard"]
@@ -581,7 +662,14 @@ mod tests {
     fn numeric_semantics_and_details_table() {
         for child in ["cpu-seconds", "token-budget"] {
             for value in ["1", "9007199254740991"] {
-                parse_fields(&format!("declared-budgets {{ {child} {value}; }}")).unwrap();
+                parse(
+                    &format!("declared-budgets {{ {child} {value}; }}")
+                        .parse::<KdlDocument>()
+                        .unwrap(),
+                    "mission",
+                    "mission/example",
+                )
+                .unwrap();
             }
             for value in ["0", "-1", "9007199254740992", "18446744073709551616"] {
                 let error =
@@ -712,6 +800,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_budgets_are_mission_only() {
+        for (child, field) in [
+            ("token-budget", "declared_budgets.token_budget"),
+            ("cpu-seconds", "declared_budgets.cpu_seconds"),
+        ] {
+            let error =
+                parse_fields(&format!("declared-budgets {{ {child} 300; }}")).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["subject"], "agent/example");
+            assert_eq!(error.details["field"], field);
+            assert!(
+                error
+                    .message
+                    .ends_with(&format!("{child} is allowed on missions only"))
+            );
+        }
+        let parsed =
+            parse_fields("declared-budgets { memory-max \"8G\"; disk-max \"20G\"; }").unwrap();
+        let budgets = parsed.budgets.unwrap();
+        assert_eq!(budgets.memory_max.as_deref(), Some("8G"));
+        assert_eq!(budgets.disk_max.as_deref(), Some("20G"));
+    }
+
+    #[test]
     fn empty_and_full_admission_roundtrip() {
         assert_eq!(parse_fields("").unwrap(), DeclaredAdmission::default());
         for source in ["declared-budgets", "declared-budgets {}"] {
@@ -726,7 +838,12 @@ mod tests {
                 .is_none()
             );
         }
-        let parsed = parse_fields("declared-priority \"background\"\ndeclared-lane \"build\"\ndeclared-budgets { cpu-seconds 300; memory-max \"0008G\"; disk-max \"20G\"; token-budget 100000; }").unwrap();
+        let parsed = parse(
+            &"declared-priority \"background\"\ndeclared-lane \"build\"\ndeclared-budgets { cpu-seconds 300; memory-max \"0008G\"; disk-max \"20G\"; token-budget 100000; }".parse::<KdlDocument>().unwrap(),
+            "mission",
+            "mission/example",
+        )
+        .unwrap();
         let json = serde_json::to_value(&parsed).unwrap();
         assert_eq!(json["budgets"]["memory_max"], "0008G");
         assert_eq!(
@@ -839,6 +956,29 @@ mod claim_tests {
     }
 
     #[test]
+    fn agent_run_budgets_are_refused_in_canonical_and_typed_claims() {
+        for (child, key) in [
+            ("token-budget", "token_budget"),
+            ("cpu-seconds", "cpu_seconds"),
+        ] {
+            for body in [
+                json!({"kind": "agent", "desired": {"children": [
+                    {"name": "declared-budgets", "children": [
+                        {"name": child, "arguments": [300]}
+                    ]}
+                ]}}),
+                json!({"kind": "agent", "member": {"declared_budgets": {key: 300}}}),
+            ] {
+                let error = validate_claim("intent.desired", "agent/test", &body).unwrap_err();
+                assert_eq!(error.code, "invalid-declared-admission");
+                assert_eq!(error.details["subject"], "agent/test");
+                assert_eq!(error.details["field"], format!("declared_budgets.{key}"));
+                assert!(error.message.ends_with("is allowed on missions only"));
+            }
+        }
+    }
+
+    #[test]
     fn old_payloads_are_not_newly_decoded_or_rejected() {
         for (kind, body) in [
             (
@@ -867,6 +1007,10 @@ mod deferred_claim_tests {
             r#"agent "worker" { declared-priority "urgent"; }"#,
             r#"host "node" { agent "worker" { declared-budgets { cpu-seconds 0; }; }; }"#,
             r#"agent "${ST_MISSION_RUN}/worker" { declared-lane "future"; }"#,
+            r#"agent "worker" { "declared\u{2d}priority" "urgent"; }"#,
+            r#"agent "worker" { declared-budgets { token-budget 300; }; }"#,
+            r#"host "node" { agent "worker" { declared-budgets { cpu-seconds 300; }; }; }"#,
+            r#"agent "worker" { declared-budgets { attention "person/reviewer" asks=3; }; }"#,
         ] {
             for mission in [
                 json!({"declarations_kdl": source}),
@@ -891,7 +1035,10 @@ mod deferred_claim_tests {
 
     #[test]
     fn admission_only_deferred_validation_leaves_unrelated_authoring_alone() {
-        validate_declaration_source("not even valid KDL {", "mission/test").unwrap();
+        validate_declaration_source(
+            r#"resource "example" { "declared\u{2d}priority" "unrelated"; }"#,
+            "mission/test",
+        ).unwrap();
         validate_declaration_source(
             r#"agent "worker" { unrelated-existing-field "anything"; declared-priority "normal"; declared-budgets { memory-max "8G"; }; }"#,
             "mission/test",
@@ -948,6 +1095,105 @@ mod consistency_tests {
                     } else {
                         assert_eq!(result.unwrap_err().code, "invalid-declared-admission");
                     }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn attention_syntax_and_scope() {
+        let good = r#"declared-budgets { attention "person/reviewer" asks=1; attention "person/a" asks=9007199254740991; }"#;
+        let document: KdlDocument = good.parse().unwrap();
+        let budgets = parse(&document, "mission", "mission/test").unwrap().budgets.unwrap();
+        assert_eq!(serde_json::to_value(&budgets).unwrap(), json!({"attention": [
+            {"person":"person/reviewer", "asks":1}, {"person":"person/a", "asks":MAX_SAFE_INTEGER}
+        ]}));
+        assert_eq!(DeclaredBudgets::deserialize(serde_json::to_value(&budgets).unwrap()).unwrap(), budgets);
+        for kind in ["agent", "step"] {
+            let error = parse(&document, kind, "test/owner").unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["subject"], "test/owner");
+            assert_eq!(error.details["field"], "declared_budgets.attention");
+        }
+        for child in [
+            r#"attention "person/a""#, r#"attention "person/a" asks=#null"#,
+            r#"attention "person/a" asks="1""#, r#"attention "person/a" asks=1.5"#,
+            r#"attention "person/a" asks=0"#, r#"attention "person/a" asks=-1"#,
+            r#"attention "person/a" asks=9007199254740992"#,
+            r#"attention #null asks=1"#, r#"attention 1 asks=1"#,
+            r#"attention "person/a" "extra" asks=1"#, r#"attention "person/a" asks=1 extra=2"#,
+            r#"attention "person/a" asks=1 {}"#, r#"(meta)attention "person/a" asks=1"#,
+            r#"attention (meta)"person/a" asks=1"#, r#"attention "person/a" asks=(meta)1"#,
+            r#"attention "agent/a" asks=1"#, r#"attention "person/a/b" asks=1"#,
+            r#"attention "person/" asks=1"#, r#"attention "person/a b" asks=1"#,
+            r#"attention "person/a" asks=1; attention "person/a" asks=2"#,
+        ] {
+            let document = format!("declared-budgets {{ {child}; }}").parse().unwrap();
+            let error = parse(&document, "mission", "mission/test").unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission", "{child}");
+            assert_eq!(error.details["subject"], "mission/test");
+            assert!(error.details["field"].as_str().unwrap().starts_with("declared_budgets.attention"));
+        }
+    }
+
+    #[test]
+    fn attention_claim_candidates_refuse_before_decoding() {
+        for attention in [
+            Value::Null, json!({}), json!([null]), json!([{"person":"person/a"}]),
+            json!([{"person":"person/a", "asks":null}]), json!([{"person":"person/a", "asks":0}]),
+            json!([{"person":"person/a", "asks":1, "extra":2}]),
+            json!([{"person":"person/a", "asks":1}, {"person":"person/a", "asks":2}]),
+        ] {
+            let payload = json!({"declared_budgets":{"attention":attention}});
+            for body in [payload.clone(), json!({"fields":payload,"body":{}}),
+                json!({"body":payload,"fields":{}}), json!({"fields":{"body":payload},"body":{}})] {
+                let error = validate_claim("mission.published", "mission/test", &body).unwrap_err();
+                assert_eq!(error.code, "invalid-declared-admission");
+                assert_eq!(error.details["subject"], "mission/test");
+                assert!(error.details["field"].as_str().unwrap().starts_with("declared_budgets.attention"));
+            }
+        }
+        let attention = json!({"name":"attention","arguments":["person/a"],"properties":{"asks":1}});
+        for payload in [
+            json!({"kind":"agent","member":{"declared_budgets":{"attention":[{"person":"person/a","asks":1}]}}}),
+            json!({"kind":"agent","desired":{"children":[{"name":"declared-budgets","children":[attention]}]}}),
+        ] {
+            for body in [payload.clone(), json!({"fields":payload,"body":{}}),
+                json!({"body":payload,"fields":{}}), json!({"fields":{"body":payload},"body":{}})] {
+                let error = validate_claim("intent.desired", "agent/test", &body).unwrap_err();
+                assert_eq!(error.code, "invalid-declared-admission");
+                assert_eq!(error.details["subject"], "agent/test");
+                assert_eq!(error.details["field"], "declared_budgets.attention");
+            }
+        }
+        for value in [json!({"attention":null}), json!({"future_budget":1})] {
+            assert!(DeclaredBudgets::deserialize(value).is_err());
+        }
+    }
+    #[test]
+    fn nested_attention_and_deferred_agents_follow_all_mission_paths() {
+        let good = json!({"declared_budgets":{"attention":[{"person":"person/a","asks":1}]}});
+        let deferred = r#"agent "worker" { declared-budgets { attention "person/a" asks=1; }; }"#;
+        for mission in [good.clone(), json!({"declarations_kdl":deferred}),
+            json!({"steps":{"work":{"declarations_kdl":deferred}}})] {
+            for step in [
+                json!({"nested_mission":mission}),
+                json!({"loop_spec":{"round":mission}}),
+                json!({"loop_spec":{"on_keep":mission}}),
+                json!({"loop_spec":{"on_discard":mission}}),
+            ] {
+                let result = validate_claim("mission.published", "mission/test", &json!({"steps":{"work":step}}));
+                if mission == good { result.unwrap(); } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, "invalid-declared-admission");
+                    assert_eq!(error.details["subject"], "agent/worker");
+                    assert_eq!(error.details["field"], "declared_budgets.attention");
                 }
             }
         }

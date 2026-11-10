@@ -413,10 +413,9 @@ pub trait SeatsStore {
             since_ms: u64,
             until_ms: u64,
         ) -> Result<(Vec<Value>, Vec<agent_messages::DailyUsage>)>;
-    /// Resolve a terminal capability and its current-head fence with two indexed seeks, in
-    /// one SQLite snapshot. Unrelated fleet history cannot hide an unexpired capability. Both
-    /// the attachment and its head are chosen in canonical claim order, so a store that admits
-    /// an attachment after the claim that consumed or detached it never revives it.
+    /// Resolve a capability from admitted attachments and issuer-bound lifecycle records.
+    /// Canonical ordering is applied after admission, so retained unrelated records cannot
+    /// displace a current attachment and out-of-order replication cannot revive consumption.
     fn terminal_attachment_for_capability_hash(
             &self,
             digest: &str,
@@ -2171,24 +2170,29 @@ impl SeatsStore for Store {
         static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
-                        predecessors, accepted_at_unix_ms,
-                        NOT EXISTS (
-                            SELECT 1 FROM claims AS newer
-                            WHERE newer.subject=claims.subject AND {}
-                        )
+                        predecessors, accepted_at_unix_ms
                  FROM claims
                  WHERE kind='custom.client.terminal-attached'
                    AND json_extract(body, '$.fields.capability_hash')=?1
-                 ORDER BY {} LIMIT 1",
-                smallclaims::store::canonical::after_sql("newer", "claims"),
+                 ORDER BY {}",
                 smallclaims::store::canonical::order_sql("claims", true),
             )
         });
         let connection = self.readers.get();
-        Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h03924d7d5055 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
-            .optional()?)
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?;
+        let mut rows = statement.query([digest])?;
+        while let Some(row) = rows.next()? {
+            let attached = claim_from_row(row)?;
+            if !fractal_store::pairing::operation_is_trusted(&connection, &attached.id,
+                &attached.origin, attached.actor.as_deref(), &attached.body["fields"])? {
+                continue;
+            }
+            let current = fractal_store::pairing::terminal_head(
+                &connection, &attached.subject, &attached.origin, attached.actor.as_deref(),
+            )?.is_some_and(|head| head.id == attached.id);
+            return Ok(Some((attached, current)));
+        }
+        Ok(None)
     }
 
     fn cached_placement_fence(

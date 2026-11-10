@@ -53,6 +53,7 @@ Use these documents for implementation details:
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
 - [Conversation search](conversation-search.md) describes searching normalized conversations and opening a match.
+- [Topic thread contract](thread-contract.md) proposes one durable discussion across Inbox and clients.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
   allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and

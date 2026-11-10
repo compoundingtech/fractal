@@ -59,7 +59,8 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* (opt
   const load = documents.get(key).pipe(Effect.orElseSucceed(() => Option.none<WorkspaceState>()))
   const stored = yield* load
   const state = yield* SubscriptionRef.make(Option.match(stored, { onNone: () => emptyWorkspace, onSome: document => repairWorkspace(document, context) }))
-  const written = yield* Ref.make(stored)
+  // An untouched new window has no document to publish.
+  const written = yield* Ref.make(Option.some(Option.getOrElse(stored, () => emptyWorkspace)))
   const listeners = new Set<() => void>()
 
   const dispatch = (command: Command) => {

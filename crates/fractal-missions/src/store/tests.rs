@@ -22,6 +22,9 @@ use crate::ArrangementsStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
+
+mod coalesce_run_part_rebuild;
+mod huge_part_rebuild_bench;
 use fractal_delivery::store::shared_missions::*;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
@@ -3885,6 +3888,107 @@ fn each_part_of_a_standing_tree_rebuilt_alone_matches_a_replay() {
 }
 
 #[test]
+fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
+    use crate::store::person_work::PersonWorkStore;
+
+    let (store, _worker, root, children) = replicated_run_tree(2);
+    // As in tree_shapes, asking from live work requires a declared claimant, not
+    // merely the assigned-to reference supplied by replicated_run_tree.
+    let agents_source = "version 2\nagent \"worker.one\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
+    let agents = crate::graph::parse_internal_intent(agents_source, "controller").unwrap();
+    let planned = store.mission(&agents, IntentInput {
+        kdl: agents_source.into(),
+        source_name: None,
+    }).unwrap();
+    store.apply(&agents, &planned.subject_tokens, "part-ask-agent").unwrap();
+    let child = &children[0];
+    let revised = publish_mission(
+        &store,
+        "version 2\nmission \"request\" state=\"ready\" { goal \"Answer the revised request.\"; concurrent-runs; step \"answer\" { assigned-to \"agent/worker.one\" } }",
+        "part-revision",
+    );
+    store
+        .adopt_mission_revision(&child.id, &revised, "person/test", "new generation", "part-adopt")
+        .unwrap();
+    let current = store.mission_run(&child.id).unwrap().unwrap();
+    assert_ne!(current.generation, child.generation, "fixture has two generations");
+    let step = &current.steps[0].subject;
+    store.set_step_state(step, "ready", None).unwrap();
+    store.work_action(step, "claim", &WorkRequest {
+        wait_ms: None,
+        actor: Some("agent/worker.one".into()),
+        incarnation: Some("part-incarnation".into()),
+        summary: None,
+        reason: None,
+        evidence: Vec::new(),
+        idempotency_key: "part-work-claim".into(),
+    }).unwrap();
+    let ask = store.ask_person(&crate::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
+        legacy_request: None,
+        person: "person/test".into(),
+        title: "Choose an answer".into(),
+        reason: "The requester must choose.".into(),
+        actor: "agent/worker.one".into(),
+        step: Some(step.clone()),
+        new_run: None,
+        incarnation: Some("part-incarnation".into()),
+        request: None,
+        idempotency_key: "part-person-ask".into(),
+    }).unwrap();
+    assert!(store.step_run(&ask.subject).unwrap().is_some());
+
+    let mut connection = store.connection.lock().unwrap();
+    let tx = connection.transaction().unwrap();
+    // Inject historical malformed creation claims below Fractal's schema admission.
+    // Unlike bare-row insert_raw_claims, this primitive also creates the batches that
+    // claims_in_replay_order_tx joins. Creation on a step fails before changing rows.
+    let mut failures = BTreeSet::new();
+    for subject in [step, &children[1].steps[0].subject] {
+        let claim = smallclaims::store::append_claim_record_tx(
+            &tx, &store.origin, subject, "mission-run.created", None,
+            &json!({"fields": {}}), &[], None,
+        ).unwrap();
+        project_claim_isolated_tx(&tx, "projection:runs", &claim, || {
+            project_mission_run_created(&tx, &claim)
+        }).unwrap();
+        failures.insert(format!("projection:runs:{}", claim.id));
+    }
+    // Quarantine timestamps use the projection wall clock, unlike claim-derived row times.
+    // Compare the failure identity/status/error rather than that replay timestamp.
+    let quarantine = || {
+        tx.prepare(
+            "SELECT aggregate, status, error_code, error_message FROM projection_health
+             WHERE aggregate LIKE 'projection:runs:%' ORDER BY aggregate",
+        ).unwrap().query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let quarantined = quarantine();
+    assert_eq!(quarantined.iter().map(|row| row.0.clone()).collect::<BTreeSet<_>>(), failures);
+    assert!(quarantined.iter().all(|row| row.1 == "stale" && row.2 == "invalid-mission-run-claim"));
+    let incremental = projection_digest::oracle(&tx).unwrap();
+    assert_eq!(
+        run_part_of_tx(&tx, step).unwrap(),
+        Some(Aggregate::RunPart(child.id.clone())),
+        "the receive path selects the child, not its standing root or sibling",
+    );
+    assert_ne!(root.id, child.id);
+    for _ in 0..2 {
+        rebuild_run_part_tx(&tx, &child.id).unwrap();
+        assert_eq!(projection_digest::oracle(&tx).unwrap(), incremental,
+            "part replay preserves all incrementally projected rows, including generations, steps and asks");
+        assert_eq!(projection_digest::tables(&tx).unwrap(), incremental,
+            "cached projection digests still describe the actual rows");
+        assert_eq!(quarantine(), quarantined,
+            "only the failing claims are quarantined; the unrelated child's quarantine is untouched");
+    }
+    tx.rollback().unwrap();
+}
+
+#[test]
 fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() {
     let store = Store::open_memory("node").unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -6995,6 +7099,56 @@ fn step_timing_reads_seek_the_runs_own_steps() {
     assert!(plan.iter().any(|row| row.contains("SEARCH claims USING INDEX claims_subject_kind_index")), "{plan:#?}");
     assert!(plan.iter().any(|row| row.contains("USING INDEX step_runs_run_index")), "{plan:#?}");
     assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
+}
+
+#[test]
+fn step_history_input_window_bounds_materialization_and_keeps_sparse_boundary_state() {
+    use rusqlite::StatementStatus;
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(&store, "version 2\nmission \"history-window\" state=\"ready\" { goal \"Bound history.\"; step \"work\" { agentless; } }", "history-window");
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "history-window".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "history-window-run".into(),
+    }).unwrap();
+    let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "working", None).unwrap();
+    let read = || store.mission_step_histories_for_runs(std::slice::from_ref(&run.subject), u128::MAX).unwrap();
+    let before = read();
+    let started_at = before[subject].attempts[0].started_at;
+    assert!(started_at.is_some());
+    let insert = |from: usize, to: usize| {
+        let connection = store.connection.write();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hdeb3f26f345c owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (SELECT ?2 UNION ALL SELECT x+1 FROM n WHERE x<?3)
+             INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+             SELECT 'history-note-'||x,(SELECT batch_id FROM claims WHERE subject=?1 LIMIT 1),
+                 ?1,'work.progress','node',CASE WHEN x%2=0 THEN '{\"fields\":{\"clock\":\"running\"}}' ELSE '{\"fields\":{\"summary\":\"ordinary note\"}}' END,'[]',CAST(1000000000000000+x AS TEXT) FROM n",
+            rusqlite::params![subject, from, to],
+        ).unwrap();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h0e67d9bae7b1 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+             SELECT id,store_index FROM claims WHERE subject=?1",
+            [subject],
+        ).unwrap();
+    };
+    let measure = || {
+        let connection = store.readers.get();
+        let sql = format!("SELECT COUNT(*) FROM ({})", crate::store::missions::mission_step_history_sql());
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7e4c2618a702 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+        let rows: usize = statement.query_row(/* sqlite-large-value: allow-for-now lv-hd3351dff2a3a owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ [serde_json::to_string(&[&run.id]).unwrap()], |row| row.get(0)).unwrap();
+        (rows, statement.get_status(StatementStatus::VmStep))
+    };
+    insert(1, 1_000);
+    let small = measure();
+    insert(1_001, 10_000);
+    let large = measure();
+    assert_eq!(small.0, large.0, "read/materialized rows must not grow with old progress notes");
+    assert!(large.0 <= 1_548, "at most 129 claims for each of 12 lifecycle kinds");
+    assert!(large.1 <= small.1 + 100, "indexed input seeks must stay bounded: {small:?} -> {large:?}");
+    let after = read();
+    assert!(!after[subject].complete, "omitted input must be reported");
+    assert_eq!(after[subject].attempts[0].started_at, started_at, "sparse state before the note window is boundary context");
 }
 
 /// The run-driven timing read returns the rows the claims-driven read of #5108 returned, in the same

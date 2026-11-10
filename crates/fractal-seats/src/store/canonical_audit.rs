@@ -208,6 +208,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "held_keys",
         "fleet_invite_tokens",
         "replica_envelope_holds",
+        "replica_restore_quarantine",
         "checkpoint_envelopes",
         "checkpoint_claims",
         "checkpoint_capture_epoch",

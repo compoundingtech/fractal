@@ -30,6 +30,15 @@ pub enum WorkerIngressGenerationCheck {
     Enforce,
 }
 
+/// Temporary migration allowance for one exact existing pairing completion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPairingAllowance {
+    pub completion_id: String,
+    pub record_hash: String,
+    pub until_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -70,6 +79,12 @@ pub struct Config {
     pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_pairing_login: Option<String>,
+    /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
@@ -104,6 +119,9 @@ pub struct Config {
     /// Opt-in, operator-bound evidence for the rolling API-readiness objective.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness_slo: Option<ReadinessSloConfig>,
+    /// Opt-in native agent-list SLO fault delivery; only the matching store origin may deliver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents_request_slo_fault: Option<AgentsRequestSloFaultConfig>,
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
@@ -188,6 +206,25 @@ pub struct ReadinessSloConfig {
     pub member: String,
     pub reviewer: String,
     pub evidence_file: PathBuf,
+    /// Optional, root-owned retained short readings for the read-only Usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_pairs_file: Option<PathBuf>,
+    /// Replace independent weekly routing with a durable early/weekly readiness case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_case: bool,
+    /// Optional informational recipient; never becomes the actionable owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
+}
+
+/// The only member and explicit reviewer authorized for agent-list SLO delivery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsRequestSloFaultConfig {
+    /// The daemon's exact store origin; other members continue measuring without delivery.
+    pub member: String,
+    /// An explicitly reviewed agent subject; delivery also requires its declaration to be live.
+    pub reviewer: String,
 }
 
 /// An operator-selected external quota source; clients cannot override its URL.
@@ -724,6 +761,8 @@ impl Default for Config {
             seat_admission: None,
             lanes: None,
             person: None,
+            browser_pairing_login: None,
+            pairing_legacy_allowances: Vec::new(),
             fleet_id: None,
             shared_secret_file: None,
             state_dir,
@@ -740,6 +779,7 @@ impl Default for Config {
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             readiness_slo: None,
+            agents_request_slo_fault: None,
             github: GithubConfig::default(),
             agent_population_enabled: false,
             agent_population_repositories: Vec::new(),
@@ -993,6 +1033,15 @@ impl Config {
                 directory.is_dir(),
                 "configured store_dir {} is missing or is not a directory; create and populate it before starting",
                 directory.display()
+            );
+        }
+        if let Some(fault) = &self.agents_request_slo_fault {
+            anyhow::ensure!(!fault.member.is_empty(), "agents_request_slo_fault.member must name a member");
+            let reviewer = fractal_schema::registry().validate_subject(&fault.reviewer)
+                .map_err(|error| anyhow::anyhow!("agents_request_slo_fault.reviewer: {}", error.message))?;
+            anyhow::ensure!(
+                reviewer.family == "agent",
+                "agents_request_slo_fault.reviewer must name an agent"
             );
         }
         self.reconcile.validate()?;
@@ -1352,6 +1401,42 @@ mod tests {
         for writer in ["person/ada", "harness/sample", "agent/"] {
             let config: super::Config = toml::from_str(&format!("[usage_limits]\nwriters=['{writer}']")).unwrap();
             assert!(config.usage_limits.unwrap().validate().is_err());
+        }
+    }
+
+    #[test]
+    fn agents_request_slo_fault_delivery_requires_explicit_member_and_agent_reviewer() {
+        let default = super::Config::default();
+        assert!(default.agents_request_slo_fault.is_none());
+        assert!(!toml::to_string(&default).unwrap().contains("agents_request_slo_fault"));
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.agents_request_slo_fault.is_none());
+
+        let configured: super::Config = toml::from_str(
+            "[agents_request_slo_fault]\nmember='dev5'\nreviewer='agent/sample/slo-reviewer'\n",
+        ).unwrap();
+        configured.validate().unwrap();
+        let restored: super::Config =
+            toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(restored.agents_request_slo_fault, configured.agents_request_slo_fault);
+
+        for reviewer in ["person/ada", "harness/sample", "agent/", "agent/invalid reviewer"] {
+            let mut config = configured.clone();
+            config.agents_request_slo_fault.as_mut().unwrap().reviewer = reviewer.into();
+            assert!(config.validate().is_err(), "{reviewer}");
+        }
+        let mut config = configured;
+        config.agents_request_slo_fault.as_mut().unwrap().member.clear();
+        assert!(config.validate().is_err());
+
+        for fields in [
+            "member='dev5'",
+            "reviewer='agent/sample/slo-reviewer'",
+            "member='dev5'\nreviewer='agent/sample/slo-reviewer'\nfallback=true",
+        ] {
+            assert!(toml::from_str::<super::Config>(
+                &format!("[agents_request_slo_fault]\n{fields}\n")
+            ).is_err(), "{fields}");
         }
     }
 

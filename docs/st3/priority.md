@@ -59,6 +59,173 @@ An unrecognized value reads as `background`, so a typo never gives a seat more C
 IO level 7 acts only under the `bfq` and `mq-deadline` disk schedulers. On an NVMe disk with the
 `none` scheduler, as on most hosts, it changes nothing; the CPU priority is what applies there.
 
+## Declared admission
+
+**Declared admission — declared, not enforced.**
+st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.
+
+Agent and mission declarations accept optional, declaration-local metadata.
+This mission example includes CPU, token and per-person attention budgets:
+
+```kdl
+mission "garden/check" {
+  declared-priority "normal"
+  declared-lane "check"
+  declared-budgets {
+    cpu-seconds 300
+    memory-max "8G"
+    disk-max "20G"
+    token-budget 100000
+    attention "person/reviewer" asks=3
+    attention "person/operator" asks=1
+  }
+}
+```
+
+These children belong directly inside `agent "…" {}` or `mission "…" {}`, not a step.
+Declared priority accepts the complete set `background < normal`; declared lane accepts
+`check` or `build`, without an ordering. Neither selects the runtime `seat_priority`,
+`ST_SEAT_PRIORITY`, or an enforced capacity lane.
+
+**Budget window.** A mission's `token-budget` is the total cost-weighted tokens for
+one mission run, including all attempts and retries; retrying does not start a new window.
+`cpu-seconds` is accumulated CPU seconds over that same mission-run window.
+A step-run window is a future extension, not an accepted declaration location.
+
+Cost-weighted tokens are `sum(tokens * (class price / base input price))` across
+models and usage classes: input, output, cache writes (including 1-hour cache writes),
+and cached reads. The unit is one base input token at the pricing version pinned
+at run admission and recorded on the run. A run is never repriced when prices change.
+Unknown pricing reports unknown usage, never zero. Usage reporting must show USD
+alongside cost-weighted tokens.
+
+**Attention window.** Attention has its own window type. A mission's attention usage
+for one person is the number of distinct native person-ask subjects
+(`work.person-asked`) that the mission sent to that person in the rolling 7 days
+that end at the read time. The window spans all recurring runs of the mission and
+does not reset per run. An answer does not reduce the count. Ask updates and migrated
+legacy asks do not count. A nested mission counts its own asks plus those from all
+delegated descendants. Each ask also counts against every declaring ancestor's
+budget for that person; a child's declaration does not replace an ancestor's.
+Reason: a person spends attention over calendar time, and a per-run window would
+let a recurring mission ask many times a day without exceeding its limit.
+`Store::attention_request_count` reports this measure from one replica's data; the
+result is not fleet-complete.
+
+**Attention declaration.** Only missions accept repeatable
+`attention "person/<id>" asks=N` children in `declared-budgets`, one entry per
+canonical person subject. Each entry has exactly one string argument, exactly the
+`asks` integer property, and no children; unknown properties or budget members refuse
+publication. `asks` must be in the shared integer range 1..9007199254740991.
+Typed entries are strict objects `{"person":"person/reviewer","asks":3}` in the
+`declared_budgets.attention` array. Authored order is preserved; an empty array is
+omitted. Semantic errors identify `declared_budgets.attention` or
+`declared_budgets.attention[<person>].asks`. A missing person entry is undeclared,
+never zero or unlimited. These declarations do not implement admission or enforcement.
+
+**Agents.** New agent declarations accept only `memory-max` and `disk-max` in
+`declared-budgets`; `cpu-seconds`, `token-budget` and `attention` refuse publication
+with `invalid-declared-admission` and the corresponding budget field. An agent has
+no retry/run boundary and no budget window. Agent and provider quota is governed by
+usage routing and the quota SLO, not per-incarnation CPU, token or attention budgets.
+
+Memory and disk describe peak footprints, without an accumulation window; disk is
+not IO traffic or a free-space floor. CPU and token values must be integers from
+1 to 9007199254740991. Sizes reuse the `capacity memory=` parser: plain byte counts
+or integer strings followed by case-insensitive `K`, `M`, `G`, or `T` (powers of 1024).
+The checked final byte count must be greater than zero and no greater than
+18446744073709551615. The original size string is preserved.
+
+These definitions are data only: no counters, resets, aggregation, pricing capture,
+usage reporting, reservations, or enforcement are implemented by declared admission.
+The window and pricing rules define the intended accounting contract, not a runtime
+accounting implementation.
+
+Omission means not declared, never zero, unlimited, or a runtime default. There is no
+inheritance or merging between declarations; replacement omission removes the value.
+Empty budgets are omitted from stored typed fields and reads. Duplicate children,
+unknown budget members, authored nulls, invalid types, invalid enum values and
+out-of-range values refuse the entire publication, before writes. Semantic refusals
+use `invalid-declared-admission` with `details.subject` and `details.field`; syntax
+refusals retain the existing declaration syntax codes.
+
+Typed declaration fields are `declared_priority`, `declared_lane`, and
+`declared_budgets`; budget members use snake_case. Existing agent and mission reads
+instead expose a single optional, nonnullable `declared_admission` group. This is
+the mission example's read shape:
+
+```json
+{"declared_admission":{"priority":"normal","lane":"check","budgets":{"cpu_seconds":300,"memory_max":"8G","disk_max":"20G","token_budget":100000,"attention":[{"person":"person/reviewer","asks":3},{"person":"person/operator","asks":1}]}}}
+```
+
+Absent members, empty budgets, and the empty group are omitted. Readers preserve future
+enum strings; TypeScript tolerant codecs expose `{_tag:"Unknown",raw:"future-level"}`
+and re-encode the original string. Strict decoding deliberately rejects unknown cases.
+These fields extend existing declaration claims only, with no new table, claim kind,
+index, migration, or backfill. Old declarations without the fields retain their
+canonical bytes and hashes.
+
+CLI and API authoring use the same scope rules: agent budgets are peak memory/disk
+only; mission budgets may also contain accumulated CPU, cost-weighted tokens and
+per-person attention. Historical readers retain CPU/token fields in older agent
+declarations; this does not permit new agent authoring of those fields. Replay and
+historical interpretation are unchanged.
+
+**Publication compatibility.** Every new declared-admission publication requires
+`features.declared_admission=1` from every active incarnation, including the local
+daemon. Publications containing attention additionally require
+`features.declared_attention=1` from every active incarnation. Both capabilities
+must appear in each incarnation's latest signed, authenticated, own-origin
+`daemon.started` advertisement anchored to the admitted incarnation. Missing or
+unsupported capability evidence refuses before writes with
+`declared-admission-feature-barrier`. Attention-free declarations continue
+publishing in mixed fleets with version-1 declared-admission support; upgrade active
+members or fence old peers before publishing attention. Remove attention using
+supporting readers before a mixed-version rollback. Old KDL and typed authoring
+already reject unknown budget members rather than silently dropping attention.
+There is no database, replay or enforcement change.
+
+### Attention report
+
+The client-v0 operation
+`GET /v1/client/attention-budget?mission=M[&person=P][&at=UNIX_MS]`
+reads the [attention window and declaration](#declared-admission) for one mission and person.
+Embedded-web recipient sessions may read their own report. Local agents and ordinary
+paired clients with `read.projections` may also read reports, including over
+Fabric. External assistant grants cannot read the report.
+Missing scope and expired sessions are refused; a raw Unix person header
+does not establish recipient authority. Existing `person_filter` restrictions
+limit person sessions to their own report: omitted person defaults to the session
+person, and another person is refused. Agents without a session person must specify
+`person`; omission never reads all people.
+
+The CLI uses the same client operation:
+`fractal budgets attention MISSION [--as ACTOR] [--person PERSON] [--at UNIX_MS] [--json]`.
+For Unix calls, `--as` names the acting person or agent (default: `ST_AGENT`, including
+the existing `FRACTAL_AGENT` alias, then the configured person); `--person` selects
+the budget recipient and never establishes acting identity. A harness cannot name
+another agent as its actor. Fabric calls use their paired credential instead.
+
+The report distinguishes declared asks from undeclared, charged from inclusive usage,
+not-charged requests, and unattributed requests for the person. It identifies the canonical
+mission and person, exclusive window start, inclusive end, and local claim index.
+The window is `(at - 7 days, at]`. `declared` reads the current revision; charging
+uses each originating or ancestor run's initial revision, so adding a limit later
+does not charge older runs. Every declaring ancestor is charged independently.
+`fleet_complete` is always false. At most 128 newest request references expose only claim
+IDs and subjects, never request text; `request_refs_complete` states whether all fit.
+This is data only: no limit enforcement, delivery decision, write, or fleet-complete promise.
+
+Reads examine at most 10,001 retained lifetime native ask claim rows for the
+recipient through the existing recipient index, newest local admission first;
+more than 10,000 refuses the whole report before applying the weekly window.
+This includes updates and expired asks, not just distinct current-window requests.
+Retained history therefore grows toward refusal even when weekly usage is low;
+the report does not silently discard older history. Unrelated recipients and other
+claim kinds are not scanned. A valid ancestry continuation beyond 64 vertices also
+refuses the whole report, even if the mission was already found; missing provenance
+remains distinct and may be reported as unattributed.
+
 ## Linux
 
 On Linux with a systemd user manager, Fractal starts each terminal in a transient scope that it records

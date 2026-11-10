@@ -107,6 +107,32 @@ Keep the listener loopback-only and preserve these headers between Serve and
 the app. Local processes can forge proxy headers, the same trust assumption as
 the Hub. The old edge URL retains its existing access policy.
 
+Browser sending uses a separate 30-day revocable device grant per browser, never
+the publisher's read-only bearer. `startHost` enables the cookie-only pairing
+endpoints automatically. Custom deployment overlays must pass
+`pairing: { admit: tailnetAdmission({ origin, logins, listener }) }` to the web
+server or middleware in addition to their general admission policy. The pairing
+admission must require the personal login allowlist, even if the read-only app
+also has an edge URL. Keep `WF_TAILNET_LOGINS` restricted to personal account
+logins; tagged infrastructure is not an approved browser device.
+The compose control requests approval in Fractal and shows the matching display
+code. Request secrets and device credentials are held exclusively in HttpOnly,
+Secure, SameSite=Strict cookies. Forgetting revokes the current device before
+clearing its cookie. HTTP and WebSocket gateway requests use that device's
+bearer when present and otherwise retain the read-only publisher bearer.
+The daemon seals the browser grant to `read.projections`, `read.declarations`,
+`read.glasses`, `read.arrangements`, `terminal.read`, and `control.messages`.
+Raw daemon `pairing` and `pairings` routes are never forwarded from HTTP or
+WebSocket browsers; only the publisher wrapper may call them. Encoded routes
+are decoded once, namespace exclusions are case-insensitive, and ambiguous paths
+are refused before routing.
+Status validates an existing browser credential with the daemon; revoked or
+expired credentials are cleared and must pair again. A send authorization
+refusal rechecks status and restores the pairing prompt without dropping drafts.
+Approve only after
+comparing the code in Fractal with the browser being used: labels and login
+names are display metadata, not proof of who initiated the request.
+
 ## Trust boundary
 
 Only same-repository PR heads are eligible: `isCrossRepository` must be false

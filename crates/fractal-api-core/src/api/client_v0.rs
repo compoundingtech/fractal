@@ -794,7 +794,8 @@ pub fn authenticate(
         }
         let pairing_completion = request.method() == axum::http::Method::POST
             && request.uri().path().starts_with("/v1/client/pairings/")
-            && request.uri().path().ends_with("/complete");
+            && (request.uri().path().ends_with("/complete")
+                || request.uri().path() == "/v1/client/pairings/renewals/pending");
         return pairing_completion
             .then(ClientSession::pairing)
             .ok_or_else(|| forbidden("the Fabric-loopback client credential is required"));
@@ -815,13 +816,15 @@ pub fn authenticate(
         .store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(ApiError::internal)?;
-    let paired = pairings.claims.iter().find(|claim| {
-        claim
-            .body
-            .pointer("/fields/credential_hash")
-            .and_then(Value::as_str)
-            == Some(digest.as_str())
-    });
+    let mut paired = None;
+    for claim in &pairings.claims {
+        if claim.body.pointer("/fields/credential_hash").and_then(Value::as_str) == Some(digest.as_str())
+            && state.store.pairing_completion_is_trusted(claim, client_now_ms()).map_err(ApiError::internal)?
+        {
+            paired = Some(claim);
+            break;
+        }
+    }
     let Some(paired) = paired else {
         return Err(credential_rejected("the client credential is unknown or expired"));
     };
@@ -867,14 +870,22 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
+    paired_client_session_at(state, paired, transport, custom_forms, client_now_ms())
+}
+
+pub fn paired_client_session_at(
+    state: &AppState,
+    paired: &ClaimRecord,
+    transport: &'static str,
+    custom_forms: bool,
+    now_unix_ms: u128,
+) -> Result<ClientSession, ApiError> {
+    let expires_at = state.store.pairing_completion_deadline(paired, now_unix_ms).map_err(ApiError::internal)?
+        .ok_or_else(|| credential_rejected("the client credential requires a new pairing"))?;
     // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
     // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
-    let revoked = !state.store.claims_for_subject_kind_at(
-        &paired.subject, "custom.client.pairing-revoked", None, true, 1,
-    ).map_err(ApiError::internal)?.claims.is_empty();
-    let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
-        .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
-    if revoked || expires_at <= client_now_ms() {
+    let revoked = state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)?;
+    if revoked || expires_at <= now_unix_ms {
         return Err(credential_rejected("the client credential was revoked or expired"));
     }
     let actor = paired.body.pointer("/fields/session_actor").and_then(Value::as_str)
@@ -931,16 +942,25 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }
-    // With a grant, the canonical newest completion, so every member checks the same one.
+    // Admission precedes canonical selection; retained records cannot displace a valid grant.
+    let now = client_now_ms();
     let paired = match session.pairing_grant.as_deref() {
-        Some(subject) => state.store
-            .newest_claim_for_subject_kind(subject, "custom.client.pairing-completed")
+        Some(subject) => state.store.newest_admitted_pairing_completion(subject, now)
             .map_err(ApiError::internal)?,
-        None => state.store
-            .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
-            .map_err(ApiError::internal)?
-            .claims.into_iter()
-            .find(|claim| claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())),
+        None => {
+            let claims = state.store.claims_for_kind_at(
+                "custom.client.pairing-completed", None, true, 10_000,
+            ).map_err(ApiError::internal)?.claims;
+            let mut selected = None;
+            for claim in claims {
+                if claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
+                    && state.store.pairing_completion_is_admitted(&claim, now).map_err(ApiError::internal)? {
+                    selected = Some(claim);
+                    break;
+                }
+            }
+            selected
+        }
     }.ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
@@ -1068,7 +1088,7 @@ pub fn mission_list_cards_with(
         let generations=newest.iter().map(|r| (r["id"].as_str().unwrap().to_owned(),r["generation_id"].clone()))
             .collect::<serde_json::Map<_,_>>();
         let historical = matches!(state,"completed"|"failed"|"cancelled"|"retired");
-        Ok(json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
+        let mut value = json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
             "title":id.trim_start_matches("mission/"),"state":state,"mission_revision":revision,
             "system":crate::mission::is_system(id, definition.map(|d| &d.mission)),
             "runs":newest.iter().rev().map(|r| r["id"].clone()).collect::<Vec<_>>(),
@@ -1077,7 +1097,17 @@ pub fn mission_list_cards_with(
             "run_generations":generations,"must_act":must_act,
             "resources":crate::api::client_declared_resources(
                 definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
-            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
+            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}});
+        if let Some(admission) = definition.and_then(|definition| {
+            crate::model::DeclaredAdmission::from_declaration(
+                definition.mission.declared_priority.as_ref(),
+                definition.mission.declared_lane.as_ref(),
+                definition.mission.declared_budgets.as_ref(),
+            )
+        }) {
+            value["declared_admission"] = serde_json::to_value(admission)?;
+        }
+        Ok(value)
     }).collect()
 }
 
@@ -1819,8 +1849,23 @@ pub fn device_resources(
     claims.sort_by_key(|claim| claim.store_index);
     let mut paired = BTreeMap::<String, (&ClaimRecord, Option<&ClaimRecord>)>::new();
     let mut names = BTreeMap::<String, String>::new();
+    let mut unadmitted = BTreeSet::new();
+    let mut withdrawals = BTreeMap::<&str, Vec<&ClaimRecord>>::new();
+    for claim in &claims {
+        if claim.kind == "custom.client.pairing-revoked" {
+            withdrawals.entry(&claim.subject).or_default().push(claim);
+        }
+    }
     for claim in &claims {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
+        if claim.kind == "custom.client.pairing-begun"
+            && !state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)? {
+            continue;
+        }
+        if claim.kind == "custom.client.pairing-completed"
+            && !state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+            unadmitted.insert(claim.id.clone());
+        }
         if claim.kind == "custom.client.pairing-begun"
             && let Some(name) = fields.get("device_name").and_then(Value::as_str)
         {
@@ -1833,10 +1878,24 @@ pub fn device_resources(
             "custom.client.pairing-completed"
                 if fields.get("person_id").and_then(Value::as_str) == Some(person) =>
             {
-                paired.insert(device_id.to_owned(), (claim, None));
+                let mut withdrawn = None;
+                if unadmitted.contains(&claim.id) {
+                    if paired.get(device_id).is_some_and(|(current, _)| !unadmitted.contains(&current.id)) {
+                        continue;
+                    }
+                    for revoked in withdrawals.get(claim.subject.as_str()).into_iter().flatten() {
+                        if state.store.pairing_revocation_is_trusted(revoked, claim).map_err(ApiError::internal)? {
+                            withdrawn = Some(*revoked);
+                        }
+                    }
+                    // Raw shadows cannot replace admitted grants or withdrawn legacy history.
+                    if withdrawn.is_none() { continue; }
+                }
+                paired.insert(device_id.to_owned(), (claim, withdrawn));
             }
             "custom.client.pairing-revoked" => {
-                if let Some(entry) = paired.get_mut(device_id) {
+                if let Some(entry) = paired.get_mut(device_id)
+                    && state.store.pairing_revocation_is_trusted(claim, entry.0).map_err(ApiError::internal)? {
                     entry.1 = Some(claim);
                 }
             }

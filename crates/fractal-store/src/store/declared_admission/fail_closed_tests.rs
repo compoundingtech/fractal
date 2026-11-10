@@ -104,9 +104,10 @@ fn decoy_bodies(payload: &Value) -> [Value; 5] {
 
 fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
     for body in decoy_bodies(payload) {
-        // Valid metadata must reach the barrier through the real raw writer.
-        let mut connection = Connection::open_in_memory().unwrap();
-        let transaction = connection.transaction().unwrap();
+        // Keep the public raw append path and exact envelopes, with schema for the real gate.
+        let store = Store::open_memory("alder").unwrap();
+        let connection = store.readers.get();
+        let transaction = connection.unchecked_transaction().unwrap();
         let error = append_claim_tx(
             &transaction, "alder", subject, kind, Some("person/avery"), &body, &[], None,
         ).unwrap_err();
