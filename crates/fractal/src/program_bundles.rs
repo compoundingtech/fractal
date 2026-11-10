@@ -50,7 +50,8 @@ mod tests {
         let hash = hex::encode(Sha256::digest(b"export default {}"));
         let kdl = |hash: &str| {
             format!(
-                r#"mission "land" state="ready" {{ goal "Land."; step "program" {{ program "{}" sha256="{hash}"; }} }}
+                r#"version 2
+                mission "land" state="ready" {{ goal "Land."; step "program" {{ program "{}" sha256="{hash}"; }} }}
                 mission "outer" state="ready" {{ goal "Nest."; step "inner" {{ mission "inner" state="ready" {{ goal "In."; step "program" {{ program "{}" sha256="{hash}"; }}; }}; }} }}"#,
                 bundle.display(),
                 bundle.display()
@@ -62,6 +63,6 @@ mod tests {
         let other = "0".repeat(64);
         let error = program_bundles(&kdl(&other)).unwrap_err().to_string();
         assert!(error.contains(&hash) && error.contains(&other) && error.contains("land.mjs"), "{error}");
-        assert!(program_bundles(r#"mission "plain" state="ready" { goal "None."; step "work" { agentless; } }"#).unwrap().is_empty());
+        assert!(program_bundles("version 2\nmission \"plain\" state=\"ready\" { goal \"None.\"; step \"work\" { agentless; } }").unwrap().is_empty());
     }
 }
