@@ -32,6 +32,8 @@ base64 = "0.22"
 flate2 = "1"
 unicode-width = "0.2.0"
 reqwest = { version = "0.12", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 # Thumbnails of attached images: kitty placeholders, sixel or iTerm2, else half blocks.
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

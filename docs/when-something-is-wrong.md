@@ -87,6 +87,33 @@ fractal usage --hours 24 --by mission
 
 These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why an agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
 
+## A conversation does not follow new entries
+
+The footer's updated time means a frame arrived, not that its newest entry was
+displayed. To locate a stale conversation inside the TUI, start a new process:
+
+```sh
+umask 077
+FRACTAL_TUI_FRESHNESS=1 FRACTAL_TUI_FRESHNESS_LOG="$HOME/tui-freshness.log" fractal tui
+```
+
+This opt-in DEBUG trace writes only the `fractal_tui::freshness` target to the
+append-only log, not the terminal. No `RUST_LOG` setting is required. Unset the
+variables to disable it. Protect the file: identifiers, endpoints and timestamps
+are metadata, not anonymous data. No message bodies, headers, tool arguments,
+rendered text, or authentication credentials are recorded.
+
+Compare `frame` (subscription, target, session, replacement flag, count and maximum
+timestamp/sequence/id), `held` (merged session, newest entry and count), `adapted`
+(last displayed entry and count), and `document` (last rendered entry and line
+count). Filtering and folded tool runs can intentionally change the last ID.
+`startup` and `connected` identify the binary build and endpoint; `update_before`,
+`presented`, `end_before` and `end_after` record pane keys, focused/main pane,
+follow state, top, total and height. `document` runs during drawing, so use
+`presented` for the complete frame's pane binding. End's `end_after` is before
+redrawing; the next `document`/`presented` pair shows the resulting viewport.
+The first stage that stops advancing identifies where to investigate next.
+
 ## Recover the cause
 
 Finish a first-run prompt by attaching, then detach with **Ctrl+\\**:
