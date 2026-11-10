@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change."},
   "compatibility": {"status": "changed", "detail": "iOS accepts st3.client.v0 and fractal.client.v0 permanently, and Fabric protection proofs accept both client.error.v0 namespaces independently. Request writers and API_VERSION defaults are unchanged."},
   "downtime": {"status": "none", "detail": "No service interruption required."},
-  "manual": {"status": "required", "detail": "Ship these readers to installed iOS builds before server version writers change; every client artifact must reach enrolled devices before W1 (#6209)."},
+  "manual": {"status": "changed", "detail": "Ship these readers to installed iOS builds before server version writers change; every client artifact must reach enrolled devices before W1 (#6209)."},
   "recovery": {"status": "none", "detail": "Legacy writers and stored profiles remain unchanged."}
 }
