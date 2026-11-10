@@ -57,44 +57,91 @@ pub(super) fn append_observer_refresh_tx(
     .map_err(internal)
 }
 
-/// The oldest refresh attempt `observer` has not yet answered with an observation or a state.
+/// The refresh attempt `observer`'s next poll answers, or `None` when none is pending. A request
+/// is pending until an observation or a state carries its attempt; requests are taken oldest
+/// first. Webhook refreshes coalesce on the polling member: the poll takes the newest pending
+/// webhook refresh from the member that wrote the oldest, and answering it answers every earlier
+/// webhook refresh from that member, since each was written after the change it announced and
+/// before the poll started.
 pub fn pending_attempt(connection: &Connection, observer: &str) -> rusqlite::Result<Option<String>> {
-    Ok(pending_attempts(connection, observer, 1)?.pop())
+    let pending = pending_requests(connection, observer)?;
+    let Some((oldest, origin)) = pending.first() else {
+        return Ok(None);
+    };
+    if !oldest.starts_with(github_webhook::ATTEMPT_PREFIX) {
+        return Ok(Some(oldest.clone()));
+    }
+    Ok(pending
+        .iter()
+        .rev()
+        .find(|(attempt, from)| from == origin && attempt.starts_with(github_webhook::ATTEMPT_PREFIX))
+        .map(|(attempt, _)| attempt.clone()))
 }
 
-/// Up to `limit` refresh attempts `observer` has not yet answered with an observation or a
-/// state, oldest first: the order its poller takes them in.
-fn pending_attempts(connection: &Connection, observer: &str, limit: usize) -> rusqlite::Result<Vec<String>> {
+/// The pending refresh attempts of `observer` with the member that wrote each, oldest first. A
+/// webhook refresh is no longer pending once a later webhook refresh from the same member is
+/// answered.
+fn pending_requests(connection: &Connection, observer: &str) -> rusqlite::Result<Vec<(String, Option<String>)>> {
     // The observations are listed once, not scanned for each request; see
     // `pending_subscription_mission_requests`.
     let mut statement = connection.prepare(
-        /* sqlite-large-value: allow-for-now lv-h5b18a0f55300 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(request.body, '$.fields.attempt')
+        /* sqlite-large-value: allow-for-now lv-h1e605cea76d4 owner=fractal_store::store::observer_refresh TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            "WITH answered(attempt) AS (
+               SELECT json_extract(result.body, '$.fields.attempt') FROM claims result
+               WHERE result.subject=?1
+                 AND result.kind IN ('observer.observed', 'observer.state')
+                 AND json_extract(result.body, '$.fields.attempt') IS NOT NULL
+             )
+             SELECT json_extract(request.body, '$.fields.attempt'),
+                    (SELECT origin FROM batches WHERE id=request.batch_id)
              FROM claims request
              WHERE request.subject=?1
                AND request.kind='observer.refresh-requested'
                AND (
                  json_extract(request.body, '$.fields.attempt') IS NULL
-                 OR json_extract(request.body, '$.fields.attempt') NOT IN (
-                   SELECT json_extract(result.body, '$.fields.attempt') FROM claims result
-                   WHERE result.subject=?1
-                     AND result.kind IN ('observer.observed', 'observer.state')
-                     AND json_extract(result.body, '$.fields.attempt') IS NOT NULL
+                 OR json_extract(request.body, '$.fields.attempt') NOT IN (SELECT attempt FROM answered)
+               )
+               AND NOT (
+                 json_extract(request.body, '$.fields.attempt') LIKE ?2
+                 AND EXISTS (
+                   SELECT 1 FROM claims later
+                   WHERE later.subject=?1
+                     AND later.kind='observer.refresh-requested'
+                     AND json_extract(later.body, '$.fields.attempt') LIKE ?2
+                     AND json_extract(later.body, '$.fields.attempt') IN (SELECT attempt FROM answered)
+                     AND (SELECT origin FROM batches WHERE id=later.batch_id)
+                       IS (SELECT origin FROM batches WHERE id=request.batch_id)
+                     AND {}
                  )
                )
-             ORDER BY CANONICAL_ASC(request)
-             LIMIT ?2",
-        ),
+             ORDER BY CANONICAL_ASC(request)",
+            canonical::after_sql("later", "request"),
+        )),
     )?;
-    let attempts = statement.query_map(params![observer, limit], |row| row.get(0))?.collect();
-    attempts
+    let requests = statement
+        .query_map(params![observer, format!("{}%", github_webhook::ATTEMPT_PREFIX)], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect();
+    requests
+}
+
+/// Whether `observer` already has a refresh request for `attempt`.
+fn requested(connection: &Connection, observer: &str, attempt: &str) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims
+         WHERE subject=?1 AND kind='observer.refresh-requested'
+           AND json_extract(body, '$.fields.attempt')=?2)",
+        params![observer, attempt],
+        |row| row.get(0),
+    )
 }
 
 impl Store {
     /// Ask every active observer that a verified delivery `delivery` concerns to poll now, and
-    /// return how many it asked. The poller answers refreshes oldest first, so the oldest pending
-    /// one may already be polling, but a second has not started: an observer with two pending
-    /// is not asked again, as its second poll reads what this delivery announced.
+    /// return how many it asked. A redelivery asks nothing more. Deliveries that arrive while a
+    /// poll runs each add a request, which the next poll answers together (see
+    /// [`pending_attempt`]).
     pub fn request_github_webhook_refresh(
         &self,
         delivery: &str,
@@ -104,18 +151,13 @@ impl Store {
         let transaction = connection.transaction().map_err(internal)?;
         let mut refreshed = 0;
         for (observer, revision, spec) in active_observers_tx(&transaction)? {
+            let attempt = github_webhook::attempt(delivery, &observer);
             if !github_webhook::refreshes(&spec, scope)
-                || pending_attempts(&transaction, &observer, 2).map_err(internal)?.len() == 2
+                || requested(&transaction, &observer, &attempt).map_err(internal)?
             {
                 continue;
             }
-            append_observer_refresh_tx(
-                &transaction,
-                &self.origin,
-                (&observer, &revision),
-                &github_webhook::attempt(delivery, &observer),
-                None,
-            )?;
+            append_observer_refresh_tx(&transaction, &self.origin, (&observer, &revision), &attempt, None)?;
             refreshed += 1;
         }
         transaction.commit().map_err(internal)?;
@@ -199,19 +241,20 @@ observer "garden-release" { resource "resource/garden-main"; provider "github.re
     }
 
     #[test]
-    fn a_delivery_during_a_poll_queues_one_refresh_that_absorbs_later_deliveries() {
+    fn deliveries_during_a_poll_are_answered_together_by_the_next_one() {
         let store = store();
         let scope = github_webhook::Scope { repository: "acme/garden".into(), branch: None };
         let attempt = |delivery: &str| github_webhook::attempt(delivery, "observer/garden");
-        let answer = |delivery: &str| {
-            let revision = store.selected_desired_revision("observer/garden").unwrap().unwrap();
+        let pending = || pending_attempt(&store.readers.get(), "observer/garden").unwrap();
+        let revision = store.selected_desired_revision("observer/garden").unwrap().unwrap();
+        let answer = |attempt: String| {
             store
                 .append_claim(&ClaimInput {
                     subject: "observer/garden".into(),
                     kind: "observer.state".into(),
                     actor: None,
                     fields: BTreeMap::from([
-                        ("attempt".into(), json!(attempt(delivery))),
+                        ("attempt".into(), json!(attempt)),
                         ("revision".into(), json!(revision)),
                         ("state".into(), json!("healthy")),
                     ]),
@@ -221,23 +264,32 @@ observer "garden-release" { resource "resource/garden-main"; provider "github.re
                 })
                 .unwrap();
         };
-        // The poller has taken delivery-1's refresh, and may have read GitHub already, so a
-        // delivery while it polls still asks for one more poll after it.
         assert_eq!(store.request_github_webhook_refresh("delivery-1", &scope).unwrap(), 1);
-        assert_eq!(pending_attempt(&store.readers.get(), "observer/garden").unwrap(), Some(attempt("delivery-1")));
+        assert_eq!(pending(), Some(attempt("delivery-1")));
+        // The poller has taken delivery-1's refresh and may have read GitHub already, so each
+        // delivery while it polls adds a request; a redelivery adds none.
         assert_eq!(store.request_github_webhook_refresh("delivery-2", &scope).unwrap(), 1);
-        // That queued poll has not started, so it reads what any later delivery announced.
+        assert_eq!(store.request_github_webhook_refresh("delivery-3", &scope).unwrap(), 1);
+        assert_eq!(store.request_github_webhook_refresh("delivery-1", &scope).unwrap(), 0);
+        assert_eq!(requests(&store, "observer/garden").len(), 3);
+        answer(attempt("delivery-1"));
+        // The next poll takes the newest, and its answer answers every earlier one.
+        assert_eq!(pending(), Some(attempt("delivery-3")));
+        answer(attempt("delivery-3"));
+        assert_eq!(pending(), None);
         assert_eq!(store.request_github_webhook_refresh("delivery-3", &scope).unwrap(), 0);
-        assert_eq!(requests(&store, "observer/garden").len(), 2);
-        answer("delivery-1");
-        assert_eq!(pending_attempt(&store.readers.get(), "observer/garden").unwrap(), Some(attempt("delivery-2")));
+        assert_eq!(pending(), None);
+
+        // A declared refresh keeps its place: the oldest request is taken first.
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        append_observer_refresh_tx(&transaction, "node", ("observer/garden", &revision), "declared", None).unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
         assert_eq!(store.request_github_webhook_refresh("delivery-4", &scope).unwrap(), 1);
-        assert_eq!(store.request_github_webhook_refresh("delivery-5", &scope).unwrap(), 0);
-        answer("delivery-2");
-        answer("delivery-4");
-        assert_eq!(pending_attempt(&store.readers.get(), "observer/garden").unwrap(), None);
-        assert_eq!(store.request_github_webhook_refresh("delivery-6", &scope).unwrap(), 1);
-        assert_eq!(pending_attempt(&store.readers.get(), "observer/garden").unwrap(), Some(attempt("delivery-6")));
+        assert_eq!(pending(), Some("declared".into()));
+        answer("declared".into());
+        assert_eq!(pending(), Some(attempt("delivery-4")));
     }
 
     #[test]
