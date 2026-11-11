@@ -28,6 +28,9 @@ import { agentReported, OLDER_ST_NOTE } from './agentsView.ts';
 assert.equal(agentReported({ state: 'running' }), 'running · older Fractal');
 assert.equal(agentReported(served('working')), undefined);
 assert.equal(agentRows([{ ...agent('example/old'), presentation: undefined }], [], 'example-linux', now)[0].reported, 'running · older Fractal');
+// The roster's newest prose reaches the row for its unread mark; an older daemon serves none.
+assert.equal(agentRows([{ ...agent('example/old'), last_prose_at: '2026-11-08T10:00:00Z' }], [], 'example-linux', now)[0].lastProseAt, '2026-11-08T10:00:00Z');
+assert.equal(agentRows([agent('example/old')], [], 'example-linux', now)[0].lastProseAt, undefined);
 assert.equal(OLDER_ST_NOTE, 'This host runs an older Fractal version: agent states appear as reported.');
 assert.equal(UNMANAGED_GROUP, 'found running · not started by Fractal');
 assert.equal(agentState(served('something-new')), 'unknown');

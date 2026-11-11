@@ -50,7 +50,7 @@ const mount = async ({ items: startingItems = [initial()], editable = true, load
     collectionStream: async (options) => {
       streamOptions = options
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribeReadPositions: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
     },
     actions: {
       snapshot: Effect.flatMap(mutationServices, () => Effect.sync(() => `snapshot/fresh/${++snapshots}`)),
