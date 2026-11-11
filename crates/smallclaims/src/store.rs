@@ -9044,7 +9044,8 @@ impl Store {
                          UNION ALL SELECT json_array(canonical_claim_id,id,canonical_claim_id)
                          FROM operations INDEXED BY operations_conflict_index WHERE state='conflict' LIMIT 1",
                         [], |row| row.get::<_,String>(0),
-                    ).optional()?.map(|message| serde_json::from_str(&message)).transpose()?;
+                    ).optional().map_err(internal)?
+                        .map(|message| serde_json::from_str(&message)).transpose().map_err(internal)?;
                     if let Some((claim_id, operation_id, previous_claim_id)) = conflict {
                         let error = FractalError::new("operation-conflict-projection-degraded",
                             json!({"operation_id":operation_id,"claim_id":claim_id,
@@ -9057,12 +9058,12 @@ impl Store {
                         self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                         return Err(error);
                     }
-                    if !operation_conflict_discovery_valid(&transaction, target)? {
+                    if !operation_conflict_discovery_valid(&transaction, target).map_err(internal)? {
                         return Err(FractalError::new("operation-conflict-discovery-unproven", "checkpoint or restored history changed during discovery; retry"));
                     }
                     // Replay is not target-bounded. A later admission has not been scanned:
                     // defer until the next pass discovers that newly admitted range.
-                    if current_index_tx(&transaction)? != target {
+                    if current_index_tx(&transaction).map_err(internal)? != target {
                         return Err(FractalError::new("projection-target-changed", "retry replay with the newly admitted range"));
                     }
                     log_staged(&full_replay_log_line(phase, &reason, frontier, target));
