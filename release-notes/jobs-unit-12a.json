@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive per-job Linux scope plans, apply and per-field readback (unit 12a)",
+  "replay": {"status": "none", "detail": "No claims or replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No host activation; gate-slot remains the admission path. apply() returning Ok means only that all writes completed, not that the scope is safe to launch. Unit 7 must refuse a launch unless all four readback matches are Measured and true; missing or malformed fields are Unknown."},
+  "compatibility": {"status": "none", "detail": "Additive inactive Rust scope plan and systemd properties with Delegate=yes, configured heavy ceilings, host-page-aligned memory high/max, zero swap and configured task count. page_size() reads the host page size. io.weight is not an IO limit and has no effect with NVMe scheduler none. Writes are not atomic; an error can leave a partially configured scope."},
+  "downtime": {"status": "none", "detail": "No live behavior changes."},
+  "manual": {"status": "none", "detail": "No deployment or activation steps."},
+  "recovery": {"status": "none", "detail": "No durable state changes."}
+}
