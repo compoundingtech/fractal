@@ -113,9 +113,52 @@ The claim-backed external-grant core is
 `crates/fractal-api-core/src/api/client_v0/external_grants.rs`. Its closed profiles
 keep `assistant/chatgpt` and `assistant/mcp` in the same assistant profile; service
 issuance is disabled and service has no assistant route or disclosure rights.
-Several active grants of a principal's own profile are allowed, but a different
-active profile is refused. Historical `custom.client.assistant.v1.*` claim kinds
-and absent-principal legacy ChatGPT grants retain their existing meaning.
+Several active grants of a principal's own profile are allowed. Admission refuses
+a known opposite-profile grant, including one replicated from another issuer.
+If disconnected issuers create opposite-profile grants, authentication suspends
+every conflicting grant with HTTP 409 `grant-profile-conflict`; there is no winner.
+Bearer authentication and pairing return only that code and the fixed message
+`principal has active grants of opposite profiles; revoke one to clear the conflict`,
+without witness details. Only the daemon-configured owner can inspect with
+`?witness=1` to expose a `conflict.grants` witness with both grant IDs, origins and
+profiles. Once an owner's revoke replicates (or the opposite grant expires),
+the remaining grant works again on its authoritative issuer; replication never
+makes foreign credentials authenticate on another member.
+While opposite-profile records remain visible, inspect also computes
+`cleared_conflicts` witnesses naming the `revoked` or `expired` clearing cause.
+Conflict state is never persisted. Admission and authentication use the same
+millisecond clock and strict `expires_at_unix_ms > now` active boundary; a newly
+issued opposite-profile grant reintroduces the conflict by computation.
+
+Only well-formed foreign grants attributed to the configured concrete owner
+count as witnesses. Their grant and effective policy must have matching immutable
+identity/profile, and each must have authenticated envelope provenance signed by a
+key in its writer's admitted fleet membership window. Legacy unsigned,
+unverifiable and malformed custom claims do not gain suspension authority merely
+by naming an owner or origin. This intentionally favors verifiable issuer claims
+over allowing arbitrary replicated custom fields to deny service. A valid record
+in a degraded envelope still counts when its signature and writer window verify;
+an unrelated rejected record cannot hide the grant.
+
+Only transitions from the grant's own origin, by its owner, with consistent
+immutable identity can revoke it or change its effective policy. Foreign
+transitions additionally require authenticated provenance. Invalid overlays are
+ignored; the last valid policy (or original grant) stays in force. This applies to
+local grants too: an unauthorized newer overlay no longer replaces their policy.
+The principal expression index prunes expired base grants without issuer policy
+candidates, and matching local revocations, before the authenticated Rust fold.
+The SQL unions indexed live-expiry ranges, legacy records, and matching-principal
+issuer-policy subjects. The additive principal/expiry index avoids parsing expired
+grant bodies on authentication; the original principal index remains in use for
+policy candidates. Revocations use the existing subject/kind index, avoiding a
+quadratic principal-wide revocation plan as completion/revocation history grows.
+Foreign revocations and policy candidates reach Rust because SQL cannot verify
+signatures. The sealed membership fold has a separate generation-keyed cache:
+request-side cold folds populate it without populating the sealing-path cache.
+Every admission/authentication/witness read recomputes conflict, including after
+replication catches up. Default grant responses preserve their pre-witness shape
+for old strict clients. Historical `custom.client.assistant.v1.*` claim kinds and
+absent-principal legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 
