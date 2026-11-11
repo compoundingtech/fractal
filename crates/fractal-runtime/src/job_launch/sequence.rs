@@ -1,9 +1,28 @@
-use super::{JobLaunch, JobLaunchEffects, JobLaunchResult, LaunchJournal};
+use super::{ExitUsage, JobLaunch, JobLaunchEffects, JobLaunchResult, LaunchJournal};
 use crate::ExecRuntime;
 use anyhow::{Result, ensure};
 use fractal_jobs::launch::{HolderOutcome, LaunchRefusal, require_caps};
 use serde::Deserialize;
 use std::path::Path;
+
+/// Release may have executed the payload. Cleanup succeeded, but the intent is
+/// unresolved and must never be refused or retried. Retain its final counters.
+#[derive(Debug)]
+pub struct UncertainRelease {
+    pub exit_usage: ExitUsage,
+    pub release_error: anyhow::Error,
+}
+impl std::fmt::Display for UncertainRelease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "uncertain gate release: {}", self.release_error)
+    }
+}
+impl std::error::Error for UncertainRelease {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.release_error.as_ref())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
@@ -48,7 +67,7 @@ impl ExecRuntime {
                 let refusal = error.downcast_ref::<LaunchRefusal>().copied()
                     .unwrap_or(LaunchRefusal::Preparation);
                 // Failure to prove cleanup leaves an uncertain intent, never a retry.
-                effects.abort_and_confirm_empty()?;
+                let _exit_usage = effects.stop_and_sample(request.host)?;
                 journal.refusal(request.intent, refusal)?;
                 return Err(error);
             }
@@ -58,17 +77,16 @@ impl ExecRuntime {
         let holder_pid = match effects.release() {
             Ok(pid) => pid,
             Err(error) => {
-                effects.abort_and_confirm_empty()?;
-                return Err(error);
+                let exit_usage = effects.stop_and_sample(request.host)?;
+                return Err(UncertainRelease { exit_usage, release_error: error }.into());
             }
         };
         effects.wait_for_exit()?;
-        let exit_usage = effects.exit_usage(&directory, request.host);
         let receipt = std::fs::read(&request.intent.outcome_file)
             .map_err(anyhow::Error::from)
             .and_then(|bytes| Ok(serde_json::from_slice::<Receipt>(&bytes)?));
-        // J persists independently of the holder; sample promptly, then remove it.
-        effects.remove_group()?;
+        // Success and abort use the same kill/empty/sample/remove path.
+        let exit_usage = effects.stop_and_sample(request.host)?;
         let receipt = receipt?;
         ensure!(receipt.mode == "scope-none" && receipt.job_label == request.job_id
             && receipt.holder_pid == holder_pid

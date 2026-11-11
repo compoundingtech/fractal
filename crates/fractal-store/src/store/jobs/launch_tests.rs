@@ -46,6 +46,7 @@ struct Effects {
     collision: bool,
     cleanup_fails: bool,
     release_fails: bool,
+    vanish_on_sample: bool,
 }
 impl JobLaunchEffects for Effects {
     fn hierarchy_path(&self, directory: &Path) -> Result<PathBuf> {
@@ -87,6 +88,8 @@ impl JobLaunchEffects for Effects {
     }
     fn release(&mut self) -> Result<u32> {
         self.order.borrow_mut().push("holder");
+        // A failed acknowledgement can follow payload execution.
+        fs::write(self.directory.join("cpu.stat"), "usage_usec 20\n")?;
         ensure!(!self.release_fails, "exec denied after gate release");
         fs::write(&self.outcome, serde_json::to_vec(&serde_json::json!({
             "mode":"scope-none", "jobLabel":self.job_id, "holderPid":42,
@@ -95,30 +98,34 @@ impl JobLaunchEffects for Effects {
         }))?)?;
         Ok(42)
     }
-    fn abort_and_confirm_empty(&mut self) -> Result<()> {
+    fn stop_and_sample(&mut self, host: &str) -> Result<ExitUsage> {
+        self.order.borrow_mut().push("kill");
         if self.cleanup_fails { anyhow::bail!("cannot prove empty"); }
-        if !self.collision && self.directory.exists() { fs::remove_dir_all(&self.directory)?; }
         self.order.borrow_mut().push("empty");
-        Ok(())
+        if self.vanish_on_sample { fs::remove_dir_all(&self.directory)?; }
+        let usage = sample_exit(&self.directory, host);
+        self.order.borrow_mut().push("exit-usage");
+        if !self.collision {
+            self.order.borrow_mut().push("remove");
+            if let Err(error) = fs::remove_dir_all(&self.directory) {
+                if error.kind() != std::io::ErrorKind::NotFound
+                    || !fs::symlink_metadata(&self.directory)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+                    return Err(error.into());
+                }
+            }
+        }
+        Ok(usage)
     }
     fn wait_for_exit(&mut self) -> Result<()> {
         self.order.borrow_mut().push("holder-exit");
         fs::write(self.directory.join("cpu.stat"), "usage_usec 20\n")?;
         Ok(())
     }
-    fn exit_usage(&mut self, directory: &Path, host: &str) -> ExitUsage {
-        self.order.borrow_mut().push("exit-usage");
-        sample_exit(directory, host)
-    }
-    fn remove_group(&mut self) -> Result<()> {
-        self.order.borrow_mut().push("remove");
-        fs::remove_dir_all(&self.directory)?;
-        Ok(())
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Extra { None, RelativeOutcome, ReleaseFailure }
+enum Extra { None, RelativeOutcome, ReleaseFailure, ReleaseFailureVanished }
 
 #[test]
 fn real_projection_and_fake_holder_observe_launch_and_exit_order() {
@@ -132,9 +139,14 @@ fn real_projection_and_fake_holder_observe_launch_and_exit_order() {
 }
 
 #[test]
-fn release_errors_clean_j_but_never_refuse_or_retry_an_uncertain_launch() {
+fn uncertain_release_samples_before_removal_without_refusal_or_retry() {
     exercise(None, false, false, false, Extra::ReleaseFailure);
     exercise(None, false, false, true, Extra::ReleaseFailure);
+}
+
+#[test]
+fn uncertain_release_retains_counters_unavailable_when_j_vanishes_during_retirement() {
+    exercise(None, false, false, false, Extra::ReleaseFailureVanished);
 }
 
 #[test]
@@ -175,7 +187,8 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
     let mut effects = Effects {
         directory: job_directory.clone(), cgroup_root: directory.path().into(),
         outcome, job_id: id.clone(), order: order.clone(), bad, collision, cleanup_fails,
-        release_fails: extra == Extra::ReleaseFailure,
+        release_fails: matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished),
+        vanish_on_sample: extra == Extra::ReleaseFailureVanished,
     };
     let runtime = ExecRuntime::new(directory.path().join("exec"), directory.path().join("logs"));
     let result = runtime.launch_job(&request, &mut journal, &mut effects);
@@ -185,23 +198,35 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
     if bad.is_none() && !missing_slice && !collision && extra == Extra::None {
         let result = result.unwrap();
         assert_eq!(*order.borrow(), ["intent", "group", "caps", "launch-usage",
-            "gated", "attach", "holder", "holder-exit", "exit-usage", "remove"]);
+            "gated", "attach", "holder", "holder-exit", "kill", "empty", "exit-usage", "remove"]);
         assert_eq!(result.launch_usage.cpu_usage_usec.reading.value, Some(10));
         let ExitUsage::Sample(exit_usage) = result.exit_usage else { panic!("missing exit sample"); };
         assert_eq!(exit_usage.cpu_usage_usec.reading.value, Some(20));
         assert_eq!(result.outcome, fractal_jobs::launch::LaunchOutcome::Exited(fractal_jobs::ExitOutcome::Code(75)));
         assert_eq!(state, JobState::Launching); // observations are not execution authority
         assert!(!job_directory.exists());
-    } else if extra == Extra::ReleaseFailure {
-        let error = result.err().unwrap().to_string();
+    } else if matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished) {
+        let error = result.err().unwrap();
         assert_eq!(state, JobState::Launching);
         assert!(!order.borrow().contains(&"refusal"));
         assert_eq!(job_directory.exists(), cleanup_fails);
         if cleanup_fails {
-            assert!(error.contains("cannot prove empty"));
+            assert!(error.to_string().contains("cannot prove empty"));
+            assert!(error.downcast_ref::<UncertainRelease>().is_none());
+            assert!(!order.borrow().contains(&"exit-usage"));
+            assert!(!order.borrow().contains(&"remove"));
         } else {
-            assert!(error.contains("exec denied"));
-            assert_eq!(order.borrow().last(), Some(&"empty"));
+            let uncertain = error.downcast_ref::<UncertainRelease>().expect("typed uncertain release");
+            if extra == Extra::ReleaseFailureVanished {
+                assert!(matches!(&uncertain.exit_usage, ExitUsage::CountersUnavailable(
+                    fractal_jobs::launch::CountersUnavailable::CgroupVanished)));
+            } else {
+                let ExitUsage::Sample(sample) = &uncertain.exit_usage else { panic!("missing uncertain sample"); };
+                assert_eq!(sample.cpu_usage_usec.reading.value, Some(20));
+            }
+            assert!(uncertain.release_error.to_string().contains("exec denied"));
+            assert_eq!(*order.borrow(), ["intent", "group", "caps", "launch-usage",
+                "gated", "attach", "holder", "kill", "empty", "exit-usage", "remove"]);
         }
     } else {
         assert!(result.is_err());
@@ -214,7 +239,13 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
             assert_eq!(state, JobState::Launching);
             assert!(!order.borrow().contains(&"refusal"));
         } else {
-            assert_eq!(&order.borrow()[order.borrow().len() - 2..], ["empty", "refusal"]);
+            let order = order.borrow();
+            let sample_index = order.iter().position(|effect| *effect == "exit-usage").unwrap();
+            let refusal_index = order.iter().position(|effect| *effect == "refusal").unwrap();
+            assert!(sample_index < refusal_index);
+            if let Some(remove_index) = order.iter().position(|effect| *effect == "remove") {
+                assert!(sample_index < remove_index && remove_index < refusal_index);
+            }
             assert!(matches!(state, JobState::Refused { .. }));
             let history = history_by_job(&tx, &id).unwrap();
             let JobRecord::LaunchRefused { refusal, .. } = serde_json::from_value(history[2].record.clone()).unwrap()
