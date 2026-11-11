@@ -1305,6 +1305,10 @@ impl MembershipUpdate {
 /// unrelated claims are never visited. Cursor and projection changes commit
 /// together in the caller's transaction. Old-build appends and signature-only
 /// arrivals are captured by persistent dirty triggers even after completion.
+/// This raw driver cannot prepare membership: membership-dependent queues wait
+/// for a durable verified snapshot matching `fleet_generation`. Startup calls it once; use
+/// `Store::advance_assistant_grant_authority_backfill` for repeated maintenance,
+/// which prepares the real sealed membership view before advancing these queues.
 pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool> {
     let applied: i64 = connection.query_row(
         "SELECT applied_generation FROM assistant_grant_membership_state WHERE id=1", [], |row| row.get(0),
