@@ -59,7 +59,8 @@ async fn replay_clears_unhealthy_graph_and_durably_audits_operator() {
 async fn replay_concurrent_call_is_rejected_before_waiting_for_writer() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let writer = state.store.connection.write();
+    let store = Arc::clone(&state.store);
+    let writer = store.connection.write();
     let first_state = state.clone();
     let first = tokio::spawn(async move {
         replay(State(first_state), Extension(ClientTransportBoundary::Unix), Json(ReplayRequest { confirm: true })).await
