@@ -8,7 +8,8 @@
 //! so each write is also decided by the rules for that starter.
 //!
 //! A write outside the authority is refused (`run-authority-denied`), or audited (`rule.audited`
-//! on `rule/run-authority`) when the daemon's `[programs] authority` says `audit`.
+//! on `rule/run-authority`) when the daemon's `[programs] authority` says `audit`. Whatever it is
+//! granted, and in either mode, a run touches only itself and the runs it started, transitively.
 use super::*;
 use crate::config::RunAuthorityMode;
 use crate::model::{AuthorityGrant, AuthorityVerb};
@@ -17,7 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The audit records' rule name: `rule.audited` on `rule/run-authority`.
 pub const AUDIT_RULE: &str = "run-authority";
 
-/// Run starters nest at most this deep; a deeper chain grants nothing.
+/// Run starters nest at most this deep; a deeper chain grants nothing. A run reaches its own
+/// descendants no deeper.
 const MAX_STARTERS: usize = 32;
 
 /// Enforced until the daemon's config says otherwise, as `[programs] authority` defaults.
@@ -68,6 +70,67 @@ fn owning_run_tx(transaction: &Transaction<'_>, subject: &str) -> Result<Option<
         .optional().map_err(internal)
 }
 
+/// The run one claim changes: the run its subject belongs to, or the run a generation or a
+/// revision proposal names.
+fn touched_run_tx(
+    transaction: &Transaction<'_>,
+    kind: &str,
+    subject: &str,
+    fields: &BTreeMap<String, Value>,
+) -> Result<Option<String>, FractalError> {
+    let field = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or_default();
+    match kind {
+        "run-generation.created" | "revision-proposal.created" => owning_run_tx(transaction, field("run")),
+        "revision-proposal.applied" => owning_run_tx(transaction, field("successor_generation")),
+        _ => owning_run_tx(transaction, subject),
+    }
+}
+
+/// Whether `target` is `run` or a run it started, transitively: a run's parent is the run of the
+/// step it was started under, the tree a cancellation cascades down.
+fn own_run_tx(transaction: &Transaction<'_>, run: &str, target: &str) -> Result<bool, FractalError> {
+    let mut current = target.to_owned();
+    for _ in 0..=MAX_STARTERS {
+        if current == run {
+            return Ok(true);
+        }
+        let parent = transaction.query_row(
+            "SELECT step.run_id FROM mission_runs child JOIN step_runs step ON step.subject=child.parent_step_run
+             WHERE child.id=?1",
+            [&current],
+            |row| row.get::<_, String>(0),
+        ).optional().map_err(internal)?;
+        let Some(parent) = parent else { return Ok(false) };
+        current = parent;
+    }
+    Ok(false)
+}
+
+/// Refuse `run` touching `target` unless it is the run or one it started, whatever it is granted
+/// and in either mode: a `write "mission-run/*"` reaches no sibling, parent or unrelated run.
+fn refuse_foreign_run_tx(transaction: &Transaction<'_>, run: &str, target: &str, action: &str) -> Result<(), FractalError> {
+    if own_run_tx(transaction, run, target)? {
+        return Ok(());
+    }
+    Err(FractalError::new(
+        "run-authority-denied",
+        format!("mission-run/{run} may not {action}: mission-run/{target} is neither it nor a run it started"),
+    ))
+}
+
+/// Admit a `mission-run` declaration applied as `actor`. Its creation and cancellations are not
+/// written as the run, so the declaration itself decides which run they touch: a run declares
+/// only on itself and the runs it started, and never creates a run this way.
+pub(super) fn admit_declaration_tx(
+    transaction: &Transaction<'_>,
+    actor: Option<&str>,
+    subject: &str,
+) -> Result<(), FractalError> {
+    let Some(run) = actor.and_then(|actor| actor.strip_prefix("mission-run/")) else { return Ok(()) };
+    let target = subject.strip_prefix("mission-run/").unwrap_or(subject);
+    refuse_foreign_run_tx(transaction, run, target, &format!("declare `{subject}`"))
+}
+
 /// The grant one claim needs, or none for the run's own journal. A start or a revision writes
 /// several claims as one operation; each names the operation's grant on the mission of the run
 /// it changes, never a `write`, so the operation's verb alone admits it.
@@ -112,10 +175,8 @@ pub(super) fn needed_tx(
         // What a revision writes on the runs it changes: its proposal, carried and terminalized
         // steps, the superseded generation, the run's and its descendants' states.
         "step-run.carried" | "step-run.state" | "run-generation.superseded" | "run-generation.state"
-        | "mission-run.state" => revise(owning_run_tx(transaction, subject)?),
-        "revision-proposal.created" => revise(owning_run_tx(transaction, field("run").unwrap_or_default())?),
-        "revision-proposal.applied" => {
-            revise(owning_run_tx(transaction, field("successor_generation").unwrap_or_default())?)
+        | "mission-run.state" | "revision-proposal.created" | "revision-proposal.applied" => {
+            revise(touched_run_tx(transaction, kind, subject, fields)?)
         }
         _ => grant(AuthorityVerb::Write, subject.into()),
     }
@@ -172,6 +233,9 @@ pub(super) fn admit_tx(
 ) -> Result<(), FractalError> {
     let Some(actor) = actor.filter(|actor| actor.starts_with("mission-run/")) else { return Ok(()) };
     let run = actor.trim_start_matches("mission-run/");
+    if let Some(target) = touched_run_tx(transaction, kind, subject, fields)? {
+        refuse_foreign_run_tx(transaction, run, &target, &format!("write {kind} on `{subject}`"))?;
+    }
     let Some(needed) = needed_tx(transaction, run, kind, subject, fields)? else { return Ok(()) };
     let (granted, starter) = effective_tx(transaction, run)?;
     if let Some(starter) = &starter {
