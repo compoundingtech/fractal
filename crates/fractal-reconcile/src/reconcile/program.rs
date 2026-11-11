@@ -32,10 +32,7 @@ use crate::MissionsStore;
 use crate::model::{ClaimInput, ClaimRecord, FractalError, MissionRunView, ProgramSpec};
 use crate::store::Store;
 
-/// The claim kind of a program journal entry, on the program's `step-run` subject.
-pub const JOURNAL_KIND: &str = "program.step";
-/// The journal key of a program's own encoded success value, written when it ends.
-pub const RESULT_KEY: &str = "$result";
+pub use crate::program_journal::{JOURNAL_KIND, RESULT_KEY};
 /// The step states in which the engine runs a program step's current attempt. A step waiting on
 /// a person keeps its program loaded (§11).
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
