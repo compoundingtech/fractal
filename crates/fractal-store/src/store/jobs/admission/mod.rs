@@ -117,7 +117,9 @@ fn binding(record: &JobRecord) -> &JobHostBinding {
         JobRecord::Submitted { binding, .. }
         | JobRecord::Transition { binding, .. }
         | JobRecord::LaunchIntent { binding, .. }
-        | JobRecord::LaunchRefused { binding, .. } => binding,
+        | JobRecord::LaunchRefused { binding, .. }
+        | JobRecord::LaunchReleased { binding, .. }
+        | JobRecord::Recovered { binding, .. } => binding,
     }
 }
 

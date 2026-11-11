@@ -49,7 +49,7 @@ impl ExecRuntime {
             effects.attach_holder(&directory)?;
             Ok((directory, hierarchy, launch_usage))
         })();
-        let (directory, hierarchy, launch_usage) = match prepared {
+        let (_directory, hierarchy, launch_usage) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 let refusal = error.downcast_ref::<LaunchRefusal>().copied()
@@ -69,6 +69,10 @@ impl ExecRuntime {
                 return Err(UncertainRelease { exit_usage, release_error: error }.into());
             }
         };
+        if let Err(error) = journal.released(request.intent, holder_pid) {
+            let exit_usage = effects.stop_and_sample(request.host)?;
+            return Err(UncertainRelease { exit_usage, release_error: error }.into());
+        }
         effects.wait_for_exit()?;
         let receipt = std::fs::read(&request.intent.outcome_file)
             .map_err(anyhow::Error::from)

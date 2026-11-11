@@ -22,6 +22,17 @@ pub enum JobRecord {
         intent: fractal_jobs::launch::LaunchIntent,
         refusal: fractal_jobs::launch::LaunchRefusal,
     },
+    LaunchReleased {
+        binding: JobHostBinding,
+        intent: fractal_jobs::launch::LaunchIntent,
+        released: fractal_jobs::recovery::Released,
+    },
+    Recovered {
+        binding: JobHostBinding,
+        intent: Option<fractal_jobs::launch::LaunchIntent>,
+        pin: fractal_jobs::recovery::RecoveryPin,
+        resolution: fractal_jobs::recovery::Resolution,
+    },
 }
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
@@ -204,12 +215,17 @@ fn apply(
                 params![subject, serde_json::to_string(&next)?, at])?;
             *state = next;
         }
+        JobRecord::LaunchReleased { .. } | JobRecord::Recovered { .. } => {
+            recovery::apply(tx, subject, at, record, current)?;
+        }
     }
     Ok(())
 }
 
 mod receipts;
 mod queries;
+mod recovery;
+pub use recovery::{RecoveryFacts, recovery_facts};
 pub use receipts::{job_id, receipt_for_key};
 pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, jobs_for_requester, queue_for_host};
 

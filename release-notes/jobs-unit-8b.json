@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retain confirmed release and pinned recovery records in jobs history (unit 8b)",
+  "replay": {"status": "changed", "detail": "Jobs-only projection folds release and recovery records, rejects intent/pin mismatches and requires a release fact before keeping a running job or consuming an outcome. Replay fixtures retain admission and reject another launch."},
+  "schema": {"status": "none", "detail": "No new tables or shared-writer changes; accepted records remain in existing jobs history."},
+  "rules": {"status": "none", "detail": "INACTIVE: no production admission, boot hook or activation. 4c-2 and explicit activation must authenticate recovery; historical rows grant no authority."},
+  "compatibility": {"status": "changed", "detail": "LaunchJournal now durably records a confirmed release with holder PID and immutable admitted host pin before waiting for exit. Failure stops J while leaving uncertainty, never a retry."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "No defaults or policy values added; existing public append remains the future writer interface."},
+  "recovery": {"status": "changed", "detail": "Read-only recovery_facts uses the existing transaction/staleness fence. Jobs projection tests cover canonical replay, unchanged pin, missing release and intent mismatch. Cargo and native execution not run."}
+}
