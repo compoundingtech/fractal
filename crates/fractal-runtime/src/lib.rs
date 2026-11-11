@@ -16,6 +16,8 @@ pub mod host;
 pub mod host_envelope;
 #[cfg(target_os = "linux")]
 pub mod job_scope;
+#[cfg(target_os = "linux")]
+pub mod job_launch;
 mod isolate;
 mod lane;
 mod priority;
