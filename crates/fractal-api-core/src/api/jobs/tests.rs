@@ -133,7 +133,7 @@ async fn concurrent_submissions_resolve_one_durable_receipt() {
         binding: JobHostBinding {
             job_id: id.clone(), execution_host: "node".into(), authority_declaration: declaration,
         },
-        identity: identity.clone(), request,
+        identity: identity.clone(), request: Box::new(request),
     };
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let launch = || {
@@ -174,9 +174,12 @@ async fn requester_private_routes_refuse_forged_or_unresolved_bound_callers() {
             .extension(BoundAgent("agent/own".into()))
             .body(Body::from(input("forged").to_string())).unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
-        assert!(!response.status().is_success());
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["code"], "foreign-agent-actor");
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        // The outer bound-actor guard rejects first; client-v0 normalizes its code.
+        assert_eq!(error["code"], "forbidden");
+        assert_eq!(error["message"], "this harness is `agent/own` and cannot act as `person/other`");
     }
     for method in ["GET", "POST"] {
         let request = Request::builder().method(method).uri("/v1/client/jobs")
