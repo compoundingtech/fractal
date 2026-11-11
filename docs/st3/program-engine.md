@@ -396,15 +396,17 @@ command (`Fractal.command(argv, { priority: 'background' })`); this is the progr
 
 ### 11. Program API
 
-The author-facing API is the `Fractal` namespace of the `fractal` package (D7), on `effect/workflow`:
+The author-facing API is the `Fractal` namespace of the `fractal` package's `fractal/effect` entry
+point (D7), on `effect/workflow`:
 
 | `Fractal` | `effect/workflow` | Engine |
 |---|---|---|
 | `Fractal.mission(intent, program)` | `Workflow.make` with `intent.input` as payload and `intent.output` as success schema | one `program` step; the bundle's entry runs the workflow body for the step run's current attempt |
 | `Fractal.step({ id, success, error }, effect)` | `Activity.make` named by the step's key (`id`, `id#2`, …) | a `program.step` entry under that key, replayed by the key |
+| `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | `DurableDeferred.make` named by the step's key | a worker turn: a linked child run of `mission` (§6); the value is its product `resource/<child run>/<product>` |
 | `Fractal.ask({ id, for, request, deadline, default })` | `DurableDeferred.make` named by the ask's key | a native person ask on the program step; the answer is journaled under the key |
-| `Fractal.run(mission, input)` | a child workflow execution | a linked child run (§6), its terminal result journaled under the key |
-| — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal |
+| `Fractal.run(mission, input)` | `DurableDeferred.make` named by the run's key | a linked child run (§6), its terminal result journaled under the key |
+| — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal, else waits for the host's `ctx.child` or `ctx.ask` |
 
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
 mission `input`, `missions start` checks the inputs against it, and the program receives the decoded
@@ -413,6 +415,15 @@ value. The success value is encoded with `intent.output` and journaled under the
 
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.
+
+**Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
+bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun`, from the tree
+root so the bytes do not depend on where the tree is checked out, and writes it to
+`<bundleDir>/<sha256>.mjs` after checking that its default export carries the entry. The mission
+loads as its declaration: the header from the intent (`timeout`, `concurrentRuns`, `authority`),
+one text `input` per field of `intent.input`, and one step `program` pinning the bundle by path and
+sha256 (`stalledAfter` becomes its `stalled-after`). Rendering it and running `fractal apply` on the
+KDL publishes the mission and carries the bundle (§4).
 
 ## Design questions
 
