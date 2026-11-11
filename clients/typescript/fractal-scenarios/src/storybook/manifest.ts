@@ -132,7 +132,8 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "none",
     "one-of-each-kind",
     "many",
-    "sidebar-tabs"
+    "sidebar-tabs",
+    "answerable"
   ],
   "conversation": [
     "default",
