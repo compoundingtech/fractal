@@ -1,8 +1,12 @@
-//! Inactive host/class keeper. No startup, watcher or scheduler calls this module.
+//! Inactive host/class keeper. Only the explicitly constructed launch adapter watches it.
 //! The keeper lives in idle/, a sibling of every J; it has no daemon FD or lifetime tie.
 use anyhow::{Context, Result, ensure};
 use fractal_jobs::launch::{LaunchRefusal, keeper_name};
-use std::{fs, io::{Read, Seek}, os::fd::AsRawFd, path::{Path, PathBuf}};
+use std::{fs, path::{Path, PathBuf}, sync::Mutex};
+
+// All adapters in this daemon share mutation ownership, including watcher repair
+// and pre-job ensure. Never hold this lock while waiting for kernel events.
+static KEEPER_MUTATION: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug)]
 pub struct KeeperScope {
@@ -66,6 +70,7 @@ pub fn ensure_keeper(
     host: &str,
     configured_slice: Option<&str>,
 ) -> Result<KeeperScope> {
+    let _guard = KEEPER_MUTATION.lock().map_err(|_| anyhow::anyhow!("keeper mutation poisoned"))?;
     let slice = slice_name(configured_slice)?;
     let name = keeper_name(host);
     let mut fresh_pid = None;
@@ -110,7 +115,7 @@ pub fn ensure_keeper(
         let enabled = fs::read_to_string(scope.directory.join("cgroup.subtree_control"))?;
         ensure!(["memory", "pids"].iter().all(|needed| enabled.split_whitespace()
             .any(|actual| actual.trim_start_matches('+') == *needed)), LaunchRefusal::KeeperUnavailable);
-        replenish_keeper(manager, &scope)?;
+        replenish_locked(manager, &scope)?;
         Ok(())
     })();
     if verified.is_err() {
@@ -124,6 +129,11 @@ pub fn ensure_keeper(
 /// Unreachable watcher repair step. An empty idle is replenished in the SAME
 /// delegated scope; no new scope and no job relaunch. Called again before each job.
 pub fn replenish_keeper(manager: &mut dyn KeeperManager, scope: &KeeperScope) -> Result<()> {
+    let _guard = KEEPER_MUTATION.lock().map_err(|_| anyhow::anyhow!("keeper mutation poisoned"))?;
+    replenish_locked(manager, scope)
+}
+
+fn replenish_locked(manager: &mut dyn KeeperManager, scope: &KeeperScope) -> Result<()> {
     let idle = scope.directory.join("idle");
     if !populated(&idle)? {
         let pid = manager.spawn_idle()?;
@@ -141,31 +151,6 @@ pub fn replenish_keeper(manager: &mut dyn KeeperManager, scope: &KeeperScope) ->
     Ok(())
 }
 
-/// Wait for the next kernel cgroup.events notification, then immediately repair
-/// a dead keeper. No production caller; activation must run this continuously.
-/// Open/arm before inspecting population so a concurrent death is not lost.
-pub fn watch_keeper_once(manager: &mut dyn KeeperManager, scope: &KeeperScope) -> Result<()> {
-    let mut events = fs::File::open(scope.directory.join("idle/cgroup.events"))?;
-    let mut contents = String::new();
-    events.read_to_string(&mut contents)?;
-    if contents.lines().any(|line| line == "populated 0") {
-        return replenish_keeper(manager, scope);
-    }
-    let mut descriptor = libc::pollfd { fd: events.as_raw_fd(), events: libc::POLLPRI | libc::POLLERR, revents: 0 };
-    loop {
-        // SAFETY: one valid descriptor, infinite wait, no borrowed buffers.
-        let result = unsafe { libc::poll(&mut descriptor, 1, -1) };
-        if result < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted { continue; }
-            return Err(error.into());
-        }
-        events.rewind()?;
-        contents.clear();
-        events.read_to_string(&mut contents)?;
-        return replenish_keeper(manager, scope);
-    }
-}
 
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,8 @@ struct Manager {
     spawned: u32,
     slice: String,
     delegated: bool,
+    killed: usize,
+    fail_population: bool,
 }
 fn group(directory: &Path) {
     fs::create_dir(directory).unwrap();
@@ -31,17 +33,19 @@ impl KeeperManager for Manager {
         Ok(())
     }
     fn spawn_idle(&mut self) -> Result<u32> { self.spawned += 1; Ok(self.spawned) }
-    fn kill_idle(&mut self, _: u32) -> Result<()> { Ok(()) }
+    fn kill_idle(&mut self, _: u32) -> Result<()> { self.killed += 1; Ok(()) }
     fn mkdir(&mut self, directory: &Path) -> Result<()> { group(directory); Ok(()) }
     fn move_pid(&mut self, pid: u32, directory: &Path) -> Result<()> {
         fs::write(directory.join("cgroup.procs"), pid.to_string())?;
-        fs::write(directory.join("cgroup.events"), "populated 1\n")?;
+        fs::write(directory.join("cgroup.events"),
+            if self.fail_population { "populated unknown\n" } else { "populated 1\n" })?;
         fs::write(self.root.join("cgroup.procs"), "")?;
         Ok(())
     }
 }
 fn manager(root: PathBuf) -> Manager {
-    Manager { root, starts: 0, spawned: 100, slice: String::new(), delegated: true }
+    Manager { root, starts: 0, spawned: 100, slice: String::new(), delegated: true,
+        killed: 0, fail_population: false }
 }
 
 #[test]
@@ -80,7 +84,7 @@ fn keeper_death_during_job_is_repaired_without_relaunch_and_counters_are_never_z
         // Kill the fixture keeper while the holder remains in sibling J.
         fs::write(scope.directory.join("idle/cgroup.procs"), "").unwrap();
         fs::write(scope.directory.join("idle/cgroup.events"), "populated 0\n").unwrap();
-        watch_keeper_once(&mut manager, &scope).unwrap();
+        replenish_keeper(&mut manager, &scope).unwrap();
         assert_eq!(manager.starts, 1);
         assert_eq!(manager.spawned, 102);
         assert!(populated(&scope.directory.join("idle")).unwrap());
@@ -127,4 +131,41 @@ fn holder_is_sole_member_with_empty_subtree_and_no_populated_children() {
         assert!(validate_path(Path::new(invalid)).is_err());
     }
     validate_path(Path::new("/user.slice/user@1.service/app.slice/keeper.scope/job-1")).unwrap();
+}
+
+#[test]
+fn concurrent_ensure_and_watch_repair_spawn_only_one_replacement() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("keeper.scope");
+    let scope = ensure_keeper(&mut manager(root.clone()), "host", Some("app-heavy.slice")).unwrap();
+    fs::write(root.join("idle/cgroup.events"), "populated 0\n").unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let threads = (0..8).map(|index| {
+        let (root, scope, barrier) = (root.clone(), scope.clone(), barrier.clone());
+        std::thread::spawn(move || {
+            let mut manager = manager(root);
+            manager.slice = "app-heavy.slice".into();
+            barrier.wait();
+            if index % 2 == 0 {
+                ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+            } else {
+                replenish_keeper(&mut manager, &scope).unwrap();
+            }
+            assert_eq!(manager.starts, 0);
+            manager.spawned - 100
+        })
+    }).collect::<Vec<_>>();
+    assert_eq!(threads.into_iter().map(|thread| thread.join().unwrap()).sum::<u32>(), 1);
+}
+
+#[test]
+fn failed_replacement_verification_kills_the_unpublished_process() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut manager = manager(temporary.path().join("keeper.scope"));
+    let scope = ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+    fs::write(scope.directory.join("idle/cgroup.events"), "populated 0\n").unwrap();
+    manager.fail_population = true;
+    assert!(replenish_keeper(&mut manager, &scope).is_err());
+    assert_eq!(manager.spawned, 102);
+    assert_eq!(manager.killed, 1);
 }
