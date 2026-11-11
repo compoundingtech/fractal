@@ -303,10 +303,16 @@ authorization. Revoke retries preserve the original revocation; policy and
 read-trust retries each append one new revision, as before. These routes do not
 offer keyed replay. Their successful responses never lift the subject's bearer
 fence.
-Management selects the newest authenticated transition by indexed subject/kind
-seek and validates its immutable identity against the current base. A newer base
-does not erase a policy revision or revocation merely because its reverse
-attachment has not run; incompatible transition identity fails closed.
+Management selects the newest applicable authenticated transition by an indexed
+seek scoped to subject, kind, origin, actor and immutable grant identity. All
+identity predicates precede the descending store index, so unrelated local
+identities and authenticated foreign members cannot add a scanned prefix or
+block owner mutations. Each read decodes at most one record; its B-tree seek is
+logarithmic in index size, independent of the number of colliding foreign rows.
+A newer same-identity base does not erase a policy revision or revocation merely
+because its reverse attachment has not run. Matching local-origin transitions
+require durable local-append provenance or authenticated writer evidence, never
+origin text alone; unrelated transitions are ignored, not management errors.
 
 
 The subject remains fenced until its attachment tasks and witness cleanup finish.

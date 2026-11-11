@@ -100,7 +100,7 @@ pub fn expiry_key(value: u64) -> String { format!("{value:020}") }
 
 pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-hecb38ff7561b owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-h01e62b989d49 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
             claim_id TEXT NOT NULL, base_claim_id TEXT NOT NULL,
             grant_subject TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
@@ -112,6 +112,13 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             ON assistant_grant_authority(grant_subject,kind,origin,actor,base_claim_id,store_index DESC);
          CREATE INDEX IF NOT EXISTS assistant_grant_authority_latest_index
             ON assistant_grant_authority(grant_subject,kind,store_index DESC);
+         CREATE INDEX IF NOT EXISTS assistant_grant_authority_management_revoke_index
+            ON assistant_grant_authority(grant_subject,kind,origin,actor,principal,profile,
+                json_extract(record,'$.body.fields.grant_id'),json_extract(record,'$.body.fields.issuer'),store_index DESC);
+         CREATE INDEX IF NOT EXISTS assistant_grant_authority_management_policy_index
+            ON assistant_grant_authority(grant_subject,kind,origin,actor,principal,profile,
+                json_extract(record,'$.body.fields.grant_id'),json_extract(record,'$.body.fields.issuer'),
+                json_extract(record,'$.body.fields.profile'),json_extract(record,'$.body.fields.session_actor'),store_index DESC);
          CREATE INDEX IF NOT EXISTS assistant_grant_authority_credential_index
             ON assistant_grant_authority(credential_hash,store_index DESC) WHERE kind='custom.client.assistant.v1.granted';
          CREATE TABLE IF NOT EXISTS assistant_grant_effective (
@@ -587,16 +594,40 @@ pub fn management_latest(connection: &Connection, subject: &str, kind: &str) -> 
     record.map(decode).transpose()
 }
 
-/// Owner management follows the newest authenticated subject transition, not
-/// attachment progress for this base. Ambiguous identities fail closed instead
-/// of treating an unattached revocation or policy as absent.
+pub const MANAGEMENT_REVOKE_QUERY: &str = "SELECT record FROM assistant_grant_authority
+    INDEXED BY assistant_grant_authority_management_revoke_index
+    WHERE grant_subject=?1 AND kind=?2 AND origin=?3 AND actor=?4 AND principal=?5 AND profile=?6
+      AND json_extract(record,'$.body.fields.grant_id') IS ?7
+      AND json_extract(record,'$.body.fields.issuer') IS ?8
+    ORDER BY store_index DESC LIMIT 1";
+pub const MANAGEMENT_POLICY_QUERY: &str = "SELECT record FROM assistant_grant_authority
+    INDEXED BY assistant_grant_authority_management_policy_index
+    WHERE grant_subject=?1 AND kind=?2 AND origin=?3 AND actor=?4 AND principal=?5 AND profile=?6
+      AND json_extract(record,'$.body.fields.grant_id') IS ?7
+      AND json_extract(record,'$.body.fields.issuer') IS ?8
+      AND json_extract(record,'$.body.fields.profile') IS ?9
+      AND json_extract(record,'$.body.fields.session_actor') IS ?10
+    ORDER BY store_index DESC LIMIT 1";
+/// Owner management selects one applicable authenticated transition independently
+/// of reverse attachment. Every immutable identity component precedes ordering
+/// in the index, so foreign or unrelated history never becomes a scanned prefix.
 pub fn management_transition(connection: &Connection, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
-    let transition = management_latest(connection,&granted.subject,kind)?;
-    if transition.as_ref().is_some_and(|claim| !transition_valid(granted,claim)) {
-        return Err(FractalError::new("assistant-grant-subject-not-ready",
-            "owner management transition identity does not match the current grant"));
-    }
-    Ok(transition)
+    let fields = &granted.body["fields"];
+    let record: Option<String> = if kind==REVOKED {
+        connection.query_row(/* sqlite-large-value: allow-for-now lv-h0acc69f486f8 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ MANAGEMENT_REVOKE_QUERY,
+            params![granted.subject,kind,granted.origin,granted.actor,principal(fields),profile(fields),
+                fields["grant_id"].as_str(),fields["issuer"].as_str()],
+            |row| row.get(0)).optional()
+    } else if kind==POLICY {
+        connection.query_row(/* sqlite-large-value: allow-for-now lv-ha81fbb31a83b owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ MANAGEMENT_POLICY_QUERY,
+            params![granted.subject,kind,granted.origin,granted.actor,principal(fields),profile(fields),
+                fields["grant_id"].as_str(),fields["issuer"].as_str(),
+                fields["profile"].as_str(),fields["session_actor"].as_str()],
+            |row| row.get(0)).optional()
+    } else {
+        return Err(FractalError::new("invalid-input","unsupported owner management transition kind"));
+    }.map_err(internal)?;
+    record.map(decode).transpose()
 }
 pub const CANDIDATES_QUERY: &str = "SELECT grant_record FROM assistant_grant_effective
     WHERE ?3 IS NOT NULL AND principal=?1 AND owner=?2 AND revoked=0 AND expires_at>?3

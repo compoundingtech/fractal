@@ -263,6 +263,106 @@ fn owner_management_preserves_transitions_before_a_new_unattached_base() {
 }
 
 #[test]
+fn owner_management_ignores_transitions_for_an_older_local_identity() {
+    for kind in [POLICY, REVOKED] {
+        for changed_profile in [false, true] {
+            let store = node("owner-identity-order", None);
+            let first = append(&store, SUBJECT, GRANTED, fields());
+            drain_authority(&store);
+            let transition = append(&store, SUBJECT, kind, fields());
+            let mut next = fields();
+            if changed_profile {
+                next["profile"] = json!("service");
+            } else {
+                next["principal"] = json!("assistant/mcp");
+                next["session_actor"] = json!("assistant/mcp/session/assistant-grant/0123456789abcdef01234567");
+            }
+            let second = append(&store, SUBJECT, GRANTED, next.clone());
+            let connection = store.readers.get();
+            assert_eq!(authority::management_latest(&connection, SUBJECT, GRANTED)
+                .unwrap().unwrap().id, second.id);
+            assert_eq!(authority::management_transition(&connection, &first, kind)
+                .unwrap().unwrap().id, transition.id);
+            assert!(authority::management_transition(&connection, &second, kind).unwrap().is_none());
+            drop(connection);
+            let applicable = append(&store, SUBJECT, kind, next);
+            assert_eq!(authority::management_transition(&store.readers.get(), &second, kind)
+                .unwrap().unwrap().id, applicable.id);
+        }
+    }
+}
+
+fn owner_management_seek_cost(store: &Store, base: &ClaimRecord, kind: &str) -> (String, i32) {
+    let connection = store.readers.get();
+    let fields = &base.body["fields"];
+    let query = if kind == POLICY { authority::MANAGEMENT_POLICY_QUERY }
+        else { authority::MANAGEMENT_REVOKE_QUERY };
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd01abd6d9fce owner=smallclaims::store::assistant_grant_attachment_tests TODO=trace-statement-and-value-representation */ query).unwrap();
+    let record: String = if kind == POLICY {
+        statement.query_row(/* sqlite-large-value: allow-for-now lv-h556a1cd4fce4 owner=smallclaims::store::assistant_grant_attachment_tests TODO=trace-statement-and-value-representation */ params![base.subject, kind, base.origin, base.actor,
+            authority::principal(fields), fields["profile"].as_str(),
+            fields["grant_id"].as_str(), fields["issuer"].as_str(),
+            fields["profile"].as_str(), fields["session_actor"].as_str()], |row| row.get(0)).unwrap()
+    } else {
+        statement.query_row(/* sqlite-large-value: allow-for-now lv-h763f36835f8e owner=smallclaims::store::assistant_grant_attachment_tests TODO=trace-statement-and-value-representation */ params![base.subject, kind, base.origin, base.actor,
+            authority::principal(fields), fields["profile"].as_str(),
+            fields["grant_id"].as_str(), fields["issuer"].as_str()], |row| row.get(0)).unwrap()
+    };
+    let record: ClaimRecord = serde_json::from_str(&record).unwrap();
+    assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0);
+    assert_eq!(statement.get_status(StatementStatus::Sort), 0);
+    (record.id, statement.get_status(StatementStatus::VmStep))
+}
+
+#[test]
+fn owner_management_excludes_authenticated_foreign_repaired_history_with_bounded_seeks() {
+    let (remote, key) = source();
+    let local = node("local-owner", Some(key.public()));
+    let mut malformed = fields();
+    malformed["expires_at_unix_ms"] = Value::Null;
+    let foreign_base = append(&remote, SUBJECT, GRANTED, malformed);
+    receive(&local, &export(&remote, &local));
+    assert!(!authority::contains(&local.readers.get(), &foreign_base.id).unwrap());
+    let base = append(&local, SUBJECT, GRANTED, fields());
+    drain_authority(&local);
+    let policy = append(&local, SUBJECT, POLICY, fields());
+    let revoke = append(&local, SUBJECT, REVOKED, fields());
+    drain_authority(&local);
+    let before_policy = owner_management_seek_cost(&local, &base, POLICY);
+    let before_revoke = owner_management_seek_cost(&local, &base, REVOKED);
+    assert_eq!(before_policy.0, policy.id);
+    assert_eq!(before_revoke.0, revoke.id);
+    for revision in 0..65 {
+        let mut changed = fields();
+        changed["policy_revision"] = json!(revision);
+        append(&remote, SUBJECT, POLICY, changed.clone());
+        append(&remote, SUBJECT, REVOKED, changed);
+    }
+    receive(&local, &export(&remote, &local));
+    let connection = local.readers.get();
+    assert!(authority::contains(&connection, &foreign_base.id).unwrap(),
+        "authenticated foreign policy must repair the older malformed base");
+    assert_eq!(authority::management_latest(&connection, SUBJECT, GRANTED)
+        .unwrap().unwrap().id, base.id);
+    for (kind, expected) in [(POLICY, &policy), (REVOKED, &revoke)] {
+        assert_eq!(authority::management_transition(&connection, &base, kind)
+            .unwrap().unwrap().id, expected.id);
+    }
+    drop(connection);
+    assert_eq!(owner_management_seek_cost(&local, &base, POLICY), before_policy,
+        "foreign policies must not add VM work to the indexed seek");
+    assert_eq!(owner_management_seek_cost(&local, &base, REVOKED), before_revoke,
+        "foreign revocations must not add VM work to the indexed seek");
+    // All three mutation routes consult these same reads. New owner-authored
+    // writes remain available despite the foreign member's subject collision.
+    for kind in [POLICY, REVOKED] {
+        let current = append(&local, SUBJECT, kind, fields());
+        assert_eq!(authority::management_transition(&local.readers.get(), &base, kind)
+            .unwrap().unwrap().id, current.id);
+    }
+}
+
+#[test]
 fn verified_attachment_zero_duration_is_one_unit_and_finishes_in_both_directions() {
     for bases_first in [true, false] {
         attachment_budget_product(true, bases_first, Duration::ZERO);
