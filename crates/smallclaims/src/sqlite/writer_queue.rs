@@ -81,6 +81,8 @@ impl BackgroundQueue {
 pub(super) struct BackgroundAdmission {
     pub queue: std::sync::OnceLock<Arc<BackgroundQueue>>,
     pub closed: AtomicBool,
+    /// Foreground jobs admitted but not dispatched, including a buffered fence or loan.
+    pub foreground_pending: AtomicU64,
 }
 
 pub(super) struct Admission {
@@ -160,6 +162,7 @@ impl Admission {
                             self.foreground_turns = 0;
                         }
                     }
+                    self.lifetime.foreground_pending.fetch_sub(1, Ordering::AcqRel);
                     return Some(job);
                 }
             }

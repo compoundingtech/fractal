@@ -71,6 +71,50 @@ fn foreground_fifo_overtakes_earlier_background_without_preempting_holder() {
 }
 
 #[test]
+fn foreground_waiting_observes_only_queued_foreground_work() {
+    let writer = writer();
+    let held = writer.write_background();
+    assert!(!writer.foreground_waiting(), "the active background loan is not foreground");
+    let back = background(&writer);
+    assert!(!writer.foreground_waiting(), "queued background work is not foreground");
+    let front = foreground(&writer);
+    assert!(writer.foreground_waiting(), "enqueue is visible before the holder releases");
+    drop(held);
+    let connection = front.acquire();
+    assert!(!writer.foreground_waiting(), "an active foreground loan is no longer waiting");
+    front.release(connection);
+    back.release(back.acquire());
+}
+
+#[test]
+fn foreground_waiting_clears_every_job_in_a_group_commit() {
+    let writer = writer();
+    let held = writer.write_background();
+    let mut answers = Vec::new();
+    for _ in 0..2 {
+        let (done, answer) = mpsc::sync_channel(1);
+        writer.send(WriterJob::Batched {
+            run: Box::new(|_| true),
+            profile: None,
+            wait: None,
+            holder: crate::windows::holds::Holder::current(),
+            done,
+            enqueued: Instant::now(),
+        });
+        answers.push(answer);
+    }
+    let back = background(&writer);
+    assert!(writer.foreground_waiting());
+    drop(held);
+    for answer in answers {
+        answer.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    }
+    let connection = back.acquire();
+    assert!(!writer.foreground_waiting(), "batch intake must retire every foreground job");
+    back.release(connection);
+}
+
+#[test]
 fn background_progress_is_bounded_by_foreground_turns_under_continuous_backlog() {
     let writer = writer();
     let held = writer.write();
@@ -192,6 +236,7 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
     let WriterJob::Lend { lent, returned, holder, enqueued, origin } = job else {
         unreachable!()
     };
+    lifetime.foreground_pending.fetch_add(1, Ordering::AcqRel);
     sent.send(WriterJob::FenceLend {
         through,
         lent,
@@ -212,10 +257,13 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
     assert!(old_loan.lent.try_recv().is_ok());
     assert!(fence.lent.try_recv().is_err());
     assert!(later_loan.lent.try_recv().is_err());
+    assert_eq!(lifetime.foreground_pending.load(Ordering::Acquire), 1,
+        "a fence buffered behind its earlier background loan remains pending");
     assert!(matches!(
         admission.next(),
         Some(WriterJob::FenceLend { .. })
     ));
+    assert_eq!(lifetime.foreground_pending.load(Ordering::Acquire), 0);
     assert!(matches!(admission.next(), Some(WriterJob::Lend { .. })));
 }
 
@@ -263,6 +311,7 @@ fn foreground_discovery_work_is_independent_of_background_backlog() {
             .unwrap();
         let (front, front_loan) = loan();
         sent.send(front).unwrap();
+        lifetime.foreground_pending.fetch_add(1, Ordering::AcqRel);
         let mut admission = Admission::new(received, lifetime);
         let WriterJob::Lend { lent, .. } = admission.next().unwrap() else {
             unreachable!()
