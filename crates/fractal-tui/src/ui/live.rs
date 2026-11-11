@@ -1628,10 +1628,10 @@ pub fn run(context: Context) -> Result<()> {
                                     },
                                 ).await
                             }).await;
-                            if let Err(reason) = &attached {
-                                if let Some(trace) = &trace {
-                                    trace.finish(if reason == "attach setup timed out" { "outer-deadline" } else { "setup-failed" });
-                                }
+                            if let Err(reason) = &attached
+                                && let Some(trace) = &trace
+                            {
+                                trace.finish(if reason == "attach setup timed out" { "outer-deadline" } else { "setup-failed" });
                             }
                             // Its tab closed while it waited: nobody is left to hear the outcome.
                             if !wanted.load(Ordering::Relaxed) {
@@ -5210,7 +5210,8 @@ async fn attach_known_then_direct(
         // Once selected, keep this incarnation through every route failure. Rediscovery after
         // an error could silently attach a process that restarted in the meantime.
         return attach_terminal(
-            client, agent, (name, incarnation), &terminal, owner, None, fallback, trace,
+            client, agent, (name, incarnation), &terminal,
+            AttachTerminalOptions { owner, expected: None, fallback, trace },
         ).await;
     }
     attach_direct(client, agent, runtime_ids, None, owner, fallback, trace).await
@@ -5280,10 +5281,7 @@ async fn attach_direct(
             subject,
             (name, incarnation),
             &terminal,
-            owner.as_deref(),
-            expected,
-            fallback,
-            trace,
+            AttachTerminalOptions { owner: owner.as_deref(), expected, fallback, trace },
         )
         .await
         {
@@ -5295,6 +5293,13 @@ async fn attach_direct(
     Err(reason)
 }
 
+struct AttachTerminalOptions<'a> {
+    owner: Option<&'a str>,
+    expected: Option<&'a str>,
+    fallback: bool,
+    trace: Option<&'a super::attach_trace::Trace>,
+}
+
 /// One terminal's PTY session at one incarnation, and its stream: the local socket for a terminal
 /// on this host, Fabric for one another fleet host owns. The paired-device gateway carries the
 /// bytes only for a device with no daemon of its own.
@@ -5303,11 +5308,9 @@ async fn attach_terminal(
     subject: &str,
     identity: (String, String),
     terminal: &str,
-    owner: Option<&str>,
-    expected: Option<&str>,
-    fallback: bool,
-    trace: Option<&super::attach_trace::Trace>,
+    options: AttachTerminalOptions<'_>,
 ) -> Result<Direct, String> {
+    let AttachTerminalOptions { owner, expected, fallback, trace } = options;
     let (name, incarnation) = identity;
     let opened = attach::traced_phase(trace, "direct open", attach::DIRECT, direct::open(
         client,

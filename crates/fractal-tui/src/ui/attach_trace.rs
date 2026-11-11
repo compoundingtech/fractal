@@ -97,19 +97,19 @@ impl Inner {
         let event = serde_json::json!({"service":"fractal-tui", "level":level, "attempt_id":self.attempt.to_string(), "agent":self.agent, "phase":phase, "phase_reached":state.last_phase, "outcome":outcome, "at_unix_ms":at_unix_ms, "elapsed_ms":self.started.elapsed().as_millis(), "phase_elapsed_ms":duration});
         #[cfg(test)]
         if let Some(events) = &state.captured { events.lock().unwrap().push(event.clone()); }
-        if let Some(file) = state.sink.as_mut() {
-            if let Ok(mut bytes) = serde_json::to_vec(&event) {
-                bytes.push(b'\n');
-                // Serialize append + size check without waiting behind another process:
-                // diagnostics must not introduce another attach stall.
-                // SAFETY: flock borrows the live file descriptor and retains no pointers.
-                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                    if file.metadata().is_ok_and(|metadata| metadata.len().saturating_add(bytes.len() as u64) <= MAX_BYTES) {
-                        let _ = file.write_all(&bytes);
-                    }
-                    // SAFETY: the descriptor still belongs to this live File.
-                    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        if let Some(file) = state.sink.as_mut()
+            && let Ok(mut bytes) = serde_json::to_vec(&event)
+        {
+            bytes.push(b'\n');
+            // Serialize append + size check without waiting behind another process:
+            // diagnostics must not introduce another attach stall.
+            // SAFETY: flock borrows the live file descriptor and retains no pointers.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                if file.metadata().is_ok_and(|metadata| metadata.len().saturating_add(bytes.len() as u64) <= MAX_BYTES) {
+                    let _ = file.write_all(&bytes);
                 }
+                // SAFETY: the descriptor still belongs to this live File.
+                let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
             }
         }
     }
