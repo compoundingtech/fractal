@@ -30,6 +30,9 @@ pub fn keeper_name(host: &str) -> String {
 #[serde(tag = "reason", rename_all = "kebab-case")]
 pub enum LaunchRefusal {
     MissingHeavySlice,
+    MissingDeadline,
+    MissingMaxHoldCeiling,
+    DeadlineExpired,
     InvalidOutcomePath,
     CgroupCollision,
     KeeperUnavailable,

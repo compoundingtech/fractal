@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Collapse the replacement-keeper PID fixture condition without changing its polling behavior.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema or shared writer changes."},
+  "rules": {"status": "none", "detail": "INACTIVE: no production caller or activation before 4c-2 and explicit activation. Declared deadline and configured max-hold ceiling are required before J; no policy defaults."},
+  "compatibility": {"status": "changed", "detail": "Concrete launches own a running keeper watcher. Holder pidfd wait observes watcher failure, and every released wait error retires J via kill/empty/sample/removal while preserving usage with typed uncertainty. B6 receives explicit --max-hold SECONDS, recomputed from whole seconds remaining to the declared deadline and capped by configuration before gated spawn."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Ignored real-kernel keeper-death fixture documents the isolated gsr-pilot command with explicit approved cgroup root, slice, plan, test timeout and ceiling. It uses a raw gated holder, not gate-slot proof, and tears down only its unique fixture scope. Cargo and native execution not run."},
+  "recovery": {"status": "changed", "detail": "Missing/expired deadline and missing ceiling refuse before J. Watcher errors never permit a rerun or discard a confirmed retirement sample. B6 max-hold bounds execution duration after command launch, not queue time; absolute deadline supervision remains an activation/cancellation responsibility."}
+}
