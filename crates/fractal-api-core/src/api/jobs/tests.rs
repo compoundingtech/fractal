@@ -119,20 +119,87 @@ async fn real_router_injects_configuration_and_preserves_disabled_reason() {
 async fn concurrent_submissions_resolve_one_durable_receipt() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
+    let request = decode(input("race"), &config().unwrap().0).unwrap().request;
+    let identity = IdempotencyKey {
+        requester: "person/a".into(), key: "race".into(), request_digest: request.digest(),
+    };
+    let id = projection::job_id(&identity.requester, &identity.key);
+    let declaration = read(&state, |tx| {
+        let membership = smallclaims::store::fleet_membership_tx(tx)?;
+        let MemberState::Current(member) = membership.state("node") else { unreachable!() };
+        Ok(member.admitted_claim.clone())
+    }).unwrap();
+    let record = JobRecord::Submitted {
+        binding: JobHostBinding {
+            job_id: id.clone(), execution_host: "node".into(), authority_declaration: declaration,
+        },
+        identity: identity.clone(), request,
+    };
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let launch = || {
-        let state = state.clone();
-        let barrier = barrier.clone();
-        let runtime = tokio::runtime::Handle::current();
+        let (state, barrier, identity, id, record) =
+            (state.clone(), barrier.clone(), identity.clone(), id.clone(), record.clone());
         tokio::task::spawn_blocking(move || {
+            let precheck = receipt(&state, &identity);
+            // Reach the rendezvous even when a precheck fails, so neither worker is stranded.
             barrier.wait();
-            runtime.block_on(submit(State(state), session("person/a"), config(), Ok(Json(input("race")))))
-                .unwrap().0["job"]["id"].clone()
+            assert!(matches!(precheck.unwrap(), IdempotencyDecision::NewJob));
+            record_submission(&state, &identity, &id, record).unwrap()
         })
     };
     let (first, second) = tokio::join!(launch(), launch());
-    let first = first.unwrap();
-    assert_eq!(first, second.unwrap());
-    let history = read(&state, |tx| projection::history_by_job(tx, first.as_str().unwrap())).unwrap();
-    assert_eq!(history.len(), 1);
+    // Exactly one worker had to recover from stale-subject: this proves CAS contention,
+    // unlike a barrier before submit, where one worker can observe the other's receipt.
+    assert_ne!(first.unwrap(), second.unwrap());
+    assert_eq!(read(&state, |tx| projection::history_by_job(tx, &id)).unwrap().len(), 1);
+    assert!(matches!(receipt(&state, &identity).unwrap(), IdempotencyDecision::ExistingJob(job)
+        if job == id));
+}
+
+#[tokio::test]
+async fn requester_private_routes_refuse_forged_or_unresolved_bound_callers() {
+    use tower::ServiceExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = super::super::router(state.clone()).layer(config().unwrap())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (method, path) in [
+        ("GET", "/v1/client/jobs"),
+        ("GET", "/v1/client/jobs/job/fixture"),
+        ("POST", "/v1/client/jobs"),
+    ] {
+        let request = Request::builder().method(method).uri(path)
+            .header(client_v0::LOCAL_PERSON_HEADER, "person/other")
+            .header("content-type", "application/json")
+            .extension(BoundAgent("agent/own".into()))
+            .body(Body::from(input("forged").to_string())).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert!(!response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["code"], "foreign-agent-actor");
+    }
+    for method in ["GET", "POST"] {
+        let request = Request::builder().method(method).uri("/v1/client/jobs")
+            .extension(HarnessAncestry::Unavailable).body(Body::empty()).unwrap();
+        assert!(!app.clone().oneshot(request).await.unwrap().status().is_success());
+    }
+}
+
+#[tokio::test]
+async fn pending_subject_is_a_typed_stale_error_through_the_router() {
+    use tower::ServiceExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = super::super::tests_shared::state(root.path());
+    let path = root.path().join("graph.db");
+    state.store = Arc::new(Store::open(&path, "node").unwrap());
+    // A separate connection models a repair commit whose projection is still pending.
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute("INSERT INTO job_pending(subject) VALUES('job/pending')", []).unwrap();
+    let app = super::super::router(state).layer(config().unwrap());
+    let request = Request::builder().uri("/v1/client/jobs")
+        .header(client_v0::LOCAL_PERSON_HEADER, "person/a").body(Body::empty()).unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["code"], "jobs-projection-stale");
 }

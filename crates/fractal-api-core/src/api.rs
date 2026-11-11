@@ -8346,6 +8346,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
     let path = request.uri().path();
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
         || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || jobs::requester_scoped_path(path)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
         || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {

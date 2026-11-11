@@ -6,6 +6,11 @@ use fractal_jobs::{JobPriority, host_authority::JobHostBinding, identity::*};
 use fractal_store::store::jobs::{self as projection, JobRecord, JobRow, JobsProjectionStale};
 use smallclaims::fleet::MemberState;
 
+/// Every jobs method is requester-private, including reads and future intent routes.
+pub fn requester_scoped_path(path: &str) -> bool {
+    path == "/v1/client/jobs" || path.starts_with("/v1/client/jobs/")
+}
+
 fn refused(code: &'static str, status: StatusCode) -> ApiError {
     ApiError { status, code: code.into(), message: code.into(), details: Box::default() }
 }
@@ -102,21 +107,39 @@ pub async fn submit(
         }))
     })??;
     let record = JobRecord::Submitted { binding, identity: identity.clone(), request: submission.request };
-    let append = state.store.append_claim(&ClaimInput {
-        subject: id.clone(), kind: projection::KIND.into(), actor: Some(session.actor.clone()),
-        fields: BTreeMap::from([("record".into(), serde_json::to_value(record).map_err(ApiError::internal)?)]),
-        evidence: vec![], expected_subject: Some(None), idempotency_key: None,
-    });
-    if let Err(error) = append {
-        // The absent-subject CAS serializes racing submissions through the existing writer.
-        // Resolve the winner's durable receipt, never mint another key or job ID.
-        if error.code != "stale-subject" { return Err(ApiError::bad(error)); }
-        match receipt(&state, &identity)? {
-            IdempotencyDecision::ExistingJob(_) => {}
-            IdempotencyDecision::NewJob => return Err(ApiError::bad(error)),
-        }
-    }
+    record_submission(&state, &identity, &id, record)?;
     Ok(response(own_job(&state, &session.actor, &id)?))
+}
+
+/// Returns whether this call appended, or resolved the winner of an absent-subject CAS.
+fn record_submission(
+    state: &AppState,
+    identity: &IdempotencyKey,
+    id: &str,
+    record: JobRecord,
+) -> Result<bool, ApiError> {
+    let append = state.store.append_claim(&ClaimInput {
+        subject: id.into(),
+        kind: projection::KIND.into(),
+        actor: Some(identity.requester.clone()),
+        fields: BTreeMap::from([
+            ("record".into(), serde_json::to_value(record).map_err(ApiError::internal)?),
+        ]),
+        evidence: vec![],
+        expected_subject: Some(None),
+        idempotency_key: None,
+    });
+    match append {
+        Ok(_) => Ok(true),
+        Err(error) if error.code == "stale-subject" => {
+            // Resolve the durable winner, never mint another key or job ID.
+            match receipt(state, identity)? {
+                IdempotencyDecision::ExistingJob(_) => Ok(false),
+                IdempotencyDecision::NewJob => Err(ApiError::bad(error)),
+            }
+        }
+        Err(error) => Err(ApiError::bad(error)),
+    }
 }
 
 pub async fn show(
