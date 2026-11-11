@@ -131,7 +131,10 @@ fn service_late_signature_promotes_grant_policy_and_revocation() {
     assert_eq!(authority::transition(&target.readers.get(), &grant, POLICY).unwrap().unwrap().id, policy.id);
     let revoke = append(&source, SUBJECT, REVOKED, service_fields());
     let exchange = export(&source, &target);
-    receive(&target, &unsigned(&exchange));
+    // Model an older build's already-admitted unsigned history; ordinary keyed
+    // receive correctly holds the unsigned envelope before claim projection.
+    receive_pre_projection_unsigned_history(&target, &exchange);
+    drain_authority(&target);
     assert!(authority::transition(&target.readers.get(), &grant, REVOKED).is_err());
     receive(&target, &signatures(&exchange));
     assert_eq!(authority::transition(&target.readers.get(), &grant, REVOKED).unwrap().unwrap().id, revoke.id);

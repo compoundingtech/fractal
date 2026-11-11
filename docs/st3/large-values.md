@@ -641,6 +641,14 @@ conservative visibility, owner-round fairness and keyed cleanup when values
 move to references. Fixture constants and integer counters do not exempt their
 variable keys, copied grant records or declared indexes from representation review.
 
+`smallclaims::store::assistant_grant_membership_property_tests` owns renewed
+withdrawal sites `lv-haa8b386b739d` and `lv-h80511dab4ee6`. The fixture deletes
+an exact writer/sequence/envelope-hash receipt, or marks it pending, after real
+receive repairs it; the composed execution sink binds the same proof identity.
+The exact-wire and dynamic-source TODOs must preserve immediate authority fencing
+and the independently queued invalidation through reference/chunk conversion.
+This test-only mutation establishes no byte-size or execution-cost guarantee.
+
 ## Incremental observed credit heads
 
 `fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,

@@ -781,7 +781,7 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             "writer_floor": 1_000_000, "mode": "listening"
         }));
         receive_without_authority_maintenance(&target, &export(&anchor, &target));
-        if mutation == "envelope-invalid" {
+        if matches!(mutation, "envelope-invalid" | "envelope-delete") {
             let mut writer = target.connection.write();
             let connection = writer.transaction().unwrap();
             let receipt_state: String = connection.query_row(
@@ -791,18 +791,22 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             ).unwrap();
             assert!(matches!(receipt_state.as_str(), "validated" | "degraded"),
                 "real receive must repair the pending receipt with its still-valid signature");
-            // Backlog validation legitimately restores a pending receipt during
-            // the real admission receive. A valid signature cache may authorize
-            // that validated receipt again; this case instead tests evidence
-            // that remains withdrawn when authority maintenance finally runs.
+            // Backlog validation legitimately restores a pending or deleted
+            // receipt during real admission receive. Renew the same withdrawal
+            // after repair so maintenance still sees withdrawn evidence.
             let queued_before: i64 = connection.query_row(
                 "SELECT COUNT(*) FROM assistant_grant_proof_invalidations
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=''",
                 params![grant.origin,sequence,hash], |row| row.get(0),
             ).unwrap();
-            assert_eq!(connection.execute(
+            let withdrawal = if mutation == "envelope-delete" {
+                /* sqlite-large-value: allow-for-now lv-haa8b386b739d owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelopes WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+            } else {
                 /* sqlite-large-value: allow-for-now lv-h731a7b88489d owner=smallclaims::store::assistant_grant_membership_property_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'
-                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3"
+            };
+            assert_eq!(connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h80511dab4ee6 owner=smallclaims::store::assistant_grant_membership_property_tests TODO=trace-statement-and-value-representation */ withdrawal,
                 params![grant.origin,sequence,hash],
             ).unwrap(), 1);
             let queued_after: i64 = connection.query_row(
