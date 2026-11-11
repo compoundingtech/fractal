@@ -83,6 +83,8 @@ mod tests {
             is_final: true,
             body: fractal_client::TimelineBody::Error(fractal_client::TimelineErrorBody {
                 code: "test".into(), message: "must not be logged".into(), retryable: false,
+                details: Default::default(),
+                blocks: Vec::new(),
             }),
         };
         assert_eq!(newest(&[]), None);
