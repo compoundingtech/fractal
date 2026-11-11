@@ -41,8 +41,8 @@ describe('client-control lifecycle gate', () => {
       expect(() => Wire.decodeUnknownSync(Wire.CollectionFrame, 'strict')(frame)).not.toThrow()
       expect(framesGate.acceptFrame(frame)).toEqual({ accepted: true, decisions: [resourceDecisions[index]] })
     }
-    expect(resourcesGate.enrollmentRevoked()).toBe(true)
-    expect(framesGate.enrollmentRevoked()).toBe(true)
+    expect(resourcesGate.enrollmentRevoked()).toBe(false)
+    expect(framesGate.enrollmentRevoked()).toBe(false)
   })
 
   it('replays every shared trace, including schema-invalid negative resources', () => {
@@ -145,7 +145,7 @@ describe('client-control lifecycle gate', () => {
     expect(gate.acceptResource({ ...started, sequence: 100 })).toBe('ignore-final-grant')
     expect(gate.allows(command())).toBe(false)
     expect(gate.acceptResource(revoked)).toBe('remain-terminal')
-    expect(gate.enrollmentRevoked()).toBe(true)
+    expect(gate.enrollmentRevoked()).toBe(false)
     expect(gate.activeRunId(grant.grant_id)).toBeUndefined()
   })
 
@@ -157,21 +157,59 @@ describe('client-control lifecycle gate', () => {
     expect(gate.allows(command())).toBe(false)
   })
 
-  it('ends only one grant, but verified revocation disables every active grant', () => {
+  it('revokes only the bound grant, leaving independent and later grants allowed', () => {
     const other = { ...grant, grant_id: 'client-control-grant/other' }
-    const gate = makeGate(id => id === grant.grant_id ? grant : id === other.grant_id ? other : undefined)
+    const later = { ...grant, grant_id: 'client-control-grant/later' }
+    const gate = makeGate(id => [grant, other, later].find(candidate => candidate.grant_id === id))
     gate.acceptResource(started)
     gate.acceptResource({ ...started, grant_id: other.grant_id })
-    gate.acceptResource(ended)
+    expect(gate.acceptResource(revoked)).toBe('terminate')
     expect(gate.enrollmentRevoked()).toBe(false)
+    expect(gate.activeRunId(grant.grant_id)).toBeUndefined()
+    expect(gate.allows(command())).toBe(false)
+    expect(gate.acceptResource({ ...started, grant_id: later.grant_id })).toBe('activate')
+    expect(gate.activeRunId(later.grant_id)).toBe(later.run_id)
+    expect(gate.allows(command(later))).toBe(true)
     expect(gate.activeRunId(other.grant_id)).toBe(other.run_id)
     expect(gate.allows(command(other))).toBe(true)
-    expect(gate.acceptResource(revoked)).toBe('remain-terminal')
+  })
+
+  it('requires verified ended state before an enrollment-loss reason disables all grants', () => {
+    const gate = makeGate()
+    expect(gate.acceptResource({ ...started, reason: 'enrollment-revoked' })).toBe('activate')
+    expect(gate.acceptResource({ ...ended, reason: 'enrollment-revoked', device: 'device/wrong' })).toBe('refused-binding')
+    expect(gate.enrollmentRevoked()).toBe(false)
+    expect(gate.allows(command())).toBe(true)
+  })
+
+  it('reconnects with a historical revoked grant beside an independent live grant', () => {
+    const other = { ...grant, grant_id: 'client-control-grant/other' }
+    const live = { ...started, id: 'client-control-grant/other/lifecycle', grant_id: other.grant_id }
+    for (const items of [[revoked, live], [live, revoked]]) {
+      const gate = makeGate(id => id === grant.grant_id ? grant : id === other.grant_id ? other : undefined)
+      expect(gate.acceptFrame({ ...snapshot, items, order: items.map(row => row.id) }).accepted).toBe(true)
+      expect(gate.enrollmentRevoked()).toBe(false)
+      expect(gate.allows(command())).toBe(false)
+      expect(gate.activeRunId(grant.grant_id)).toBeUndefined()
+      expect(gate.allows(command(other))).toBe(true)
+      expect(gate.activeRunId(other.grant_id)).toBe(other.run_id)
+    }
+  })
+
+  it('verified enrollment loss disables every active and later grant, even after a terminal row', () => {
+    const other = { ...grant, grant_id: 'client-control-grant/other' }
+    const later = { ...grant, grant_id: 'client-control-grant/later' }
+    const gate = makeGate(id => [grant, other, later].find(candidate => candidate.grant_id === id))
+    gate.acceptResource(started)
+    gate.acceptResource({ ...started, grant_id: other.grant_id })
+    gate.acceptResource(revoked)
+    expect(gate.acceptResource({ ...ended, reason: 'enrollment-revoked', sequence: 4 })).toBe('remain-terminal')
     expect(gate.enrollmentRevoked()).toBe(true)
-    expect(gate.activeRunId(other.grant_id)).toBeUndefined()
-    expect(gate.allows(command(other))).toBe(false)
-    gate.acceptResource({ ...started, grant_id: 'client-control-grant/unknown' })
-    expect(gate.enrollmentRevoked()).toBe(true)
+    gate.acceptResource({ ...started, grant_id: later.grant_id })
+    for (const binding of [grant, other, later]) {
+      expect(gate.allows(command(binding))).toBe(false)
+      expect(gate.activeRunId(binding.grant_id)).toBeUndefined()
+    }
   })
 
   it.each(['grant_id', 'run_id', 'device', 'session', 'item_id'] as const)('rechecks current authority and embedded grant %s', field => {

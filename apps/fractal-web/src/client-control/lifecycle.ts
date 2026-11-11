@@ -44,7 +44,8 @@ export const createClientControlLifecycle = ({ authority, subscriptionId }: {
 
   const apply = (row: Wire.ClientControlGrantLifecycle): Decision => {
     const previous = records.get(row.grant_id)
-    if (row.state === 'revoked') revoked = true
+    // Grant revocation is local; only verified enrollment loss disables the enrollment.
+    if (row.state === 'ended' && row.reason === 'enrollment-revoked') revoked = true
     if (previous?.terminal === true) return row.state === 'started' ? 'ignore-final-grant' : 'remain-terminal'
     if (row.state === 'started') {
       if (previous !== undefined && row.sequence <= previous.row.sequence) return 'ignore-stale-started'
