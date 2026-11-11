@@ -59,7 +59,7 @@ fn t1_generated_owned_set_arrivals_match_full_replay_effective_held_view() {
                 // Equal sequences across branches exercise conflict holds; unequal
                 // sequences exercise highest-source selection and losing-only members.
                 let sequence = 10 + revision * 10 + next(&mut random) % 2;
-                let input = bundle(&format!("branch-{index}-{revision}-{seed}"), next(&mut random) % 2 == 0);
+                let input = bundle(&format!("branch-{index}-{revision}-{seed}"), next(&mut random).is_multiple_of(2));
                 let mut opts = options(branch, sequence);
                 let preview = branch.owned_set_preview(&input, &opts).unwrap();
                 opts.expected_subjects = preview.expected_subjects;
