@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Qualify runtime receipt fixture paths to avoid ambiguity with store idempotency receipts.",
+  "replay": {"status": "none", "detail": "No replay changes; an empty reservation is not a completed outcome or permission to rerun."},
+  "schema": {"status": "none", "detail": "No persistent schema or shared writer changes."},
+  "rules": {"status": "none", "detail": "INACTIVE before 4c-2 and explicit activation. Receipt directory comes from configuration with no default. Intent is durably recorded before directory/file side effects and before J."},
+  "compatibility": {"status": "changed", "detail": "Outcome names use the same job hash and generation as cgroup_name. The runtime creates or validates a caller-owned mode-0700 receipt directory and reserves its mode-0600 file with O_EXCL. Component-wise descriptor-relative O_NOFOLLOW traversal rejects symlink ancestors; existing destinations, insecure directories and mismatched recorded paths are refused. B6 atomically replaces the reservation with its outcome."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Pilot cap ceilings remain explicit caller JobScopePlan inputs. Pilot configuration supplies MemoryHigh 14G, MemoryMax 16G and swap 0; tasks, deadline and max-hold ceiling are also configured. Gate-slot verify independently refuses loose caps."},
+  "recovery": {"status": "none", "detail": "Existing generation fencing and receipt identity checks remain. Tests cover exclusive reservation, naming, absent configuration, symlink ancestors/destination, directory permissions and intent-before-J ordering. Cargo and native execution not run."}
+}

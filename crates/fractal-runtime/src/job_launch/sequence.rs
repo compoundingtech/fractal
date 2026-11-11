@@ -2,7 +2,6 @@ use super::{ExitUsage, JobLaunch, JobLaunchEffects, JobLaunchResult, LaunchJourn
 use crate::ExecRuntime;
 use anyhow::{Result, ensure};
 use fractal_jobs::{launch::{LaunchRefusal, require_caps}, recovery::Receipt};
-use std::path::Path;
 
 /// Release may have executed the payload. Cleanup succeeded, but the intent is
 /// unresolved and must never be refused or retried. Retain its final counters.
@@ -38,9 +37,7 @@ impl ExecRuntime {
                 LaunchRefusal::MissingHeavySlice);
             ensure!(!request.launcher.is_empty(), LaunchRefusal::Preparation);
             super::driver::max_hold_seconds(request, std::time::SystemTime::now())?;
-            ensure!(Path::new(&request.intent.outcome_file).is_absolute(),
-                LaunchRefusal::InvalidOutcomePath);
-            ensure!(!Path::new(&request.intent.outcome_file).exists(), LaunchRefusal::Preparation);
+            super::receipts::reserve(request.receipt_directory, request.job_id, request.intent)?;
             let directory = effects.create_group(request)?;
             let hierarchy = effects.hierarchy_path(&directory)?;
             let readback = effects.apply(&directory, request.plan)?;
