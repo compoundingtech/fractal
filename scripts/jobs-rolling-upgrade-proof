@@ -33,6 +33,11 @@ import os
 import sys
 
 output = os.path.realpath(sys.argv[1])
+if ":" in output:
+    print("The canonical --output-dir must not contain ':' because the private "
+          "pty directory must remain one PATH entry. Choose a fresh path without ':'.",
+          file=sys.stderr)
+    raise SystemExit(2)
 for node in ("a", "b"):
     for name in ("st3.sock", "st3-client.sock"):
         suffix = f"/fleet.XXXXXXXX/{node}/run/{name}"

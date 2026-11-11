@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reject proof output paths containing a PATH separator before allocating the keeper.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "Daemon account-shell selection and executable checks remain unchanged."},
+  "compatibility": {"status": "none", "detail": "No runtime or wire changes."},
+  "downtime": {"status": "none", "detail": "Manual proof tooling only."},
+  "manual": {"status": "changed", "detail": "The early preflight rejects a colon in the canonical output directory with an explicit diagnostic. Shell quoting cannot preserve a colon-containing private pty directory as one PATH entry. Choose a fresh output path without colons."},
+  "recovery": {"status": "none", "detail": "The rejection precedes keeper allocation; existing cleanup is unchanged."}
+}
