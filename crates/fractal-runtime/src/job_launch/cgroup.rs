@@ -3,7 +3,7 @@ use crate::job_scope;
 use fractal_jobs::launch::CountersUnavailable;
 use anyhow::{Result, ensure};
 use fractal_jobs::launch::LaunchRefusal;
-use std::{fs, io::{Read, Seek}, os::{fd::AsRawFd, unix::fs::MetadataExt}, path::Path};
+use std::{fs, io::{Read, Seek}, os::{fd::AsRawFd, unix::fs::MetadataExt}, path::Path, time::{Duration, Instant}};
 pub use fractal_jobs::recovery::RecoveryUsage as ExitUsage;
 pub fn verify_dedicated(directory: &Path, pid: Option<u32>) -> Result<()> {
     validate_path(directory)?;
@@ -33,21 +33,61 @@ fn remove_empty_tree(directory: &Path) -> Result<()> {
 }
 /// Kill a caller-owned J and positively wait for populated=0 before removal.
 pub fn kill_and_wait_empty(directory: &Path) -> Result<()> {
-    let mut events = fs::File::open(directory.join("cgroup.events"))?;
-    fs::write(directory.join("cgroup.kill"), "1")?;
+    kill_and_wait_empty_until(directory, None).map_err(|error| error.source)
+}
+
+struct RetirementError {
+    reason: fractal_jobs::cancel::StopUncertain,
+    source: anyhow::Error,
+}
+
+fn retirement_error(
+    reason: fractal_jobs::cancel::StopUncertain, source: impl Into<anyhow::Error>,
+) -> RetirementError {
+    RetirementError { reason, source: source.into() }
+}
+
+fn kill_and_wait_empty_until(directory: &Path, deadline: Option<Instant>) -> Result<(), RetirementError> {
+    use fractal_jobs::cancel::StopUncertain::{EmptyTimeout, KillFailed, PopulationReadFailed};
+    let mut events = fs::File::open(directory.join("cgroup.events"))
+        .map_err(|error| retirement_error(PopulationReadFailed, error))?;
+    fs::write(directory.join("cgroup.kill"), "1")
+        .map_err(|error| retirement_error(KillFailed, error))?;
+    let mut contents = String::new();
     loop {
-        events.rewind()?;
-        let mut contents = String::new();
-        events.read_to_string(&mut contents)?;
+        events.rewind().map_err(|error| retirement_error(PopulationReadFailed, error))?;
+        contents.clear();
+        events.read_to_string(&mut contents)
+            .map_err(|error| retirement_error(PopulationReadFailed, error))?;
         if contents.lines().any(|line| line == "populated 0") { return Ok(()); }
-        ensure!(contents.lines().any(|line| line == "populated 1"), "J population is unknown");
+        if !contents.lines().any(|line| line == "populated 1") {
+            return Err(retirement_error(PopulationReadFailed, anyhow::anyhow!("J population is unknown")));
+        }
+        let timeout = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(retirement_error(EmptyTimeout, anyhow::anyhow!("J remained populated")));
+                }
+                poll_milliseconds(remaining)
+            }
+            None => -1,
+        };
         let mut descriptor = libc::pollfd { fd: events.as_raw_fd(), events: libc::POLLPRI | libc::POLLERR, revents: 0 };
-        let result = unsafe { libc::poll(&mut descriptor, 1, -1) };
-        if result < 0 {
+        // SAFETY: descriptor is valid writable storage for one pollfd.
+        if unsafe { libc::poll(&mut descriptor, 1, timeout) } < 0 {
             let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::Interrupted { return Err(error.into()); }
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(retirement_error(PopulationReadFailed, error));
+            }
         }
     }
+}
+
+/// Round up for poll's millisecond API; long durations are observed in chunks.
+pub(crate) fn poll_milliseconds(duration: Duration) -> i32 {
+    i32::try_from(duration.as_millis() + u128::from(duration.subsec_nanos() % 1_000_000 != 0))
+        .unwrap_or(i32::MAX)
 }
 
 /// A vanished J is evidence of unavailable counters, never zero and never a rerun.
@@ -81,9 +121,27 @@ fn sample_presence(
 /// The sole J retirement path: kill, populated=0, sample, then remove.
 /// A vanished J reports unavailable counters without inventing zero usage.
 pub fn stop_and_sample(directory: &Path, host: &str) -> Result<ExitUsage> {
-    retirement_step(directory, kill_and_wait_empty(directory))?;
+    retire(directory, host, None).map_err(|error| error.source)
+}
+
+/// INACTIVE bounded cancellation variant of the same retirement path.
+/// The caller supplies the entire escalation budget; no policy default applies.
+pub fn stop_and_sample_timed(
+    directory: &Path, host: &str, escalation: Duration,
+) -> Result<ExitUsage, fractal_jobs::cancel::StopUncertain> {
+    let deadline = Instant::now().checked_add(escalation)
+        .ok_or(fractal_jobs::cancel::StopUncertain::EmptyTimeout)?;
+    retire(directory, host, Some(deadline)).map_err(|error| error.reason)
+}
+
+fn retire(directory: &Path, host: &str, deadline: Option<Instant>) -> Result<ExitUsage, RetirementError> {
+    if let Err(error) = kill_and_wait_empty_until(directory, deadline) {
+        retirement_step(directory, Err(error.source))
+            .map_err(|source| retirement_error(error.reason, source))?;
+    }
     let usage = sample_exit(directory, host);
     finish_retirement(directory, usage)
+        .map_err(|source| retirement_error(fractal_jobs::cancel::StopUncertain::RemovalFailed, source))
 }
 
 fn finish_retirement(directory: &Path, usage: ExitUsage) -> Result<ExitUsage> {
@@ -151,5 +209,39 @@ mod retirement_tests {
         fs::write(&missing, "not a cgroup").unwrap();
         assert!(matches!(sample_exit(&missing, "fixture"),
             ExitUsage::CountersUnavailable(CountersUnavailable::ReadFailed)));
+    }
+
+    #[test]
+    fn timed_retirement_requires_empty_and_successful_removal() {
+        use fractal_jobs::cancel::StopUncertain;
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("cgroup.events"), "populated 1\n").unwrap();
+        assert_eq!(stop_and_sample_timed(root.path(), "fixture", Duration::ZERO),
+            Err(StopUncertain::EmptyTimeout));
+        assert!(root.path().exists());
+        assert_eq!(fs::read_to_string(root.path().join("cgroup.kill")).unwrap(), "1");
+        fs::write(root.path().join("cgroup.events"), "populated 0\n").unwrap();
+        // Ordinary fixture files cannot be rmdir'd like cgroup virtual files.
+        // This deliberately exercises failed removal, never false success.
+        assert_eq!(stop_and_sample_timed(root.path(), "fixture", Duration::ZERO),
+            Err(StopUncertain::RemovalFailed));
+    }
+
+    #[test]
+    fn timed_retirement_types_vanished_population_and_kill_errors() {
+        use fractal_jobs::cancel::StopUncertain;
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        assert!(matches!(stop_and_sample_timed(&missing, "fixture", Duration::ZERO).unwrap(),
+            ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished)));
+        assert_eq!(stop_and_sample_timed(root.path(), "fixture", Duration::ZERO),
+            Err(StopUncertain::PopulationReadFailed));
+        fs::write(root.path().join("cgroup.events"), "unknown\n").unwrap();
+        assert_eq!(stop_and_sample_timed(root.path(), "fixture", Duration::ZERO),
+            Err(StopUncertain::PopulationReadFailed));
+        fs::remove_file(root.path().join("cgroup.kill")).unwrap();
+        fs::create_dir(root.path().join("cgroup.kill")).unwrap();
+        assert_eq!(stop_and_sample_timed(root.path(), "fixture", Duration::ZERO),
+            Err(StopUncertain::KillFailed));
     }
 }
