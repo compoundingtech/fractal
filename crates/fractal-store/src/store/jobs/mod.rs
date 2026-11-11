@@ -41,6 +41,22 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     CREATE TRIGGER IF NOT EXISTS jobs_pending_insert AFTER INSERT ON claims
     WHEN NEW.kind='job.recorded' BEGIN
         INSERT OR IGNORE INTO job_pending VALUES(NEW.subject);
+    END;
+    CREATE TRIGGER IF NOT EXISTS jobs_pending_repair_update AFTER UPDATE OF state,claim_id ON replica_records
+    WHEN (OLD.state='repaired' OR NEW.state='repaired')
+        AND (OLD.state IS NOT NEW.state OR OLD.claim_id IS NOT NEW.claim_id) BEGIN
+        INSERT OR IGNORE INTO job_pending
+        SELECT subject FROM claims WHERE kind='job.recorded' AND id IN (OLD.claim_id,NEW.claim_id);
+    END;
+    CREATE TRIGGER IF NOT EXISTS jobs_pending_repair_insert AFTER INSERT ON replica_records
+    WHEN NEW.state='repaired' BEGIN
+        INSERT OR IGNORE INTO job_pending
+        SELECT subject FROM claims WHERE kind='job.recorded' AND id=NEW.claim_id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS jobs_pending_repair_delete AFTER DELETE ON replica_records
+    WHEN OLD.state='repaired' BEGIN
+        INSERT OR IGNORE INTO job_pending
+        SELECT subject FROM claims WHERE kind='job.recorded' AND id=OLD.claim_id;
     END;")?;
     Ok(())
 }
@@ -102,9 +118,13 @@ fn refold(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     tx.execute("DELETE FROM job_receipts WHERE job_id=?1", [subject])?;
     let mut current: Option<(JobHostBinding, JobState)> = None;
     for (ordinal, (claim, body, at)) in records.into_iter().enumerate() {
-        let body: serde_json::Value = serde_json::from_str(&body)?;
-        let record: JobRecord = serde_json::from_value(body["fields"]["record"].clone())?;
-        let result = apply(tx, subject, &claim, &at, &record, &mut current);
+        let body: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|_| serde_json::Value::String(body));
+        let fields = body.get("fields").unwrap_or(&body);
+        let raw = fields.get("record").unwrap_or(fields);
+        let result = serde_json::from_value::<JobRecord>(raw.clone())
+            .map_err(|error| anyhow::anyhow!("job-record-decode: {error}"))
+            .and_then(|record| apply(tx, subject, &claim, &at, &record, &mut current));
         // Invalid edges/bindings are retained as refused history, never execution authority.
         let refusal = match result {
             Ok(()) => None,
@@ -113,7 +133,7 @@ fn refold(tx: &Transaction<'_>, subject: &str) -> Result<()> {
         };
         let state = current.as_ref().map(|(_, state)| serde_json::to_string(state)).transpose()?;
         tx.execute("INSERT INTO job_history VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![subject, ordinal, claim, serde_json::to_string(&record)?, state, refusal, at])?;
+            params![subject, ordinal, claim, serde_json::to_string(raw)?, state, refusal, at])?;
     }
     Ok(())
 }
@@ -156,7 +176,7 @@ fn apply(
 mod receipts;
 mod queries;
 pub use receipts::{job_id, receipt_for_key};
-pub use queries::{HistoryRow, JobRow, history_by_job, job_by_id, queue_for_host};
+pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, queue_for_host};
 
 
 #[cfg(test)]

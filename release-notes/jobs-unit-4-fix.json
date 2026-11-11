@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Harden inactive jobs decoding, normalize claim bodies and fence read-only queries after repairs.",
+  "replay": {"status": "changed", "detail": "Malformed schema-admitted job records become refused raw history instead of poisoning projection, open or rebuild. Direct record bodies and fields envelopes use the same fold."},
+  "schema": {"status": "changed", "detail": "Subject-scoped replica-record repair insertion/update/deletion triggers enqueue only affected jobs. No generic fold, runtime repair dispatch or smallclaims implementation changes."},
+  "rules": {"status": "none", "detail": "Inactive history only; no execution authority or host activation."},
+  "compatibility": {"status": "changed", "detail": "Public jobs/history/receipt reads require a Transaction snapshot and return typed JobsProjectionStale for pending subjects; queues also fence candidate hosts. Reads remain read-only and never drain pending work or acquire the writer. History exposes raw record JSON so malformed records remain inspectable."},
+  "downtime": {"status": "none", "detail": "No production activation."},
+  "manual": {"status": "none", "detail": "No operator action. Pending repairs clear through existing flush/open/rebuild hooks; automatic repair-page dispatch is deferred to separately approved unit 4c-2. Until then typed stale results intentionally fence affected reads."},
+  "recovery": {"status": "changed", "detail": "Repair fixtures require stale reads before flush, no read-path writes, and equivalence of explicit flush with rebuild. No full-replay fallback is introduced."}
+}

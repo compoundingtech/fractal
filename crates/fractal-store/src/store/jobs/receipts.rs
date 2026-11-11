@@ -17,7 +17,7 @@ pub fn job_id(requester: &str, key: &str) -> String {
 
 pub(super) fn reserve_receipt(tx: &Transaction<'_>, identity: &IdempotencyKey, id: &str) -> Result<()> {
     ensure!(id == job_id(&identity.requester, &identity.key), "job-idempotency-subject-mismatch");
-    let existing = receipt_for_key(tx, &identity.requester, &identity.key)?;
+    let existing = lookup_receipt(tx, &identity.requester, &identity.key)?;
     match decide_idempotency(identity, existing) {
         Ok(IdempotencyDecision::NewJob) => {
             tx.execute("INSERT INTO job_receipts VALUES(?1,?2,?3,?4)",
@@ -29,7 +29,12 @@ pub(super) fn reserve_receipt(tx: &Transaction<'_>, identity: &IdempotencyKey, i
     Ok(())
 }
 
-pub fn receipt_for_key(connection: &Connection, requester: &str, key: &str) -> Result<Option<(RequestDigest, String)>> {
+pub fn receipt_for_key(connection: &Transaction<'_>, requester: &str, key: &str) -> Result<Option<(RequestDigest, String)>> {
+    super::queries::ensure_current(connection, &job_id(requester, key))?;
+    lookup_receipt(connection, requester, key)
+}
+
+fn lookup_receipt(connection: &Connection, requester: &str, key: &str) -> Result<Option<(RequestDigest, String)>> {
     let existing: Option<(String, String)> = connection.query_row(
         "SELECT digest,job_id FROM job_receipts WHERE requester=?1 AND key=?2",
         params![requester, key], |row| Ok((row.get(0)?, row.get(1)?)),

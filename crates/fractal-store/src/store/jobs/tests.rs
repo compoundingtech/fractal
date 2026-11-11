@@ -78,14 +78,14 @@ fn canonical_refold_refuses_illegal_edges_and_conflicting_binding() {
     insert(&tx, id.as_str(), "first", 1, &submitted);
     insert(&tx, id.as_str(), "middle", 2, &JobRecord::Transition {
         binding: binding.clone(), event: Event::LaunchIntent });
-    refold(&tx, id.as_str()).unwrap();
+    flush(&tx).unwrap();
     let state: String = tx.query_row("SELECT state FROM jobs", [], |row| row.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<JobState>(&state).unwrap(), JobState::Running);
     let mut conflict = binding.clone();
     conflict.execution_host = "different-host".into();
     insert(&tx, id.as_str(), "conflict", 4, &JobRecord::Transition { binding: conflict, event: Event::HostLost });
     insert(&tx, id.as_str(), "illegal", 5, &JobRecord::Transition { binding: binding.clone(), event: Event::Prepared });
-    refold(&tx, id.as_str()).unwrap();
+    flush(&tx).unwrap();
     let refusals: u64 = tx.query_row("SELECT count(*) FROM job_history WHERE refusal IS NOT NULL", [], |row| row.get(0)).unwrap();
     assert_eq!(refusals, 2);
     assert_eq!(tx.query_row("SELECT state FROM jobs", [], |row| row.get::<_, String>(0)).unwrap(), state);
@@ -126,7 +126,8 @@ fn receipts_are_atomic_isolated_and_refuse_changed_digest() {
             Some((identity.request_digest, id.clone())));
         // Rollback removes both reservations, just as a refused writer transaction does.
     }
-    assert!(receipt_for_key(&connection, &identity.requester, &identity.key).unwrap().is_none());
+    let tx = connection.transaction().unwrap();
+    assert!(receipt_for_key(&tx, &identity.requester, &identity.key).unwrap().is_none());
 }
 
 #[test]
@@ -162,9 +163,9 @@ fn canonical_receipt_wins_independently_of_arrival_order() {
     request.command.argv.push("changed-input".into());
     identity.request_digest = request.digest();
     insert(&tx, &id, "later-changed", 20, &changed);
-    refold(&tx, &id).unwrap();
+    flush(&tx).unwrap();
     insert(&tx, &id, "earlier-original", 10, &original);
-    refold(&tx, &id).unwrap();
+    flush(&tx).unwrap();
     let JobRecord::Submitted { identity, .. } = &original else { unreachable!() };
     assert_eq!(receipt_for_key(&tx, &identity.requester, &identity.key).unwrap(),
         Some((identity.request_digest, id.clone())));
@@ -174,4 +175,83 @@ fn canonical_receipt_wins_independently_of_arrival_order() {
     let before = serde_json::to_value(&history).unwrap();
     rebuild(&tx).unwrap();
     assert_eq!(serde_json::to_value(history_by_job(&tx, &id).unwrap()).unwrap(), before);
+}
+
+#[test]
+fn malformed_records_are_refused_raw_history_without_poisoning_open() {
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    fractal_schema::registry().validate_claim("job/malformed", KIND,
+        &std::collections::BTreeMap::from([("record".into(), json!({}))])).unwrap();
+    for (claim, body) in [("wrapped", json!({"fields":{"record":{}}})), ("direct", json!({"record":{}}))] {
+        tx.execute("INSERT INTO claims VALUES(?1,1,'batch','job/malformed',?2,?3,'1')",
+            params![claim, KIND, body.to_string()]).unwrap();
+    }
+    flush(&tx).unwrap();
+    for _ in 0..2 {
+        open(&tx).unwrap();
+        rebuild(&tx).unwrap();
+        let history = history_by_job(&tx, "job/malformed").unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|row| row.record == json!({})
+            && row.refusal.as_deref().unwrap().starts_with("job-record-decode:")));
+        assert!(job_by_id(&tx, "job/malformed").unwrap().is_none());
+    }
+}
+
+#[test]
+fn direct_and_enveloped_bodies_share_the_same_fold() {
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    let id = job_id("person/fixture", "direct");
+    let submitted = submission(&id, "direct");
+    let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
+    insert(&tx, &id, "submit", 1, &submitted);
+    tx.execute("UPDATE claims SET body=?1 WHERE id='submit'",
+        [json!({"record":submitted}).to_string()]).unwrap();
+    insert(&tx, &id, "launch", 2, &JobRecord::Transition {
+        binding: binding.clone(), event: Event::LaunchIntent });
+    let started = JobRecord::Transition { binding: binding.clone(), event: Event::Started };
+    insert(&tx, &id, "start", 3, &started);
+    tx.execute("UPDATE claims SET body=?1 WHERE id='start'",
+        [json!({"record":started}).to_string()]).unwrap();
+    flush(&tx).unwrap();
+    assert_eq!(job_by_id(&tx, &id).unwrap().unwrap().state, JobState::Running);
+    assert!(history_by_job(&tx, &id).unwrap().iter().all(|row| row.refusal.is_none()));
+}
+
+#[test]
+fn repaired_claim_fences_read_only_queries_until_flush_matches_rebuild() {
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    let id = job_id("person/fixture", "repair");
+    let submitted = submission(&id, "repair");
+    let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
+    insert(&tx, &id, "submit", 1, &submitted);
+    insert(&tx, &id, "launch", 2, &JobRecord::Transition {
+        binding: binding.clone(), event: Event::LaunchIntent });
+    insert(&tx, &id, "start", 3, &JobRecord::Transition {
+        binding: binding.clone(), event: Event::Started });
+    flush(&tx).unwrap();
+    assert_eq!(job_by_id(&tx, &id).unwrap().unwrap().state, JobState::Running);
+    tx.execute("INSERT INTO replica_records VALUES('start','valid',3)", []).unwrap();
+    tx.execute("UPDATE replica_records SET state='repaired' WHERE claim_id='start'", []).unwrap();
+    let changes = tx.total_changes();
+    for error in [
+        job_by_id(&tx, &id).unwrap_err(),
+        history_by_job(&tx, &id).unwrap_err(),
+        receipt_for_key(&tx, "person/fixture", "repair").unwrap_err(),
+        queue_for_host(&tx, "fixture-host").unwrap_err(),
+    ] {
+        assert_eq!(error.downcast_ref::<JobsProjectionStale>().unwrap().subject, id);
+    }
+    assert!(queue_for_host(&tx, "unrelated-host").unwrap().is_empty());
+    assert_eq!(tx.total_changes(), changes);
+    flush(&tx).unwrap();
+    assert_eq!(job_by_id(&tx, &id).unwrap().unwrap().state, JobState::Launching);
+    let flushed = serde_json::to_value(history_by_job(&tx, &id).unwrap()).unwrap();
+    let receipt = receipt_for_key(&tx, "person/fixture", "repair").unwrap();
+    rebuild(&tx).unwrap();
+    assert_eq!(serde_json::to_value(history_by_job(&tx, &id).unwrap()).unwrap(), flushed);
+    assert_eq!(receipt_for_key(&tx, "person/fixture", "repair").unwrap(), receipt);
 }
