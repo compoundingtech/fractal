@@ -945,7 +945,7 @@ enum SeatMove {
 async fn cross_host_seat_move(mode: SeatMove) {
     const SUBJECT: &str = "agent/move/worker";
     let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "amber").await;
+    let a = anchor(root.path(), "amber").await;
     let b = joined(root.path(), &a, "cobalt", &[]).await;
     let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join("pty"))
@@ -991,7 +991,10 @@ agent "move/worker" {
         .await;
     }
     if mode == SeatMove::SourceOffline {
-        a.stop();
+        // Offline, as a sleeping laptop is: its daemon and worker are frozen while its seat's
+        // process stays alive. Stopping the node would reap the process with the daemon's
+        // fixture scope, and leave the returning source nothing to retire.
+        a.signal("STOP");
         b.st_ok(&[
             "agents",
             "start",
@@ -1057,7 +1060,7 @@ agent "move/worker" {
             peek.contains("moved-seat-ready"),
             "destination is reachable while source is offline: {peek}"
         );
-        a.start().await;
+        a.signal("CONT");
         wait_until(
             "returning source retires its old incarnation",
             30,
@@ -5667,6 +5670,16 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         )
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        // Managed harness launch takes omp from the runtime profile's wrapper directory, never
+        // from PATH (fractal-drivers managed_launch).
+        let profile = node.root.join("runtime-profile.json");
+        fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": node.root.join("bin")}}},
+        })).unwrap()).unwrap();
+        node.env.extend([
+            ("AGENT_RUNTIME_PROFILE".to_owned(), profile.display().to_string()),
+            ("AGENT_PERSONA".to_owned(), "generalist".to_owned()),
+        ]);
         node.start().await;
     }
     let workspace = root.path().join("workspace");
@@ -7990,14 +8003,31 @@ fn leave_in_outbox(node: &Node, subject: &str, from: &str, to: &str, attempts: i
         expected_subject: None,
         idempotency_key: None,
     };
+    leave_claim_in_outbox(node, &claim, attempts);
+}
+
+/// Leave `claim` in stopped `node`'s message outbox, refused `attempts` times already.
+fn leave_claim_in_outbox(node: &Node, claim: &ClaimInput, attempts: i64) {
     let queued_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
     rusqlite::Connection::open(node.state_dir().join("claims.sqlite3"))
         .unwrap()
         .execute(
             "INSERT INTO local_message_outbox(subject, claim, queued_at_unix_ms, attempts) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![subject, serde_json::to_string(&claim).unwrap(), queued_at, attempts],
+            rusqlite::params![claim.subject, serde_json::to_string(claim).unwrap(), queued_at, attempts],
         )
         .unwrap();
+}
+
+/// How often the drain has tried `subject` in `node`'s message outbox, and its last error.
+fn outbox_attempts(node: &Node, subject: &str) -> (i64, Option<String>) {
+    rusqlite::Connection::open_with_flags(node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT attempts, last_error FROM local_message_outbox WHERE subject=?1",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
 }
 
 /// The subjects waiting in `node`'s message outbox; the read fails if the table is missing.
@@ -8174,43 +8204,74 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
 }
 
 /// The daemon drains what a stopped member left in its message outbox when it starts: an
-/// agent's message reaches the shard once, a message the shard already holds is only removed,
-/// and a person's message, which the shard refuses, goes to the graph after the retry pause.
-/// The refused row is left refused one time short of the limit, so the test waits for one pause
-/// (30 s), not three; the unit tests count the refusals.
+/// agent's message to a seat on this member reaches the shard once, a message the shard already
+/// holds is only removed, and a person's message, which is never routed to the stream
+/// (message_routing), goes to the graph at once. A message the shard refuses, here because an
+/// earlier send under its key wrote other content, holds up none of them: refused at startup for
+/// the last time it may be, it waits out the retry pause, is tried on the graph, which refuses it
+/// too, and stays with its error for an operator, in neither store. It is left refused one time
+/// short of the limit, so the test waits for one pause (30 s), not three; the unit tests count
+/// the refusals.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
+    use fractal_store::store::message_outbox::ATTEMPTS;
     let root = tempfile::tempdir().unwrap();
     let mut n = Node::new(root.path(), "n");
     n.start().await;
+    // The reader is a seat on this member, so an agent's mail to it routes to the stream. A
+    // slash-qualified name keeps its subject; a simple one would take the host as a prefix.
+    let reader = "agent/fleet/fixture-reader";
+    let declaration = root.path().join("reader.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"fleet/fixture-reader\" {{ host \"n\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        n.root
+    )).unwrap();
+    n.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
     let held = "message/0000000000000f01";
     append_stream_item(&n, held).await;
+    let key = "fleet-outbox-keyed";
+    assert!(append_keyed_stream_item(&n, "message/0000000000000f00", reader, key).await);
     n.stop();
     let eligible = "message/0000000000000f02";
-    let refused = "message/0000000000000f03";
+    let personal = "message/0000000000000f03";
+    let refused = "message/0000000000000f04";
     // The drain stopped after the shard append, before the delete.
-    leave_in_outbox(&n, held, "agent/fleet-sender", "agent/fleet-reader", 0);
-    leave_in_outbox(&n, eligible, "agent/fleet-sender", "agent/fleet-reader", 0);
-    leave_in_outbox(&n, refused, PERSON, "agent/fleet-reader", fractal_store::store::message_outbox::ATTEMPTS - 1);
+    leave_in_outbox(&n, held, "agent/fleet-sender", reader, 0);
+    leave_in_outbox(&n, eligible, "agent/fleet-sender", reader, 0);
+    leave_in_outbox(&n, personal, PERSON, reader, 0);
+    let mut refused_claim = keyed_message(refused, key, "through the outbox");
+    refused_claim.fields.insert("to".into(), json!(reader));
+    leave_claim_in_outbox(&n, &refused_claim, ATTEMPTS - 1);
 
     n.start().await;
+    // The drain tries the refused row last; wait until it records that attempt too.
     wait_until("the startup drain empties the outbox but for the refused message", 30, || async {
-        outbox(&n) == [refused]
+        outbox(&n) == [refused] && outbox_attempts(&n, refused).0 >= ATTEMPTS
     })
     .await;
     for subject in [held, eligible] {
         assert_eq!(stream_items(&n, subject).await, 1, "{subject}");
         assert_eq!(graph_messages(&n, subject).await, 0, "{subject}");
     }
-    assert_eq!(stream_items(&n, refused).await, 0);
-    assert_eq!(graph_messages(&n, refused).await, 0);
+    assert_eq!(graph_messages(&n, personal).await, 1);
+    assert_eq!(stream_items(&n, personal).await, 0);
+    let (attempts, error) = outbox_attempts(&n, refused);
+    assert_eq!(attempts, ATTEMPTS);
+    assert!(error.as_deref().is_some_and(|error| error.starts_with("idempotency-mismatch")), "{error:?}");
 
-    // Refused once more at startup, it waits out the pause and goes to the graph.
-    wait_until("the refused message goes to the graph", 90, || async { outbox(&n).is_empty() }).await;
-    assert_eq!(graph_messages(&n, refused).await, 1);
+    // Refused as often as the shard may refuse it, it waits out the pause and goes to the graph,
+    // which replays the stream under the same key and refuses it too.
+    wait_until("the refused message is tried on the graph after the pause", 90, || async {
+        outbox_attempts(&n, refused).0 > ATTEMPTS
+    })
+    .await;
+    assert_eq!(outbox(&n), [refused]);
+    let (_, error) = outbox_attempts(&n, refused);
+    assert!(error.as_deref().is_some_and(|error| error.starts_with("idempotency-mismatch")), "{error:?}");
+    assert_eq!(graph_messages(&n, refused).await, 0);
     assert_eq!(stream_items(&n, refused).await, 0);
     for subject in [held, eligible] {
         assert_eq!(stream_items(&n, subject).await, 1, "{subject}");

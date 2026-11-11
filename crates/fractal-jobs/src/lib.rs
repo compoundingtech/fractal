@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, num::NonZeroU32};
 
 pub mod host_authority;
+pub mod identity;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
