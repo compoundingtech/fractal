@@ -29,6 +29,39 @@ fn current_authority_install_and_idle_maintenance_do_not_write() {
     assert_eq!(after, before, "unchanged install and empty queues must be read-only");
 }
 
+#[test]
+fn authority_ddl_digest_matches_recorded_schema_version() {
+    use sha2::{Digest as _, Sha256};
+    let store = Store::open_memory("ddl-digest", Arc::new(Plain)).unwrap();
+    let connection = store.connection.write();
+    authority::install(&connection, "ddl-digest").unwrap();
+    let version: String = connection.query_row(
+        "SELECT value FROM meta WHERE key='assistant_grant_authority_schema_version'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut statement = connection.prepare(
+        "SELECT type,name,sql FROM sqlite_master
+         WHERE type IN ('table','index','trigger') AND sql IS NOT NULL
+           AND (name GLOB 'assistant_grant_*' OR name='replica_records_writer_grant_proof_index')
+         ORDER BY type COLLATE BINARY,name COLLATE BINARY",
+    ).unwrap();
+    let objects = statement.query_map([], |row| Ok([
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,
+    ])).unwrap();
+    let mut digest = Sha256::new();
+    for object in objects {
+        // Length-prefix each UTF-8 field; object boundaries and SQL whitespace
+        // are significant, without depending on JSON serialization behavior.
+        for field in object.unwrap() {
+            digest.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+    }
+    let digest = hex::encode(digest.finalize());
+    assert_eq!((version.as_str(),digest.as_str()),authority::SCHEMA_DDL_FINGERPRINT,
+        "authority DDL changed: bump SCHEMA_VERSION, provide any required migration, and update SCHEMA_DDL_FINGERPRINT with the new version and digest");
+}
+
 fn node(name: &str, anchor: Option<&str>) -> Store {
     let store = Store::open_memory(name, Arc::new(Plain)).unwrap();
     store.bind_fleet(FLEET).unwrap();

@@ -198,6 +198,7 @@ Authority schema installation has its own durable version, separate from backfil
 readiness. An unchanged reopen neither replaces triggers nor rewrites metadata;
 idle maintenance likewise leaves queue frontiers and completed backfill markers
 untouched. This preserves SQLite's schema cookie and durable consumer bindings.
+Any change to authority tables, indexes or triggers must bump `SCHEMA_VERSION` and provide any required migration; update the recorded versioned DDL digest alongside it.
 The `assistant_grant_*` tables are member-local derived authentication state,
 including effective snapshots: they depend on local verified receipts, arrival
 order and maintenance progress, not only canonical claims. Shared grant, policy

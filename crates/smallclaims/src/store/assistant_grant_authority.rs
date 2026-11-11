@@ -6,7 +6,12 @@ pub const GRANTED: &str = "custom.client.assistant.v1.granted";
 pub const POLICY: &str = "custom.client.assistant.v1.policy";
 pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 const VERSION: &str = "1";
+/// Any authority DDL change (tables, indexes or triggers) must bump this version
+/// and provide any required migration; update the versioned DDL digest as well.
 const SCHEMA_VERSION: &str = "1";
+#[cfg(test)]
+pub(super) const SCHEMA_DDL_FINGERPRINT: (&str, &str) =
+    ("1", "1bee597c13dc75e97e29c66e14c129baa93d3c048bd92e9b2e58e6c4e618846f");
 const KINDS: [&str; 3] = [GRANTED, POLICY, REVOKED];
 pub const CLAIMS_PER_SLICE: usize = 64;
 pub const MEMBERSHIP_KEYS_PER_REFRESH: usize = 16;
