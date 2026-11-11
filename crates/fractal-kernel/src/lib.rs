@@ -32,6 +32,8 @@ pub mod memory;
 pub mod read_cache;
 pub mod model;
 pub mod pricing;
+/// What a program step's journal shows: each inner step's latest status, timing and failure.
+pub mod program_journal;
 pub mod projection;
 pub mod rules;
 pub mod seat_queue;

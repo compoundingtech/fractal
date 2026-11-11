@@ -265,7 +265,7 @@ mod tests {
         }
         smallclaims::store::set_thread_clock(Some(deadline + 1));
         store
-            .retire_mission("mission/orchard", "person/avery", "retire")
+            .retire_mission("mission/orchard", "person/avery", "retire", None)
             .unwrap();
         parity(&store, &views, deadline + 1);
         assert!(
