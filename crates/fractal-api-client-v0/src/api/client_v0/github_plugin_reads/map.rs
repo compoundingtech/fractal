@@ -339,7 +339,7 @@ pub(crate) fn checks(graph: &Value) -> Result<GithubChecks, Failure> {
 }
 
 pub(crate) fn files(total: u64, pages: &[std::sync::Arc<Value>], cut_short: bool) -> Result<GithubFiles, Failure> {
-    // Match the existing bounded client reads: reserve 128 KiB for the read wrapper and Envelope.
+    // Match the existing bounded client reads: reserve 128,000 bytes for the read wrapper and Envelope.
     let budget = super::CLIENT_MAX_RESPONSE_BYTES - 128_000;
     let available = pages.iter().map(|page| items(page).len()).sum::<usize>();
     let total = total.max(available as u64);

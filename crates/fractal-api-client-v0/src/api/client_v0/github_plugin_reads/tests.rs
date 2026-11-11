@@ -282,7 +282,7 @@ fn a_redirect_is_reported_only_when_it_names_a_typed_github_item() {
     // GitHub's rename and transfer form is resolved by one more read, never followed.
     assert_eq!(
         classify(Raw { status: 301, location: Some("https://api.github.com/repositories/1/pulls/7".into()), ..Raw::default() }, false).err(),
-        Some(Failure::Relocated { repository_id: 1, number: Some(7) })
+        Some(Failure::Relocated { repository_id: 1, number: Some(7), cacheable: false })
     );
     let Err(Failure::Unavailable { .. }) = classify(Raw { status: 301, location: Some("https://api.github.com/user/1".into()), ..Raw::default() }, false) else {
         panic!("an untyped redirect is unavailable")
@@ -346,7 +346,7 @@ async fn the_cache_revalidates_with_etags_and_serves_stale_only_for_upstream_fai
     // Expired: revalidated with the ETag; 304 refreshes.
     let refreshed = cached(&cache, "k", true, |etag| async move {
         assert_eq!(etag.as_deref(), Some("\"v1\""));
-        Ok(Raw { status: 304, ..Raw::default() })
+        Ok(Raw { status: 304, cacheable: true, ..Raw::default() })
     })
     .await
     .unwrap();
@@ -429,7 +429,7 @@ impl Canned {
 }
 
 fn redirect(location: &str) -> Raw {
-    Raw { status: 301, location: Some(location.into()), ..Raw::default() }
+    Raw { status: 301, location: Some(location.into()), cacheable: true, ..Raw::default() }
 }
 
 fn repository(full_name: &str) -> Raw {
@@ -568,6 +568,18 @@ async fn cache_principals_isolate_fresh_documents_etags_failures_and_relocations
         else { Ok(redirect("https://api.github.com/repositories/42/issues/9")) }
     }).await.unwrap_err();
     assert!(matches!(failure, Failure::Unavailable { .. }));
+    for (redirect_cacheable, lookup_cacheable) in [(false, true), (true, false), (false, false)] {
+        let cache = std::sync::Mutex::new(Cache::default());
+        let result = rest_read(&cache, &auth, moved_path, |path, _| async move {
+            let mut raw = if path == "/repositories/42" { repository("acme/fallback") }
+                else { redirect("https://api.github.com/repositories/42/issues/9") };
+            raw.cacheable = if path == "/repositories/42" { lookup_cacheable } else { redirect_cacheable };
+            Ok(raw)
+        }).await.unwrap_err();
+        assert!(matches!(result, Failure::Moved(_)));
+        assert!(!cache.lock().unwrap().entries.contains_key(&format!("GET {} {moved_path}", auth.cache_principal())));
+        assert_eq!(cache.lock().unwrap().len(), usize::from(lookup_cacheable), "ineligible fallback must not populate relocation document or moved caches");
+    }
 }
 
 #[tokio::test]

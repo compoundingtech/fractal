@@ -72,7 +72,7 @@ REST and GraphQL reads select the owner's installation credential before looking
 the cache; documents, ETags and repository relocations are partitioned by the selected
 principal. Bounded PAT fallback responses do not populate installation document caches.
 File lists count encoded JSON bytes (including escaping and metadata), reserving
-128 KiB below the advertised client response ceiling for the read wrapper and envelope.
+128,000 bytes below the advertised client response ceiling for the read wrapper and envelope.
 Excess patches are omitted, or the file list is cut short, with `truncated: true`.
 
 Sent and received image attachments use a separate consent boundary: **Show image**

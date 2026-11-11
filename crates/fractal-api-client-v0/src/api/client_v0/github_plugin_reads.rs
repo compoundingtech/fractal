@@ -174,7 +174,7 @@ pub(crate) enum Failure {
     Unavailable { reason: String, retry_after_s: Option<u64> },
     /// A 301 to `/repositories/{id}/...`, GitHub's form for a renamed or transferred repository.
     /// Resolved to [`Failure::Moved`] by one more read of the repository; never answered as is.
-    Relocated { repository_id: u64, number: Option<u64> },
+    Relocated { repository_id: u64, number: Option<u64>, cacheable: bool },
 }
 
 impl Failure {
@@ -206,6 +206,7 @@ pub(crate) struct Fetched {
     pub value: Arc<Value>,
     pub fetched_at: String,
     pub stale: bool,
+    pub cacheable: bool,
     /// The REST `Link` header named a next page.
     pub has_next: bool,
 }
@@ -316,20 +317,22 @@ where
                 if let Some(to) = &entry.moved {
                     return Err(Failure::Moved(to.clone()));
                 }
-                return Ok(Fetched { value: entry.value.clone(), fetched_at: entry.fetched_at.clone(), stale: false, has_next: entry.has_next });
+                return Ok(Fetched { value: entry.value.clone(), fetched_at: entry.fetched_at.clone(), stale: false, cacheable: true, has_next: entry.has_next });
             }
             Some(entry) if revalidate && entry.moved.is_none() => entry.etag.clone(),
             _ => None,
         }
     };
-    let result = send(etag.clone()).await.and_then(|raw| classify(raw, etag.is_some()));
+    let response = send(etag.clone()).await;
+    let cacheable = response.as_ref().is_ok_and(|raw| raw.cacheable);
+    let result = response.and_then(|raw| classify(raw, etag.is_some()));
     let mut cache = cache.lock().map_err(|_| Failure::unavailable("GitHub read cache is unavailable"))?;
     match result {
         Ok(Classified::NotModified) => match cache.touch(key) {
             Some(entry) => {
                 entry.fresh_until = Instant::now() + FRESH_FOR;
                 entry.fetched_at = now();
-                Ok(Fetched { value: entry.value.clone(), fetched_at: entry.fetched_at.clone(), stale: false, has_next: entry.has_next })
+                Ok(Fetched { value: entry.value.clone(), fetched_at: entry.fetched_at.clone(), stale: false, cacheable, has_next: entry.has_next })
             }
             None => Err(Failure::unavailable("GitHub answered 304 for a read Fractal no longer holds")),
         },
@@ -351,14 +354,18 @@ where
             } else if let Some(old) = cache.entries.remove(key) {
                 cache.bytes -= old.bytes;
             }
-            Ok(Fetched { value, fetched_at, stale: false, has_next })
+            Ok(Fetched { value, fetched_at, stale: false, cacheable, has_next })
         }
         Err(Failure::Moved(to)) => {
-            remember_moved(&mut cache, key, &to);
+            if cacheable {
+                remember_moved(&mut cache, key, &to);
+            } else if let Some(old) = cache.entries.remove(key) {
+                cache.bytes -= old.bytes;
+            }
             Err(Failure::Moved(to))
         }
         Err(failure) if failure.may_serve_stale() => match cache.touch(key) {
-            Some(entry) if entry.moved.is_none() => Ok(Fetched { value: entry.value.clone(), fetched_at: entry.fetched_at.clone(), stale: true, has_next: entry.has_next }),
+            Some(entry) if entry.moved.is_none() => Ok(Fetched { value: entry.value.clone(), fetched_at: entry.fetched_at.clone(), stale: true, cacheable: true, has_next: entry.has_next }),
             _ => Err(failure),
         },
         // Resolved by the caller, which remembers the move it finds.
@@ -393,13 +400,16 @@ pub(crate) fn classify(raw: Raw, conditional: bool) -> Result<Classified, Failur
             }
             Ok(Classified::Document { value, etag: raw.etag, has_next: raw.has_next, cacheable: raw.cacheable, bytes: raw.body.len() })
         }
-        304 if conditional => Ok(Classified::NotModified),
+        304 if conditional && raw.cacheable => Ok(Classified::NotModified),
         301 => Err(raw
             .location
             .as_deref()
             .and_then(moved_to)
             .map(Failure::Moved)
-            .or_else(|| raw.location.as_deref().and_then(relocated_to))
+            .or_else(|| raw.location.as_deref().and_then(relocated_to).map(|failure| match failure {
+                Failure::Relocated { repository_id, number, .. } => Failure::Relocated { repository_id, number, cacheable: raw.cacheable },
+                other => other,
+            }))
             .unwrap_or_else(|| Failure::unavailable(UNRESOLVED_MOVE))),
         404 => Err(Failure::NotFound),
         410 => Err(Failure::Gone),
@@ -496,7 +506,7 @@ pub(crate) fn relocated_to(location: &str) -> Option<Failure> {
         ["pulls" | "issues", n, ..] => parse_id(n, i32::MAX as u64),
         _ => None,
     };
-    Some(Failure::Relocated { repository_id, number })
+    Some(Failure::Relocated { repository_id, number, cacheable: true })
 }
 
 /// The pull request or issue number a `/repos/{owner}/{repo}/...` request path names.
@@ -515,9 +525,9 @@ pub(crate) async fn resolve_relocation<F, Fut>(
     cache: &std::sync::Mutex<Cache>,
     key: &str,
     auth: &crate::github_http::GithubAuth,
-    original_path: &str,
     repository_id: u64,
-    location_number: Option<u64>,
+    number: Option<u64>,
+    cacheable: bool,
     fetch: F,
 ) -> Failure
 where
@@ -538,11 +548,13 @@ where
     let to = GithubMovedTo {
         owner: owner.to_owned(),
         repo: repo.to_owned(),
-        number: requested_number(original_path).or(location_number),
+        number,
     };
-    match cache.lock() {
-        Ok(mut cache) => remember_moved(&mut cache, key, &to),
-        Err(_) => return Failure::unavailable("GitHub read cache is unavailable"),
+    if cacheable && repository.cacheable {
+        match cache.lock() {
+            Ok(mut cache) => remember_moved(&mut cache, key, &to),
+            Err(_) => return Failure::unavailable("GitHub read cache is unavailable"),
+        }
     }
     Failure::Moved(to)
 }
@@ -555,8 +567,8 @@ where
 {
     let key = format!("GET {} {path}", auth.cache_principal());
     match cached(cache, &key, true, |etag| fetch(path.to_owned(), etag)).await {
-        Err(Failure::Relocated { repository_id, number }) => {
-            Err(resolve_relocation(cache, &key, auth, path, repository_id, number, &fetch).await)
+        Err(Failure::Relocated { repository_id, number, cacheable }) => {
+            Err(resolve_relocation(cache, &key, auth, repository_id, requested_number(path).or(number), cacheable, &fetch).await)
         }
         other => other,
     }
