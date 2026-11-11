@@ -219,7 +219,7 @@ export const TwoLineAndNesting: Story = {
     }
     // Without a mission, line 2 is exactly status · host; metrics remain in reported details.
     const line2 = (row: Element) => row.querySelector('[data-row-column="line2"]')!
-    await expect(line2(root!).textContent).toBe('Working·build-2')
+    await expect(line2(root!).textContent).toBe('Needs you·build-2')
     await expect(line2(review!).textContent).toBe('Ended·build-2')
     for (const row of rows) {
       await expect(line2(row).querySelector('[data-mission-ring], [data-row-field="spend"], [data-row-field="duration"]')).toBeNull()
@@ -966,17 +966,25 @@ export const NativeOverlaysThemed: StoryObj<{ scheme: Scheme }> = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed row with reported context opens the hover card and the Reported details dialog inside a scheme-themed root without a host portal layer, verifying both overlays portal into and paint that scheme.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <main data-testid="overlay-root" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}>
+    <label>Composer<input aria-label="Composer" /></label>
     <section aria-label="Sidebar" {...stylex.props(styles.column)}><MilestoneAgentRow row={contextRow} now={storyNow} /></section>
   </main>,
   play: async ({ canvasElement }) => {
     const root = within(canvasElement).getByTestId('overlay-root')
     const light = root.getAttribute('data-scheme') === 'light'
     const row = root.querySelector<HTMLElement>('[data-milestone-row]')!
+    const composer = within(root).getByRole('textbox', { name: 'Composer' })
+    await userEvent.click(composer)
     await userEvent.hover(row)
     const card = await waitFor(() => { const element = document.querySelector<HTMLElement>('[data-testid="agent-hover-card"]'); expect(element).not.toBeNull(); return element! })
     // Portalled inside the themed root, so the theme's tokens resolve on the overlay itself.
     await expect(root.contains(card)).toBe(true)
     await expect(paintedLuminance(card) > 0.5).toBe(light)
+    // The direct sidebar surface opens under the pointer even while keyboard focus is elsewhere.
+    await expect(composer).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    await expect(composer).toHaveFocus()
     await userEvent.unhover(row)
     await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
     await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)

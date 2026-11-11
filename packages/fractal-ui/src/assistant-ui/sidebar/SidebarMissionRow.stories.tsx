@@ -186,20 +186,27 @@ const missionName = (...parts: readonly string[]) => {
   return new RegExp('^' + escaped.join('\\s*,\\s*') + '$')
 }
 const retainedCases = [
-  { title: 'Watch the upload retries', info: 'stale', updatedAt: staleAt, note: 'Mission info may be out of date. Updated 10m ago.', name: ['Mission upload-retries', '1 of 3 steps'], touchQueue: [], reason: 'mission info may be out of date' },
-  { title: 'Index the search logs', info: 'stale', updatedAt: undefined, note: 'Mission info may be out of date.', name: ['Mission search-index'], touchQueue: [], reason: 'mission info may be out of date' },
-  { title: 'Map the billing events', info: 'failed', updatedAt: undefined, note: 'Couldn’t refresh mission info.', name: ['Mission billing-events', '2 of 4 steps'], touchQueue: ['+1 more mission queued'], reason: 'couldn’t refresh mission info' },
+  { title: 'Watch the upload retries', info: 'stale', updatedAt: staleAt, note: 'Mission info may be out of date. Updated 10m ago.', name: ['1 of 3 steps'], touchQueue: [], reason: 'mission info may be out of date' },
+  { title: 'Index the search logs', info: 'stale', updatedAt: undefined, note: 'Mission info may be out of date.', name: [], touchQueue: [], reason: 'mission info may be out of date' },
+  { title: 'Map the billing events', info: 'failed', updatedAt: undefined, note: 'Couldn’t refresh mission info.', name: ['2 of 4 steps'], touchQueue: ['+1 more mission queued'], reason: 'couldn’t refresh mission info' },
 ] as const
 
 /** Geometry and content shared by the desktop and phone stories. */
 const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const marks = await waitFor(() => { const found = [...canvasElement.querySelectorAll<HTMLElement>('[data-host="designed"] [data-mission-ring]')]; expect(found.length).toBeGreaterThanOrEqual(7); return found })
-  // Every ring starts at line 2's first pixel, so all share one x, and each is 12px.
-  const x = marks[0]!.getBoundingClientRect().left
+  // Bare rings align with line 2; phone disclosure rings sit inside their 44px touch target.
   for (const mark of marks) {
     const box = mark.getBoundingClientRect()
-    await expect(Math.abs(box.left - x)).toBeLessThanOrEqual(0.5)
-    await expect(Math.abs(box.left - line2(mark.closest('[data-milestone-row]')!).getBoundingClientRect().left)).toBeLessThanOrEqual(0.5)
+    const row = mark.closest('[data-milestone-row]')!
+    const touchTarget = mark.closest<HTMLElement>('button[data-mission-trigger]')
+    const lineLeft = line2(row).getBoundingClientRect().left
+    if (row.hasAttribute('data-touch-mission') && touchTarget) {
+      await expect(touchTarget.getBoundingClientRect().left).toBeCloseTo(lineLeft, 0)
+      await expect(box.left).toBeGreaterThanOrEqual(touchTarget.getBoundingClientRect().left)
+      await expect(box.right).toBeLessThanOrEqual(touchTarget.getBoundingClientRect().right)
+    } else {
+      await expect(Math.abs(box.left - lineLeft)).toBeLessThanOrEqual(0.5)
+    }
     await expect(Math.abs(box.height - 12)).toBeLessThanOrEqual(0.5)
     await expect(Math.abs(box.width - 12)).toBeLessThanOrEqual(0.5)
   }
@@ -317,7 +324,7 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
 export const MissionRows: Story = { tags: ['critical'], name: 'Mission line · every case · live default width', play: missionRowsPlay }
 export const MissionRowsLight: Story = { ...MissionRows, name: 'Mission line · every case · live default width · light', args: { scheme: 'light' } }
 
-const queuedTrigger = (canvasElement: HTMLElement) => within(designedRow(canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+2 more missions queued') })
+const queuedTrigger = (canvasElement: HTMLElement) => within(designedRow(canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('+2 more missions queued') })
 const queuedDialog = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Queued missions"]')
 
 /** "+N" opens an accessible dialog popover on press, never on hover; Escape closes it and returns focus. Ends open for the a11y check. */
@@ -334,12 +341,12 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   // The trigger stays clear of the desktop action overlay, so the row menu never covers it.
   const menu = trigger.closest('[data-milestone-row]')!.querySelector('[data-agent-menu]')!.getBoundingClientRect()
   if (canvasElement.querySelector('[data-narrow]') === null) await expect(trigger.getBoundingClientRect().right).toBeLessThanOrEqual(menu.left + 0.5)
-  // Hover alone never opens it, and it is never a tooltip.
+  // Hover alone never opens the queue; the row may independently show its agent hover card.
   await userEvent.hover(trigger)
   const started = performance.now()
   do {
     await expect(queuedDialog()).toBeNull()
-    await expect(document.querySelector('[role="tooltip"]')).toBeNull()
+    await expect(document.querySelector('[role="tooltip"] [data-queued-mission]')).toBeNull()
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   } while (performance.now() - started < 700)
   await userEvent.unhover(trigger)
@@ -449,7 +456,7 @@ const expectDrawnLine = async (row: HTMLElement) => {
 /** A served ETA: only a visually hidden description in the mission slot, plus the row's accessible name; nothing drawn. */
 const expectEta = async (row: HTMLElement, item: Row, text: string, tail: RegExp, name: RegExp) => {
   await expectDrawnLine(row)
-  const description = await waitFor(() => { const found = row.querySelector<HTMLElement>('[data-line2-slot="mission"] [data-mission-eta]'); expect(found).not.toBeNull(); return found! })
+  const description = await waitFor(() => { const found = line2(row).querySelector<HTMLElement>('[data-mission-eta]'); expect(found).not.toBeNull(); return found! })
   await expect(description).toHaveAttribute('data-mission-eta', text)
   await expect(description.textContent).toMatch(tail)
   await expect(getComputedStyle(description).position).toBe('absolute')
@@ -632,7 +639,7 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   }
   // The parent carries a mission and a queue, so its merged target sits beside both trailing 44px tracks.
   await assertTouchTargets(parentSection)
-  const parentTrigger = within(parent).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+1 more mission queued') })
+  const parentTrigger = within(parent).getByRole('button', { name: missionName('+1 more mission queued') })
   await expect(parentTrigger).toHaveAttribute('data-mission-trigger', 'queued')
   await expect(parent.querySelector('[data-line2-slot="step"]')).toHaveTextContent('Write the port notes')
   await expect(rect(parent.querySelector('[data-line2-slot="step"]')!).width).toBeGreaterThan(0)
@@ -664,8 +671,8 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(infoDialog()).toBeNull())
 
-  // The queued row: one target for ring and "+2"; a touch press opens the queue inside the frame.
-  const trigger = within(designedRow(context.canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('Mission fractal-web-upstream', '2 of 5 steps', '+2 more missions queued') })
+  // The queue count is its own target; a touch press opens the queue inside the frame.
+  const trigger = within(designedRow(context.canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('+2 more missions queued') })
   await expect(trigger.querySelector('[data-queued-count]')).toHaveTextContent('+2')
   await userEvent.pointer([{ keys: '[TouchA>]', target: trigger }, { keys: '[/TouchA]', target: trigger }])
   const dialog = await waitFor(() => { const element = queuedDialog(); expect(element).not.toBeNull(); expect(element).toBeVisible(); return element! })

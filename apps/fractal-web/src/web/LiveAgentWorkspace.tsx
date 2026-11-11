@@ -170,7 +170,11 @@ const LiveSidebarTreeView = React.memo((props: {
       const next = new Map(props.agents.flatMap(agent => [
         [agent.ref, sidebarRowAccessibleName(sidebarRow({ agent, stale: props.stale, needsMe: props.needsYou.has(agent.ref), ...observation }))] as const,
         ...(agent.subagents ?? []).map(child => [subagentRowId({ parent: agent.ref, id: child.id }), sidebarRowAccessibleName(sidebarSubagentRow({ parent: agent, child, stale: props.stale }))] as const),
-        ...(agentSeatChildren(agent) ?? []).flatMap(child => child.missionId === undefined ? [] : [[child.id, missionChildAccessibleName({ ...sidebarMissionChild({ agent, missionId: child.missionId, missions: observation?.missions, attention: observation?.attention }), title: child.label })] as const]),
+        ...(agentSeatChildren(agent) ?? []).flatMap(child => {
+          if (child.missionId === undefined) return []
+          const mission = sidebarMissionChild({ agent, missionId: child.missionId, missions: observation?.missions, attention: observation?.attention })
+          return [[child.id, missionChildAccessibleName({ ...mission, title: mission.title ?? child.label })] as const]
+        }),
       ]))
       const previous = previousAccessibleNames.current
       if (previous.size === next.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous

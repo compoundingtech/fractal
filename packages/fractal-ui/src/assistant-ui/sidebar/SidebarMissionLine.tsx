@@ -97,7 +97,7 @@ export function SidebarMissionLine({ mission, info = live, touch = false, now, f
             <span data-row-field="question" {...stylex.props(styles.ellipsis)}>{step.handle === undefined && <VisuallyHidden>Waiting on you: </VisuallyHidden>}{step.question}</span>
           </>}
       </span>}
-    {!adHoc && <span data-line2-slot="slug" {...stylex.props(styles.slugSlot)}><VisuallyHidden>Mission </VisuallyHidden><span data-row-field="mission" data-mission={slug} {...stylex.props(styles.ellipsis)}>{slug}</span></span>}</span>
+    {!adHoc && <span data-line2-slot="slug" {...stylex.props(styles.slugSlot, muted && styles.mutedInk)}><VisuallyHidden>Mission </VisuallyHidden><span data-row-field="mission" data-mission={slug} {...stylex.props(styles.ellipsis)}>{slug}</span></span>}</span>
   </>
   return <>
     {muted && triggerSlot(true)}
@@ -138,14 +138,15 @@ const queuedNoun = (count: number) => count === 1 ? 'mission' : 'missions'
  */
 function MissionInfoTrigger({ mission, adHoc, mark, info, queued, touch, now }: { readonly mission: Mission; readonly adHoc: boolean; readonly mark: boolean; readonly info: SidebarMissionInfo; readonly queued: Mission['queued']; readonly touch: boolean; readonly now: number | undefined }) {
   const retained = info._tag !== 'Live'
+  const hasProgress = mark && !adHoc && mission.progress._tag === 'Known'
   const clock = React.useMemo(() => now === undefined ? undefined : fixedClock(now), [now])
   const body = <MissionInfoBody info={info} queued={queued} />
   return <DialogTrigger>
     <Button data-mission-trigger={retained ? 'info' : 'queued'} data-queued-missions={queued.length > 0 ? queued.length : undefined} {...stylex.props(styles.trigger, touch && styles.triggerTouch)}>
       {mark && <MissionProgressMark progress={adHoc ? { _tag: 'Unknown' } : mission.progress} retained={retained} />}
-      {queued.length > 0 && <span data-queued-count={queued.length} {...stylex.props(styles.count)}><VisuallyHidden>, </VisuallyHidden>+{queued.length}<VisuallyHidden> more {queuedNoun(queued.length)} queued</VisuallyHidden></span>}
-      {info._tag === 'Stale' && <VisuallyHidden>, mission info may be out of date</VisuallyHidden>}
-      {info._tag === 'Failed' && <VisuallyHidden>, couldn’t refresh mission info</VisuallyHidden>}
+      {queued.length > 0 && <span data-queued-count={queued.length} {...stylex.props(styles.count)}>{hasProgress && <VisuallyHidden>, </VisuallyHidden>}+{queued.length}<VisuallyHidden> more {queuedNoun(queued.length)} queued</VisuallyHidden></span>}
+      {info._tag === 'Stale' && <VisuallyHidden>{hasProgress || queued.length > 0 ? ', ' : ''}mission info may be out of date</VisuallyHidden>}
+      {info._tag === 'Failed' && <VisuallyHidden>{hasProgress || queued.length > 0 ? ', ' : ''}couldn’t refresh mission info</VisuallyHidden>}
     </Button>
     <Popover placement="bottom start">
       <Dialog aria-label={retained ? 'Mission info' : `Queued ${queuedNoun(queued.length)}`} data-mission-info-dialog={info._tag.toLowerCase()} {...stylex.props(styles.queued)}>
@@ -187,14 +188,14 @@ const styles = stylex.create({
   // Step then slug on one 24px line that wraps: the slug claims a line only when 48px of it fits beside the step, and
   // otherwise wraps out of sight instead of showing a stub. The step always keeps the first line.
   run: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', alignContent: 'flex-start', flex: '1 1 0', minWidth: 0, height: g.controlSm, overflow: 'hidden' },
-  slugSlot: { display: 'inline-flex', alignItems: 'center', flex: '1 1 48px', minWidth: '48px', maxWidth: 'max-content', height: g.controlSm, overflow: 'hidden', paddingInlineStart: s.sm, boxSizing: 'border-box', color: ink.fgMuted },
+  slugSlot: { display: 'inline-flex', alignItems: 'center', flex: '1 1 48px', minWidth: '48px', maxWidth: 'max-content', height: g.controlSm, overflow: 'hidden', paddingInlineStart: s.sm, boxSizing: 'border-box', color: ink.fgSoft },
   ellipsis: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metric: { flexShrink: 0, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   ring: { display: 'block', width: `${ringBox}px`, height: `${ringBox}px`, flexShrink: 0 },
   // The mission run as one target: as wide as its content, so the rest of the line still selects the agent. Hover draws its box.
   open: {
     display: 'inline-flex', alignItems: 'center', flex: '0 1 auto', minWidth: 0, margin: 0, padding: 0, paddingInline: s.xs, marginInlineStart: `calc(-1 * ${s.xs})`, height: g.controlSm, boxSizing: 'border-box', borderWidth: 0, borderRadius: r.sm,
-    backgroundColor: { default: surface.transparent, ':hover': surface.rowActive }, color: { default: 'inherit', ':hover': ink.fg }, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', cursor: 'pointer', outline: 'none',
+    backgroundColor: { default: surface.transparent, ':is(:hover, [data-hovered])': surface.rowActive }, color: { default: 'inherit', ':is(:hover, [data-hovered])': ink.fg }, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', cursor: 'pointer', outline: 'none',
     ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
   },
   openTouch: { height: g.touchTarget },

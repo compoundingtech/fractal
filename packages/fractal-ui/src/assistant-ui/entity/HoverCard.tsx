@@ -86,6 +86,17 @@ export interface HoverCardSurfaceProps {
 export function HoverCardSurface({ triggerRef, isOpen, onOpenChange, placement = 'right top', offset = 8, label, id, children }: HoverCardSurfaceProps) {
   const close = React.useCallback(() => onOpenChange?.(false), [onOpenChange])
   const state = React.useMemo<TooltipTriggerState>(() => ({ isOpen, shouldSkipAnimation: false, open: () => onOpenChange?.(true), close }), [isOpen, onOpenChange, close])
+  React.useEffect(() => {
+    if (!isOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      // A passive card never takes focus; dismiss it without moving focus from the user's current control.
+      close()
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
+  }, [isOpen, close])
   if (!isOpen) return null
   return <TooltipTriggerStateContext.Provider value={state}>
       <Tooltip isOpen triggerRef={triggerRef as React.RefObject<Element>} placement={placement} offset={offset} containerPadding={8} shouldFlip

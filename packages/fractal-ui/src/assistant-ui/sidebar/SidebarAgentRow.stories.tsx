@@ -156,7 +156,6 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
 async function paintedText(card: HTMLElement): Promise<string> {
   const painted = card.cloneNode(true) as HTMLElement
   const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
-  await expect(carriers.length).toBeGreaterThan(0)
   for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
   return painted.textContent!
 }
@@ -276,7 +275,7 @@ export const HoverCardMissions: Story = { tags: ['critical'], name: 'Hover card 
   // The goal is the current step here, so the card does not say it twice.
   await expect(within(canvasElement).getByTestId('hover-facts').textContent?.match(/Fix the review gate/g)).toHaveLength(1)
 } }
-export const HoverCardRetainedMissions: Story = { tags: ['critical'], name: 'Hover card · retained missions say so under a live agent', render: () => <main {...stylex.props(styles.root)}>
+export const HoverCardRetainedMissions: Story = { tags: ['critical'], name: 'Hover card · retained missions say so under a live agent', render: () => <main tabIndex={0} {...stylex.props(styles.root)}>
   <div data-testid="stale-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Stale', updatedAt: storyNow - 5 * 60_000 } }} now={storyNow} /></div>
   <div data-testid="failed-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Failed' } }} now={storyNow} /></div>
   <div data-testid="live-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Live' } }} now={storyNow} /></div>
@@ -293,6 +292,7 @@ export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card �
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
   await expect(await paintedText(card)).not.toMatch(/unknown|unavailable|—/i)
+  await expect(card.querySelectorAll('[aria-describedby]')).toHaveLength(0)
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
 export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
