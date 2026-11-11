@@ -90,8 +90,8 @@ export function HoverCardSurface({ triggerRef, isOpen, onOpenChange, placement =
     if (!isOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
-      event.stopPropagation()
-      // A passive card never takes focus; dismiss it without moving focus from the user's current control.
+      // Passive content never consumes Escape: a focused menu or dialog must receive the same key.
+      // Dismiss without moving focus from the user's current control.
       close()
     }
     document.addEventListener('keydown', onKeyDown, true)

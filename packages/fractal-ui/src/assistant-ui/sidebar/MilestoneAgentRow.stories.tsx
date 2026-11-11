@@ -987,6 +987,13 @@ export const NativeOverlaysThemed: StoryObj<{ scheme: Scheme }> = {
     await expect(composer).toHaveFocus()
     await userEvent.unhover(row)
     await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    // Opening an interactive overlay over a pointer-open card must not let the passive card swallow Escape.
+    await userEvent.hover(row)
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).not.toBeNull())
+    await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)
+    await within(document.body).findByRole('menu', { name: `Actions for ${contextRow.title}` })
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
     await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)
     const menu = await within(document.body).findByRole('menu', { name: `Actions for ${contextRow.title}` })
     await expect(root.contains(menu)).toBe(true)

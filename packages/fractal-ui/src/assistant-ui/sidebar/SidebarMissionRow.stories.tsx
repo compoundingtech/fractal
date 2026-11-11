@@ -349,7 +349,10 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
     await expect(document.querySelector('[role="tooltip"] [data-queued-mission]')).toBeNull()
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   } while (performance.now() - started < 700)
-  await userEvent.unhover(trigger)
+  // Keep the passive card open behind the queue to exercise overlay Escape priority.
+  if (!window.matchMedia(touchPointerQuery).matches) {
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).not.toBeNull())
+  }
   await userEvent.click(trigger)
   const dialog = await waitFor(() => { const element = queuedDialog(); expect(element).not.toBeNull(); expect(element).toBeVisible(); return element! })
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
