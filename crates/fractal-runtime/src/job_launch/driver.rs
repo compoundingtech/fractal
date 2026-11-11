@@ -58,15 +58,18 @@ pub struct JobLaunchResult {
 /// No default configuration or caller. The keeper is shared; J is generation-local.
 pub struct CgroupJobLaunch {
     manager: SystemdKeeper,
+    daemon_identity: fractal_jobs::launch::DaemonIdentity,
     directory: Option<PathBuf>,
     gated: Option<GatedChild>,
     holder: Option<Child>,
     watcher: Option<KeeperWatcher>,
 }
 impl CgroupJobLaunch {
-    pub fn new(cgroup_root: PathBuf) -> Self {
-        Self { manager: SystemdKeeper::new(cgroup_root), directory: None, gated: None,
-            holder: None, watcher: None }
+    /// The caller supplies the pinned member-key fingerprint; never derive it
+    /// from a process, host alone, instance flag, or a fresh restart-local key.
+    pub fn new(cgroup_root: PathBuf, daemon_identity: fractal_jobs::launch::DaemonIdentity) -> Self {
+        Self { manager: SystemdKeeper::new(cgroup_root), daemon_identity,
+            directory: None, gated: None, holder: None, watcher: None }
     }
 }
 impl JobLaunchEffects for CgroupJobLaunch {
@@ -75,7 +78,7 @@ impl JobLaunchEffects for CgroupJobLaunch {
     }
     fn create_group(&mut self, request: &JobLaunch<'_>) -> Result<PathBuf> {
         ensure!(self.directory.is_none() && self.gated.is_none(), "job adapter cannot be reused");
-        let keeper = ensure_keeper(&mut self.manager, request.host, request.heavy_slice)
+        let keeper = ensure_keeper(&mut self.manager, request.host, self.daemon_identity, request.heavy_slice)
             .context(LaunchRefusal::KeeperUnavailable)?;
         let directory = keeper.directory.join(cgroup_name(request.job_id, request.intent));
         validate_path(&directory)?;
