@@ -1401,19 +1401,20 @@ fn a_skipped_item_that_finds_an_earlier_due_time_is_a_correction() {
     let (_store, _runtime, reconciler, _) = stopping();
     let timed = "stop:invented-timed";
     reconciler.incremental.evaluated(timed, BTreeSet::new(), Some(START + 60_000));
-    let mark = smallclaims::touched::wrote_len();
+    let mark = reconciler.evaluation_mark();
+    let reads = BTreeSet::new();
     // A later or equal due time is what a skipping pass already wakes for.
     for later in [START + 60_000, START + 120_000] {
-        assert!(reconciler.missed_by_skipping(timed, mark, Some(later)).is_empty());
+        assert!(reconciler.missed_by_skipping(timed, mark, &reads, Some(later)).is_empty());
     }
-    assert!(reconciler.missed_by_skipping(timed, mark, None).is_empty());
+    assert!(reconciler.missed_by_skipping(timed, mark, &reads, None).is_empty());
     // An earlier one, such as a timer armed or a time limit found only because a full pass
     // evaluated the item anyway, is one a skipping pass would have slept through.
-    let earlier = reconciler.missed_by_skipping(timed, mark, Some(START + 30_000));
+    let earlier = reconciler.missed_by_skipping(timed, mark, &reads, Some(START + 30_000));
     assert_eq!(earlier, [format!("due {timed} at {}", START + 30_000)]);
     let untimed = "stop:invented-untimed";
     reconciler.incremental.evaluated(untimed, BTreeSet::new(), None);
-    assert_eq!(reconciler.missed_by_skipping(untimed, mark, Some(START + 30_000)).len(), 1);
+    assert_eq!(reconciler.missed_by_skipping(untimed, mark, &reads, Some(START + 30_000)).len(), 1);
     // Corrections are counted by cause, so a missed timer shows apart from a missed write.
     // The count lands before the strict check that fails a test on any correction.
     let strict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1429,6 +1430,43 @@ fn a_skipped_item_that_finds_an_earlier_due_time_is_a_correction() {
             .any(|row| row["item"] == "stop · due"),
         "{counted}"
     );
+}
+
+/// The program engine settles a step from its own thread, so its write can land after a full
+/// pass read the change feed and while that pass evaluates the step's run. The run's evaluation
+/// then writes on what it read, and the next pass is marked for the engine's change: no
+/// correction. A change to something the evaluation did not read excuses nothing.
+#[test]
+fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
+    let (store, _runtime, reconciler, _) = stopping();
+    let observed = |subject: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let item = "mission-run/raced";
+    let reads = BTreeSet::from(["resource/run".to_owned(), "resource/step".to_owned()]);
+    reconciler.incremental.observe(&store).unwrap();
+    reconciler.incremental.evaluated(item, reads.clone(), None);
+    smallclaims::touched::record_wrote(|| {
+        let mark = reconciler.evaluation_mark();
+        // The evaluation's own write to what it read is a correction on its own.
+        store.append_claim(&observed("resource/run")).unwrap();
+        let own = |reads: &BTreeSet<String>| {
+            let missed = reconciler.missed_by_skipping(item, mark, reads, None);
+            !missed.is_empty() && missed.iter().all(|wrote| wrote == "resource.observed resource/run")
+        };
+        assert!(own(&reads));
+        std::thread::scope(|scope| {
+            scope.spawn(|| store.append_claim(&observed("resource/step")).unwrap()).join().unwrap();
+        });
+        assert!(reconciler.missed_by_skipping(item, mark, &reads, None).is_empty());
+        assert!(own(&BTreeSet::from(["resource/run".to_owned()])));
+    });
 }
 
 #[test]
