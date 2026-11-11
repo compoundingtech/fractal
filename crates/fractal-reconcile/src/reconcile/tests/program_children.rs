@@ -91,11 +91,20 @@ mission "program-child" state="ready" {{
 mission "program-parent" state="ready" {{
   goal "Wait on child runs and asks."
   concurrent-runs max=4
+  authority {{ start "program-child"; }}
   input "mode" kind="text"
   input "gate" kind="text"
   step "program" {{
     retry {{ attempts 2 }}
-    program "{}" sha256="{hash}"
+    program "{0}" sha256="{hash}"
+  }}
+}}
+mission "program-unauthorized" state="ready" {{
+  goal "Start a child run it holds no authority to start."
+  input "mode" kind="text"
+  input "gate" kind="text"
+  step "program" {{
+    program "{0}" sha256="{hash}"
   }}
 }}"#,
             bundle.display()
@@ -114,12 +123,16 @@ mission "program-parent" state="ready" {{
 
 impl Fixture {
     fn start(&self, name: &str, mode: &str) -> Started {
+        self.start_mission("program-parent", name, mode)
+    }
+
+    fn start_mission(&self, mission: &str, name: &str, mode: &str) -> Started {
         let gate = self.dir.path().join(format!("{name}.gate"));
         let inputs = BTreeMap::from([("mode".to_owned(), mode.to_owned()), ("gate".to_owned(), gate.display().to_string())]);
         let run = self
             .store
             .create_mission_run(&MissionRunRequest {
-                mission: "program-parent".into(),
+                mission: mission.into(),
                 revision: None,
                 workspace: self.dir.path().display().to_string(),
                 requester: Some("person/owner".into()),
@@ -284,6 +297,26 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
         fixture.result(&parent.step, RESULT_KEY, 1),
         Some(("completed".to_owned(), json!({"published": completed, "gate": "opened"})))
     );
+}
+
+/// The parent run starts its program's children: the creation is written as the parent, and a
+/// mission whose authority lacks `start` on the child's mission fails its step with the refusal
+/// (docs/st3/program-engine.md §3).
+#[test]
+fn a_programs_child_is_started_by_its_parent_run_within_its_authority() {
+    let fixture = fixture();
+    let parent = fixture.start("starter", "child");
+    fixture.until("the child run starts", || fixture.child(&parent.step, "publish", 1).is_some());
+    let child = fixture.child(&parent.step, "publish", 1).unwrap();
+    let created = fixture.store.claims_for(&child, Some("mission-run.created")).unwrap();
+    assert_eq!(created[0].actor.as_deref(), Some(parent.run.as_str()));
+    assert_eq!(fixture.store.mission_run(&child).unwrap().unwrap().requester, "person/owner");
+
+    let denied = fixture.start_mission("program-unauthorized", "denied", "child");
+    fixture.until("the unauthorized program's step fails", || fixture.status(&denied.step) == "failed");
+    assert!(fixture.children(&denied.step).is_empty());
+    let reason = fixture.store.step_run(&denied.step).unwrap().unwrap().blocked_reason.unwrap_or_default();
+    assert!(reason.contains("could not start its child run `publish`"), "{reason}");
 }
 
 #[test]

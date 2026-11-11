@@ -14512,7 +14512,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         input: &BTreeMap<String, String>,
         idempotency_key: String,
     ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
-        self.store.create_child_mission_run(
+        self.store.create_program_child_mission_run(
             &MissionRunRequest {
                 mission: mission.to_owned(),
                 revision: None,
@@ -14524,7 +14524,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
             run,
             step,
-            None,
         )
     }
 
