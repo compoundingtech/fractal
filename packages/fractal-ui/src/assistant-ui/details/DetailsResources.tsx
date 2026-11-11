@@ -1,7 +1,9 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useDrag } from 'react-aria'
-import { Button as AriaButton, Tooltip as AriaTooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button as AriaButton, VisuallyHidden } from 'react-aria-components'
+import { HoverCard } from '../entity/HoverCard'
+import { ResourceEntityCard } from '../entity/ResourceCard'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon, type IconName } from '../composition/Icons'
@@ -287,15 +289,11 @@ function SectionItems({ section, now, form, open, pending }: { section: DetailsS
   </>
 }
 
-/** Terminal previews are observed lines; diff and file previews reuse the canonical hover. */
+/** Each resource row shows its entity's canonical card: an agent's is the sidebar card; a terminal shows its observed tail. */
 function HoverContent({ resource, now }: { resource: DetailsResource; now: number }) {
   if (resource.agent !== undefined) return <AgentHoverCard row={resource.agent} reportedStatusOnly now={now} />
-  return <div {...stylex.props(styles.hover)}>
-    <strong {...stylex.props(styles.hoverTitle)}>{resource.card.label}</strong>
-    {resource.terminal !== undefined
-      ? <pre {...stylex.props(styles.terminalPreview)}>{resource.terminal.join('\n')}</pre>
-      : <ResourceHoverV1 resource={resource.card} file={resource.file} />}
-  </div>
+  if (resource.terminal !== undefined) return <ResourceEntityCard id={resource.uri} title={resource.card.label} kind="Terminal" icon="terminal" text={resource.card.detail} preview={resource.terminal.slice(-6)} />
+  return <ResourceHoverV1 id={resource.uri} resource={resource.card} file={resource.file} />
 }
 
 function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
@@ -359,14 +357,13 @@ function DenseRow({ resource, now, open }: { resource: DetailsResource; now: num
       {resource.card.detail === '' ? null : <span {...stylex.props(styles.staticDetail)}>{resource.card.detail}</span>}
     </span>
   </div>
-  return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><TooltipTrigger delay={150}>
+  return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><HoverCard placement="left top" content={() => <HoverContent resource={resource} now={now} />}>
     <AriaButton data-details-resource-row aria-describedby={facts.length > 0 ? descriptionId : undefined} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow, narrow && styles.touchRow)}>
       <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
       <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>{' '}
       <WholeResourceMeta numeric={resource.file !== undefined} styles={styles.denseMeta}>{meta}</WholeResourceMeta>
     </AriaButton>
-    <AriaTooltip placement="left" {...stylex.props(styles.tooltip)}><HoverContent resource={resource} now={now} /></AriaTooltip>
-  </TooltipTrigger>{facts.length > 0 && <VisuallyHidden elementType="span"><span id={descriptionId} data-details-resource-facts>{facts.join(' · ')}</span></VisuallyHidden>}{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit, narrow && styles.touchSquare)}><Icon name="panel" /></AriaButton>}</div>
+  </HoverCard>{facts.length > 0 && <VisuallyHidden elementType="span"><span id={descriptionId} data-details-resource-facts>{facts.join(' · ')}</span></VisuallyHidden>}{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit, narrow && styles.touchSquare)}><Icon name="panel" /></AriaButton>}</div>
 }
 
 /** Phone hosts: the shared resource card's open row (footer height) and detail row (control height) become 44px targets. */
@@ -424,8 +421,4 @@ const styles = stylex.create({
   skeletonRow: { position: 'relative', minWidth: 0 },
   skeletonInk: { visibility: 'visible', position: 'absolute', inset: s.zero, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.sm, overflow: 'hidden', pointerEvents: 'none' },
   skeletonLabel: { display: 'flex', flexGrow: 1, minWidth: 0, overflow: 'hidden' },
-  hover: { maxWidth: 'min(360px, calc(100vw - 24px))', display: 'flex', flexDirection: 'column', gap: s.xs },
-  hoverTitle: { fontSize: t.metaSize, fontWeight: t.weightMedium },
-  tooltip: { padding: s.md, backgroundColor: surface.raised, color: ink.fg, borderRadius: r.md, borderWidth: 1, borderStyle: 'solid', borderColor: border.borderStrong, fontSize: t.metaSize, lineHeight: t.metaLeading, zIndex: 10 },
-  terminalPreview: { margin: s.zero, padding: s.sm, backgroundColor: surface.codeBg, borderRadius: r.sm, fontFamily: t.fontMono, fontSize: t.metaSize, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
 })
