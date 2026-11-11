@@ -36,6 +36,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         requester TEXT NOT NULL, key TEXT NOT NULL, digest TEXT NOT NULL, job_id TEXT NOT NULL,
         PRIMARY KEY(requester, key)
     ) WITHOUT ROWID;
+    CREATE UNIQUE INDEX IF NOT EXISTS job_receipts_job ON job_receipts(job_id);
     CREATE TABLE IF NOT EXISTS job_pending (subject TEXT PRIMARY KEY) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS jobs_claim_subject ON claims(subject) WHERE kind='job.recorded';
     CREATE TRIGGER IF NOT EXISTS jobs_pending_insert AFTER INSERT ON claims
@@ -61,7 +62,10 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn open(tx: &Transaction<'_>) -> Result<()> { create_schema(tx) }
+pub fn open(tx: &Transaction<'_>) -> Result<()> {
+    create_schema(tx)?;
+    rebuild(tx)
+}
 
 pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
     if claim.kind != KIND { return Ok(()); }
@@ -86,11 +90,18 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     let mut statement = tx.prepare("SELECT DISTINCT subject FROM claims INDEXED BY jobs_claim_subject WHERE kind='job.recorded'")?;
     let subjects = statement.query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for subject in subjects { refold(tx, &subject)?; }
+    for subject in subjects {
+        refold(tx, &subject)?;
+        tx.execute("DELETE FROM job_pending WHERE subject=?1", [&subject])?;
+    }
     Ok(())
 }
 
 fn refold(tx: &Transaction<'_>, subject: &str) -> Result<()> {
+    let size: usize = tx.query_row("SELECT count(*) FROM (SELECT 1 FROM claims
+        INDEXED BY jobs_claim_subject WHERE kind='job.recorded' AND subject=?1 LIMIT ?2)",
+        params![subject, REFOLD_LIMIT + 1], |row| row.get(0))?;
+    ensure!(size <= REFOLD_LIMIT, "job-refold-limit: affected subject exceeds bounded refold");
     let sql = format!("SELECT id,body,accepted_at_unix_ms FROM claims INDEXED BY jobs_claim_subject
         WHERE kind='job.recorded' AND subject=?1
         AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
@@ -103,6 +114,9 @@ fn refold(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     ensure!(records.len() <= REFOLD_LIMIT, "job-refold-limit: affected subject exceeds bounded refold");
     tx.execute("DELETE FROM jobs WHERE id=?1", [subject])?;
     tx.execute("DELETE FROM job_history WHERE job_id=?1", [subject])?;
+    // Receipts are a durable projection of canonical submissions, rebuilt atomically
+    // with this subject; durable claims ensure checkpoints never rotate them away.
+    tx.execute("DELETE FROM job_receipts WHERE job_id=?1", [subject])?;
     let mut current: Option<(JobHostBinding, JobState)> = None;
     for (ordinal, (claim, body, at)) in records.into_iter().enumerate() {
         let body: serde_json::Value = serde_json::from_str(&body)
@@ -131,11 +145,13 @@ fn apply(
 ) -> Result<()> {
     match record {
         JobRecord::Submitted { binding, identity, request } => {
-            ensure!(current.is_none(), "job-already-submitted");
+            ensure!(current.as_ref().is_none_or(|(existing, _)| existing == binding), "job-binding-conflict");
             ensure!(binding.job_id == subject, "job-binding-subject-mismatch");
             ensure!(request.digest() == identity.request_digest, "job-request-digest-mismatch");
             request.resources.validate()?;
             request.command.validate()?;
+            receipts::reserve_receipt(tx, identity, subject)?;
+            if current.is_some() { return Ok(()); }
             let digest = serde_json::to_string(&identity.request_digest)?;
             let queue_order = smallclaims::store::canonical::sortable_key(
                 &smallclaims::store::canonical::claim_key(tx, claim)?,
@@ -157,6 +173,11 @@ fn apply(
     }
     Ok(())
 }
+
+mod receipts;
+mod queries;
+pub use receipts::{job_id, receipt_for_key};
+pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, queue_for_host};
 
 
 #[cfg(test)]
