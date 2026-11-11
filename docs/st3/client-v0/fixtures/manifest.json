@@ -2,6 +2,7 @@
   "contract": "st3.client.v0",
   "schema": "../schemas/client-v0.schema.json",
   "fixtures": [
+    {"file": "usage-hub-quota.json", "definition": "Envelope"},
     { "file": "harness-question.json", "definition": "Envelope" },
     { "file": "harness-questions-page.json", "definition": "Envelope" },
     { "file": "harness-answer.json", "definition": "ActionRequest" },

@@ -19,7 +19,7 @@ vi.mock('@stylexjs/stylex', () => ({
 vi.mock('../data/react.tsx', () => ({ useDataSource: () => data.source }))
 
 import { gatewayAgentControls } from '../agents/agent-control-port.ts'
-import { AgentActions, agentActions } from './AgentActions.tsx'
+import { ConversationOverflowMenu, agentActions } from './AgentActions.tsx'
 
 const keys = (state: string, activity: 'working' | 'idle' = 'idle') => agentActions({ state, activity }).map((row) => row.key)
 
@@ -94,7 +94,7 @@ describe('gatewayAgentControls', () => {
   })
 })
 
-describe('AgentActions', () => {
+describe('ConversationOverflowMenu', () => {
   const mount = async (state: string) => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     // React Aria's menu selection escapes keys with CSS.escape, which jsdom does not provide.
@@ -102,7 +102,7 @@ describe('AgentActions', () => {
     const container = document.createElement('div')
     document.body.append(container)
     const root = createRoot(container)
-    await act(async () => root.render(<AgentActions agent={{ ref: 'agent/example/atlas', name: 'atlas', state, activity: 'idle' }} />))
+    await act(async () => root.render(<ConversationOverflowMenu agent={{ ref: 'agent/example/atlas', name: 'atlas', state, activity: 'idle' }} onViewDeclaration={() => undefined} />))
     const press = async (label: string) => act(async () => {
       // Icon-only buttons are found by their accessible name; text buttons and menu items by their text.
       const target = [...document.querySelectorAll<HTMLElement>('button, [role="menuitem"]')].find((each) => (each.getAttribute('aria-label') ?? each.textContent)?.startsWith(label))
@@ -115,13 +115,13 @@ describe('AgentActions', () => {
   it('asks before restarting, and keeping it sends nothing', async () => {
     data.control.mockClear()
     const view = await mount('running')
-    await view.press('Actions for atlas')
+    await view.press('More actions')
     await view.press('Restart')
     expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('Restart atlas?')
     expect(data.control).not.toHaveBeenCalled()
     await view.press('Keep it')
     expect(document.querySelector('[role="alertdialog"]')).toBeNull()
-    await view.press('Actions for atlas')
+    await view.press('More actions')
     await view.press('Restart')
     await act(async () => [...document.querySelectorAll<HTMLElement>('[role="alertdialog"] button')].find((each) => each.textContent === 'Restart')!.click())
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'restart')
@@ -129,10 +129,17 @@ describe('AgentActions', () => {
     view.unmount()
   })
 
+  it('keeps View KDL in the same menu, with or without a roster row', async () => {
+    const view = await mount('running')
+    await view.press('More actions')
+    expect([...document.querySelectorAll('[role="menuitem"]')].map(each => each.querySelector('span')?.textContent)).toEqual(['Restart', 'Suspend', 'Retire', 'Copy id', 'View KDL'])
+    view.unmount()
+  })
+
   it('starts a stopped seat without asking', async () => {
     data.control.mockClear()
     const view = await mount('stopped')
-    await view.press('Actions for atlas')
+    await view.press('More actions')
     await view.press('Start')
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'start')
     expect(document.querySelector('[role="alertdialog"]')).toBeNull()
