@@ -177,7 +177,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
     }
   })
   expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
-  expect(row().querySelector('[data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission]')).toBeNull()
   const warning = row().querySelector('[data-mission-unavailable]')!
   expect(warning.textContent).toContain('Mission info unavailable')
   expect(warning.querySelector('svg')).not.toBeNull()
@@ -185,7 +185,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
   expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
   await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
   expect(row().getAttribute('aria-label')).toBe('Worker, Working')
-  expect(row().querySelector('[data-mission-unavailable], [data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission-unavailable], [data-mission]')).toBeNull()
   expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
 })
 

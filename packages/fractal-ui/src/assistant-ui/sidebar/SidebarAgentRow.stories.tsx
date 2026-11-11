@@ -39,7 +39,7 @@ const childObservation = { subagentCount: undefined, subagentObservation: { _tag
 const cohortRows: readonly Row[] = [
   { ...knownRow, ref: 'agent/first', id: 'first', title: 'First session' },
   { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } },
-  { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Needs you' },
+  { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Waiting' },
   { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', harness: 'opencode', subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
   { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } },
   { ...knownRow, ...childObservation, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
