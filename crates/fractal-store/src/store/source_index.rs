@@ -119,7 +119,7 @@ impl Store {
                 recorded_at_unix_ms: accepted.parse().map_err(internal)?,
             });
         }
-        revisions.sort_by(|a, b| (b.recorded_at_unix_ms, b.sequence).cmp(&(a.recorded_at_unix_ms, a.sequence)));
+        revisions.sort_by_key(|entry| std::cmp::Reverse((entry.recorded_at_unix_ms, entry.sequence)));
         Ok(Revisions { subject: subject.to_owned(), current, revisions })
     }
 
@@ -213,13 +213,12 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use fractal_schema::source_map::claim_subject;
 
     #[test]
     fn claim_subject_range_holds_only_this_subjects_revisions() {
         for (other, inside) in [("mission/a@r1", true), ("mission/a/b@r1", false), ("mission/aa@r1", false), ("mission/a", false)] {
-            let within = other >= "mission/a@" && other < "mission/aA";
+            let within = ("mission/a@".."mission/aA").contains(&other);
             assert_eq!(within, inside, "{other}");
         }
         assert_eq!(claim_subject("mission/a", "r1"), "mission/a@r1");
