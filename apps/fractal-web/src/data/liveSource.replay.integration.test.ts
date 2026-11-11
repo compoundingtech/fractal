@@ -100,11 +100,11 @@ describe('scenario replay through the real live source', () => {
       vi.stubGlobal('fetch', network)
       const usage = live.source.usage
       if (usage._tag !== 'declared') throw new Error('Expected the live usage relay')
-      const quota = yield* Effect.either(usage.source.quota)
-      const history = yield* Effect.either(usage.source.history('synthetic/account'))
+      const quota = yield* Effect.result(usage.source.quota)
+      const history = yield* Effect.result(usage.source.history('synthetic/account'))
       // The world does not model quota: its transport returns an explicit unsupported route.
-      expect(quota).toMatchObject({ _tag: 'Left', left: { kind: 'http', reason: 'quota returned HTTP 501' } })
-      expect(history).toMatchObject({ _tag: 'Left', left: { kind: 'http', reason: 'history returned HTTP 501' } })
+      expect(quota).toMatchObject({ _tag: 'Failure', failure: { kind: 'http', reason: 'quota returned HTTP 501' } })
+      expect(history).toMatchObject({ _tag: 'Failure', failure: { kind: 'http', reason: 'history returned HTTP 501' } })
       expect(network).not.toHaveBeenCalled()
     })),
   )
