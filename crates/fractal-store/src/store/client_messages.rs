@@ -1705,9 +1705,11 @@ mod tests {
                 transaction.commit().unwrap();
             }
             assert_eq!(target.index().unwrap(), admitted, "the peer wake admits no additional source");
-            assert!(target.project_replication_backlog().unwrap());
+            assert!(!target.project_replication_backlog().unwrap());
+            assert!(target.replication_projection_recovery_required().unwrap());
+            target.replay_replication_graph().unwrap();
             assert_eq!(target.message("message/keyed").unwrap().unwrap().content, "keyed lookup",
-                "missing or stale health must not skip needed canonical projection");
+                "explicit recovery must restore canonical projection without a live replay");
             let health: (String, u64) = target.readers.get().query_row(
                 "SELECT status,last_good_store_index FROM projection_health WHERE aggregate='graph'", [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
