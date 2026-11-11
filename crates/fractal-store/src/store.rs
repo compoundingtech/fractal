@@ -17278,13 +17278,8 @@ pub fn try_project_all_simple_replication_tx(
 // explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
 fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, reason: &str) -> Result<bool, FractalError> {
     let conflict: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM operations WHERE state='conflict')
-         OR EXISTS(SELECT 1 FROM claims incoming INDEXED BY claims_operation_index
-           JOIN claims other INDEXED BY claims_operation_index
-             ON json_extract(other.body,'$._operation.id')=json_extract(incoming.body,'$._operation.id')
-           WHERE json_extract(incoming.body,'$._operation.id') IS NOT NULL
-             AND json_extract(other.body,'$._operation.request_digest')<>json_extract(incoming.body,'$._operation.request_digest')
-             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=incoming.id OR id=other.id))",
+        "SELECT EXISTS(SELECT 1 FROM operations INDEXED BY operations_conflict_index WHERE state='conflict')
+         OR EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
         [], |row| row.get(0),
     ).map_err(internal)?;
     if conflict {
@@ -17989,6 +17984,20 @@ pub fn try_project_simple_replication_tx(
         None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
+    // A later receipt must not implicitly repair a set excluded by an earlier chunk.
+    let mut excluded = transaction.prepare(
+        "SELECT aggregate FROM projection_health WHERE status='stale'
+         AND error_code='operation-conflict-no-bounded-refold'
+         AND aggregate GLOB 'projection:operation-conflict:*'",
+    ).map_err(internal)?;
+    for key in excluded.query_map([], |row| row.get::<_, String>(0)).map_err(internal)? {
+        let key = key.map_err(internal)?;
+        if let Some(identity) = key.strip_prefix("projection:operation-conflict:")
+            && let Ok((_, subject)) = serde_json::from_str::<(String, String)>(identity) {
+            unsupported_conflict_subjects.insert(subject);
+        }
+    }
+    drop(excluded);
     owned_sets::project_excluding_tx(transaction, &unsupported_conflict_subjects)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
     // Prefer a degraded subject's identifiers over an unrelated later event-only conflict.

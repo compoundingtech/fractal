@@ -150,10 +150,34 @@ fn operation_conflict_refuses_a_guard_requested_full_replay() {
             tx.commit().unwrap();
         }
         FULL_REPLAYS.with(|count| count.set(0));
-        assert!(!store.project_replication_backlog().unwrap());
+        assert!(store.project_replication_backlog().unwrap());
         assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
         assert!(store.replication_status(false, None, &[]).unwrap().unhealthy.iter().any(|row|
-            row.error_code.as_deref() == Some("operation-conflict-projection-degraded")));
+            row.error_code.as_deref() == Some("operation-conflict-replay-deferred")));
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            append_claim_record_tx(&tx, "peer", "exec/after-checkpoint-conflict", "intent.desired", None,
+                &json!({"subject":"exec/after-checkpoint-conflict","kind":"exec","desired":{}}),
+                &[], None).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(store.project_replication_backlog().unwrap());
+        assert!(store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM desired WHERE subject='exec/after-checkpoint-conflict')",
+            [], |row| row.get::<_, bool>(0),
+        ).unwrap());
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        assert!(store.replication_projection_needs_recovery().unwrap());
+        let health = store.replication_status(false, None, &[]).unwrap();
+        assert!(health.unhealthy.iter().any(|row| row.aggregate == "graph" && row.status == "stale"));
+        assert!(health.unhealthy.iter().any(|row| row.aggregate == "projection:deferred-replay"));
+        let before_repair = (operation_rows(&store.readers.get()), graph_digest_of(&store));
+        store.replay_replication_graph().unwrap();
+        assert!(!store.replication_projection_needs_recovery().unwrap());
+        assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+            .any(|row| row.aggregate == "projection:deferred-replay"));
+        assert_eq!(before_repair, (operation_rows(&store.readers.get()), graph_digest_of(&store)));
     }
 }
 
@@ -228,7 +252,29 @@ fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
         /* sqlite-large-value: allow-for-now lv-hf0bbe1f00bc2 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", [],
     ).unwrap();
     FULL_REPLAYS.with(|count| count.set(0));
-    target.project_replication_backlog().unwrap();
+    let scanned_target = target.index().unwrap();
+    let injected = std::cell::Cell::new(false);
+    target.project_replication_backlog_with_yield(|| {
+        if injected.replace(true) { return; }
+        let mut connection = target.connection.write();
+        let tx = connection.transaction().unwrap();
+        for digest in ["a", "b"] {
+            append_claim_record_tx(&tx, "peer", "custom/after-target", "custom.test.observed", None,
+                &json!({"fields":{},"_operation":{"id":"op/after-target","request_digest":digest}}),
+                &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }).unwrap();
+    let watermark = || target.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='projection:operation-conflict-scan'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    let after_target_discovered = || target.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:operation-conflict-fence:op/after-target')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap();
+    assert_eq!(watermark(), scanned_target);
+    assert!(!after_target_discovered());
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert!(target.replication_status(false, None, &[]).unwrap().unhealthy.iter().any(|row|
         row.error_code.as_deref() == Some("operation-conflict-replay-deferred")));
@@ -241,6 +287,8 @@ fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
         tx.commit().unwrap();
     }
     target.project_replication_backlog().unwrap();
+    assert_eq!(watermark(), target.index().unwrap());
+    assert!(after_target_discovered());
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert!(target.readers.get().query_row(
         "SELECT EXISTS(SELECT 1 FROM desired WHERE subject='exec/after-deferred')",
@@ -281,4 +329,58 @@ fn operation_conflict_refold_failure_restores_every_prior_desired_column() {
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert!(store.replication_status(false, None, &[]).unwrap().unhealthy.iter().any(|row|
         row.status == "stale" && row.aggregate.contains("op/refold-failure")));
+}
+
+#[test]
+fn operation_conflict_owned_set_exclusion_survives_later_receipt_chunk() {
+    let store = Store::open_memory("fixture").unwrap();
+    store.project_replication_backlog().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        let body = json!({"subject":"exec/excluded-member","kind":"exec","desired":{"value":"excluded"},
+            "owned_set":"owned-set/excluded"});
+        let desired: DesiredSubject = serde_json::from_value(body.clone()).unwrap();
+        let member = append_claim_record_tx(&tx, "peer", "exec/excluded-member", "intent.desired",
+            None, &body, &[], None).unwrap();
+        let revision = owned_sets::Revision {
+            rollout: None, previous: None,
+            source: owned_sets::Source { repository:"acme/garden".into(), r#ref:"main".into(), sha:"abc".into(), sequence:1 },
+            bundle_digest:"bundle".into(),
+            members:BTreeMap::from([("exec/excluded-member".into(), owned_sets::Member {
+                manual_rollout:false, one_shot:false, kind:"exec".into(), claim:member.id,
+                revision:desired_revision(&desired),
+            })]),
+            retired:BTreeMap::new(), adoptions:BTreeMap::new(),
+        };
+        for digest in ["a", "b"] {
+            append_claim_record_tx(&tx, "peer", "owned-set/excluded", "owned-set.revised", None,
+                &json!({"fields":{"revision":canonical_hash(&revision).unwrap(),"body":revision},
+                    "_operation":{"id":"op/excluded-set","request_digest":digest}}), &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    let absent = || !store.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM desired WHERE subject='exec/excluded-member')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap();
+    assert!(store.project_replication_backlog().unwrap());
+    assert!(absent());
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "custom/unrelated-set-event", "custom.test.observed",
+            None, &json!({"fields":{}}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    assert!(store.project_replication_backlog().unwrap());
+    assert!(absent(), "an unrelated later chunk must not repair the excluded set");
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    // The set really is projectable: only an explicit repair may apply its member.
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    owned_sets::project_tx(&tx).unwrap();
+    tx.commit().unwrap();
+    assert!(!absent());
 }
