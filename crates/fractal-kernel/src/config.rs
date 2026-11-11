@@ -82,6 +82,9 @@ pub struct Config {
     /// Tailnet login admitted for browser pairing; absent disables browser pairing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_pairing_login: Option<String>,
+    /// Inactive jobs recording API; absent configuration disables every jobs route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<JobsConfig>,
     /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
@@ -626,6 +629,14 @@ impl Default for IdleNudgeSettings {
     }
 }
 
+
+/// Explicit classes are declarations only, never admission or preemption authority.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JobsConfig {
+    pub enabled: bool,
+    pub allowed_classes: Vec<String>,
+}
 /// The config file the running daemon was started with, so its `[limits]` can be read again.
 static DAEMON_CONFIG: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
@@ -804,6 +815,7 @@ impl Default for Config {
             person: None,
             browser_pairing_login: None,
             pairing_legacy_allowances: Vec::new(),
+            jobs: None,
             fleet_id: None,
             shared_secret_file: None,
             state_dir,

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Cover the disabled jobs admission boundary with corruption, snapshot, origin, concurrency and replay refusal fixtures.",
-  "replay": {"status": "none", "detail": "Test-only replay runs without database tables and returns HistoryOnly from immutable signed content, proving it does not read membership, binding, host state or wall-clock state."},
+  "replay": {"status": "none", "detail": "Test-only replay verifies both direct and fields-enveloped records against their exact signed bytes without database tables. It returns HistoryOnly, proving it does not read membership, binding, host state or wall-clock state. The private validator uses the same normalization as the projection."},
   "schema": {"status": "none", "detail": "Fixtures distinguish unavailable membership/binding lookups and malformed rows from successfully proven absence. No production schema or migration is installed."},
   "rules": {"status": "none", "detail": "Real cryptographic signature corruption, nonce tampering, partial signatures, changed immutable binding fields, changed root, stale membership, binding conflicts and origin mismatches refuse. A step lease without a signature refuses."},
   "compatibility": {"status": "none", "detail": "Concurrent incompatible same-ID attempts both refuse while post-sealing proof is unavailable: zero grants, not a simulated successful grant. Tests do not claim authenticated admission or successful binding reservation."},

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Add indexed inactive jobs queries, requester-isolated atomic receipts and migration/replay fixtures.",
-  "replay": {"status": "changed", "detail": "Open catches up existing job-only history. Rebuild atomically recomputes each subject's receipt with its canonical history. Refold checks the bounded subject count before sorting or changing tables. Earlier canonical submissions win; changed-digest repeats and changed bindings are refused history."},
-  "schema": {"status": "changed", "detail": "Populate the previously declared receipt table with composite (requester,key) uniqueness. Receipt-bearing claims are durable, never rotated away. Job IDs are versioned SHA-256 identities of requester/key, so receipt conflicts remain within one subject."},
-  "rules": {"status": "none", "detail": "No execution admission or host activation. Pure unit-2 idempotency decisions are used within the same SQLite transaction as job rows and transition history."},
-  "compatibility": {"status": "changed", "detail": "Expose history-only job lookup, host queue in canonical order, transition history and receipt lookup. Queue reads require an explicit transaction snapshot. No public submit endpoint or execution-authority evidence constructor exists."},
-  "downtime": {"status": "none", "detail": "No fleet activation."},
-  "manual": {"status": "none", "detail": "No operator action."},
-  "recovery": {"status": "changed", "detail": "Durable canonical claims reconstruct job rows, receipts and refused transition histories. These history rows never authorize local execution; admission wiring remains separately gated."}
+  "summary": "Add indexed inactive jobs queries, atomic requester-isolated receipts and read-only repair-staleness fencing.",
+  "replay": {"status": "changed", "detail": "Open catches up existing job history; bounded refold checks subject size before sorting or changing tables. Canonical submissions atomically reconstruct job rows, receipts and raw transition history. Reverse-arrival, malformed-record and repair fixtures cover rebuild equivalence."},
+  "schema": {"status": "changed", "detail": "Populate receipts with composite requester/key uniqueness and a unique job-ID index. Job IDs are versioned SHA-256 identities of requester/key, keeping conflicts subject-local. Durable receipt-bearing claims never rotate away."},
+  "rules": {"status": "none", "detail": "No execution admission or host activation. Unit-2 decisions run in the receipt's SQLite writer transaction. A new two-connection race fixture requires exactly one NewJob result, one ExistingJob with the same ID, and one persisted receipt."},
+  "compatibility": {"status": "changed", "detail": "Read-only Transaction queries expose job lookup, canonical host queue, raw transition history and receipts. Pending subjects return typed JobsProjectionStale; queues fence current and candidate hosts. Reads never drain pending work or acquire the writer."},
+  "downtime": {"status": "none", "detail": "No activation."},
+  "manual": {"status": "none", "detail": "No operator action. Automatic runtime repair-page dispatch remains deferred to approved 4c-2; affected reads explicitly report stale until existing flush/open/rebuild hooks drain pending subjects."},
+  "recovery": {"status": "changed", "detail": "Repair fixtures require stale reads without writes, followed by flush/rebuild equivalence. Histories and receipts do not authorize execution, and no whole-log fallback is introduced."}
 }

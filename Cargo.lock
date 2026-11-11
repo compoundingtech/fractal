@@ -1610,6 +1610,7 @@ dependencies = [
  "fractal-api-core",
  "fractal-client",
  "fractal-drivers",
+ "fractal-jobs",
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
