@@ -2580,6 +2580,7 @@ export type MissionStep = {
   next_wake_at?: (Timestamp | null);
   nudged_at?: (Timestamp | null);
   path: string;
+  program?: MissionStepProgram;
   progress_at?: (Timestamp | null);
   since: Timestamp;
   started_at?: number | null;
@@ -2625,6 +2626,28 @@ export type MissionStepPresentation = {
   | "failed"
   | "pending"
 ;
+};
+
+export type MissionStepProgram = {
+  entries: Array<MissionStepProgramEntry>;
+  fault?: ({
+  reason: string;
+  scope: string;
+} | null);
+  last_entry_at?: (Timestamp | null);
+  open_key?: string | null;
+  stalled_after_ms: number;
+  truncated: boolean;
+};
+
+export type MissionStepProgramEntry = {
+  child?: string | null;
+  ended_at?: (Timestamp | null);
+  error?: string | null;
+  key: string;
+  ms?: number | null;
+  started_at?: (Timestamp | null);
+  status: ("started" | "completed" | "failed" | string);
 };
 
 export type MissionStepTransition = {
