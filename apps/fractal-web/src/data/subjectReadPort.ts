@@ -148,6 +148,31 @@ const retainedReader = <T>({
   return subjectReaderFromAtom({ feed, registry })
 }
 
+/**
+ * Reads of values that never change once served: a revision-pinned declaration or source map,
+ * or file text by its sha256. One read per subscription and no refresh; a failure stays visible
+ * until the subscriber remounts, which reads again.
+ */
+const immutableReader = <T>({
+  read,
+  registry,
+}: {
+  readonly read: (ref: string) => Effect.Effect<Extract<Feed<T>, { readonly _tag: 'Observed' }>, SubjectReadFailure>
+  readonly registry: AtomRegistry.AtomRegistry
+}): SubjectReader<T> => {
+  const feed = Atom.family((ref: string) =>
+    Atom.make((get): Feed<T> => {
+      const fiber = Effect.runFork(read(ref).pipe(Effect.match({
+        onSuccess: (value) => get.setSelf({ ...value, readAt: Date.now() }),
+        onFailure: ({ reason, detail }) => get.setSelf(unavailable({ reason, detail })),
+      })))
+      get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
+      return waiting
+    }),
+  )
+  return subjectReaderFromAtom({ feed, registry })
+}
+
 /** Only the request transport is scoped; capability discovery remains the source client's cache. */
 class ScopedSubjectClient extends FractalClient {
   private readonly signal: AbortSignal
@@ -311,50 +336,47 @@ export const gatewaySubjectReads = ({
   readonly discovery?: FractalClient
   readonly registry?: AtomRegistry.AtomRegistry
 }): SubjectReads => {
-  const fromGetter = <T>({
-    decode,
-    getter,
-  }: {
+  type Getter<T> = {
     readonly decode: (value: unknown) => T | Promise<T>
     readonly getter: (args: {
       readonly client: FractalClient
       readonly ref: string
       readonly signal: AbortSignal
     }) => Promise<{ readonly value: unknown; readonly snapshot?: { readonly created_at: unknown } }>
-  }) =>
-    retainedReader({
-      read: Effect.fn('SubjectReadPort.read')((ref: string) =>
-        Effect.tryPromise({
-          try: async (signal) => {
-            signal.throwIfAborted()
-            const response = await getter({
-              client: new ScopedSubjectClient({
-                options: options,
-                signal: signal,
-                discovery: discovery,
-              }),
-              ref: ref,
+  }
+  const readWith = <T>({ decode, getter }: Getter<T>) =>
+    Effect.fn('SubjectReadPort.read')((ref: string) =>
+      Effect.tryPromise({
+        try: async (signal) => {
+          signal.throwIfAborted()
+          const response = await getter({
+            client: new ScopedSubjectClient({
+              options: options,
               signal: signal,
-            })
-            signal.throwIfAborted()
-            const decoded = decode(response.value)
-            return {
-              _tag: 'Observed' as const,
-              value: decoded instanceof Promise ? await decoded : decoded,
-              freshness: 'live' as const,
-              ...(response.snapshot === undefined ? {} : { snapshotCreatedAt: Native.decodeUnknownSync(Native.Timestamp)(response.snapshot.created_at) }),
-            }
-          },
-          catch: (cause) =>
-            new SubjectReadFailure({
-              ref,
-              reason: clientReadAuthorization(cause) ?? (cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed'),
-              detail: cause instanceof Error ? cause.message : String(cause),
+              discovery: discovery,
             }),
-        }),
-      ),
-      registry: registry,
-    })
+            ref: ref,
+            signal: signal,
+          })
+          signal.throwIfAborted()
+          const decoded = decode(response.value)
+          return {
+            _tag: 'Observed' as const,
+            value: decoded instanceof Promise ? await decoded : decoded,
+            freshness: 'live' as const,
+            ...(response.snapshot === undefined ? {} : { snapshotCreatedAt: Native.decodeUnknownSync(Native.Timestamp)(response.snapshot.created_at) }),
+          }
+        },
+        catch: (cause) =>
+          new SubjectReadFailure({
+            ref,
+            reason: clientReadAuthorization(cause) ?? (cause instanceof ClientError && cause.status === 501 ? 'unsupported' : 'failed'),
+            detail: cause instanceof Error ? cause.message : String(cause),
+          }),
+      }),
+    )
+  const fromGetter = <T>(spec: Getter<T>) => retainedReader({ read: readWith(spec), registry: registry })
+  const onceFromGetter = <T>(spec: Getter<T>) => immutableReader({ read: readWith(spec), registry: registry })
   const decodeMissionDeclaration = Native.decodeUnknownSync(Schema.Union([Native.MissionDeclaration, Native.PublicationDefinition]))
   return {
     resource,
@@ -501,7 +523,56 @@ export const gatewaySubjectReads = ({
         }
       },
     }),
+    sourceMap: onceFromGetter({
+      decode: (value): SourceMapLookup => {
+        const lookup = value as SourceMapWire
+        return lookup._tag === 'Mapped' ? { _tag: 'Mapped', value: decodeSourceMap(lookup.value) } : lookup
+      },
+      getter: async ({ client, ref, signal }): Promise<{ readonly value: SourceMapWire }> => {
+        const { subject, revision } = parsePinnedRef(ref)
+        try {
+          return { value: { _tag: 'Mapped', value: (await client.sourceMapGet(subject, revision, { signal })).value } }
+        } catch (cause) {
+          if (!(cause instanceof ClientError && cause.status === 404)) throw cause
+          // An empty or non-JSON 404 is a router without the read; a JSON not-found is a revision without a map.
+          return { value: { _tag: cause.response.code === 'http-error' ? 'Unserved' : 'Unmapped' } }
+        }
+      },
+    }),
+    sourceBlob: onceFromGetter({
+      decode: Native.decodeUnknownSync(Native.SourceBlob),
+      getter: ({ client, ref, signal }) => {
+        const { pinned, hash } = parseBlobRef(ref)
+        const { subject, revision } = parsePinnedRef(pinned)
+        if (revision === undefined) throw new Error(`Blob reads name the mapped revision: ${ref}`)
+        return client.sourceBlobGet(hash, subject, revision, { signal })
+      },
+    }),
   }
+}
+
+const decodeSourceMap = Native.decodeUnknownSync(Native.SubjectSourceMap)
+type SourceMapWire = { readonly _tag: 'Mapped'; readonly value: unknown } | { readonly _tag: 'Unmapped' } | { readonly _tag: 'Unserved' }
+
+/** One subject revision's recorded source map, or why there is none. */
+export type SourceMapLookup =
+  | { readonly _tag: 'Mapped'; readonly value: Native.SubjectSourceMap }
+  /** The revision was published without a map. */
+  | { readonly _tag: 'Unmapped' }
+  /** This Fractal does not serve source maps. */
+  | { readonly _tag: 'Unserved' }
+
+/** Pinned reads take `subject@revision`; subjects never contain `@`. A bare subject reads the current revision's map. */
+export const pinnedRef = (subject: string, revision: string): string => `${subject}@${revision}`
+export const parsePinnedRef = (ref: string): { readonly subject: string; readonly revision: string | undefined } => {
+  const at = ref.indexOf('@')
+  return at === -1 ? { subject: ref, revision: undefined } : { subject: ref.slice(0, at), revision: ref.slice(at + 1) }
+}
+/** Blob reads name the mapped revision that lists the file: `blobRef(pinnedRef(subject, revision), sha256)`. */
+export const blobRef = (pinned: string, hash: string): string => `${pinned}#${hash}`
+const parseBlobRef = (ref: string): { readonly pinned: string; readonly hash: string } => {
+  const at = ref.lastIndexOf('#')
+  return { pinned: ref.slice(0, at), hash: ref.slice(at + 1) }
 }
 
 /** Native subject families available through the same read, stream, and atom contract. */
@@ -534,6 +605,10 @@ export interface SubjectReads {
   readonly agentDeclaration: SubjectReader<Native.AgentDeclaration>
   /** Served canonical mission KDL, or an older daemon's redacted structured definition. */
   readonly missionDefinition: SubjectReader<MissionDeclarationValue>
+  /** The source map and canonical KDL of one revision; `pinnedRef(subject, revision)` (immutable), or the bare subject for its current revision, read once. */
+  readonly sourceMap: SubjectReader<SourceMapLookup>
+  /** One source file text, by `blobRef` of a mapped revision and the sha256 its map names. Immutable. */
+  readonly sourceBlob: SubjectReader<Native.SourceBlob>
 }
 /** Effect service providing the source's native subject readers. */
 export class SubjectReadPort extends Context.Service<SubjectReadPort, SubjectReads>()(
@@ -633,5 +708,7 @@ export const fixtureSubjectReads = ({
     glass: reader({ table: fixtures.glass, pinned: overrides.glass }),
     agentDeclaration: reader({ table: fixtures.agentDeclaration, pinned: overrides.agentDeclaration }),
     missionDefinition: reader({ table: fixtures.missionDefinition, pinned: overrides.missionDefinition }),
+    sourceMap: reader({ table: fixtures.sourceMap, pinned: overrides.sourceMap }),
+    sourceBlob: reader({ table: fixtures.sourceBlob, pinned: overrides.sourceBlob }),
   }
 }
