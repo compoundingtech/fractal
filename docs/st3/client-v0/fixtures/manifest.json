@@ -20,6 +20,7 @@
     { "file": "mission-detail-step-history.json", "definition": "Mission" },
     { "file": "mission-declaration-provenance.json", "definition": "MissionDeclaration" },
     { "file": "conversation-search.json", "definition": "Envelope" },
+    { "file": "message-sender-outcomes.json", "definition": "Page" },
     { "file": "timeline.json", "definition": "Envelope" },
     { "file": "timeline-views.json", "definition": "Envelope" },
     { "file": "timeline-conformance.json", "definition": "TimelinePage" },

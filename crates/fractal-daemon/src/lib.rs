@@ -13,6 +13,8 @@ mod ci_test_paths;
 pub use fractal_kernel::accounts;
 pub mod api;
 pub mod web;
+/// Verified GitHub webhook deliveries ask the observers of their repository to poll now.
+pub mod github_webhook;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
@@ -71,6 +73,7 @@ pub use fractal_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub use fractal_reconcile::native_seed;
 pub use fractal_store::node_identity;
+pub use fractal_api_mailbox::declared_objectives;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
 pub use fractal_api_mailbox::readiness_slo;

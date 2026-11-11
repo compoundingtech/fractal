@@ -77,6 +77,7 @@ pub fn delivery_items(graph: &crate::store::Store, recipient: &str) -> anyhow::R
     for subject in subjects {
         if let Some(message) = message_view(graph, &subject)?
             && message.to == recipient
+            && message.status != "expired"
         {
             items.push(message);
         }

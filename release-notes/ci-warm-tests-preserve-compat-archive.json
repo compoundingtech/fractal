@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve downloaded compatibility archives while warming CI caches by checking out the workspace only once.",
+  "replay": { "status": "none", "detail": "CI workflow-only change; no runtime replay behavior changes." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or fleet coordination changes." },
+  "compatibility": { "status": "none", "detail": "No client, protocol, or harness compatibility changes; existing published compatibility baselines and archive download mechanism are unchanged." },
+  "downtime": { "status": "none", "detail": "No service deployment or interruption is required." },
+  "manual": { "status": "none", "detail": "No manual upgrade steps or intermediate version transitions are required for existing installations." },
+  "recovery": { "status": "none", "detail": "No runtime recovery procedure changes." }
+}

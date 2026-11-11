@@ -34,7 +34,13 @@ async fn authored_omp_resume_publishes_binding_from_an_empty_managed_directory()
         .join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
         .join("sessions/omp/provider-sessions");
     std::fs::create_dir_all(&managed).unwrap();
-    let provider = root.path().join("omp");
+    let managed_bin = root.path().join("managed-bin");
+    std::fs::create_dir(&managed_bin).unwrap();
+    let profile = root.path().join("runtime-profile.json");
+    std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+        "personas": {"launch": {"generalist": {"harnessBin": managed_bin}}},
+    })).unwrap()).unwrap();
+    let provider = managed_bin.join("omp");
     let fixture_node = std::env::split_paths(&std::ffi::OsString::from(env!("ST3_FIXTURE_PATH")))
         .map(|directory| directory.join("node"))
         .find(|candidate| candidate.is_file())
@@ -153,6 +159,9 @@ agent "garden/worker" {{
         .env("RESUME_TEST_STOP", &stop)
         .env("ST3_DRIVER_STATE_DIR", &drivers)
         .env("ST_AGENT", subject)
+        .env("FRACTAL_AGENT", subject)
+        .env("AGENT_PERSONA", "generalist")
+        .env("AGENT_RUNTIME_PROFILE", &profile)
         .env("ST3_ENDPOINT", &socket)
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("ST_HOOKS", hooks)

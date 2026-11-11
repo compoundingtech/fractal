@@ -352,6 +352,13 @@ instead of assuming every assignee or claimant is an agent.
 
 `loop_round` and `loop_max_rounds` belong to the loop attached to that exact step in the current
 generation; they are null for a non-loop step. `loop_reason` is the observed loop-state reason.
+`program`, present only on a program step of a run the detail enriches, is its current attempt's
+journal: `entries` holds each key's latest `status` (`started`, `completed` or `failed`),
+`started_at`, `ended_at`, `ms`, the typed `error`, and the `child` run or ask the key waits on, in
+the order the keys first appear; the newest 200 journal entries are read and `truncated` says older
+ones exist. `open_key` is the innermost open key, `last_entry_at` the newest entry, and `fault` the
+open `program/host` or `program/stalled` fault (`scope`, `reason`), which the run's `blocker` also
+names when no scheduler fault does.
 `next_wake_at` is the observed not-before time (earliest work eligibility), not a delivery promise
 or a computed retry estimate. `wake_reason` is the deferral's blocked reason, otherwise the
 observed wake failure. `wake` carries the assignee and its current harness state/incarnation,

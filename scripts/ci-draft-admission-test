@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 import re
 import sys
+from urllib.error import HTTPError
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -101,6 +103,50 @@ def changes_association(api, path, method, count):
 api = API(change=changes_association)
 assert m.cancel_draft(api, REPO, ID)['decision'] == 'association-or-readiness-changed' and not api.posts
 print('passed: current readiness, completed target and changed association races preserve the run')
+
+def cancellation_conflict(status, conclusion=None, identity_change=None):
+    def conflict(api, path, method, count):
+        if method == 'POST':
+            api.run.update(status=status, conclusion=conclusion)
+            api.run.update(identity_change or {})
+            raise HTTPError(path, 409, 'Conflict', {}, None)
+    return API(change=conflict)
+
+for conclusion in ('cancelled', 'skipped', 'success', 'failure'):
+    api = cancellation_conflict('completed', conclusion)
+    result = m.cancel_draft(api, REPO, ID)
+    assert result == {'decision': 'completed-during-request', 'run_id': ID, 'conclusion': conclusion}
+    assert api.calls[-2:] == [('POST', f'repos/{REPO}/actions/runs/{ID}/cancel'),
+                             ('GET', f'repos/{REPO}/actions/runs/{ID}')]
+    assert sum(method == 'POST' for method, _ in api.calls) == 1
+for status in ('queued', 'in_progress', None):
+    api = cancellation_conflict(status)
+    try:
+        m.cancel_draft(api, REPO, ID)
+        raise AssertionError('unconfirmed cancellation conflict was ignored')
+    except RuntimeError as error:
+        assert 'HTTP 409' in str(error) and 'terminal completion was not confirmed' in str(error)
+api = cancellation_conflict('completed', 'cancelled', {'head_sha': 'b' * 40})
+try:
+    m.cancel_draft(api, REPO, ID)
+    raise AssertionError('changed run identity was accepted after conflict')
+except ValueError as error:
+    assert 'identity changed after cancellation conflict' in str(error)
+print('passed: cancellation HTTP 409 succeeds only for the same completed run; active conflicts and changed identity fail')
+
+for code in (409, 403, 500):
+    error = HTTPError('https://api.github.com/cancel', code, 'API error', {}, None)
+    with patch.dict(m.os.environ, REPOSITORY=REPO, RUN_ID=str(ID), GH_TOKEN='test'), \
+            patch.object(m, 'urlopen', side_effect=error), \
+            patch.object(m, 'cancel_draft', side_effect=lambda api, *_: api('cancel', 'POST')):
+        try:
+            m.main()
+            raise AssertionError('transport error was ignored')
+        except HTTPError as caught:
+            assert code == 409 and caught is error
+        except RuntimeError as caught:
+            assert code != 409 and f'HTTP {code}' in str(caught)
+print('passed: HTTP transport preserves cancellation 409 for reconciliation and fails other API errors')
 
 # An omitted fork link must use both source repository and branch. Another PR on
 # the same branch name cannot be used to cancel this run.
