@@ -652,7 +652,7 @@ fn owned_set_publication_checks_only_the_gates_of_unpublished_mission_revisions(
     let daemon = Daemon::start(root.path());
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    // `kept`'s gate cannot answer; only a check that reruns a published revision would see it.
+    // `kept`'s gate cannot answer; only a check that reruns a held revision would see it.
     let kept = r#"version 2
 mission "example/kept" state="ready" {
   goal "Keep."
@@ -732,7 +732,7 @@ mission "example/kept" state="ready" {
     assert!(!stderr.contains("exec gate"), "{stderr}");
     assert!(!ran("edited") && !ran("kept"));
 
-    // A revision this daemon published before was checked then.
+    // A revision this daemon already holds is not checked again.
     std::fs::write(&file, bundle("First.")).unwrap();
     let (_, stderr) = publish("4", &revision, &[]);
     assert!(!stderr.contains("exec gate"), "{stderr}");

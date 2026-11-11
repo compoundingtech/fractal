@@ -3382,7 +3382,7 @@ struct ApplyArgs {
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
     /// Check mission and step exec gates during a dry run, as `fractal missions check` does; with
-    /// --set only the missions whose revision the daemon has not published. Loop until scripts are
+    /// --set only the missions whose revision the daemon does not hold yet. Loop until scripts are
     /// not checked; they run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
@@ -3630,9 +3630,9 @@ async fn run_owned_set_apply(
         "owned set refused: {}",
         preview.blockers.join("; ")
     );
-    // Check only the missions whose revision this daemon has not published: an unchanged or
-    // adopted member was checked when it was published. An older daemon names none, so every
-    // mission is checked. Empty membership has no gates and is not a valid gate-check intent.
+    // Check only the missions whose revision this daemon does not hold yet: an unchanged or
+    // adopted member is not checked again. An older daemon names none, so every mission is
+    // checked. Empty membership has no gates and is not a valid gate-check intent.
     let missions = preview.gate_check.clone();
     let any = !preview.empty && missions.as_ref().is_none_or(|missions| !missions.is_empty());
     if any && (args.check || (!args.dry_run && !args.no_gate_check)) {

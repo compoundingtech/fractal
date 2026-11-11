@@ -161,8 +161,9 @@ pub struct Preview {
     /// Open source debt against the previous revision that this publication closes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reverted_debts: Vec<crate::model::SourceDebt>,
-    /// The missions whose exact revision this store has not published yet. Publication checks
-    /// only their exec gates: an already published revision was checked when it was published.
+    /// The missions whose exact revision this store does not hold yet. Publication checks only
+    /// their exec gates: a held revision is not checked again, even if it was published with
+    /// --no-gate-check or replicated from another daemon (`fractal missions check` checks it).
     /// Absent from older daemons, whose publications check every mission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_check: Option<BTreeSet<String>>,
