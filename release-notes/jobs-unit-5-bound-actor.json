@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fence requester-private jobs reads with the existing bound-identity administrative-read guard; fail closed for missing or unverifiable requester identity.",
+  "replay": {"status": "none", "detail": "No replay changes. Deterministic receipt-race coverage forces two proven-absent snapshots and asserts exactly one stale-subject CAS recovery."},
+  "schema": {"status": "none", "detail": "No schema changes. A router-level pending-subject fixture verifies HTTP 503 jobs-projection-stale."},
+  "rules": {"status": "none", "detail": "All jobs paths, including future cancel/withdraw routes, are requester-private. Jobs GETs no longer inherit the bound-harness projection-read exemption. Existing bound-actor checks continue to fence writes; unverifiable ancestry refuses jobs methods, and local jobs authentication requires a concrete requester."},
+  "compatibility": {"status": "none", "detail": "A bound harness cannot use x-st3-person to read or submit as another requester. Real-router fixtures cover list, show and submit with mismatched bound actor/header, plus unresolved ancestry."},
+  "downtime": {"status": "none", "detail": "No downtime. Jobs remain disabled unless explicitly configured, and admission remains not wired."},
+  "manual": {"status": "none", "detail": "No activation or operator action."},
+  "recovery": {"status": "none", "detail": "CAS losers resolve the same durable requester/key receipt; no rerun or alternate job ID is introduced."}
+}

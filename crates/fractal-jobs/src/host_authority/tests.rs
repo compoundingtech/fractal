@@ -57,5 +57,8 @@ fn host_authority_fixture_table() {
         );
     }
     let wire = serde_json::to_string(&binding).unwrap();
-    assert_eq!(serde_json::from_str::<JobHostBinding>(&wire).unwrap(), binding);
+    assert_eq!(
+        serde_json::from_str::<JobHostBinding>(&wire).unwrap(),
+        binding
+    );
 }
