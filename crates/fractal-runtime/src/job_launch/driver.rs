@@ -103,6 +103,7 @@ impl JobLaunchEffects for CgroupJobLaunch {
         verify_dedicated(directory, None)?;
         let pid = self.gated.as_ref().context("holder is not gated")?.pid;
         self.manager.move_pid(pid, directory)?;
+        self.gated.as_mut().context("holder is not gated")?.mark_attached();
         verify_dedicated(directory, Some(pid))
     }
     fn release(&mut self) -> Result<u32> {
@@ -118,12 +119,22 @@ impl JobLaunchEffects for CgroupJobLaunch {
     fn stop_and_sample(&mut self, host: &str) -> Result<ExitUsage> {
         // Always clean J even if the watcher failed; never kill the shared keeper.
         let cleanup = (|| {
-            if let Some(gated) = &mut self.gated { gated.abort()?; }
-            match &self.directory {
-                Some(directory) => stop_and_sample(directory, host),
-                None => Ok(ExitUsage::CountersUnavailable(
-                    fractal_jobs::launch::CountersUnavailable::CgroupVanished)),
+            if let Some(gated) = &mut self.gated {
+                if gated.is_attached() {
+                    if gated.is_gated() { gated.fence_attached_abort()?; }
+                } else {
+                    gated.abort()?;
+                }
             }
+            let usage = match &self.directory {
+                Some(directory) => stop_and_sample(directory, host)?,
+                None => ExitUsage::CountersUnavailable(
+                    fractal_jobs::launch::CountersUnavailable::CgroupVanished),
+            };
+            if let Some(gated) = &mut self.gated
+                && gated.is_attached() && gated.is_gated()
+            { gated.reap_after_retirement()?; }
+            Ok::<_, anyhow::Error>(usage)
         })();
         let watched = self.watcher.as_mut().map_or(Ok(()), KeeperWatcher::stop);
         let usage = cleanup?;
