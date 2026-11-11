@@ -1432,14 +1432,8 @@ fn a_skipped_item_that_finds_an_earlier_due_time_is_a_correction() {
     );
 }
 
-/// The program engine settles a step from its own thread, so its write can land after a full
-/// pass read the change feed and while that pass evaluates the step's run. The run's evaluation
-/// then writes on what it read, and the next pass is marked for the engine's change: no
-/// correction. A change to something the evaluation did not read excuses nothing.
-#[test]
-fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
-    let (store, _runtime, reconciler, _) = stopping();
-    let observed = |subject: &str| ClaimInput {
+fn observed(subject: &str) -> ClaimInput {
+    ClaimInput {
         subject: subject.into(),
         kind: "resource.observed".into(),
         actor: None,
@@ -1447,7 +1441,23 @@ fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: None,
-    };
+    }
+}
+
+/// Write `subject` from another thread, as the program engine settles a step from its own.
+fn write_elsewhere(store: &Store, subject: &str) {
+    std::thread::scope(|scope| {
+        scope.spawn(|| store.append_claim(&observed(subject)).unwrap()).join().unwrap();
+    });
+}
+
+/// The program engine settles a step from its own thread, so its write can land after a full
+/// pass read the change feed and while that pass evaluates the step's run. The run's evaluation
+/// then writes on what it read, and the next pass is marked for the engine's change: no
+/// correction. A change to something the evaluation did not read excuses nothing.
+#[test]
+fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
+    let (store, _runtime, reconciler, _) = stopping();
     let item = "mission-run/raced";
     let reads = BTreeSet::from(["resource/run".to_owned(), "resource/step".to_owned()]);
     reconciler.incremental.observe(&store).unwrap();
@@ -1461,11 +1471,31 @@ fn a_write_another_thread_makes_while_an_item_is_evaluated_is_no_correction() {
             !missed.is_empty() && missed.iter().all(|wrote| wrote == "resource.observed resource/run")
         };
         assert!(own(&reads));
-        std::thread::scope(|scope| {
-            scope.spawn(|| store.append_claim(&observed("resource/step")).unwrap()).join().unwrap();
-        });
+        write_elsewhere(&store, "resource/step");
         assert!(reconciler.missed_by_skipping(item, mark, &reads, None).is_empty());
         assert!(own(&BTreeSet::from(["resource/run".to_owned()])));
+    });
+}
+
+/// A settle whose write the passes read before the run's evaluation started, yet which marked
+/// nothing, is a missed wake: what the evaluation writes on it still fails the strict check.
+#[test]
+#[should_panic(expected = "an incremental pass would have missed a write")]
+fn a_write_the_feed_held_before_an_evaluation_started_is_still_a_correction() {
+    let (store, _runtime, reconciler, _) = stopping();
+    let item = "mission-run/missed";
+    let reads = BTreeSet::from(["resource/run".to_owned(), "resource/step".to_owned()]);
+    reconciler.incremental.observe(&store).unwrap();
+    write_elsewhere(&store, "resource/step");
+    reconciler.incremental.observe(&store).unwrap();
+    // The run never heard of the step's change: nothing marks it.
+    reconciler.incremental.evaluated(item, reads.clone(), None);
+    assert!(!reconciler.incremental.needs(item, START));
+    smallclaims::touched::record_wrote(|| {
+        let mark = reconciler.evaluation_mark();
+        store.append_claim(&observed("resource/run")).unwrap();
+        let missed = reconciler.missed_by_skipping(item, mark, &reads, None);
+        reconciler.incremental_correction("mission-run", item, &reads, &missed);
     });
 }
 
