@@ -12,7 +12,7 @@ fn fixture() -> Value {
         "resources": {
             "cpu_millicores": 1, "memory_bytes": 2, "io_weight": 3,
             "tasks_max": 4, "expected_duration_ms": 5, "run_timeout_ms": null,
-            "priority": 0, "requested_class": "configured",
+            "priority": "background", "requested_class": "configured",
             "storage_request": null, "delegated_reservations": null
         }
     })
@@ -25,16 +25,27 @@ fn request(value: Value) -> ExecutionRequest {
 fn canonical_fixture_is_stable() {
     let original = request(fixture());
     let reordered = serde_json::from_str::<ExecutionRequest>(
-        r#"{"command":{"cwd":".","argv":["printf","\u00e9",""]},"resources":{"delegated_reservations":null,"storage_request":null,"requested_class":"configured","priority":0,"run_timeout_ms":null,"expected_duration_ms":5,"tasks_max":4,"io_weight":3,"memory_bytes":2,"cpu_millicores":1},"environment":{"value":{"A":"\u00e9","Z":"最後"},"kind":"exact"},"source":{"commit":{"digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"algorithm":"sha1"},"repo":"repo/é","kind":"git"}}"#,
+        r#"{"command":{"cwd":".","argv":["printf","\u00e9",""]},"resources":{"delegated_reservations":null,"storage_request":null,"requested_class":"configured","priority":"background","run_timeout_ms":null,"expected_duration_ms":5,"tasks_max":4,"io_weight":3,"memory_bytes":2,"cpu_millicores":1},"environment":{"value":{"A":"\u00e9","Z":"最後"},"kind":"exact"},"source":{"commit":{"digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"algorithm":"sha1"},"repo":"repo/é","kind":"git"}}"#,
     ).unwrap();
     let expected = concat!(
         "fractal-jobs-request-v1\n",
-        r#"{"source":{"kind":"git","repo":"repo/é","commit":{"algorithm":"sha1","digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]}},"environment":{"kind":"exact","value":{"A":"é","Z":"最後"}},"command":{"argv":["printf","é",""],"cwd":"."},"resources":{"cpu_millicores":1,"memory_bytes":2,"io_weight":3,"tasks_max":4,"expected_duration_ms":5,"run_timeout_ms":null,"priority":0,"requested_class":"configured","storage_request":null,"delegated_reservations":null}}"#
+        r#"{"source":{"kind":"git","repo":"repo/é","commit":{"algorithm":"sha1","digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]}},"environment":{"kind":"exact","value":{"A":"é","Z":"最後"}},"command":{"argv":["printf","é",""],"cwd":"."},"resources":{"cpu_millicores":1,"memory_bytes":2,"io_weight":3,"tasks_max":4,"expected_duration_ms":5,"run_timeout_ms":null,"priority":"background","requested_class":"configured","storage_request":null,"delegated_reservations":null}}"#
     );
     assert_eq!(original.canonical_bytes(), expected.as_bytes());
     assert_eq!(original.canonical_bytes(), reordered.canonical_bytes());
     assert_eq!(original.digest(), reordered.digest());
     assert_eq!(&original.digest().0[..], &Sha256::digest(expected)[..]);
+}
+
+#[test]
+fn priority_is_a_closed_ordered_declaration() {
+    use fractal_jobs::JobPriority::{Background, Normal};
+    assert!(Background < Normal);
+    assert_eq!(serde_json::to_value(Background).unwrap(), json!("background"));
+    assert_eq!(serde_json::to_value(Normal).unwrap(), json!("normal"));
+    for invalid in [json!(0), json!("urgent"), json!("Normal")] {
+        assert!(serde_json::from_value::<fractal_jobs::JobPriority>(invalid).is_err());
+    }
 }
 
 #[test]
@@ -61,7 +72,7 @@ fn every_execution_and_resource_input_changes_identity() {
         ("/resources/tasks_max", json!(5)),
         ("/resources/expected_duration_ms", json!(6)),
         ("/resources/run_timeout_ms", json!(7)),
-        ("/resources/priority", json!(1)),
+        ("/resources/priority", json!("normal")),
         ("/resources/requested_class", json!("other")),
         (
             "/resources/storage_request",

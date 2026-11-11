@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Replace inactive job integer priority with the closed background/normal declaration, ordered background before normal.",
+  "replay": {"status": "none", "detail": "No production job records exist; fixtures use the new canonical priority strings."},
+  "schema": {"status": "none", "detail": "JobRequest.priority now serializes as background or normal, changing canonical request bytes and digests before persistence is activated."},
+  "rules": {"status": "none", "detail": "Priority declares intent only and grants neither admission nor preemption. Runtime conversion to SeatPriority is lossless."},
+  "compatibility": {"status": "none", "detail": "Clean inactive-contract cutover: integer priorities are rejected. No persisted records require migration."},
+  "downtime": {"status": "none", "detail": "Inactive contract only."},
+  "manual": {"status": "none", "detail": "No activation or operator action."},
+  "recovery": {"status": "none", "detail": "No execution or recovery path changes."}
+}
