@@ -192,16 +192,15 @@ fn a_program_resumes_from_its_journal_after_its_host_is_killed() {
 #[test]
 fn a_new_program_run_starts_its_first_step_without_a_pass() {
     let fixture = fixture(Liveness::default());
-    // The follower's cursor starts before the run exists, as it does in a running daemon.
-    assert_eq!(fixture.reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+    // A running daemon's passes, and so its follower, have read the feed up to here.
+    fixture.reconciler.reconcile_once().unwrap();
     let started = fixture.start("first", "wait");
-    // The follower's chain of evaluations after the run's creation, as `follow_mission_reads`
-    // runs it: each evaluation moves the step one state.
+    // The follower's chain after the run's creation, as `follow_mission_reads` runs it: an
+    // evaluation that wrote is followed at once by another.
     for _ in 0..=MISSION_READS_CONTINUATIONS {
-        if fixture.status(&started.step) == "working" {
+        if !fixture.reconciler.evaluate_changed_mission_runs().unwrap().1 {
             break;
         }
-        fixture.reconciler.evaluate_changed_mission_runs().unwrap();
     }
     fixture.without_passes("the first inner step starts", || !fixture.journal(&started.step).is_empty());
     assert_eq!(fixture.journal(&started.step)[0], ("first".to_owned(), "started".to_owned()));
