@@ -120,6 +120,9 @@ struct Inner {
     running: HashMap<String, Running>,
     /// By step: the attempt and the last host or liveness failure that stopped it.
     faults: HashMap<String, (u32, String)>,
+    /// By step: the attempt this engine ended itself (its program finished or its worker was
+    /// terminated). That attempt never starts again, even before the step's new state is written.
+    ended: HashMap<String, u32>,
 }
 
 pub struct ProgramEngine {
@@ -157,9 +160,11 @@ impl ProgramEngine {
         }) {
             return Ok(Dispatched::Running);
         }
-        // A pass may hand over a view read before this engine stopped the attempt. The engine
-        // writes the step's new state under this lock when it stops one (`done`, `unresponsive`),
-        // so the store read here sees it: an attempt its step left is never started again.
+        // A pass may hand over a view read before the attempt ended: one this engine ended, whose
+        // step's new state may not be written yet, or one its step left. Neither starts again.
+        if inner.ended.get(&dispatch.step) == Some(&dispatch.attempt) {
+            return Ok(Dispatched::Left(format!("the program of attempt {} already ended", dispatch.attempt)));
+        }
         if let Some(reason) = self.left(&dispatch.step, dispatch.attempt)? {
             return Ok(Dispatched::Left(reason));
         }
@@ -538,10 +543,12 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
-        // Held until the step's state is written, so no dispatch restarts the attempt in between.
-        let mut inner = self.lock();
-        if !forget(&mut inner, step, attempt, generation) {
-            return Ok(());
+        {
+            let mut inner = self.lock();
+            if !forget(&mut inner, step, attempt, generation) {
+                return Ok(());
+            }
+            inner.ended.insert(step.to_owned(), attempt);
         }
         if self.left(step, attempt)?.is_some() {
             return Ok(());
@@ -555,7 +562,6 @@ impl ProgramEngine {
             _ => ("failed", Some(failure_reason(&exit["error"]))),
         };
         self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
-        drop(inner);
         eprintln!("fractal: program {step} {status}");
         (self.wake)(step);
         Ok(())
@@ -566,17 +572,18 @@ impl ProgramEngine {
     fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
-        // Held until the step's failure is written, so no dispatch restarts the attempt in between.
-        let mut inner = self.lock();
-        if !forget(&mut inner, step, attempt, generation) {
-            return Ok(());
+        {
+            let mut inner = self.lock();
+            if !forget(&mut inner, step, attempt, generation) {
+                return Ok(());
+            }
+            inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
+            inner.ended.insert(step.to_owned(), attempt);
         }
-        inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
         if self.left(step, attempt)?.is_none() {
             self.store.set_step_state_unless_terminal(step, "failed", Some(&reason))?;
         }
-        drop(inner);
         (self.wake)(step);
         Ok(())
     }

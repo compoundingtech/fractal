@@ -126,11 +126,11 @@ fn messages_for_another_attempt_or_host_change_nothing() {
     assert_eq!(engine.host_fault(step, 1), None);
 }
 
-/// A pass may hand the engine a view read before the engine stopped an attempt. The engine
-/// re-reads the step and starts nothing for an attempt its step left, keeping the fault that
-/// stopped it.
+/// A pass may hand the engine a view read before an attempt ended. An attempt this engine ended
+/// itself never starts again, even while the store still says it runs, and neither does one its
+/// step left; the fault that stopped it stays.
 #[test]
-fn a_dispatch_for_an_attempt_its_step_left_starts_nothing() {
+fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine(dir.path());
     let step = engine.store.start_program_step_for_tests();
@@ -144,14 +144,17 @@ fn a_dispatch_for_an_attempt_its_step_left_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1 });
+    engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
-    engine.lock().faults.insert(step.subject.clone(), (1, reason.into()));
-    engine.store.set_step_run_state_for_tests(&step.subject, "failed", 1);
-    assert_eq!(engine.dispatch(dispatch(1)).unwrap(), Dispatched::Left("the step is failed at attempt 1".into()));
-    // A retry moved the step on: the earlier attempt still starts nothing.
-    engine.store.set_step_run_state_for_tests(&step.subject, "working", 2);
-    assert_eq!(engine.dispatch(dispatch(1)).unwrap(), Dispatched::Left("the step is working at attempt 2".into()));
+    assert_eq!(engine.store.step_run(&step.subject).unwrap().unwrap().status, "failed");
+    // The view a pass read before the failure was written.
+    engine.store.set_step_run_state_for_tests(&step.subject, "working", 1);
+    assert_eq!(engine.dispatch(dispatch(1)).unwrap(), Dispatched::Left("the program of attempt 1 already ended".into()));
     assert_eq!(engine.host_fault(&step.subject, 1).as_deref(), Some(reason));
+    // An attempt its step left, here failed by the reconciler, does not start either.
+    engine.store.set_step_run_state_for_tests(&step.subject, "failed", 2);
+    assert_eq!(engine.dispatch(dispatch(2)).unwrap(), Dispatched::Left("the step is failed at attempt 2".into()));
     let inner = engine.lock();
     assert!(inner.host.is_none() && inner.running.is_empty());
 }
