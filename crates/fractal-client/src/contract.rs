@@ -85,6 +85,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("slo.list", "/v1/client/slo"),
     ("slo.history", "/v1/client/slo/history"),
     ("usage.period", "/v1/client/usage"),
+    ("usage-hub.quota", "/v1/client/usage/quota"),
     ("clients.list", "/v1/client/clients"),
     ("now.list", "/v1/client/now"),
     ("machines.list", "/v1/client/machines"),
