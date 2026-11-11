@@ -14443,7 +14443,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             cwd: run.workspace.clone(),
         };
         match self.program_engine().dispatch(dispatch)? {
-            program::Dispatched::Running | program::Dispatched::Started => Ok(false),
+            // A step that left this attempt already says why in its state.
+            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => Ok(false),
             // The step keeps its state; `ProgramEngine::host_fault` names the reason.
             program::Dispatched::HostDown(reason) => {
                 eprintln!("fractal: program {}: {reason}", view.subject);
