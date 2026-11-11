@@ -124,12 +124,11 @@ fn pending_requests(connection: &Connection, observer: &str) -> rusqlite::Result
             canonical::after_sql("later", "request"),
         )),
     )?;
-    let requests = statement
+    statement
         .query_map(params![observer, format!("{}%", github_webhook::ATTEMPT_PREFIX)], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?
-        .collect();
-    requests
+        .collect()
 }
 
 /// Whether `observer` already has a refresh request for `attempt`.
