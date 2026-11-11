@@ -55,18 +55,41 @@ fn mixed_version_job_claims_wait_for_unknown_kind_or_reason_and_read_legacy_reco
     let mut before_jobs = current.clone();
     before_jobs.claims.remove(KIND).unwrap();
     before_jobs.subjects.remove("job").unwrap();
-    assert_ne!(before_jobs.digest(), current.digest());
+    let mut before_reason = current.clone();
+    before_reason.claims.get_mut(KIND).unwrap().fields.remove("reason").unwrap();
+    assert_ne!(before_jobs.digest(), before_reason.digest());
+    assert_ne!(before_reason.digest(), current.digest());
 
     // The existing submission fixture is an original unit-4a record: no reason.
-    let id = "job/mixed-version".to_string();
+    let id = job_id("person/fixture", "mixed-version");
     let record = submission(&id, "mixed-version");
-    let claim = ClaimRecord { id: "legacy-job".into(), store_index: 1, batch_id: "batch".into(),
+    let mut claim = ClaimRecord { id: "legacy-job".into(), store_index: 1, batch_id: "batch".into(),
         subject: id.clone(), kind: KIND.into(), origin: "fixture-host".into(),
         actor: Some("person/fixture".into()), operation_id: None, request_digest: None,
         body: json!({"fields":{"record":record}}), predecessors: vec![],
         accepted_at_unix_ms: 1 };
     assert!(matches!(classify_replicated_claim_with_registry(&claim, &before_jobs).unwrap(),
         ReplicatedClaimAdmission::UnknownKind));
+    for registry in [&before_reason, current] {
+        assert!(matches!(classify_replicated_claim_with_registry(&claim, registry).unwrap(),
+            ReplicatedClaimAdmission::Valid));
+    }
+
+    // A unit-6 reason waits as a whole immutable claim on a unit-4a reader.
+    claim.body["fields"]["reason"] = json!("requester-cancelled");
+    assert!(matches!(classify_replicated_claim_with_registry(&claim, &before_reason).unwrap(),
+        ReplicatedClaimAdmission::UnknownField));
+    assert!(matches!(classify_replicated_claim_with_registry(&claim, current).unwrap(),
+        ReplicatedClaimAdmission::Valid));
+    assert!(matches!(classify_replicated_claim_with_registry(&claim, &before_jobs).unwrap(),
+        ReplicatedClaimAdmission::UnknownKind));
+
+    // The upgraded jobs fold still reconstructs the original no-reason submission.
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    insert(&tx, &id, "legacy-job", 1, &record);
+    flush(&tx).unwrap();
+    assert_eq!(queue_for_host(&tx, "fixture-host").unwrap()[0].id, id);
 }
 
 #[test]
