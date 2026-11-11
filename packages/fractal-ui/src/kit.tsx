@@ -198,17 +198,6 @@ export function CommandMenu({ groups, placeholder = 'Type a command…', emptyHi
   </div>
 }
 
-/* ContextCard — preview on hover AND keyboard focus (350 ms intent delay). */
-export function ContextCard({ title, children, preview }: { title: string; children: React.ReactNode; preview: React.ReactNode }) {
-  return <Aria.TooltipTrigger delay={350} closeDelay={0}>
-    <Aria.Button className={`${focusClass} w-full cursor-pointer rounded-panel border border-line bg-panel p-3 text-left transition-colors data-[hovered]:bg-recess`}>
-      <span className="mb-1 block text-[10px] font-semibold uppercase tracking-widest text-accent">{title}</span>
-      {children}
-    </Aria.Button>
-    <Aria.Tooltip placement="top start" offset={8} className="z-50 max-w-80 rounded-panel border border-line bg-panel p-3 text-[12px] font-sans leading-relaxed text-ink shadow-xl">{preview}</Aria.Tooltip>
-  </Aria.TooltipTrigger>
-}
-
 const styles = stylex.create({
   focus: {
     ':is([data-focus-visible], :focus-visible)': {
