@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Prove that a restarted daemon re-adopts a seat PTY that survived its stop: fleet fixture stops can release a seat's PTY server, as a systemd work scope outlives the daemon's service.",
+  "replay": {
+    "status": "none",
+    "detail": "Test fixtures only; no stored data changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or SQL changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No coordination rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Runtime behavior and telemetry contracts are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator steps required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Existing state remains compatible with previous binaries."
+  }
+}

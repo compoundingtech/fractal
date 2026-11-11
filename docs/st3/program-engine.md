@@ -490,8 +490,9 @@ A program waiting on an ask or a child run stays loaded in the host. A replaced 
 program to the same wait.
 
 **Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
-bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun`, from the tree
-root so the bytes do not depend on where the tree is checked out, and writes it to
+bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun
+--minify-whitespace`, which drops Bun's per-module path comments so the bytes do not depend on where
+the tree or its dependencies are checked out, and writes it to
 `<bundleDir>/<sha256>.mjs` after checking that its default export carries the entry. The mission
 loads as its declaration: the header from the intent (`timeout`, `concurrentRuns`, `authority`),
 one text `input` per field of `intent.input`, and one step `program` pinning the bundle by path and

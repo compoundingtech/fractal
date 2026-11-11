@@ -175,6 +175,7 @@ impl Daemon {
             notify: notify.clone(),
             event_notify: watch::channel(0_u64).0,
             node: NODE.into(),
+            api_socket: state_dir.join("api.sock"),
             state_dir,
             pty_root: root.join("pty"),
             pty_binary: PathBuf::from("pty"),

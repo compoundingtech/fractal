@@ -1546,6 +1546,11 @@ pub struct GateCheckRequest {
     /// Values for the mission's inputs. A gate that reads an input without one is unchecked.
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
+    /// Check only these mission subjects' gates; omitted checks every mission in the intent. An
+    /// owned-set publication names the missions whose declaration differs from the selected
+    /// revision, so an unchanged member's gates do not run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missions: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

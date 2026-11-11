@@ -644,6 +644,102 @@ mission "example/check" state="ready" {
 }
 
 #[test]
+fn owned_set_publication_checks_only_the_gates_of_unpublished_mission_revisions() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    // `kept`'s gate cannot answer; only a check that reruns a held revision would see it.
+    let kept = r#"version 2
+mission "example/kept" state="ready" {
+  goal "Keep."
+  step "work" {
+    agentless
+    gate "check" { exec "touch kept-ran; exit 2"; host "orchid"; workspace "."; }
+  }
+}
+"#;
+    let bundle = |goal: &str| {
+        format!(
+            r#"{kept}mission "example/edited" state="ready" {{
+  goal "{goal}"
+  step "work" {{
+    agentless
+    gate "check" {{ exec "touch edited-ran"; host "orchid"; workspace "."; }}
+  }}
+}}
+"#
+        )
+    };
+    let file = root.path().join("garden.kdl");
+    let publish = |sequence: &str, expect: &str, extra: &[&str]| {
+        let sha = format!("{sequence:0>40}");
+        let mut args = vec![
+            "apply",
+            file.to_str().unwrap(),
+            "--as",
+            PUBLISHER,
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--set",
+            "garden",
+            "--repository",
+            "acme/garden",
+            "--ref",
+            "refs/heads/main",
+            "--sha",
+            &sha,
+            "--source-sequence",
+            sequence,
+            "--expect-set",
+            expect,
+        ];
+        args.extend(extra);
+        let output = daemon.run_cli(&args);
+        assert!(output.status.success(), "{output:?}");
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (
+            response["set"]["revision"].as_str().unwrap().to_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let ran = |name: &str| {
+        let path = workspace.join(format!("{name}-ran"));
+        let ran = path.exists();
+        let _ = std::fs::remove_file(path);
+        ran
+    };
+
+    // Published on its own first, as a host does before it publishes a set.
+    std::fs::write(&file, kept).unwrap();
+    daemon.command(&["apply", file.to_str().unwrap(), "--as", PUBLISHER, "--no-gate-check"]);
+
+    // The set's first publication adopts `kept` at the revision already published.
+    std::fs::write(&file, bundle("First.")).unwrap();
+    let (revision, stderr) = publish("1", "absent", &["--adopt", "mission/example/kept"]);
+    assert!(stderr.contains("Checking 1 exec gate"), "{stderr}");
+    assert!(ran("edited") && !ran("kept"));
+
+    std::fs::write(&file, bundle("Second.")).unwrap();
+    let (revision, stderr) = publish("2", &revision, &[]);
+    assert!(stderr.contains("Checking 1 exec gate"), "{stderr}");
+    assert!(ran("edited") && !ran("kept"));
+
+    let (revision, stderr) = publish("3", &revision, &[]);
+    assert!(!stderr.contains("exec gate"), "{stderr}");
+    assert!(!ran("edited") && !ran("kept"));
+
+    // A revision this daemon already holds is not checked again.
+    std::fs::write(&file, bundle("First.")).unwrap();
+    let (_, stderr) = publish("4", &revision, &[]);
+    assert!(!stderr.contains("exec gate"), "{stderr}");
+    assert!(!ran("edited") && !ran("kept"));
+}
+
+#[test]
 fn a_terminal_exec_fails_its_unsatisfied_field_gate() {
     if fractal_daemon::test_support::supervise_test() {
         return;
