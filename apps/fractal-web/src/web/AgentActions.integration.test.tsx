@@ -2,6 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
+import { within } from '@testing-library/dom'
 import type { FractalClient } from '@fractal/client'
 
 const data = vi.hoisted(() => {
@@ -133,6 +134,11 @@ describe('ConversationOverflowMenu', () => {
     const view = await mount('running')
     await view.press('More actions')
     expect([...document.querySelectorAll('[role="menuitem"]')].map(each => each.querySelector('span')?.textContent)).toEqual(['Restart', 'Suspend', 'Retire', 'Copy id', 'View KDL'])
+    const menu = within(document.body).getByRole('menu', { name: 'More actions' })
+    for (const row of agentActions({ state: 'running', activity: 'idle' })) {
+      expect(within(menu).getByRole('menuitem', { name: `${row.label} ${row.what}` })).not.toBeNull()
+    }
+    expect(within(menu).getByRole('menuitem', { name: 'View KDL read its whole declaration' })).not.toBeNull()
     view.unmount()
   })
 

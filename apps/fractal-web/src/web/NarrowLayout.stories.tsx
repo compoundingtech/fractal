@@ -164,7 +164,8 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const header = within(node)
   const buttons = header.getAllByRole('button')
   await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', 'More actions', 'Agent details'])
-  await expect(header.getByRole('heading', { name: agentName })).toBeVisible()
+  // The pane owns the phone's thread heading; the header breadcrumb still identifies the selected agent.
+  await expect(within(header.getByRole('navigation', { name: 'Breadcrumb' })).getByText(agentName, { exact: true })).toBeVisible()
   for (const name of ['Resources', 'View KDL', 'Show terminal', 'Show conversation', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
@@ -308,7 +309,7 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   for (const name of ['More actions', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
   await expect(canvas.queryByRole('separator', { name: /^Resize / })).toBeNull()
   const tabs = within(views).getAllByRole('tab')
-  await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Changes', 'Details'])
+  await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Details', 'Changes', 'Resources'])
   for (const node of tabs) {
     const rect = node.getBoundingClientRect()
     await expect(rect.width).toBeGreaterThanOrEqual(44)
@@ -441,7 +442,7 @@ export const SidebarDragUnmountCleanup: Story = {
       await user.click(canvas.getByRole('button', { name: 'More actions' }))
       const menu = await canvas.findByRole('menu', { name: 'More actions' })
       await expect(menu).toBeVisible()
-      await expect(within(menu).getByRole('menuitem', { name: 'View KDL' })).toBeVisible()
+      await expect(within(menu).getByRole('menuitem', { name: 'View KDL read its whole declaration' })).toBeVisible()
       await user.keyboard('{Escape}')
       await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
       await user.keyboard('{Control>}b{/Control}')

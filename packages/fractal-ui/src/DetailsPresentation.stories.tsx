@@ -742,12 +742,18 @@ function ProductionPhoneSheet({scheme,children}:{readonly scheme:Args['scheme'];
     </NarrowLayoutContext.Provider></ThemePortal>
   </div>
 }
+/** The production inspector row names Details, Changes and Resources in order; counted tabs append their count. */
+const productionTabs=[/^Details$/,/^Changes(, \d+)?$/,/^Resources(, \d+)?$/]
+function requireProductionInspector(panel:HTMLElement){
+  const names=[...panel.querySelectorAll<HTMLElement>('[role="tab"]')].map(tab=>(tab.getAttribute('aria-label')??tab.textContent??'').trim())
+  requireContract(names.length===productionTabs.length&&names.every((name,index)=>productionTabs[index]!.test(name))&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details, Changes and Resources')
+}
 /** Opens the phone sheet as a user does and waits for the inspector inside it. */
 async function openPhoneSheet(canvasElement:HTMLElement){
   const canvas=within(canvasElement),opener=canvas.getByRole('button',{name:'Agent details'})
   await userEvent.click(opener)
   const sheet=await canvas.findByRole('dialog',{name:'Agent details'}),panel=await within(sheet).findByRole('complementary',{name:'Agent inspector'})
-  await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+  await waitFor(()=>requireProductionInspector(panel))
   return {opener,sheet,panel}
 }
 function ProductionPhoneInspector({ scheme }: Args) {
@@ -1192,7 +1198,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     if(narrow){const opened=await openPhoneSheet(canvasElement);panel=opened.panel;assertSheetClose(opened.sheet)}
     else{
       panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'})
-      await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+      await waitFor(()=>requireProductionInspector(panel))
       requireContract(panel.getBoundingClientRect().height>=899,'Production desktop inspector lost its dock-height layout')
       assertDesktopClose(panel)
     }
