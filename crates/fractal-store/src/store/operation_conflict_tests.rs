@@ -677,3 +677,94 @@ fn operation_conflict_partial_rediscovery_below_graph_frontier_keeps_receipt_mov
 fn require_replay_after_repair(tx: &Transaction<'_>) {
     tx.execute(/* sqlite-large-value: allow-for-now lv-h7772a8dd1107 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
 }
+
+#[test]
+fn degraded_run_settles_sibling_pending_work_and_does_not_block_startup_repair() {
+    let store = Store::open_memory("fixture").unwrap();
+    super::tests_shared_seats::publish_mission(&store, r#"version 2
+mission "pending-conflict" state="ready" {
+  goal "Drain independent run work."
+  step "program" { agentless }
+}"#, "publish-pending-conflict");
+    let start = |key: &str, parent: Option<&MissionRunView>| {
+        let child = parent.map(|parent| ChildMissionContext {
+            root_revision: parent.root_revision.clone(),
+            root_run_id: parent.id.clone(),
+            parent_step_run: parent.steps[0].subject.clone(),
+            default_selector: None, started_by: Some(parent.subject.clone()),
+        });
+        store.create_mission_run_inner(&crate::model::MissionRunRequest {
+            mission: "pending-conflict".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/operator".into()), mode: None, inputs: Default::default(),
+            idempotency_key: key.into(),
+        }, child, None, None).unwrap()
+    };
+    let root = start("pending-root", None);
+    let ordinary = start("pending-ordinary", Some(&root));
+    let conflicting = start("pending-conflicting", Some(&root));
+    let unrelated = start("pending-unrelated", None);
+    let operation = "op/pending-sibling-conflict";
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for number in 0..=OPERATION_CONFLICT_REFOLD_CLAIMS {
+            append_claim_record_tx(&tx, "peer", &conflicting.subject, "custom.test.observed", None,
+                &json!({"fields":{"number":number}}), &[], None).unwrap();
+        }
+        append_claim_record_tx(&tx, "peer", &conflicting.subject, "mission-run.state", None,
+            &json!({"fields":{"state":"running"},"_operation":{"id":operation,"request_digest":"z"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        // Ordinary sibling work enters the pending queue before the bounded conflict
+        // attempt fences their shared root. Independent root work must still drain.
+        for run in [&ordinary, &unrelated] {
+            let claim = append_claim_record_tx(&tx, "peer", &run.subject, "mission-run.state", None,
+                &json!({"fields":{"status":"running"}}), &[], None).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hf851bfc39d1f owner=fractal_store::store::operation_conflict_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='0' WHERE id=?1", [&claim.id]).unwrap();
+        }
+        append_claim_record_tx(&tx, "peer", &conflicting.subject, "mission-run.state", None,
+            &json!({"fields":{"state":"running"},"_operation":{"id":operation,"request_digest":"a"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    RUN_TREE_REBUILDS.with(|count| count.set(0));
+    let saw_fenced_pending_sibling = std::cell::Cell::new(false);
+    store.project_replication_backlog_with_yield(|| {
+        if !saw_fenced_pending_sibling.get() {
+            let connection = store.readers.get();
+            let pending = pending_run_rebuilds_tx(&connection).unwrap();
+            if run_conflict_degraded_tx(&connection, &root.id).unwrap() && !pending.is_empty() {
+                assert!(pending.contains(&run_part_of_tx(&connection, &ordinary.subject).unwrap().unwrap()));
+                assert!(pending.contains(&run_part_of_tx(&connection, &unrelated.subject).unwrap().unwrap()));
+                saw_fenced_pending_sibling.set(true);
+            }
+        }
+    }).unwrap();
+    assert!(saw_fenced_pending_sibling.get(), "exercise the already-queued sibling path");
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 2,
+        "only the bounded conflict attempt and independent root rebuild may run");
+    assert!(store.replication_status(false, None, &[]).unwrap().unhealthy.iter().any(|row|
+        row.aggregate.contains(operation) && row.error_code.as_deref() == Some("operation-conflict-refold-limit")));
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    assert!(!projection_work_pending_tx(&tx).unwrap());
+    assert!(run_conflict_degraded_tx(&tx, &root.id).unwrap());
+    let body: String = tx.query_row(
+        "SELECT body FROM claims WHERE subject=?1 AND kind='mission-run.created' LIMIT 1",
+        [&root.subject], |row| row.get(0),
+    ).unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    body["startup_fixture"] = json!(true);
+    append_claim_record_tx(&tx, "peer", &root.subject, "mission-run.created", None, &body, &[], None).unwrap();
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hec42c211f7cb owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='occurrence_creation_projection_rules'", []).unwrap();
+    RUN_TREE_REBUILDS.with(|count| count.set(0));
+    migrate_occurrence_creation_projections_tx(&tx).unwrap();
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 0);
+    assert!(run_conflict_degraded_tx(&tx, &root.id).unwrap());
+    tx.rollback().unwrap();
+}

@@ -11052,7 +11052,7 @@ fn migrate_occurrence_creation_projections_tx(transaction: &Transaction<'_>) -> 
         }
     }
     for root in roots {
-        rebuild_run_tree_tx(transaction, &root).map_err(anyhow::Error::new)?;
+        settle_run_refold_result(rebuild_run_tree_tx(transaction, &root)).map_err(anyhow::Error::new)?;
     }
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-h03f8f0e09c2c owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('occurrence_creation_projection_rules','1')",
@@ -11098,9 +11098,9 @@ fn migrate_work_extension_projections_tx(transaction: &Transaction<'_>) -> Resul
         return Ok(0);
     }
     let (roots, _) = work_extension_roots_tx(transaction)?;
-    let rebuilt = roots.len();
+    let mut rebuilt = 0;
     for root in roots {
-        rebuild_run_tree_tx(transaction, &root).map_err(anyhow::Error::new)?;
+        rebuilt += usize::from(settle_run_refold_result(rebuild_run_tree_tx(transaction, &root)).map_err(anyhow::Error::new)?);
     }
     if !work_extension_roots_tx(transaction)?.1 {
         mark_work_extensions_projected_tx(transaction)?;
@@ -17478,6 +17478,16 @@ fn require_healthy_run_refold_tx(connection: &Connection, root: &str) -> Result<
     Ok(())
 }
 
+// Excluded runs keep their durable health marker, but must not strand shared queues
+// or startup migrations. Only the explicit degraded-run boundary is skippable.
+fn settle_run_refold_result(result: Result<(), FractalError>) -> Result<bool, FractalError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if error.code == "operation-conflict-run-degraded" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Retain the guard reason for the always-on log at the actual fallback boundary.
 fn replay_needed(reason: &'static str) -> IncrementalProjection {
     crate::profile::note(&format!("replay: {reason}"));
@@ -17566,11 +17576,12 @@ fn normalize_pending_run_tx(transaction: &Transaction<'_>, aggregate: Aggregate)
 
 fn rebuild_pending_run_tx(transaction: &Transaction<'_>, aggregate: &Aggregate) -> Result<(), FractalError> {
     let effective = normalize_pending_run_tx(transaction, aggregate.clone())?;
-    match &effective {
-        Aggregate::RunTree(root) => holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root))?,
-        Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top))?,
+    let result = match &effective {
+        Aggregate::RunTree(root) => holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+        Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
         _ => return Err(FractalError::new("invalid-pending-rebuild", "pending rebuild is not a run aggregate")),
-    }
+    };
+    settle_run_refold_result(result)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h8a1016207aaf owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(aggregate)?])
         .map_err(internal)?;
     if let Aggregate::RunTree(root) = &effective {

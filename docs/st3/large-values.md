@@ -732,3 +732,10 @@ with restored graph health. Canonical operation conflict rows remain intact.
 New admissions may produce fresh fence evidence; the repaired prefix does not
 immediately rediscover itself. `lv-h02c178e28e3f` and `lv-h7772a8dd1107` are
 fixture-only late-claim and stale-health mutations proving these boundaries.
+
+Pending-work drains settle an excluded run's queue entry without rebuilding it,
+then continue with independent roots. Startup projection migrations likewise skip
+only the typed degraded-run result; other errors still propagate and degraded
+health/membership remains until explicit repair. Fixture-only `lv-hec42c211f7cb`
+and `lv-hf851bfc39d1f` force startup migration and out-of-order sibling work to
+prove that exclusion does not strand the queue.
