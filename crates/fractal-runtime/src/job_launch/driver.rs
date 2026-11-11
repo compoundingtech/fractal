@@ -27,6 +27,8 @@ pub trait LaunchJournal {
 /// proves populated=0, and removes J before reporting success. Never stop the keeper.
 pub trait JobLaunchEffects {
     fn create_group(&mut self, request: &JobLaunch<'_>) -> Result<PathBuf>;
+    /// Kernel hierarchy identity, not the cgroupfs mount-prefixed pathname.
+    fn hierarchy_path(&self, directory: &Path) -> Result<PathBuf>;
     fn gate_holder(&mut self, request: &JobLaunch<'_>) -> Result<()>;
     fn attach_holder(&mut self, directory: &Path) -> Result<()>;
     fn apply(&mut self, directory: &Path, plan: &JobScopePlan) -> Result<ScopeReadback> {
@@ -63,6 +65,9 @@ impl CgroupJobLaunch {
     }
 }
 impl JobLaunchEffects for CgroupJobLaunch {
+    fn hierarchy_path(&self, directory: &Path) -> Result<PathBuf> {
+        self.manager.hierarchy_path(directory)
+    }
     fn create_group(&mut self, request: &JobLaunch<'_>) -> Result<PathBuf> {
         ensure!(self.directory.is_none() && self.gated.is_none(), "job adapter cannot be reused");
         let keeper = ensure_keeper(&mut self.manager, request.host, request.heavy_slice)

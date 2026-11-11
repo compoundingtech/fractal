@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add unreachable ExecRuntime intent-to-holder handshake with real projection fixtures (unit 7e)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission is explicitly not wired. No scheduler, activation, configuration defaults or launch caller. The separate ExecRuntime method never enters the existing generation-replacement path."},
+  "compatibility": {"status": "changed", "detail": "Durable generation intent precedes side effects. Keeper/J creation, caps, four Measured-and-true matches, launch usage, gated fork, sole-holder attachment and release are ordered. Exit usage precedes removal. Receipt identity compares B6's hierarchy-relative jobCgroup against J with the configured cgroupfs root stripped, never the filesystem path. Outcome paths must be absolute before creating J; the same journaled path is passed to B6 and read back. Real projection/fake-holder fixtures cover hierarchy-relative receipts, all cap refusals, invalid outcome paths, collisions and cleanup uncertainty."},
+  "downtime": {"status": "none", "detail": "No live behavior changes."},
+  "manual": {"status": "none", "detail": "No activation or pilot. A vanished J returns typed counters-unavailable, never zero or rerun. No sentinel or per-job transient scope remains."},
+  "recovery": {"status": "none", "detail": "Pre-release refusal follows confirmed whole-J stop/removal. A release error also stops/removes J, propagating cleanup uncertainty, but retains the uncertain intent without refusal or retry. Fixtures cover exec failure after release with both confirmed and uncertain cleanup. Unit 8 owns restart fencing and unknown-after-host-loss."}
+}
