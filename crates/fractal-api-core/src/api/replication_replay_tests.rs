@@ -46,7 +46,7 @@ async fn replay_estimate_names_blocked_owned_sets_and_explains_projection_loss()
         subject: "owned-set/garden".into(), kind: "owned-set.revised".into(),
         actor: None,
         fields: serde_json::from_value(json!({
-            "revision": crate::model::canonical_hash(&receipt).unwrap(), "body": receipt
+            "revision": smallclaims::hash::canonical_hash(&receipt).unwrap(), "body": receipt
         })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
