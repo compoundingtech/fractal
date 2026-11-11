@@ -517,6 +517,8 @@ async fn bootstrap_fabric_invite(
 }
 
 pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
+    Config::load_unvalidated(None)?.network_policy()
+        .require(fractal_daemon::config::NetworkOperation::FleetJoin)?;
     // Recording an override only asks this member's daemon; it reads no fleet configuration.
     let command = match command {
         FleetCommand::AdmitWithout { peers, reason, actor } => {
