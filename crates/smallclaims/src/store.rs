@@ -9098,6 +9098,11 @@ impl Store {
                             self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                             error
                         })?;
+                    // Complete discovery and the graph-conflict fence authorized this full
+                    // repair. Consume its deferred requirement atomically with restored health.
+                    transaction.execute(
+                        /* sqlite-large-value: allow-for-now lv-h15d4a1d1ce13 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:deferred-replay'", [],
+                    ).map_err(internal)?;
                 } else {
                     crate::profile::note("projection: incremental");
                 }

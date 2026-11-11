@@ -531,4 +531,17 @@ fn operation_conflict_partial_rediscovery_below_graph_frontier_keeps_receipt_mov
     assert!(store.replication_projection_needs_recovery().unwrap());
     assert!(store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
         .any(|row| row.aggregate == "projection:deferred-replay"));
+    // Rediscovery now finishes without graph-projecting conflicts. One authorized full
+    // repair consumes the deferred row; a quiet subsequent catch-up must not replay again.
+    FULL_REPLAYS.with(|count| count.set(0));
+    assert!(store.project_replication_backlog().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 1);
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    assert!(!store.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:deferred-replay')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap());
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
 }

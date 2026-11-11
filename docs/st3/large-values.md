@@ -629,7 +629,9 @@ diagnostic. Both retain metadata, never claim bodies, with the same bounding deb
 `smallclaims::store` owns `lv-hb7532db3c65d` (full operation/claim identity evidence),
 `lv-hb0e4de996f4f` (the generation-qualified incremental reader scan watermark), `lv-hcc82e02fe20f`
 (graph health that retains deferred-repair visibility), and `lv-h362e35c78646`
-(clearing that deferred row only after explicit full repair succeeds).
+(clearing that deferred row after explicit full repair succeeds). The same owner's
+`lv-h15d4a1d1ce13` consumes the row after a successful automatic full repair,
+authorized only by complete discovery and the graph-conflict fence.
 Evidence contains identifiers, not claim bodies; identifier representation remains
 the same bounding debt. Discovery reads only the newly admitted target range on
 readers; writer metadata pages are capped at the projection chunk size.
