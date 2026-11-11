@@ -265,6 +265,14 @@ needs `write SUBJECT`. A refusal reaches its caller as `run-authority-denied`. T
 discover the grants it needs. Each decision reads only each revision's `authority` member along
 the starter chain.
 
+**Reach.** Whatever it is granted, and in either mode, a run touches only itself and the runs it
+started, transitively: a run's parent is the run of the step it was started under, the tree a
+cancellation cascades down (§6). A claim on a run, its generations, step runs or revision
+proposals, a `mission-run` declaration a run applies (creation, revision, reset or cancellation),
+and a cancellation requested as the run, are refused as
+`run-authority-denied` for any other run, so `write "mission-run/*"` reaches no sibling, parent or
+unrelated run. A run starts runs only as the children its program starts, never by declaring one.
+
 ### 4. Versioning
 
 A program's revision is its bundle hash: `sha256` is part of the step definition, so it enters the
