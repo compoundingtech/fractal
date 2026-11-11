@@ -275,6 +275,19 @@ export const HoverCardMissions: Story = { tags: ['critical'], name: 'Hover card 
   // The goal is the current step here, so the card does not say it twice.
   await expect(within(canvasElement).getByTestId('hover-facts').textContent?.match(/Fix the review gate/g)).toHaveLength(1)
 } }
+export const HoverCardRetainedMissions: Story = { tags: ['critical'], name: 'Hover card · retained missions say so under a live agent', render: () => <main {...stylex.props(styles.root)}>
+  <div data-testid="stale-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Stale', updatedAt: storyNow - 5 * 60_000 } }} now={storyNow} /></div>
+  <div data-testid="failed-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Failed' } }} now={storyNow} /></div>
+  <div data-testid="live-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Live' } }} now={storyNow} /></div>
+</main>, play: async ({ canvasElement }) => {
+  const card = (id: string) => within(within(canvasElement).getByTestId(id))
+  const stale = await card('stale-card').findByTestId('hover-missions-note', {}, { timeout: hoverSettleTimeout })
+  await expect(stale).toHaveTextContent('Mission info may be out of date. Updated 5m ago.')
+  await expect(card('stale-card').getByTestId('hover-missions')).toContainElement(stale)
+  await expect(card('failed-card').getByTestId('hover-missions-note')).toHaveTextContent('Couldn\u2019t refresh mission info.')
+  await expect(card('failed-card').getByTestId('hover-missions-note').textContent).not.toContain('Updated')
+  await expect(card('live-card').queryByTestId('hover-missions-note')).toBeNull()
+} }
 export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
