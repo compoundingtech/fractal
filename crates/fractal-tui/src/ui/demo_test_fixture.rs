@@ -70,6 +70,7 @@ pub fn world() -> World {
         behind: Vec::new(),
         missions_followed: true,
         settled: true,
+        unread: Default::default(),
         active_missions: None,
         inbox_alerts: None,
         attention: Load::Ready(attention()),
@@ -674,6 +675,7 @@ fn agent(
         terminal: !matches!(state, AgentState::Stopped),
         subagents: Vec::new(),
         reported: None,
+        last_prose_ms: None,
     }
 }
 
@@ -803,6 +805,7 @@ fn agents() -> Vec<Agent> {
         terminal: false,
         subagents: Vec::new(),
         reported: None,
+        last_prose_ms: None,
     });
     let detail =
         |goal: &str, claimed: &str, next: Option<&str>, queue: &[&str], state: &str| AgentDetails {
