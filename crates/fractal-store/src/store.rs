@@ -4920,6 +4920,9 @@ impl Store {
         for item in &plan.items {
             affected_subjects.extend(item.affected_subjects.iter().cloned());
             match item.class.as_str() {
+                outbound_park_fault::REPAIR_CLASS => {
+                    claim_ids.push(outbound_park_fault::apply(self, &transaction, item)?);
+                }
                 "revoked-legacy-runtime-start" => {
                     let operation_id = item.details["operation"]["id"].as_str()
                         .ok_or_else(|| FractalError::new("invalid-repair-plan", "missing runtime operation"))?;
@@ -14863,6 +14866,7 @@ fn operational_repair_plan_with_legacy_starts_tx(
     native_evidence: &[Value],
 ) -> Result<OperationalRepairPlan> {
     let mut plan = operational_repair_plan_tx(connection, snapshot_unix_ms)?;
+    outbound_park_fault::plan(connection, origin, &mut plan.items)?;
     let mut seen = BTreeSet::new();
     for evidence in native_evidence {
         let (Some(operation_id), Some(runtime_id)) = (
