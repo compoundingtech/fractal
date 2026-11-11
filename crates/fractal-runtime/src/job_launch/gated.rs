@@ -19,6 +19,8 @@ pub struct GatedChild {
     pub pid: u32,
     gate: Option<File>,
     worker: Option<JoinHandle<io::Result<Child>>>,
+    // Positive evidence, not absence of gate/worker: release consumes those too.
+    aborted_before_release: bool,
 }
 
 impl GatedChild {
@@ -63,7 +65,21 @@ impl GatedChild {
             pid: libc::pid_t::from_ne_bytes(bytes) as u32,
             gate: Some(gate_write),
             worker: Some(worker),
+            aborted_before_release: false,
         })
+    }
+
+    /// An exclusive borrower may abort only while release is still fenced.
+    /// Inspecting this does not itself serialize callers; retain the borrow and
+    /// the caller's generation mutation guard through abort and retirement.
+    pub fn is_gated(&self) -> bool {
+        self.gate.is_some() && self.worker.is_some()
+    }
+
+    /// Successful pre-release abort permanently disables release. Retained across
+    /// retirement/journal failures so cancellation may retry cleanup, never exec.
+    pub fn is_aborted_before_release(&self) -> bool {
+        self.aborted_before_release
     }
 
     pub fn release(&mut self) -> io::Result<Child> {
@@ -81,12 +97,14 @@ impl GatedChild {
         if self.worker.is_none() {
             return Ok(());
         }
+        let before_release = self.is_gated();
         // Still an unreaped child: PID cannot have been recycled.
         unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL); }
         self.gate.take();
         if let Ok(mut child) = self.join()? {
             child.wait()?;
         }
+        self.aborted_before_release = before_release;
         Ok(())
     }
 }
@@ -119,6 +137,23 @@ mod tests {
     #[test]
     fn explicit_release_executes_holder() {
         let mut child = GatedChild::spawn(Command::new("true")).unwrap();
+        assert!(child.is_gated());
         assert!(child.release().unwrap().wait().unwrap().success());
+        assert!(!child.is_gated());
+        child.abort().unwrap();
+        assert!(!child.is_aborted_before_release());
+    }
+
+    #[test]
+    #[ignore = "native Linux gate/fork test; run explicitly"]
+    fn aborted_gate_cannot_be_released() {
+        let mut child = GatedChild::spawn(Command::new("true")).unwrap();
+        assert!(child.is_gated());
+        child.abort().unwrap();
+        assert!(!child.is_gated());
+        assert!(child.is_aborted_before_release());
+        child.abort().unwrap();
+        assert!(child.is_aborted_before_release());
+        assert!(child.release().is_err());
     }
 }
