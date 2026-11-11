@@ -10507,6 +10507,94 @@ fn late_receipt_preserves_observation_and_next_head_push_delivers() {
 }
 
 #[test]
+fn headless_open_receipt_and_observation_deliver_once_in_either_replication_order() {
+    let repository = "resource/github/acme/demo";
+    let subject = format!("{repository}/pull-request/9");
+    let empty = json!({"repository_id": 1, "pull_requests": []});
+    let current = json!({"repository_id": 1, "pull_requests": [{
+        "number": 9, "state": "open", "draft": false, "head": "head-a"
+    }]});
+    for receipt_first in [true, false] {
+        let creator = Store::open_memory("creator").unwrap();
+        let observer = Store::open_memory("observer").unwrap();
+        creator.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "resource.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("kind".into(), json!("vcs.pull-request")),
+                ("attribution_only".into(), json!(true)),
+                ("facts".into(), json!({
+                    "number": 9, "opened_by": "agent/creator.builder"
+                })),
+            ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let receipt_facts = creator.latest_actual_value(&subject).unwrap().unwrap()["facts"].clone();
+        assert_eq!(receipt_facts["receipt_only"], true);
+        assert_eq!(
+            creator.resource_collection_page(None, None, Some(&subject), None, 10).unwrap()[0]["facts"],
+            receipt_facts,
+        );
+        let replicate_receipt = || {
+            let exchange = exchange_from(&creator, &observer.replication_inventory().unwrap());
+            receive_and_project(&observer, "creator", &exchange);
+        };
+        if receipt_first {
+            replicate_receipt();
+        }
+        let recorded = || observer.latest_actual_value(&subject).unwrap()
+            .map(|value| value["facts"].clone());
+        let incremental = recorded();
+        observer.replay_replication_graph().unwrap();
+        assert_eq!(recorded(), incremental, "refolding retains receipt provenance");
+        let changes = discovered_collection_items(
+            repository, "pull_requests", Some(&empty), &current, &mut |_| recorded(),
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].deliver, "receipt_first={receipt_first}");
+        assert!(changes[0].facts.get("receipt_only").is_none());
+        observer.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "resource.observed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("kind".into(), json!("vcs.pull-request")),
+                ("facts".into(), changes[0].facts.clone()),
+            ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        // A receipt from another host must not erase an already observed head, even
+        // when it arrives after the observation. Re-delivery of either is harmless.
+        replicate_receipt();
+        replicate_receipt();
+        let prior = recorded().unwrap();
+        assert_eq!(prior["head_sha"], "head-a");
+        assert_eq!(prior["opened_by"], "agent/creator.builder");
+        assert!(prior.get("receipt_only").is_none());
+        observer.replay_replication_graph().unwrap();
+        assert_eq!(recorded(), Some(prior.clone()), "refolding clears receipt provenance after observation");
+        let repeated = discovered_collection_items(
+            repository, "pull_requests", Some(&current), &current, &mut |_| Some(prior.clone()),
+        );
+        assert!(repeated.iter().all(|item| !item.deliver), "receipt_first={receipt_first}");
+    }
+}
+
+#[test]
+fn unmarked_headless_receipts_and_legacy_observations_remain_baselines() {
+    let previous = json!({"repository_id": 1, "pull_requests": []});
+    let current = json!({"repository_id": 1, "pull_requests": [{
+        "number": 9, "state": "open", "draft": false, "head": "head-a"
+    }]});
+    for prior in [
+        json!({"number": 9, "state": "open", "opened_by": "agent/creator.builder"}),
+        json!({"number": 9, "state": "open", "draft": false, "title": "Legacy observation"}),
+    ] {
+        let changes = discovered_collection_items(
+            "resource/github/acme/demo", "pull_requests", Some(&previous), &current,
+            &mut |_| Some(prior.clone()),
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].deliver, "unmarked head-less prior must stay a baseline: {prior}");
+    }
+}
+
+#[test]
 fn receipt_born_resources_receive_first_observer_issue_and_review_delivery() {
     let store = Store::open_memory("node").unwrap();
     let spool = tempfile::tempdir().unwrap();
@@ -10798,7 +10886,7 @@ fn only_a_new_ready_head_of_an_open_pull_request_asks_for_review() {
         ),
         Some(false)
     );
-    // Reopening at the same head, or a head first recorded for a known item, is a baseline.
+    // Reopening at the same head is not a new head.
     assert_eq!(
         asks(
             json!({"number": 4, "head": a, "state": "closed", "draft": false}),
@@ -10806,12 +10894,13 @@ fn only_a_new_ready_head_of_an_open_pull_request_asks_for_review() {
         ),
         Some(false)
     );
+    // Only a positively marked head-less creation receipt establishes no observed head.
     assert_eq!(
         asks(
-            json!({"number": 4, "state": "open"}),
+            json!({"number": 4, "state": "open", "receipt_only": true}),
             json!({"number": 4, "head": a, "state": "open", "draft": false})
         ),
-        Some(false)
+        Some(true)
     );
     // A draft is not reviewed, and it is when it becomes ready at the same head.
     assert_eq!(

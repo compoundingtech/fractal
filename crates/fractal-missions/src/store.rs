@@ -299,9 +299,9 @@ fn item_data_types(
 /// A pull request is reviewed once for each head it is ready at: when it first appears open and
 /// ready, when a draft becomes ready, and when a new head replaces one that was known. Nothing
 /// else starts a review. A closure, a merge, a reopening at the same head, a title edit, and a
-/// field that an older build did not record never do, because st would review a head it already
-/// saw or one nobody can act on. A known item with no known head proves nothing, so a head first
-/// recorded for it is a baseline.
+/// field an older build did not record never do. A positively marked creation receipt has not
+/// observed a head: only its first ready head needs a review. Unmarked head-less priors remain
+/// a baseline, including observations made by older builds.
 fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
     // An item resource names the head `head_sha`; a listing names it `head`.
     let head_of = |item: &Value| {
@@ -324,6 +324,7 @@ fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
     };
     let prior_head = head_of(prior);
     prior.get("draft").and_then(Value::as_bool) == Some(true)
+        || (prior_head.is_none() && prior.get("receipt_only") == Some(&Value::Bool(true)))
         || prior_head.is_some_and(|prior_head| Some(prior_head) != head)
 }
 
@@ -376,6 +377,7 @@ fn item_facts(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    facts.remove("receipt_only");
     for (name, value) in seen.as_object().into_iter().flatten() {
         let name = match name.as_str() {
             "new" => continue,
