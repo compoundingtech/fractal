@@ -41,6 +41,17 @@ pub trait OwnedSetsStore {
             options: &Options,
             key: &str,
             actor: &str,
+        ) -> Result<ApplyResponse, FractalError> {
+        self.apply_owned_set_mapped(intent, options, key, actor, None)
+    }
+    /// Also record `source_map` beside the set commit, in the same transaction.
+    fn apply_owned_set_mapped(
+            &self,
+            intent: &NormalizedIntent,
+            options: &Options,
+            key: &str,
+            actor: &str,
+            source_map: Option<&fractal_schema::source_map::SourceMap>,
         ) -> Result<ApplyResponse, FractalError>;
 }
 
@@ -205,12 +216,13 @@ impl OwnedSetsStore for Store {
         .map_err(internal)
     }
 
-    fn apply_owned_set(
+    fn apply_owned_set_mapped(
             &self,
             intent: &NormalizedIntent,
             options: &Options,
             key: &str,
             actor: &str,
+            source_map: Option<&fractal_schema::source_map::SourceMap>,
         ) -> Result<ApplyResponse, FractalError> {
         let key = format!("owned-set:{}:{key}", options.set);
         self.apply_as_impl(
@@ -223,6 +235,7 @@ impl OwnedSetsStore for Store {
                 owned: Some(options),
                 guard: None,
                 force: None,
+                source_map,
             },
         )
     }

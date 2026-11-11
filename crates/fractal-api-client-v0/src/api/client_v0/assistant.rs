@@ -45,7 +45,7 @@ pub struct AssistantGrantPolicy {
 
 fn validate_policy(version: &str, scopes: &[String], seconds: u64, consent: bool,
                    evidence: &str) -> Result<(), ApiError> {
-    if version != CLIENT_API_VERSION || seconds == 0 || seconds > 2_592_000 {
+    if !super::super::wire_names::api_version(version) || seconds == 0 || seconds > 2_592_000 {
         return Err(validation("assistant expiry must be positive and at most 30 days"));
     }
     if scopes.is_empty() || scopes.iter().any(|scope| !SCOPES.contains(&scope.as_str()))
@@ -568,7 +568,9 @@ mod tests {
             assert_eq!(schema["$defs"][definition]["properties"]["expires_in_seconds"]["maximum"], maximum);
         }
         let policy = request();
-        assert!(validate_policy(CLIENT_API_VERSION, &policy.scopes, maximum, true, "recorded consent").is_ok());
+        for version in ["st3.client.v0", CLIENT_API_VERSION] {
+            assert!(validate_policy(version, &policy.scopes, maximum, true, "recorded consent").is_ok());
+        }
         for seconds in [0, maximum + 1] {
             assert!(validate_policy(CLIENT_API_VERSION, &policy.scopes, seconds, true, "recorded consent").is_err());
         }

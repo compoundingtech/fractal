@@ -602,6 +602,7 @@ async fn check_mission_file(
     let checked = run_gate_check(
         client,
         &intent,
+        None,
         &args.workspace,
         &args.inputs,
         |view, item| {

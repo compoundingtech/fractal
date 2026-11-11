@@ -144,6 +144,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/source-blobs/{hash}",
+        "answers text/plain, which the JSON cost client cannot decode; one primary-key lookup of a sha256 in blobs, independent of claim history; owned_sets::source_maps_record_once_per_revision_with_deduplicated_texts covers the store read and the route's not-found answer",
+    ),
+    (
         "GET /v1/custom/decision-inputs",
         "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
     ),
@@ -499,6 +503,34 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "image bytes, outside the graph",
     ),
     (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
         "GET /v1/client/conversations/{id}/content/{reference}/chunk",
         "requires owner-native transcript content; scope, bounded chunk and revision invalidation are covered by conversation_blocks tests",
     ),
@@ -746,6 +778,7 @@ const PROBES: &[Probe] = &[
         owned_set_request(&format!("apply-{attempt}"))
     }),
     get("GET /v1/source/status", "/v1/source/status"),
+    get("GET /v1/source-maps", "/v1/source-maps?subject=agent/bench/cost/fixture&texts=true"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
@@ -3391,10 +3424,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         publication["revision"].as_str(),
         Some(expected_publication_revision.as_deref().unwrap())
     );
-    client
-        .post::<_, Value>("/v1/sets/apply", &owned_set_request("fixture"))
+    // The fixture set carries a source map, so the source-map read probe answers a real claim.
+    let mut fixture_set = owned_set_request("fixture");
+    fixture_set["source_map"] = json!({
+        "schema": "fractal.source-map/v1",
+        "files": [{"repository": "acme/garden", "path": "graph/fixture.ts", "blob": "b".repeat(40),
+            "text": "export default fixture\n"}],
+        "subjects": {"agent/bench/cost/fixture": {"declaration": 0, "inputs": [0]}},
+    });
+    let applied: Value = client
+        .post("/v1/sets/apply", &fixture_set)
         .await
         .expect("the owned-set read fixture must publish");
+    assert_eq!(applied["publication"]["source_maps"]["recorded"], 1, "{applied}");
     let selected: Value = person
         .get("/v1/client/sets/bench/cost/fixture")
         .await

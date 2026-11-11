@@ -262,6 +262,18 @@ async fn assistant_read_trust_rejects_shim_as_attestor_and_remote_pinning() {
 }
 
 #[tokio::test]
+async fn assistant_read_trust_accepts_legacy_and_fractal_versions() {
+    let fixture=fixture(SCOPES,false).await;
+    for version in ["st3.client.v0", "fractal.client.v0"] {
+        let mut trust=fixture.trust_request();
+        trust.api_version=version.into();
+        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()),Json(trust)).await.unwrap();
+        assert!(grant["policy_revision"].as_u64().is_some());
+    }
+}
+
+#[tokio::test]
 async fn assistant_read_nonce_is_atomic_and_private_results_never_replay_after_restart() {
     let fixture=fixture(SCOPES,true).await;
     let payload=fixture.payload("summary","");let header=fixture.header(&payload,&fixture.attestor);

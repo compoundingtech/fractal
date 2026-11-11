@@ -10839,12 +10839,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Evaluate the runs whose last evaluation read a subject that changed since, such as a
-    /// baseline's resource or a step they depend on, without waiting for a pass. A pass reaches
-    /// mission runs once, after its other stages, so on a slow host a run that a change makes
-    /// ready would wait for the rest of the pass running then and most of the next. It reads the
-    /// change feed with its own cursor and marks nothing, so a pass's evaluation running at the
-    /// same time cannot clear a mark it set. Leaves full passes, due times and runs no pass has
-    /// evaluated yet to the pass. Returns how many runs it evaluated and whether any wrote.
+    /// baseline's resource or a step they depend on, and the active runs this host originates
+    /// that changed but no evaluation has seen yet, such as a run `missions start` just created,
+    /// without waiting for a pass. A pass reaches mission runs once, after its other stages, and
+    /// waits out `StartSpacing`, so a new run's first step would wait up to a pass interval and a
+    /// run that a change makes ready would wait for the rest of the pass running then and most of
+    /// the next. It reads the change feed with its own cursor and marks nothing, so a pass's
+    /// evaluation running at the same time cannot clear a mark it set. Leaves full passes, due
+    /// times and runs that existed before this follower's cursor to the pass. Returns how many
+    /// runs it evaluated and whether any wrote.
     pub fn evaluate_changed_mission_runs(&self) -> Result<(usize, bool)> {
         let _evaluating = self
             .mission_evaluation
@@ -10854,9 +10857,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_reads_cursor
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (next, changed_runs) =
+        let crate::incremental::FeedReaders { cursor: next, readers: mut changed_runs, unseen } =
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
+        if !unseen.is_empty() {
+            // Another host's run, or one that already ended, is not this host's to evaluate.
+            let active = self
+                .store
+                .active_mission_run_ids_for_origin(&self.host)?
+                .into_iter()
+                .map(|id| format!("mission-run/{id}"))
+                .collect::<BTreeSet<_>>();
+            changed_runs.extend(unseen.into_iter().filter(|subject| active.contains(subject)));
+        }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
         let mut changed = false;
@@ -24149,6 +24162,77 @@ mission "relay" state="ready" {
             [("first", "completed"), ("second", "working")]
         );
         follower.abort();
+    }
+
+    /// `missions start` commits a new run and wakes the follower. The run's first step's exec
+    /// starts from that change alone: no pass, which would first wait out `StartSpacing`, has to
+    /// evaluate the run first. A host that does not originate the run leaves it alone.
+    #[test]
+    fn a_new_runs_first_step_starts_without_a_pass() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "single" state="ready" {
+  goal "Start one agentless exec."
+  step "first" {
+    agentless
+    exec "first" { host "node"; workspace "/tmp"; command "true"; restart "never" }
+    gate "first succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/first" is 0 }
+  }
+}
+"#,
+            "single",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let elsewhere = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "elsewhere".into(),
+            Arc::new(Notify::new()),
+        );
+        // Each follower's cursor starts before the run exists, as it does in a running daemon.
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(elsewhere.evaluate_changed_mission_runs().unwrap(), (0, false));
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "single".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "single-run".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            elsewhere.evaluate_changed_mission_runs().unwrap(),
+            (0, false),
+            "another host's run is not its to evaluate"
+        );
+        let started = || {
+            store
+                .desired_subject_with_writer(&format!("exec/{}/first", run.id))
+                .unwrap()
+                .is_some_and(|(desired, _)| {
+                    let id = &desired.member.as_ref().unwrap().runtime_id;
+                    runtime.started_members.lock().unwrap().iter().any(|member| &member.runtime_id == id)
+                })
+        };
+        // The follower's chain of evaluations after the run's creation, as
+        // `follow_mission_reads` runs it: each evaluation moves the step one state.
+        for _ in 0..=MISSION_READS_CONTINUATIONS {
+            if started() {
+                break;
+            }
+            reconciler.evaluate_changed_mission_runs().unwrap();
+        }
+        assert!(started(), "the new run's first step's exec starts without a pass");
+        let steps = store.mission_run(&run.subject).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "working");
     }
 
     #[test]
