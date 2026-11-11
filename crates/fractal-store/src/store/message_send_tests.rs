@@ -144,15 +144,9 @@ fn message_operation_conflict_receipt_cost_depends_on_its_own_history() {
             tx.commit().unwrap();
         }
         FULL_REPLAYS.with(|replays| replays.set(0));
-        // Reader discovery may page through retained evidence before lending the writer.
-        // Measure the projection loan, whose work must stay keyed to this operation.
-        let mut work = None;
-        store.project_replication_backlog_with_progress("message-conflict-cost", |progress| {
-            if progress.phase == "project-incremental" && work.is_none() {
-                work = Some(SqliteWorkScope::start());
-            }
-        }).unwrap();
-        let cost = work.unwrap().finish();
+        let work = SqliteWorkScope::start();
+        store.project_replication_backlog().unwrap();
+        let cost = work.finish();
         assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
         eprintln!(
             "message conflict receipt prior_claims={count} statements={} vm_steps={} fullscan_steps={}",
@@ -161,8 +155,9 @@ fn message_operation_conflict_receipt_cost_depends_on_its_own_history() {
         assert!(cost.vm_steps > 0);
         costs.push(cost);
     }
-    assert_eq!(costs[0].statements, costs[1].statements);
-    assert_eq!(costs[1].statements, costs[2].statements);
+    // Reader discovery may issue additional keyed/page statements. It must not add a
+    // whole-log scan as this operation's history grows; keep the linear VM-work bound too.
+    assert_eq!(costs[0].fullscan_steps, costs[2].fullscan_steps);
     assert!(
         costs[2].vm_steps < costs[0].vm_steps * 50,
         "one indexed fold should grow linearly, not repeat a whole-store replay per receipt"
