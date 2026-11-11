@@ -587,9 +587,16 @@ pub fn management_latest(connection: &Connection, subject: &str, kind: &str) -> 
     record.map(decode).transpose()
 }
 
-/// Owner-management counterpart to `transition`; never bearer authorization.
+/// Owner management follows the newest authenticated subject transition, not
+/// attachment progress for this base. Ambiguous identities fail closed instead
+/// of treating an unattached revocation or policy as absent.
 pub fn management_transition(connection: &Connection, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
-    transition_unchecked(connection,granted,kind).map_err(internal)
+    let transition = management_latest(connection,&granted.subject,kind)?;
+    if transition.as_ref().is_some_and(|claim| !transition_valid(granted,claim)) {
+        return Err(FractalError::new("assistant-grant-subject-not-ready",
+            "owner management transition identity does not match the current grant"));
+    }
+    Ok(transition)
 }
 pub const CANDIDATES_QUERY: &str = "SELECT grant_record FROM assistant_grant_effective
     WHERE ?3 IS NOT NULL AND principal=?1 AND owner=?2 AND revoked=0 AND expires_at>?3

@@ -336,6 +336,27 @@ mod tests {
                 assert_eq!(response["value"]["revoked"],true);
                 assert_eq!(count,1,"revoke retry must not append another revocation");
                 if let Some(first) = &first { assert_eq!(first,&committed.id); }
+                if attempt==1 {
+                    let before = state.store.claims_for(&granted.subject,Some(POLICY)).unwrap().len();
+                    let policy = serde_json::from_value(json!({
+                        "api_version":CLIENT_API_VERSION,"scopes":SCOPES[..4],
+                        "disclosure_consent":true,"consent_evidence":"owner approved renewal",
+                        "minimal_read_mode":"approval-once",
+                    })).unwrap();
+                    assert_eq!(update_policy(State(state.clone()),
+                        Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+                        AxumPath(id.into()),Json(policy)).await.unwrap_err().status,StatusCode::FORBIDDEN);
+                    let trust = serde_json::from_value(json!({
+                        "api_version":CLIENT_API_VERSION,"issuer":"approval/test","key_id":"test-key",
+                        "attestor_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32]),
+                        "shim_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([8_u8;32]),
+                    })).unwrap();
+                    assert_eq!(pin_read_trust(State(state.clone()),
+                        Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+                        AxumPath(id.into()),Json(trust)).await.unwrap_err().status,StatusCode::FORBIDDEN);
+                    assert_eq!(state.store.claims_for(&granted.subject,Some(POLICY)).unwrap().len(),before,
+                        "a revoked new base must refuse policy and pin without appending");
+                }
             } else {
                 assert_eq!(count,attempt+1,"each policy or pin retry appends exactly one revision");
                 assert_eq!(response["value"]["policy_revision"],attempt+2);
@@ -344,7 +365,17 @@ mod tests {
             first = Some(committed.id);
             assert!(authority::subject_ready(&state.store.readers.get(),&granted.subject).is_err());
             assert!(authenticate(&state,&credential_digest(paired["credential"].as_str().unwrap()),
-                "fabric-loopback").is_err(),"committed owner success must not lift the bearer fence");
+                "fabric-loopback").unwrap().is_none(),"committed owner success must not lift the bearer fence");
+            if attempt==0 {
+                // A new valid base must not hide the existing transition while
+                // its reverse attachment task has not run.
+                state.store.append_claim(&ClaimInput {
+                    subject:granted.subject.clone(),kind:GRANTED.into(),actor:granted.actor.clone(),
+                    fields:serde_json::from_value(fields(&granted).unwrap().clone()).unwrap(),
+                    evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+                }).unwrap();
+                assert_ne!(owner_grant(&state,id).unwrap().id,granted.id);
+            }
         }
     }
 

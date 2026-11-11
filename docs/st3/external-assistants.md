@@ -303,6 +303,10 @@ authorization. Revoke retries preserve the original revocation; policy and
 read-trust retries each append one new revision, as before. These routes do not
 offer keyed replay. Their successful responses never lift the subject's bearer
 fence.
+Management selects the newest authenticated transition by indexed subject/kind
+seek and validates its immutable identity against the current base. A newer base
+does not erase a policy revision or revocation merely because its reverse
+attachment has not run; incompatible transition identity fails closed.
 
 
 The subject remains fenced until its attachment tasks and witness cleanup finish.

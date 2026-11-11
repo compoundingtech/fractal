@@ -236,6 +236,33 @@ fn local_owner_transition_materializes_only_one_pair_and_keeps_bearer_fenced() {
 }
 
 #[test]
+fn owner_management_preserves_transitions_before_a_new_unattached_base() {
+    for kind in [POLICY,REVOKED] {
+        let store = node("owner-transition-order",None);
+        let first = append(&store,SUBJECT,GRANTED,fields());
+        drain_authority(&store);
+        let mut changed = fields();
+        changed["policy_revision"] = json!(7);
+        let transition = append(&store,SUBJECT,kind,changed);
+        let second = append(&store,SUBJECT,GRANTED,fields());
+        let connection = store.readers.get();
+        assert_eq!(authority::management_latest(&connection,SUBJECT,GRANTED)
+            .unwrap().unwrap().id,second.id);
+        let attached: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?2)",
+            params![transition.id,second.id],|row| row.get(0),
+        ).unwrap();
+        assert!(!attached,"fixture must retain the missing reverse attachment");
+        assert_ne!(first.id,second.id);
+        let current = authority::management_transition(&connection,&second,kind)
+            .unwrap().expect("a new base cannot erase an existing transition");
+        assert_eq!(current.id,transition.id);
+        if kind==POLICY { assert_eq!(current.body["fields"]["policy_revision"],7); }
+        assert!(authority::transition(&connection,&second,kind).is_err());
+    }
+}
+
+#[test]
 fn verified_attachment_zero_duration_is_one_unit_and_finishes_in_both_directions() {
     for bases_first in [true, false] {
         attachment_budget_product(true, bases_first, Duration::ZERO);
