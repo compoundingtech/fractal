@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/4ba99f3209788ed04f01af38f77ddb803ad6ec63";
     fractal = {
-      url = "github:compoundingtech/fractal/943445316e3738a1fc1ee58f676334b7ec684bf4";
+      url = "git+https://github.com/compoundingtech/fractal?rev=943445316e3738a1fc1ee58f676334b7ec684bf4&shallow=1";
       flake = false;
     };
   };
