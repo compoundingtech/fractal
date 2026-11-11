@@ -12,7 +12,7 @@ mission "heron/close-out" state="ready" {
   gate "work waits" { field "state" "resource/heron-work" is "ready" }
  }
  finally {
-  step "close-out" { assigned-to "agent/heron-requester" }
+  step "close-out" { assigned-to "agent/node.heron-requester" }
  }
 }"#;
 

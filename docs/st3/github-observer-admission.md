@@ -259,7 +259,11 @@ For a repository's owner, read `ROOT/gh-ci/OWNER.token` and `OWNER.json` for
 metadata, branches/contents, PRs/reviews, checks/actions and open-PR GraphQL.
 Use `ROOT/github-ledger/OWNER.token` and `OWNER.json` for issue lists, issue
 comments/excerpts, issue watch preflight and Issue identity GraphQL. PR watch
-preflight and review excerpts use gh-ci. When either installation is selected,
+preflight and review excerpts use gh-ci. When no github-ledger installation is
+published for the owner (reason `missing` or `no-installation`) and the gh-ci
+sidecar's `permissions` grant `issues` read, issue reads use the gh-ci token
+instead and record no fallback; an expired or unreadable ledger installation
+still falls back to the PAT. When either installation is selected,
 remembered opaque node IDs are partitioned by their recorded `ItemIdentity.pull`,
 never guessed from their bytes, and each partition gets its own minimal identity
 query and authorization. PAT-only batches retain the prior single mixed Issue/PR
@@ -290,16 +294,17 @@ These count source-selection fallback events, not GitHub charges; conditional
 cache hits can still encounter a missing source. Remove transition fallback only
 after one week with zero unintentional fallback across the enrolled owners.
 
-**Legacy status qualification:** neither app has statuses:read. An app GraphQL
-`statusCheckRollup` returns check runs without legacy `StatusContext` data, so
-repository PR detail reads retain a PAT-only combined commit-status GET, once
-per distinct head SHA in a read, through the existing ETag cache. Its source
+**Legacy status qualification:** an installation without statuses:read sees a
+GraphQL `statusCheckRollup` of check runs without legacy `StatusContext` data,
+so repository PR detail reads then add a PAT-only combined commit-status GET,
+once per distinct head SHA in a read, through the existing ETag cache. Its source
 exception is observable as fallback reason `statuses`. Legacy status contexts
 are merged with app check runs before deriving check facts and required-check
 outcomes. Truncated status responses fail visibly rather than asserting missing
-contexts passed. This intentional status exception must be excluded from the
-one-week unintentional-fallback gate until installation permissions are separately
-approved and qualified. No statuses permission is assumed or added here.
+contexts passed. When the gh-ci sidecar grants `statuses` read, the rollup already
+carries `StatusContext` entries, so the extra GET is skipped, and any commit-status
+read routes to gh-ci without a fallback. Until then this intentional status
+exception is excluded from the one-week unintentional-fallback gate.
 
 REST cache keys include the stable installation principal, permissions and
 repository-selection scope, not token bytes; rotation preserves cache identity.

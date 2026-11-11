@@ -136,6 +136,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Require successful archive preparation
         shell: bash
         env:
@@ -188,11 +189,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -393,6 +389,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -423,11 +420,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -603,6 +595,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Require successful archive preparation
         shell: bash
         env:
@@ -655,11 +648,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -834,6 +822,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Restore the local Nix cache
         id: nix-probe
         if: success()
@@ -852,11 +841,6 @@ jobs:
           if [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -972,6 +956,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -1002,11 +987,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -5812,6 +5792,8 @@ jobs:
               "apps/fractal-web/src/**/*.stories.tsx",
               # Changelog stories render the app's changelog view and seen state.
               "apps/fractal-web/src/changelog/**",
+              # The dev-bar build and changes stories render the real segment.
+              "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
               "apps/fractal-web/src/embed/**",
               "apps/fractal-web/src/web/AlertDetailsPane.tsx",
               "apps/fractal-web/src/web/AlertFlashBand.tsx",

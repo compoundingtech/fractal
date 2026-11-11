@@ -1439,10 +1439,10 @@ fn ignored_authority_warnings(
 
 pub async fn apply_with_bound(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
-    apply_with_authority(state, request, bound.as_ref().map(|bound| bound.0.0.as_str())).await
+    apply_with_authority(state, request, bound.as_ref().map(BoundActor::actor)).await
 }
 
 pub async fn get_mission(
@@ -1483,7 +1483,7 @@ pub async fn retire_mission(
     let actor = person_or_agent_actor(&request.actor, "mission-retire-authority-denied")?;
     let store = state.store.clone();
     let retired =
-        blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key))
+        blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key, request.force_reason.as_deref()))
             .await?;
     signal_changed(&state);
     let mut retired = retired;

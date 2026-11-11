@@ -299,6 +299,7 @@ async fn a_viewer_reads_a_relay_hosts_seat_from_it_and_unknown_when_it_does_not_
             host: OWNER.into(),
             held: true,
             status: Some("read"),
+            consumed: Some("read"),
             latest: answered.get(&message.subject).and_then(|relayed| match relayed {
                 Relayed::Answered { latest, .. } => latest.clone(),
                 Relayed::Unknown { .. } => None,

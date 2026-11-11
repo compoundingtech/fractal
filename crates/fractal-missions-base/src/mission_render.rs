@@ -35,7 +35,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
 
 fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
-    let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, inputs,
+    let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, authority, inputs,
         max_active_runs, timeout_ms: _, report_to: _, stalled_after_ms: _, report_stalls: _,
         report_completed: _, revision_owners: _, revisions_human_only: _, revision_reviewer: _,
         revision_cutover: _, declarations_kdl: _, capacity, work_selector, completion, goals,
@@ -70,6 +70,10 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
             comment(&mut resource, "authored URI edge; locator is not stored in the published revision");
         }
         children.push(resource);
+    }
+    if !authority.is_empty() {
+        children.push(block(node("authority", []),
+            authority.iter().map(|grant| text(grant.verb.as_str(), &grant.pattern)).collect()));
     }
     for input in inputs.values() {
         if parent.is_some_and(|parent| parent.inputs.contains_key(&input.name)
@@ -129,7 +133,7 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         goals, constraints, agent_constraints, timeout_ms, capacity, retry, finally: _,
         work_selector, revision_owners, revisions_human_only, revision_reviewer, dependencies: after,
         baselines, documents, declarations_kdl, products, produces_mission, uses_mission, after_run,
-        gates, nested_mission, loop_spec: _, definition_hash: _ } = step;
+        program, gates, nested_mission, loop_spec: _, definition_hash: _ } = step;
     let mut root = text("step", id);
     protection(&mut root, *revisions_human_only, revision_reviewer.as_deref(), *timeout_ms);
     annotations(&mut root, declarations_kdl.as_deref(), revision_owners, agent_constraints);
@@ -155,6 +159,12 @@ fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
         });
     }
     if let Some(run) = after_run { children.push(text("after-run", run)); }
+    if let Some(program) = program {
+        let mut program_node = text("program", &program.bundle);
+        property(&mut program_node, "sha256", program.bundle_hash.as_str());
+        if let Some(ms) = program.stalled_after_ms { property(&mut program_node, "stalled-after", format!("{ms}ms")); }
+        children.push(program_node);
+    }
     if let Some(nested) = nested_mission { children.push(mission_node(nested)?); }
     Ok(block(root, children))
 }
@@ -206,6 +216,22 @@ mod tests {
             declared-lane "check"
             declared-budgets { cpu-seconds 300; token-budget 100000; memory-max "8G"; disk-max "20G"; attention "person/reviewer" asks=3; }
         }"#);
+    }
+
+    #[test]
+    fn canonical_mission_authority_round_trip() {
+        let source = r#"mission "test" state="ready" {
+            goal "Land one change."
+            authority { write "resource/factory/*"; publish "scratch/*"; start "factory/publish"; }
+            step "work" { agentless; }
+        }"#;
+        round_trip(source);
+        let rendered: KdlDocument = render_mission_kdl(&parse(source)).unwrap().text.parse().unwrap();
+        let rules = rendered.get("mission").unwrap().children().unwrap().get("authority").unwrap()
+            .children().unwrap().nodes().iter()
+            .map(|rule| format!("{} {}", rule.name().value(), rule.get(0).unwrap().as_string().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(rules, ["publish scratch/*", "start factory/publish", "write resource/factory/*"]);
     }
 
     #[test]
@@ -301,6 +327,36 @@ mod tests {
         let mut spec = parse(&source);
         spec.display_order.clear();
         assert!(render_mission_kdl(&spec).is_err());
+    }
+
+    #[test]
+    fn program_step_round_trips_and_owns_its_outcome() {
+        let sha = "ab".repeat(32);
+        let source = format!(r#"mission "test" state="ready" {{ goal "Land."; input "change" kind="text"
+            step "program" timeout="1h" {{ program "/bundles/land.mjs" sha256="{sha}" stalled-after="10m"; }} }}"#);
+        round_trip(&source);
+        let step = &parse(&source).steps["program"];
+        let program = step.program.as_ref().unwrap();
+        assert_eq!((program.bundle_hash.as_str(), program.stalled_after_ms), (sha.as_str(), Some(600_000)));
+        assert_eq!(step.work_selector, Some(crate::model::WorkSelector::Agentless));
+        // The definition names the blob by `bundle_hash`, so publishing it promotes the blob.
+        assert_eq!(serde_json::to_value(step).unwrap()["program"]["bundle_hash"], sha.as_str());
+        round_trip(&format!(r#"mission "test" state="ready" {{ goal "Land."; step "program" {{ program "/b.mjs" sha256="{sha}"; }} }}"#));
+        let error = |body: &str| {
+            let source = format!(r#"mission "test" state="ready" {{ goal "Land."; step "program" {{ {body} }} }}"#);
+            crate::mission::parse_missions(&source.parse().unwrap(), "node").unwrap_err().code
+        };
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}"; assigned-to "agent/test";"#)), "conflicting-work-selector");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}"; gate "g" {{ exists "resource/x"; }};"#)), "program-step-outcome");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}"; uses-mission "other@{sha}";"#)), "program-step-outcome");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}"; after-run "mission-run/x";"#)), "program-step-outcome");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}"; mission "n" state="ready" {{ goal "N."; step "s" {{ agentless; }}; }};"#)), "program-step-outcome");
+        assert_eq!(error(r#"program "/b.mjs" sha256="ABC";"#), "invalid-program");
+        assert_eq!(error(&format!(r#"program "b.mjs" sha256="{sha}";"#)), "invalid-program");
+        assert_eq!(error(&format!(r#"program "/b.mjs" sha256="{sha}" stalled-after="0s";"#)), "invalid-program");
+        let in_finally = format!(r#"mission "test" state="ready" {{ goal "Land."; step "work" {{ agentless; }}
+            finally {{ step "program" {{ program "/b.mjs" sha256="{sha}"; }} }} }}"#);
+        assert_eq!(crate::mission::parse_missions(&in_finally.parse().unwrap(), "node").unwrap_err().code, "program-step-outcome");
     }
 
     #[test]
