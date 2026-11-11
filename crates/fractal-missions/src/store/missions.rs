@@ -7147,32 +7147,7 @@ impl MissionsStore for Store {
     }
 
     fn pending_observer_refresh_attempt(&self, observer: &str) -> Result<Option<String>> {
-        let connection = self.readers.get();
-        // The observations are listed once, not scanned for each request; see
-        // `pending_subscription_mission_requests`.
-        connection
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h9b4924d4a878 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
-                    "SELECT json_extract(request.body, '$.fields.attempt')
-                 FROM claims request
-                 WHERE request.subject=?1
-                   AND request.kind='observer.refresh-requested'
-                   AND (
-                     json_extract(request.body, '$.fields.attempt') IS NULL
-                     OR json_extract(request.body, '$.fields.attempt') NOT IN (
-                       SELECT json_extract(result.body, '$.fields.attempt') FROM claims result
-                       WHERE result.subject=?1
-                         AND result.kind IN ('observer.observed', 'observer.state')
-                         AND json_extract(result.body, '$.fields.attempt') IS NOT NULL
-                     )
-                   )
-                 ORDER BY CANONICAL_ASC(request)
-                 LIMIT 1",
-                ),
-                [observer],
-                |row| row.get(0),
-            )
-            .optional()
+        fractal_store::store::observer_refresh::pending_attempt(&self.readers.get(), observer)
             .map_err(Into::into)
     }
 

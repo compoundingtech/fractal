@@ -42,7 +42,8 @@ pub const DATA_TYPES: [&str; 5] = [
 const SETTLED_PULL_REQUEST_CHECK: Duration = Duration::from_secs(15 * 60);
 
 /// The least time between two GraphQL reads of one repository on this host, however often its
-/// observers poll and whatever they saw change. Only a refresh asks sooner.
+/// observers poll and whatever they saw change. Only a refresh asks sooner. A webhook-covered
+/// repository's refreshes carry its changes, so its polls wait `SETTLED_PULL_REQUEST_CHECK`.
 const PULL_REQUEST_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// The most comments and reviews each item keeps in `recent_comments`, newest last.
@@ -1663,6 +1664,7 @@ async fn observe_poll(
             &request.locator,
             current_location,
             request.refresh,
+            request.webhook_covered,
             changed_open_pull
                 || !cursor.seen.contains_key("pull-requests")
                 || items
@@ -1864,10 +1866,11 @@ fn merge_legacy_statuses(node: &mut Value, combined: &Value) -> Result<()> {
 /// The repository's open pull requests as GraphQL last answered on this host. GraphQL has no
 /// conditional request, so it is asked again only when `changed` says the REST reads saw an open
 /// pull request change, while a pull request is settling, or once the last answer is old, and
-/// never sooner than a minute after the last read unless `refresh` asks or the REST reads name
-/// an open pull request (`listed`) the last answer lacks: a new pull request's first record
+/// never sooner than the active floor after the last read unless `refresh` asks or the REST reads
+/// name an open pull request (`listed`) the last answer lacks: a new pull request's first record
 /// carries its head, since only a head that differs from a known one asks for a review. A change
-/// seen within that minute is remembered, so the first read after it asks.
+/// seen within the floor is remembered, so the first read after it asks. A `webhook_covered`
+/// repository's floor is the settled interval: its webhook refreshes read changes as they happen.
 #[allow(clippy::too_many_arguments)]
 async fn open_pull_requests(
     client: &reqwest::Client,
@@ -1877,6 +1880,7 @@ async fn open_pull_requests(
     locator: &str,
     (owner, repository): (&str, &str),
     refresh: bool,
+    webhook_covered: bool,
     changed: bool,
     listed: &BTreeSet<u64>,
     emit_pulls: bool,
@@ -1914,7 +1918,7 @@ async fn open_pull_requests(
                     .iter()
                     .any(|facts| facts.get("number").and_then(Value::as_u64) == Some(*number))
             })
-            && (previous.at.elapsed() < PULL_REQUEST_CHECK_INTERVAL
+            && (previous.at.elapsed() < if webhook_covered { SETTLED_PULL_REQUEST_CHECK } else { PULL_REQUEST_CHECK_INTERVAL }
                 || (!previous.changed
                     && !previous.settling
                     && previous.at.elapsed() < SETTLED_PULL_REQUEST_CHECK))
@@ -2219,6 +2223,7 @@ mod tests {
             // Each poll revalidates instead of reusing a cached response.
             every_ms: Some(0),
             refresh: false,
+            webhook_covered: false,
         }
     }
 
@@ -2272,7 +2277,7 @@ mod tests {
         }).await;
         let details = open_pull_requests(&reqwest::Client::new(), &fixture.base,
             &GithubAuth::test("fixture-pat"), Duration::ZERO, "pat-fixture/repo",
-            ("pat-fixture", "repo"), true, true, &BTreeSet::new(), false,
+            ("pat-fixture", "repo"), true, false, true, &BTreeSet::new(), false,
             &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
         assert_eq!(details.identities_read, 2);
         assert_eq!(details.resolved.len(), 2);
@@ -2306,7 +2311,7 @@ mod tests {
         }).await;
         for _ in 0..2 {
             open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
-                Duration::ZERO, "forbidden-pulls/repo", (owner, "repo"), false, true,
+                Duration::ZERO, "forbidden-pulls/repo", (owner, "repo"), false, false, true,
                 &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
         }
         let calls = calls.lock();
@@ -2360,7 +2365,7 @@ mod tests {
             }
         }).await;
         let details = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
-            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), true, true,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), true, false, true,
             &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
         assert_eq!(details.identities_read, 2);
         assert_eq!(details.resolved.len(), 2);
@@ -2371,7 +2376,7 @@ mod tests {
             assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "lint"));
         }
         let reused = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
-            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), false, false,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), false, false, false,
             &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
         assert_eq!(reused.identities_read, 0, "intentional PAT status reads must preserve the GraphQL detail cache");
         assert!(Arc::ptr_eq(&details.open, &reused.open));
@@ -2435,9 +2440,34 @@ mod tests {
         open_pull_requests(
             &reqwest::Client::new(), base, &GithubAuth::test("fixture-auth"),
             Duration::ZERO, "github/acme/garden", ("acme", "garden"),
-            true, true, &BTreeSet::new(), true, &identities,
+            true, false, true, &BTreeSet::new(), true, &identities,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn webhook_coverage_raises_the_graphql_floor_to_the_settled_interval() {
+        let (github, base) = FakeGithub::start().await;
+        github.open_pull_requests(json!([open_pull(1, "head", "SUCCESS")]));
+        let read = |webhook_covered: bool| {
+            let base = base.clone();
+            async move {
+                open_pull_requests(&reqwest::Client::new(), &base, &GithubAuth::test("fixture-auth"),
+                    Duration::ZERO, "acme/garden", ("acme", "garden"), false, webhook_covered, true,
+                    &BTreeSet::new(), true, &[]).await.unwrap();
+            }
+        };
+        let reads = || std::mem::take(&mut *github.graphql_requests.lock()).len();
+        read(false).await;
+        assert_eq!(reads(), 1);
+        age_pull_request_check(&base, PULL_REQUEST_CHECK_INTERVAL);
+        read(true).await;
+        assert_eq!(reads(), 0, "a covered repository's polls wait out the settled interval");
+        read(false).await;
+        assert_eq!(reads(), 1, "an uncovered repository reads a change after the active floor");
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        read(true).await;
+        assert_eq!(reads(), 1, "the settled interval still bounds a covered repository");
     }
 
     #[tokio::test]
@@ -3365,6 +3395,7 @@ mod tests {
             ("acme", "garden"),
             false,
             false,
+            false,
             &BTreeSet::new(),
             true,
             &[],
@@ -3398,6 +3429,7 @@ mod tests {
             Duration::ZERO,
             "acme/garden",
             ("acme", "garden"),
+            false,
             false,
             false,
             &BTreeSet::new(),
