@@ -175,6 +175,9 @@ pub fn merge_observation(
                 return;
             }
             let initial = current.is_empty();
+            if initial {
+                current.insert("receipt_only".into(), Value::Bool(true));
+            }
             for name in ["repository", "number", "url", "opened_by", "opened_by_run"] {
                 if (initial || matches!(name, "opened_by" | "opened_by_run")) && let Some(value) = incoming.get(name) {
                     current.entry(name).or_insert_with(|| value.clone());
@@ -234,6 +237,11 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
             Some(fields) => serde_json::from_value(fields)?,
         };
         let mut facts = resource_facts(&fields).map_err(anyhow::Error::new)?;
+        if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener)
+            && fields.get("attribution_only") == Some(&Value::Bool(true))
+        {
+            facts.insert("receipt_only".into(), Value::Bool(true));
+        }
         if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener) {
             let first_opener = transaction.query_row(
                 /* sqlite-large-value: allow-for-now lv-h4c329b1274fe owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &format!("SELECT body FROM claims WHERE subject=?1 AND kind='resource.observed'
