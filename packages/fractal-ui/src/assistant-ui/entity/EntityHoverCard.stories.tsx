@@ -189,7 +189,8 @@ export const ModalEscapePriority: Story = {
     await expect(composer).toHaveFocus()
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Preview modal' })).toBeNull())
-    await expect(trigger).toHaveFocus()
+    // RAC FocusScope restores focus in requestAnimationFrame after unmount, not when the dialog first disappears.
+    await waitFor(() => expect(trigger).toHaveFocus())
   },
 }
 

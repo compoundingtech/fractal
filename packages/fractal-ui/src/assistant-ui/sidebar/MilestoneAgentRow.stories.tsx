@@ -995,7 +995,8 @@ export const NativeOverlaysThemed: StoryObj<{ scheme: Scheme }> = {
     await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
-    await expect(row.querySelector('[data-agent-menu]')).toHaveFocus()
+    // RAC FocusScope restores focus in requestAnimationFrame after the menu unmounts.
+    await waitFor(() => expect(row.querySelector('[data-agent-menu]')).toHaveFocus())
     await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)
     const menu = await within(document.body).findByRole('menu', { name: `Actions for ${contextRow.title}` })
     await expect(root.contains(menu)).toBe(true)
