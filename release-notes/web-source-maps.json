@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal Web's declaration sheet becomes a subject inspector with Source (TypeScript linked to KDL by node path, with declaration › helper › value frames), KDL and Changes tabs, and mission step rows carry a declared-at chip that opens the run's pinned revision; the client API adds source-map.get, source-blob.get and MissionRunSummary.revision.",
+  "summary": "Fractal Web's declaration sheet becomes a subject inspector with Source (TypeScript linked to KDL by node path, with declaration › helper › value frames), KDL and Changes tabs, and mission step rows carry a declared-at chip that opens the run's pinned revision; the client API adds source-map.get (with the revision's redacted kdl and the current revision), source-blob.get, and the run revision on mission cards and MissionRunSummary.",
   "replay": { "status": "none", "detail": "No replay changes." },
   "schema": { "status": "none", "detail": "No storage changes; reads the source.mapped claims and blobs that set publications already record." },
   "rules": { "status": "none", "detail": "No checkpoint changes." },
