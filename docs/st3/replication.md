@@ -1622,6 +1622,58 @@ reading the ledger as the authority. The retired claim IDs travel between such m
 `[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
 finds this member and a peer answering differently; see [Answers across members](#answers-across-members).
 
+## Replication ingress and outbound rejection parks
+
+Both graph and shard receive routes share a 30-second receive budget, with a
+two-second response reserve. Its origin is a monotonic `Instant` stamped by the
+network middleware when the request is accepted, before body collection or queue
+entry, and carried in request extensions, never a wire header. The origin must
+not be reset at extraction or writer acquisition. This is a cooperative deadline:
+at most one in-flight inflate bounded by the existing caps and one started commit
+may overshoot. A started commit is never aborted; overshoot is logged. A timeout
+does not erase a committed delivery.
+
+Ingress uses string codes, not new closed-enum variants:
+
+| Code | HTTP status | New sender disposition |
+| --- | --- | --- |
+| `replication-ingress/raw-oversize` | 413 | Terminal for the sent unit |
+| `replication-ingress/inflated-oversize` | 413 | Terminal for the sent unit |
+| `replication-ingress/malformed-deflate` | 400 | Terminal for the sent unit |
+| `replication-ingress/malformed-json` | 400 | Terminal for the sent unit |
+| `replication-ingress/receive-deadline` | 503 | Retryable |
+| `replication-ingress/writer-unavailable` | 503 | Retryable |
+
+The daemon re-emit and authenticated remote allowlist preserve these codes and
+statuses. Existing raw and inflated caps are unchanged. Content-Length or the
+stream cap refuses raw oversize before reading or inflating an oversized body.
+Receive telemetry counts rejections per peer. The receive-only fallible writer
+loan distinguishes expiry, closed admission and disconnected writer; existing
+infallible callers are unchanged. If handoff succeeds while the borrower expires,
+the writer is returned exactly once. Later SQL and commit errors are not loan
+failures.
+
+New senders recognize only authenticated typed terminal codes, before generic
+backoff, bound to the envelope hashes captured for the actual sent page. Unsigned
+413 responses from pre-authentication layers remain diagnostic and retryable.
+The current writer durably persists each terminal rejection before the terminal
+transition in additive smallclaims table
+`outbound_parks(origin, scope, peer, envelope_hash, code, episode)`, with an indexed,
+bounded `(peer, envelope_hash)` lookup. The existing `operational.failure` episode
+is used only for alerting and repair, not as the exclusion authority.
+
+Every export path excludes parked envelopes before its page limit: difference
+listing, missing-payload listing, claim-range bypass and reverse-direction reply
+export. Parks are destination-specific: other peers can still receive the same
+envelope. Restart and wake generations never resurrect a park. Only the explicit
+repair class in the existing repair path can unpark, idempotently and bound to
+the current failure; there is no automatic unpark.
+
+Migration is additive. An older binary ignores `outbound_parks` and resumes
+today's retry behavior. Old senders treat the new 4xx exactly like today's
+BAD_REQUEST (`replication-peer-rejected`, ordinary backoff, wake resets). The
+no-storm claim covers ONLY new senders.
+
 ## Recovery
 
 Replication never changes a source SQLite file directly. It exchanges immutable authority records through the signed protocol.
