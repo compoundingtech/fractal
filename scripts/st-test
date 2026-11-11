@@ -885,7 +885,7 @@ def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
             return False
 
     gate = next((depth for depth, part in enumerate(parts) if depth > 1
-                 and re.fullmatch(r'gate-slot-(gate|heavy|eval)-[1-9][0-9]*(?:-[0-9]+)?\.scope', part)
+                 and re.fullmatch(r'gate-slot-[A-Za-z0-9_.-]+\.scope', part)
                  and (parts[depth - 2:depth] == ['app.slice', 'app-capped.slice']
                       or parts[max(0, depth - 3):depth] == ['app.slice', 'app-capped.slice', 'app-capped-heavy.slice'])), None)
     if gate is not None:
