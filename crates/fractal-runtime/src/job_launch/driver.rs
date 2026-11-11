@@ -20,6 +20,9 @@ pub struct JobLaunch<'a> {
 /// unit 4c-2 must supply admission before any caller is wired.
 pub trait LaunchJournal {
     fn intent(&mut self, intent: &LaunchIntent) -> Result<()>;
+    /// Persist the confirmed release and admitted host pin. Failure leaves an
+    /// uncertain intent: the runtime stops J rather than allowing a retry.
+    fn released(&mut self, intent: &LaunchIntent, holder_pid: u32) -> Result<()>;
     fn refusal(&mut self, intent: &LaunchIntent, refusal: LaunchRefusal) -> Result<()>;
 }
 

@@ -9,6 +9,7 @@ struct Journal {
     connection: Rc<RefCell<Connection>>,
     binding: JobHostBinding,
     order: Order,
+    release_checkpoint_fails: bool,
 }
 impl Journal {
     fn append(&mut self, record: JobRecord, ordinal: u64) -> Result<()> {
@@ -26,6 +27,19 @@ impl LaunchJournal for Journal {
         self.append(JobRecord::LaunchIntent { binding: self.binding.clone(), intent: intent.clone() }, 2)?;
         self.order.borrow_mut().push("intent");
         Ok(())
+    }
+    fn released(&mut self, intent: &LaunchIntent, holder_pid: u32) -> Result<()> {
+        ensure!(!self.release_checkpoint_fails, "release journal checkpoint failed");
+        self.append(JobRecord::LaunchReleased {
+            binding: self.binding.clone(), intent: intent.clone(),
+            released: fractal_jobs::recovery::Released {
+                holder_pid, pin: fractal_jobs::recovery::RecoveryPin {
+                    host: self.binding.execution_host.clone(),
+                    member_key: "fixture-member-key".into(),
+                    admitted_claim: self.binding.authority_declaration.clone(),
+                },
+            },
+        }, 3)
     }
     fn refusal(&mut self, intent: &LaunchIntent, refusal: LaunchRefusal) -> Result<()> {
         self.append(JobRecord::LaunchRefused {
@@ -125,7 +139,7 @@ impl JobLaunchEffects for Effects {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Extra { None, RelativeOutcome, ReleaseFailure, ReleaseFailureVanished }
+enum Extra { None, RelativeOutcome, ReleaseFailure, ReleaseFailureVanished, JournalReleaseFailure }
 
 #[test]
 fn real_projection_and_fake_holder_observe_launch_and_exit_order() {
@@ -142,6 +156,12 @@ fn real_projection_and_fake_holder_observe_launch_and_exit_order() {
 fn uncertain_release_samples_before_removal_without_refusal_or_retry() {
     exercise(None, false, false, false, Extra::ReleaseFailure);
     exercise(None, false, false, true, Extra::ReleaseFailure);
+}
+
+#[test]
+fn release_checkpoint_failure_retains_sample_without_refusal_or_retry() {
+    exercise(None, false, false, false, Extra::JournalReleaseFailure);
+    exercise(None, false, false, true, Extra::JournalReleaseFailure);
 }
 
 #[test]
@@ -169,7 +189,8 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
         tx.commit().unwrap();
     }
     let order = Order::default();
-    let mut journal = Journal { connection: connection.clone(), binding: binding.clone(), order: order.clone() };
+    let mut journal = Journal { connection: connection.clone(), binding: binding.clone(),
+        order: order.clone(), release_checkpoint_fails: extra == Extra::JournalReleaseFailure };
     let outcome = if extra == Extra::RelativeOutcome { PathBuf::from("outcome.json") }
         else { directory.path().join("outcome.json") };
     let intent = LaunchIntent {
@@ -203,9 +224,9 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
         let ExitUsage::Sample(exit_usage) = result.exit_usage else { panic!("missing exit sample"); };
         assert_eq!(exit_usage.cpu_usage_usec.reading.value, Some(20));
         assert_eq!(result.outcome, fractal_jobs::launch::LaunchOutcome::Exited(fractal_jobs::ExitOutcome::Code(75)));
-        assert_eq!(state, JobState::Launching); // observations are not execution authority
+        assert_eq!(state, JobState::Running); // durable release remains history, not authority
         assert!(!job_directory.exists());
-    } else if matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished) {
+    } else if matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished | Extra::JournalReleaseFailure) {
         let error = result.err().unwrap();
         assert_eq!(state, JobState::Launching);
         assert!(!order.borrow().contains(&"refusal"));
@@ -224,7 +245,9 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
                 let ExitUsage::Sample(sample) = &uncertain.exit_usage else { panic!("missing uncertain sample"); };
                 assert_eq!(sample.cpu_usage_usec.reading.value, Some(20));
             }
-            assert!(uncertain.release_error.to_string().contains("exec denied"));
+            let expected = if extra == Extra::JournalReleaseFailure { "release journal checkpoint failed" }
+                else { "exec denied" };
+            assert!(uncertain.release_error.to_string().contains(expected));
             assert_eq!(*order.borrow(), ["intent", "group", "caps", "launch-usage",
                 "gated", "attach", "holder", "kill", "empty", "exit-usage", "remove"]);
         }
