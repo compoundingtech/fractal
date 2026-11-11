@@ -1026,7 +1026,7 @@ An unknown or invalid record stays in `replica_records`. It does not block a val
 
 Admission commits once per pass over the pending envelopes, so one disk flush covers an exchange. Each envelope is admitted in its own savepoint, so an invalid one is rolled back and recorded alone.
 
-A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `fractal now`, `fractal missions ls` and the terminal UI say the node is syncing.
+A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. Late history rebuilds only its affected graph parts; a live receive never falls back to full-store replay. Meanwhile `fractal now`, `fractal missions ls` and the terminal UI say the node is syncing.
 
 A claim that reaches a mission run tree out of the replay's order rebuilds that tree from its own
 claims. Runs in one tree affect each other only from the root down: a run that ends cancels the
@@ -1052,11 +1052,12 @@ An unknown claim kind or field can become valid after a schema upgrade. Admissio
 
 A projection fault keeps the last good projection. The daemon continues to serve status and repair commands.
 
-A valid claim can still fail to project, for example a body written by another build. That claim
-is quarantined on its own: its projection is rolled back, and every other claim, from every peer,
-still reaches the graph. `fractal replication status` lists it as an `unhealthy` projection named
-`projection:base:CLAIM` or `projection:runs:CLAIM`, and `fractal doctor` names it. Each full replay
-decides the claim again.
+A valid claim can still fail to project, for example a body written by another build.
+Live projection rolls back that chunk and durably parks graph recovery; receipt and admitted
+input remain durable. Explicit canonical recovery quarantines each unprojectable claim on its
+own while projecting the others. `fractal replication status` lists those quarantines as
+`projection:base:CLAIM` or `projection:runs:CLAIM`, and `fractal doctor` names them.
+Each explicit full replay decides those claims again.
 
 A repair that cannot be applied is listed the same way, as `repair:CLAIM`. The other repairs still
 apply, and the daemon still starts.
@@ -1099,7 +1100,17 @@ from its own claims, in the replay's order and passes. The parts are:
   revision proposals;
 - one desired subject;
 - one document;
-- one mission.
+- one mission;
+- the owned-set dependency closure affected by new receipts, member claims or late references.
+
+Owned-set projection uses exact pinned references, highest source sequence, historical
+losing-branch membership and overlapping ownership. Conflicted or incomplete sets retain
+their physical last-good desired/mission rows but withhold their effective selected view.
+Parity is defined over effective views and held/conflict flags, not those retained rows.
+Live base-history rebuilds preserve owned selection rows, including overlapping owners,
+while still materializing mission revisions and retirement history. Both ownership and
+the claims folded into that selection use the same admitted prefix; a later admitted
+receipt or descendant cannot remove or replace an earlier prefix's selection.
 
 So does every run tree that holds a claim this node wrote since the last projection, because this
 node applied that claim when it wrote it. A claim whose run or generation has not arrived waits in
@@ -1107,15 +1118,14 @@ the claim log, and the claim that creates the run or generation rebuilds its tre
 arrives after a run, generation or proposal that uses it rebuilds those trees. Claims of every
 other kind only add events and operations, whose order does not matter.
 
-The graph is replayed from nothing only in these cases:
+Live projection never selects full-store replay. Missing/stale health, conflicting structural
+operations, missing operation digests, unsupported incremental kinds and non-contention
+projection errors instead persist `projection-recovery-required/<reason>` on graph health.
+The existing frontier and speculative effects are rolled back atomically. A queued projection
+call rechecks the durable fence after acquiring the projection gate; restart and later automatic
+passes do not clear it. SQLite contention remains retryable and does not park recovery.
 
-- a stale or unhealthy projection;
-- an operation whose digests conflict, except `message.sent` receipts, which reconcile
-  only the affected operation from its indexed claims and checkpoint tombstones;
-- an operation claim without a digest;
-- a work claim that carries an operation;
-- a restore from a claim backup;
-- the first start of a build with the rule below.
+Full replay remains a separate explicit recovery, restore or existing migration operation.
 
 A rebuilt part costs what its own history costs, while a replay holds the store's only writer for
 as long as the whole graph takes.
@@ -1145,9 +1155,10 @@ records the frontier actually projected. Admissions and catch-up deferrals advan
 the final pass clears only the generation it observed while holding the writer, so it cannot
 overwrite a newer deferral. Sync comparisons remain deferred until the pass has
 reached its starting backlog and no later admitted claims remain. A dirty aggregate still
-rebuilds from its complete canonical history; the chunk limit does not bound that history or a
-fallback replay. The regression interleaves local writes with committed prefixes and checks the
-final graph against canonical replay.
+rebuilds from its complete canonical history; the chunk limit does not bound that history,
+body bytes, SQLite work or writer hold time. It never authorizes a fallback replay.
+The regression interleaves local writes with committed prefixes and checks the
+final effective graph against canonical replay.
 
 The projection gate covers the complete catch-up pass, including its between-chunk writer
 returns and final drains. Fenced actions cannot drain its markers between successful chunks.
@@ -1700,6 +1711,27 @@ After a partition, each node continues local work. A later exchange transfers ev
 If two nodes differ, inspect unresolved records and peer errors first. Publish a replacement repair when a record needs correction.
 
 Do not copy one live SQLite file over another. A file copy can discard concurrent authority and local runtime state.
+
+### Parked graph projection
+
+`fractal doctor` includes a distinct `replication-projection-recovery-required` failure
+with the last-good frontier, typed reason and current admitted target. The daemon records
+one existing operator operational-failure episode and one
+`replication.projection.recovery_required` transition diagnostic when it durably parks.
+Repeated automatic attempts and restarts do not emit another transition or replay the graph.
+Only an authorized explicit recovery clears the marker; do not restart repeatedly to retry it.
+
+Read-only `GET /v1/health` keeps its existing `status: "ready"` and adds a `checks` array only
+while parked. In the native response envelope the row is at `$.value.checks`:
+`id: "replication-projection-recovery-required"`, `aggregate: "graph"`,
+`frontier: number|null`, `reason_code: string`, `current_target: number`, `phase: "projection"`.
+The target is read-time durable admitted position, not the failed attempt's historical target.
+Missing health means an unknown frontier (`null`), even on schemas whose stored column defaults
+to zero. A legacy bare recovery code has reason `unknown`; its existing stored frontier is
+reported without inventing missing history. Health reads do not repair or enqueue recovery.
+The bounded reader query does not wait for a projection/writer gate and uses zero SQLite busy
+timeout; opening a reader or OS I/O is still synchronous, not a hard wall-clock deadline.
+
 
 ### Carrier evidence for exchanges
 

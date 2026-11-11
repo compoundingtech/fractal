@@ -12,6 +12,8 @@ use fractal_attention::store::owned_sets_tests_shared::{bundle, direct, share, s
 use fractal_attention::store::tests_shared::*;
 use fractal_attention::store::tests_shared::{TEST_FLEET, exchange_from, receive_and_project};
 mod empty_authority_guard;
+mod s6_receive;
+mod s6_held_rows;
 
 fn options(store: &Store, sequence: u64) -> Options {
     let current = store
@@ -46,6 +48,134 @@ fn apply(store: &Store, input: &NormalizedIntent, sequence: u64) -> ApplyRespons
     store
         .apply_owned_set(input, &opts, &format!("set-{sequence}"), "person/operator")
         .unwrap()
+}
+
+fn signed_share_incrementally(from: &Store, to: &Store) {
+    let before = smallclaims::store::FULL_REPLAYS.with(std::cell::Cell::get);
+    signed_share(from, to);
+    assert!(to.project_replication_backlog().unwrap(),
+        "a successful receipt must also finish projection");
+    assert_eq!(smallclaims::store::FULL_REPLAYS.with(std::cell::Cell::get), before,
+        "owned-set exchange must not replay the full graph");
+}
+
+fn effective_owned_set_reads(store: &Store) -> Value {
+    let connection = store.readers.get();
+    let reads = owned_sets::selected(&connection, None).unwrap().into_iter().map(|view| {
+        let held = !view.blockers.is_empty();
+        let members = owned_sets::effective_members(&connection, &view, None).unwrap();
+        let selected = members.keys().map(|subject| {
+            // Held physical last-good rows are not canonical authority.
+            let token = if held { None } else {
+                store.selected_desired_token(subject).unwrap()
+            };
+            let guard = store.owned_member_guard(subject).err().map(|error| error.code);
+            (subject.clone(), json!({"token": token, "guard": guard}))
+        }).collect::<BTreeMap<_, _>>();
+        json!({"view": view, "held": held, "members": members, "selected": selected})
+    }).collect::<Vec<_>>();
+    json!(reads)
+}
+
+fn assert_effective_owned_set_replay_parity(store: &Store) {
+    let before = effective_owned_set_reads(store);
+    store.connection.batched(replay_graph_from_nothing_tx).unwrap().unwrap();
+    assert_eq!(effective_owned_set_reads(store), before);
+}
+
+fn append_revision_receipt(store: &Store, receipt: owned_sets::Revision) {
+    store.append_claim(&ClaimInput {
+        subject: "owned-set/garden".into(),
+        kind: "owned-set.revised".into(),
+        actor: None,
+        fields: serde_json::from_value(
+            json!({"revision": canonical_hash(&receipt).unwrap(), "body": receipt}),
+        ).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+}
+
+#[test]
+fn signed_incremental_missing_member_reference_unholds_when_its_claim_arrives() {
+    let stores = signed_fleet();
+    let (amber, cobalt, ivory) = (&stores[0], &stores[1], &stores[2]);
+    apply(amber, &bundle("initial", false), 10);
+    signed_share_incrementally(amber, ivory);
+    let initial = ivory.selected_desired_token("agent/garden/orchard").unwrap();
+    assert!(initial.is_some());
+    direct(cobalt, &bundle("future", false), "future-member").unwrap();
+    let future = cobalt.claims_for("agent/garden/orchard", Some("intent.desired"))
+        .unwrap().pop().unwrap();
+    let desired: DesiredSubject = serde_json::from_value(future.body.clone()).unwrap();
+    let old = amber.owned_sets().unwrap().remove(0);
+    let mut receipt = old.receipt.clone();
+    receipt.previous = Some(format!("{}@{}", old.id, old.revision));
+    receipt.source = options(amber, 30).source;
+    let member = receipt.members.get_mut("agent/garden/orchard").unwrap();
+    member.claim = future.id.clone();
+    member.revision = desired_revision(&desired);
+    append_revision_receipt(amber, receipt);
+    signed_share_incrementally(amber, ivory);
+    assert!(ivory.claim_by_id(&future.id).unwrap().is_none());
+    let held = ivory.owned_sets().unwrap().remove(0);
+    assert_eq!(held.receipt.source.sequence, 30);
+    assert!(held.blockers.iter().any(|blocker| blocker.contains("missing member reference")));
+    assert_eq!(ivory.selected_desired_token("agent/garden/orchard").unwrap(), initial);
+    assert_eq!(ivory.owned_member_guard("agent/garden/orchard").unwrap_err().code,
+        "owned-set-pending");
+    assert!(ivory.owned_desired_subjects(&ivory.desired_subjects().unwrap()).unwrap().is_empty());
+    // Only a member claim arrives: no new owned-set revision can trigger this refresh.
+    signed_share_incrementally(cobalt, ivory);
+    assert!(ivory.owned_sets().unwrap()[0].blockers.is_empty());
+    assert_eq!(ivory.selected_desired_token("agent/garden/orchard").unwrap(), Some(future.id));
+    let selected = ivory.desired_subject_with_writer("agent/garden/orchard")
+        .unwrap().unwrap().0;
+    assert_eq!(selected.desired, desired.desired);
+    assert!(ivory.owned_desired_guard(&selected).is_ok());
+    assert_effective_owned_set_replay_parity(ivory);
+}
+
+#[test]
+fn signed_incremental_late_previous_revision_discovers_losing_only_retirement() {
+    let stores = signed_fleet();
+    let (amber, cobalt, ivory) = (&stores[0], &stores[1], &stores[2]);
+    apply(amber, &bundle("initial", false), 10);
+    signed_share_incrementally(amber, cobalt);
+    signed_share_incrementally(amber, ivory);
+    let old = amber.owned_sets().unwrap().remove(0);
+    let initial = ivory.selected_desired_token("agent/garden/orchard").unwrap();
+    assert!(initial.is_some());
+    apply(cobalt, &bundle("middle", true), 20);
+    let previous = cobalt.owned_sets().unwrap().remove(0);
+    let mut receipt = old.receipt.clone();
+    receipt.previous = Some(format!("{}@{}", previous.id, previous.revision));
+    receipt.source = options(amber, 30).source;
+    append_revision_receipt(amber, receipt);
+    signed_share_incrementally(amber, ivory);
+    let held = ivory.owned_sets().unwrap().remove(0);
+    assert_eq!(held.receipt.source.sequence, 30);
+    assert!(held.blockers.iter().any(|blocker| blocker.contains("missing previous revision")));
+    assert_eq!(ivory.selected_desired_token("agent/garden/orchard").unwrap(), initial);
+    assert_eq!(ivory.owned_member_guard("agent/garden/orchard").unwrap_err().code,
+        "owned-set-pending");
+    assert!(ivory.desired_subject_with_writer("agent/garden/meadow").unwrap().is_none());
+    signed_share_incrementally(cobalt, ivory);
+    let selected = ivory.owned_sets().unwrap().remove(0);
+    assert_eq!(selected.receipt.source.sequence, 30);
+    assert!(selected.blockers.is_empty());
+    assert_eq!(ivory.owned_set_history("garden").unwrap().len(), 3);
+    assert_eq!(ivory.selected_desired_token("agent/garden/orchard").unwrap(), initial);
+    let stopped = ivory.desired_subject_with_writer("agent/garden/meadow")
+        .unwrap().unwrap().0;
+    assert_eq!(stopped.kind, "stop");
+    assert!(ivory.owned_desired_guard(&stopped).is_ok());
+    let members = owned_sets::effective_members(&ivory.readers.get(), &selected, None).unwrap();
+    let (member, retired, implicit) = &members["agent/garden/meadow"];
+    assert!(*retired && *implicit);
+    assert_eq!(member.claim, selected.claim);
+    assert_effective_owned_set_replay_parity(ivory);
 }
 
 fn assert_pass_candidates_match_effect_guards(store: &Store, desired: &[DesiredSubject]) {
@@ -1034,32 +1164,33 @@ fn signed_replication_replay_and_checkpoint_keep_source_winner() {
     let stores = signed_fleet();
     let (amber, cobalt, ivory) = (&stores[0], &stores[1], &stores[2]);
     apply(amber, &bundle("initial", true), 10);
-    signed_share(amber, cobalt);
-    signed_share(amber, ivory);
+    signed_share_incrementally(amber, cobalt);
+    signed_share_incrementally(amber, ivory);
     apply(amber, &bundle("new", true), 30);
     apply(cobalt, &bundle("old", true), 20);
     // The older render arrives last, after all of the newer one's records were admitted.
-    signed_share(amber, ivory);
-    signed_share(cobalt, ivory);
-    signed_share(cobalt, amber);
-    signed_share(amber, cobalt);
+    signed_share_incrementally(amber, ivory);
+    signed_share_incrementally(cobalt, ivory);
+    signed_share_incrementally(cobalt, amber);
+    signed_share_incrementally(amber, cobalt);
     let token = amber
         .selected_desired_token("agent/garden/orchard")
         .unwrap();
     assert!(token.is_some());
     for store in &stores {
         assert_eq!(store.owned_sets().unwrap()[0].receipt.source.sequence, 30);
+        assert!(store.owned_sets().unwrap()[0].blockers.is_empty());
+        let orchard = store.desired_subject_with_writer("agent/garden/orchard")
+            .unwrap().unwrap().0;
+        assert_eq!(orchard.desired, bundle("new", true).subjects["agent/garden/orchard"].desired);
+        assert!(store.owned_desired_guard(&orchard).is_ok());
         assert_eq!(
             store
                 .selected_desired_token("agent/garden/orchard")
                 .unwrap(),
             token
         );
-        store
-            .connection
-            .batched(replay_graph_from_nothing_tx)
-            .unwrap()
-            .unwrap();
+        assert_effective_owned_set_replay_parity(store);
         assert_eq!(
             store
                 .selected_desired_token("agent/garden/orchard")
@@ -1295,14 +1426,14 @@ fn a_member_added_only_on_a_losing_partition_retires_through_the_winning_set() {
     let stores = signed_fleet();
     let (amber, cobalt, ivory) = (&stores[0], &stores[1], &stores[2]);
     apply(amber, &bundle("initial", false), 10);
-    signed_share(amber, cobalt);
-    signed_share(amber, ivory);
+    signed_share_incrementally(amber, cobalt);
+    signed_share_incrementally(amber, ivory);
     apply(cobalt, &bundle("initial", true), 20);
     apply(amber, &bundle("newer", false), 30);
-    signed_share(cobalt, ivory);
-    signed_share(amber, ivory);
-    signed_share(cobalt, amber);
-    signed_share(amber, cobalt);
+    signed_share_incrementally(cobalt, ivory);
+    signed_share_incrementally(amber, ivory);
+    signed_share_incrementally(cobalt, amber);
+    signed_share_incrementally(amber, cobalt);
     for store in &stores {
         let stopped = store
             .desired_subject_with_writer("agent/garden/meadow")
@@ -1310,6 +1441,15 @@ fn a_member_added_only_on_a_losing_partition_retires_through_the_winning_set() {
             .unwrap()
             .0;
         assert_eq!(stopped.kind, "stop");
+        let view = store.owned_sets().unwrap().remove(0);
+        assert_eq!(view.receipt.source.sequence, 30);
+        assert!(view.blockers.is_empty());
+        assert!(!view.receipt.members.contains_key("agent/garden/meadow"));
+        assert!(!view.receipt.retired.contains_key("agent/garden/meadow"));
+        let members = owned_sets::effective_members(&store.readers.get(), &view, None).unwrap();
+        let (member, retired, implicit) = &members["agent/garden/meadow"];
+        assert!(*retired && *implicit);
+        assert_eq!(member.claim, view.claim);
         assert!(store.owned_desired_guard(&stopped).is_ok());
         assert!(
             store
@@ -1323,11 +1463,7 @@ fn a_member_added_only_on_a_losing_partition_retires_through_the_winning_set() {
                 .code,
             "set-managed-subject"
         );
-        store
-            .connection
-            .batched(replay_graph_from_nothing_tx)
-            .unwrap()
-            .unwrap();
+        assert_effective_owned_set_replay_parity(store);
         assert_eq!(
             store
                 .desired_subject_with_writer("agent/garden/meadow")
@@ -1369,12 +1505,23 @@ fn equal_source_content_conflicts_hold_effects_until_a_higher_source_resolves_th
     let stores = signed_fleet();
     let (amber, cobalt, ivory) = (&stores[0], &stores[1], &stores[2]);
     apply(amber, &bundle("initial", false), 10);
-    signed_share(amber, cobalt);
-    signed_share(amber, ivory);
-    apply(amber, &bundle("one", false), 20);
-    apply(cobalt, &bundle("two", false), 20);
-    signed_share(amber, ivory);
-    signed_share(cobalt, ivory);
+    signed_share_incrementally(amber, cobalt);
+    signed_share_incrementally(amber, ivory);
+    for (publisher, input) in [(amber, bundle("one", false)), (cobalt, bundle("two", false))] {
+        let mut opts = options(publisher, 20);
+        opts.expected_subjects = publisher.owned_set_preview(&input, &opts).unwrap().expected_subjects;
+        publisher.apply_owned_set(
+            &input, &opts, &format!("set-{}-20", publisher.origin), "person/operator",
+        ).unwrap();
+    }
+    signed_share_incrementally(amber, ivory);
+    let last_good = ivory.selected_desired_token("agent/garden/orchard").unwrap();
+    assert!(last_good.is_some());
+    assert_eq!(last_good, amber.selected_desired_token("agent/garden/orchard").unwrap());
+    signed_share_incrementally(cobalt, ivory);
+    assert_eq!(ivory.selected_desired_token("agent/garden/orchard").unwrap(), last_good);
+    assert!(ivory.owned_sets().unwrap()[0].blockers.iter()
+        .any(|blocker| blocker.contains("conflicting source sequence 20")));
     assert!(ivory.owned_member_guard("agent/garden/orchard").is_err());
     assert!(!ivory.owned_sets().unwrap()[0].blockers.is_empty());
     let conflicted = ivory.desired_subjects().unwrap();
@@ -1385,14 +1532,19 @@ fn equal_source_content_conflicts_hold_effects_until_a_higher_source_resolves_th
             .is_empty()
     );
     assert_pass_candidates_match_effect_guards(ivory, &conflicted);
+    assert_effective_owned_set_replay_parity(ivory);
     apply(ivory, &bundle("settled", false), 30);
-    signed_share(ivory, amber);
-    signed_share(ivory, cobalt);
+    signed_share_incrementally(ivory, amber);
+    signed_share_incrementally(ivory, cobalt);
     for store in &stores {
         let view = store.owned_sets().unwrap().remove(0);
         assert_eq!(view.receipt.source.sequence, 30);
         assert!(view.blockers.is_empty());
         assert!(store.owned_member_guard("agent/garden/orchard").is_ok());
+        let orchard = store.desired_subject_with_writer("agent/garden/orchard")
+            .unwrap().unwrap().0;
+        assert_eq!(orchard.desired, bundle("settled", false).subjects["agent/garden/orchard"].desired);
+        assert_effective_owned_set_replay_parity(store);
         assert_pass_candidates_match_effect_guards(store, &store.desired_subjects().unwrap());
     }
 }
