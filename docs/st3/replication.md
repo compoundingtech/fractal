@@ -1627,11 +1627,33 @@ finds this member and a peer answering differently; see [Answers across members]
 Both graph and shard receive routes share a 30-second receive budget, with a
 two-second response reserve. Its origin is a monotonic `Instant` stamped by the
 network middleware when the request is accepted, before body collection or queue
-entry, and carried in request extensions, never a wire header. The origin must
-not be reset at extraction or writer acquisition. This is a cooperative deadline:
+entry, and carried in request extensions, never a peer-wire header. The origin
+must not be reset at extraction or writer acquisition. Across the local Unix
+worker-to-daemon hop, `x-fractal-internal-receive-budget-ms` carries only the
+remaining integer milliseconds, capped at 30000; the daemon converts this to its
+own monotonic deadline at accept. The worker strips any peer-supplied copy.
+Only the daemon's local Unix listener honors the header. Missing or unparsable
+values use the daemon's full accept-time budget and log this compatibility path
+once. This is a cooperative deadline:
 at most one in-flight inflate bounded by the existing caps and one started commit
 may overshoot. A started commit is never aborted; overshoot is logged. A timeout
 does not erase a committed delivery.
+
+Every receive follow-up writer acquisition (sealing, judgment, admission, repair,
+projection and optional transport bookkeeping) honors the remaining deadline.
+Expiry after a committed receipt prevents a new follow-up commit and logs
+`replication-ingress/follow-up-deferred`; it does not turn the daemon's durable
+receipt into a failed delivery. The existing post-receive `changed` wake runs the
+normal admission/projection backlog passes. Optional transport observations
+skipped at expiry are logged, not promised a retry.
+
+The network worker still answers at 28 seconds. The exact deadline-503 semantics
+are: **outcome unknown, retry safe; a late commit is kept, and the retry gets the
+duplicate result**. This is not proof that no receipt exists. If the deadline expires
+before reverse export can start, no new seal/judge commit starts: the network
+answers 503, the committed receipt's normal wake still runs, and a retry gets the
+duplicate receipt with a normal full reply export. There is no fabricated empty
+reply or separate read-only export path.
 
 Ingress uses string codes, not new closed-enum variants:
 
@@ -1653,6 +1675,14 @@ infallible callers are unchanged. If handoff succeeds while the borrower expires
 the writer is returned exactly once. Later SQL and commit errors are not loan
 failures.
 
+### Sender handling
+
+For a sender, a `replication-ingress/receive-deadline` 503 means **outcome unknown,
+retry safe; a late commit is kept, and the retry gets the duplicate result**.
+The code is never terminal and never creates a park. Reply export preparation
+uses the same deadline-aware seal/judge loans as receive follow-ups, including
+the trusted local Unix budget header; ordinary outbound export is unchanged.
+
 New senders recognize only authenticated typed terminal codes, before generic
 backoff, bound to the envelope hashes captured for the actual sent page. Unsigned
 413 responses from pre-authentication layers remain diagnostic and retryable.
@@ -1661,6 +1691,12 @@ transition in additive smallclaims table
 `outbound_parks(origin, scope, peer, envelope_hash, code, episode)`, with an indexed,
 bounded `(peer, envelope_hash)` lookup. The existing `operational.failure` episode
 is used only for alerting and repair, not as the exclusion authority.
+The manual operational repair class is `replication-outbound-park`; its approval
+token binds the current failure and episode, origin, scope, destination and code.
+Repair removes only that episode's parks and records `operational.recovered`;
+reapplying its receipt cannot clear a replacement episode. Rejected pages for the
+same destination and code share one open episode, so rejecting the alert itself
+does not recursively create new alerts.
 
 Every export path excludes parked envelopes before its page limit: difference
 listing, missing-payload listing, claim-range bypass and reverse-direction reply
@@ -1673,6 +1709,11 @@ Migration is additive. An older binary ignores `outbound_parks` and resumes
 today's retry behavior. Old senders treat the new 4xx exactly like today's
 BAD_REQUEST (`replication-peer-rejected`, ordinary backoff, wake resets). The
 no-storm claim covers ONLY new senders.
+The local Unix export request's optional destination is derived only from the
+authenticated peer identity, never from a peer-supplied value. Only the Unix
+listener honors it; other listeners ignore it. An old worker omits the internal
+destination and budget fields: export has no park filter and the daemon uses its
+own full receive budget. These additions do not change the signed peer protocol.
 
 ## Recovery
 
