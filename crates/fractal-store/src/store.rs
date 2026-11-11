@@ -135,6 +135,7 @@ pub mod operation_audit;
 pub mod push_registrations;
 pub mod mission_provenance;
 pub mod source_maps;
+pub mod source_index;
 pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;

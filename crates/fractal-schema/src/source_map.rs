@@ -15,6 +15,10 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub const MAX_MAP_BYTES: usize = 32 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 1024;
 
+pub mod index;
+pub mod locate;
+pub mod text_diff;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceMap {
