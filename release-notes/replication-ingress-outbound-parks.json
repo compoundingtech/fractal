@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound replication ingress work and durably park authenticated per-peer terminal rejections",
+  "replay": {"status": "none", "detail": "No graph replay or history rewrite. Started commits complete and committed deliveries remain durable after request timeout."},
+  "schema": {"status": "changed", "detail": "Additive smallclaims outbound_parks table and destination/envelope index. Existing tables and ingress size caps are unchanged."},
+  "rules": {"status": "changed", "detail": "Receive uses a cooperative 30-second budget with a two-second response reserve. Only authenticated typed terminal ingress rejections park the exact sent envelopes for that destination; deadline and writer-unavailable responses remain retryable. Deadline 503 means outcome unknown, retry safe; a late commit is kept, and the retry gets the duplicate result. Exclusion precedes every export page limit. Existing post-receive wakes own deferred admission/projection and shard stream bookkeeping, without starting a new receive follow-up commit after expiry."},
+  "compatibility": {"status": "changed", "detail": "Peer protocol fields are unchanged. Local Unix IPC adds an optional authenticated export destination and x-fractal-internal-receive-budget-ms. Old workers omit these fields: exports remain unfiltered and the daemon uses its own full receive budget. Older binaries ignore outbound_parks and resume today's retry behavior. Old senders treat the new 4xx exactly like today's BAD_REQUEST (replication-peer-rejected, ordinary backoff, wake resets). The no-storm claim covers ONLY new senders. Unsigned 413 responses remain retryable."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only; no coordinated fleet outage or replay is required."},
+  "manual": {"status": "changed", "detail": "Inspect the existing operational.failure alert and use the existing explicit repair path to unpark the current failure. Restart and wake events do not unpark envelopes."},
+  "recovery": {"status": "changed", "detail": "Manual repair is idempotent and bound to the current failure episode. Downgrade retains the additive table but loses park enforcement until a new binary is restored."}
+}
