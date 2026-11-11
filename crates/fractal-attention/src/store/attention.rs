@@ -190,12 +190,11 @@ impl AttentionStore for Store {
     }
 
     fn discard_desired_owned_by(&self, owner_run: &str) -> Result<usize> {
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h345fc67acafe owner=fractal_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1 AND subject NOT LIKE 'resource/uri/%'", [owner_run])?;
-        fractal_store::store::ordered_membership::flush(&transaction)?;
-        transaction.commit()?;
-        Ok(removed)
+        self.with_run_fence(owner_run, |transaction| -> Result<usize> {
+            let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h345fc67acafe owner=fractal_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1 AND subject NOT LIKE 'resource/uri/%'", [owner_run])?;
+            fractal_store::store::ordered_membership::flush(transaction)?;
+            Ok(removed)
+        })
     }
 
     fn human_review_refusal(&self, owner: &str) -> Result<String> {

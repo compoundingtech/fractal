@@ -166,6 +166,7 @@ impl<'connection> WriterTransaction<'connection> {
         }
         check()?;
         self.transaction.commit()?;
+        crate::receive_metrics::commit();
         crate::profile::managed_commit_succeeded();
         Ok(())
     }
