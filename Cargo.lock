@@ -2203,12 +2203,14 @@ name = "fractal-missions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "flate2",
  "fractal-delivery",
  "fractal-kernel",
  "fractal-missions",
  "fractal-schema",
+ "fractal-secrets",
  "fractal-store",
  "hex",
  "kdl",
@@ -2219,6 +2221,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallclaims",
  "tempfile",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -5902,6 +5905,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
 ]
 

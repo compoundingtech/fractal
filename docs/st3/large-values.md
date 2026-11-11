@@ -108,6 +108,17 @@ metadata. Both are dynamic SQL readers, not size proofs. Their maintainers retai
 `trace-statement-and-value-representation` task; representation changes must not count repeated
 observations as new events or move a queue-exit time.
 
+### Agent prose seek indexes
+
+`fractal_store::store` owns the `claims_timeline_prose_time_index` and
+`local_observations_timeline_prose_index` prose-only partial indexes. They reuse the existing subject,
+incarnation and acceptance-time TEXT values, plus integer arrival/snapshot/time columns.
+They add no payload copies or logical input limits, but their variable keys remain inline:
+indexed seeks bound non-prose-history work, not encoded key size. The existing
+`chunk-or-reference-variable-columns` TODO must preserve subject/incarnation equality,
+numeric accepted-time ordering, local arrival order and snapshot fences during reference
+conversion. The indexes add no new value representation.
+
 ### Client operation admission inventory (PR #5921)
 
 The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,

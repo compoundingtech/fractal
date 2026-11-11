@@ -1906,6 +1906,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn incoming_resumes(&self, desired: &[DesiredSubject]) -> Result<()> {
         let targets = self.store.cross_host_resume_targets(&self.host)?;
         for subject in desired.iter().filter(|subject| targets.contains(&subject.subject)) {
+            if let Some(run) = &subject.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                continue;
+            }
             let Some(member) = &subject.member else {
                 continue;
             };
@@ -3065,6 +3070,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let gate_runners = self.gate_runners()?;
         _runners_span.items(gate_runners.len());
         for runner in &gate_runners {
+            if self.store.run_projection_pending(&runner.owner_run)? {
+                continue;
+            }
             if runner.retired && runner.host == self.host {
                 let _ = self.isolate("gate", &runner.subject, || {
                     let runtime_id = runner.subject.replace('/', ".");
@@ -3097,6 +3105,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        let mut pending_subjects = BTreeSet::new();
+        for declaration in &desired {
+            if let Some(run) = &declaration.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                pending_subjects.insert(declaration.subject.clone());
+            }
+        }
         if crate::otel::export_enabled() {
             tracing::Span::current().record("st.reconcile.items", desired.len() as i64);
         }
@@ -3118,6 +3134,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
@@ -3125,6 +3142,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut task_stops = BTreeSet::new();
         if !stopped_roots.is_empty() {
             for subject in &desired {
+                if pending_subjects.contains(&subject.subject) {
+                    continue;
+                }
                 let Some(member) = subject.member.as_ref().filter(|_| {
                     matches!(subject.kind.as_str(), "exec" | "pty")
                 }) else {
@@ -3207,10 +3227,12 @@ impl<R: RuntimeControl> Reconciler<R> {
 
         let task_stop_subjects = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
         let active = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| !task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
         let eligible = match self.store.owned_desired_subjects(&desired) {
@@ -10515,9 +10537,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         let full = !self.skip_unneeded || self.incremental.take_full_pass("mission-run", now_ms());
         for id in &ids {
             let subject = format!("mission-run/{id}");
+            let pending = self.store.run_projection_pending(&subject)?;
+            if pending {
+                let mut reads = self.incremental.reads_of(&subject);
+                reads.insert(subject.clone());
+                self.incremental.evaluated(&subject, reads, None);
+            }
             let _clock = smallclaims::store::clock_snapshot();
             let needed = self.needs_item(&subject, full);
-            if !full && !needed {
+            if pending || (!full && !needed) {
                 // Nothing it read changed and nothing is due. It stays active: keep its caches,
                 // faults and file watchers as its last evaluation left them.
                 for key in self.incremental.reads_of(&subject) {
@@ -10605,11 +10633,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
+                    smallclaims::touched::note_read(|| subject.clone());
                     let (run, mission) = self.store.mission_run_for_evaluation(id)?;
                     // Eager cancellation (§6): a program step that left its attempt in this run's
-                    // latest transition stops now, before an inactive run returns below.
+                    // latest transition stops now, with its child runs and asks, before an
+                    // inactive run returns below. Then what the run's programs wait on is started
+                    // or resolved, with its reads noted so their ends evaluate the run again.
+                    let mut settled = false;
                     if let Some(engine) = self.program_engine.get() {
-                        engine.release_left(&run);
+                        engine.release_left(&run)?;
+                        settled = self.settle_program_waits(engine, &run)?;
                     }
                     if active_only
                         && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
@@ -10650,7 +10683,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             }
                         }
                     }
-                    let evaluated = self.evaluate_active_mission_run(&run, mission);
+                    let evaluated = self
+                        .evaluate_active_mission_run(&run, mission)
+                        .map(|evaluated| evaluated || settled);
                     // Recovery is diagnostic too: admission and execution writes come first.
                     if (!first_readiness_pending(&run)
                         || now_ms().saturating_sub(first_readiness_since(&run))
@@ -10776,6 +10811,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(id) = subject.strip_prefix("mission-run/") else {
                 continue;
             };
+            if self.store.run_projection_pending(subject)? {
+                continue;
+            }
             let _clock = smallclaims::store::clock_snapshot();
             changed |= self.evaluate_one_mission_run(
                 id,
@@ -11235,6 +11273,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 step.spec.retry.backoff_ms,
                             )?;
                         }
+                        return Ok(changed);
+                    }
+                    // A program waiting on its person asks stays loaded (§6), so a restarted daemon
+                    // replays it to the same wait. Its step's timeout pauses meanwhile (DQ6).
+                    if view.status == "waiting-person"
+                        && let Some(program) = &step.spec.program
+                    {
+                        changed |= self.dispatch_program(run, &step, view, program)?;
                         return Ok(changed);
                     }
                     if matches!(
@@ -14411,7 +14457,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             cwd: run.workspace.clone(),
         };
         match self.program_engine().dispatch(dispatch)? {
-            program::Dispatched::Running | program::Dispatched::Started => Ok(false),
+            // A step that left this attempt already says why in its state.
+            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => Ok(false),
             // The step keeps its state; `ProgramEngine::host_fault` names the reason.
             program::Dispatched::HostDown(reason) => {
                 eprintln!("fractal: program {}: {reason}", view.subject);
@@ -14419,6 +14466,197 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason)),
         }
+    }
+
+    /// Start or resolve what the programs of `run` wait on (§6). It runs inside the run's
+    /// evaluation, so each read is noted: a child run's end, an ask's answer, or the end of a run
+    /// that holds a full mission's capacity evaluates this run again. Returns whether it wrote.
+    fn settle_program_waits(&self, engine: &program::ProgramEngine, run: &MissionRunView) -> Result<bool> {
+        let mut changed = false;
+        for request in engine.requests(&run.subject) {
+            changed |= match &request.wait {
+                program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
+                program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
+            };
+        }
+        Ok(changed)
+    }
+
+    /// A linked child run: started once per key and attempt, adopted when the program resumes,
+    /// and resolved with its outcome once it ends. A start that finds the mission at capacity
+    /// waits until a run holding the capacity ends.
+    fn settle_program_child(
+        &self,
+        engine: &program::ProgramEngine,
+        run: &MissionRunView,
+        request: &program::Request,
+        mission: &str,
+        input: &BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let idempotency_key = request.idempotency_key();
+        let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        let Some(status) = self.store.mission_run_status(&child)? else {
+            // The runs holding the mission's capacity are read before the start and again after a
+            // refusal, so the end of any holder, even one that ends in between, evaluates this run.
+            let note_holders = || -> Result<()> {
+                for holder in self.store.active_mission_runs_for_mission(mission)? {
+                    smallclaims::touched::note_read(|| holder.subject.clone());
+                }
+                Ok(())
+            };
+            note_holders()?;
+            return match self.start_program_child(run, &request.step, mission, input, idempotency_key) {
+                Ok(started) => {
+                    engine.waiting(request, &started.subject)?;
+                    Ok(true)
+                }
+                Err(error) if error.code == "mission-run-capacity" => {
+                    note_holders()?;
+                    Ok(false)
+                }
+                // A store failure or contention (a run-mutation fence while projections catch up)
+                // is retried by the next evaluation; only a refused request is the program's defect.
+                Err(error) if error.code == "internal" || error.is_sqlite_contention() => Err(error.into()),
+                Err(error) => {
+                    let reason = format!(
+                        "the program could not start its child run `{}` of mission `{mission}`: {}",
+                        request.key, error.message
+                    );
+                    engine.fail(&request.step, request.attempt, &reason)?;
+                    Ok(true)
+                }
+            };
+        };
+        if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+            return Ok(false);
+        }
+        let exit = self.program_child_exit(&child, &status)?;
+        engine.resolve(request, &child, exit)?;
+        Ok(true)
+    }
+
+    /// The one place a program starts a child run: linked to the program step, for the parent
+    /// run's requester, in its workspace.
+    fn start_program_child(
+        &self,
+        run: &MissionRunView,
+        step: &str,
+        mission: &str,
+        input: &BTreeMap<String, String>,
+        idempotency_key: String,
+    ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
+        self.store.create_program_child_mission_run(
+            &MissionRunRequest {
+                mission: mission.to_owned(),
+                revision: None,
+                workspace: run.workspace.clone(),
+                requester: Some(run.requester.clone()),
+                mode: Some(run.mode.clone()),
+                inputs: input.clone(),
+                idempotency_key,
+            },
+            run,
+            step,
+        )
+    }
+
+    /// A child run's end as its program receives it: `{run, status: 'completed', products?}`
+    /// with each product its steps declare, by full subject, or `ChildFailed {run, status,
+    /// reason}`.
+    fn program_child_exit(&self, child: &str, status: &str) -> Result<Value> {
+        let view = self
+            .store
+            .mission_run_steps(child, false)?
+            .with_context(|| format!("the child run {child} disappeared"))?;
+        if status == "completed" {
+            let mut value = serde_json::json!({"run": child, "status": status});
+            let products = self.program_child_products(&view)?;
+            if !products.is_empty() {
+                value["products"] = Value::Object(products);
+            }
+            return Ok(serde_json::json!({"_tag": "Success", "value": value}));
+        }
+        let reason = self
+            .store
+            .latest_claim(child, Some("mission-run.state"))?
+            .and_then(|claim| claim.body["fields"]["reason"].as_str().map(str::to_owned))
+            .or_else(|| {
+                view.steps.iter().find(|step| step.status == "failed").map(|step| {
+                    format!("step `{}` failed: {}", step.step, step.blocked_reason.as_deref().unwrap_or("no reason recorded"))
+                })
+            })
+            .unwrap_or_else(|| format!("the child run is {status}"));
+        Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason}}))
+    }
+
+    fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
+        let mut products = serde_json::Map::new();
+        let Some(spec) = self.store.mission_spec(&child.mission, Some(child.revision.as_str()))? else {
+            return Ok(products);
+        };
+        for step in flatten_mission_steps(&spec) {
+            let Some(view) = child.steps.iter().find(|view| view.step == step.spec.path) else {
+                continue;
+            };
+            let variables = run_variables(child, &step, view);
+            for product in &step.spec.products {
+                let subject = crate::mission::interpolate(&product.subject, &variables)?;
+                if let Some(value) = self.subject_value(&subject)? {
+                    products.insert(subject, value);
+                }
+            }
+        }
+        Ok(products)
+    }
+
+    /// A person ask on the program step: asked once per key and attempt, and resolved with the
+    /// person's answer, the default at its deadline, or `AskCancelled` when it is withdrawn.
+    fn settle_program_ask(
+        &self,
+        engine: &program::ProgramEngine,
+        request: &program::Request,
+        ask: &crate::model::PersonAskRequest,
+    ) -> Result<bool> {
+        let (subject, asked) = match &request.child {
+            Some(subject) => (subject.clone(), false),
+            None => match self.store.ask_person(ask) {
+                Ok(view) => {
+                    engine.waiting(request, &view.subject)?;
+                    (view.subject, true)
+                }
+                // A store failure or contention is retried by the next evaluation.
+                Err(error) if error.code == "internal" || error.is_sqlite_contention() => return Err(error.into()),
+                Err(error) => {
+                    let reason = format!("the program's ask `{}` was refused: {}", request.key, error.message);
+                    engine.fail(&request.step, request.attempt, &reason)?;
+                    return Ok(true);
+                }
+            },
+        };
+        smallclaims::touched::note_read(|| subject.clone());
+        let exit = if let Some(done) = self.store.latest_claim(&subject, Some("work.person-done"))? {
+            let fields = &done.body["fields"];
+            let resolved_by = fields["resolved_by"].as_str().or(done.actor.as_deref()).unwrap_or_default();
+            let mut value = serde_json::json!({"resolved_by": resolved_by});
+            if let Some(answer) = fields["answer"].as_object() {
+                value["answer"] = Value::Object(
+                    ["type", "outcome", "id", "label", "text"]
+                        .into_iter()
+                        .filter_map(|name| answer.get(name).filter(|part| part.is_string()).map(|part| (name.to_owned(), part.clone())))
+                        .collect(),
+                );
+            }
+            if let Some(summary) = fields["summary"].as_str() {
+                value["summary"] = Value::from(summary);
+            }
+            serde_json::json!({"_tag": "Success", "value": value})
+        } else if self.store.latest_claim(&subject, Some("work.person-cancelled"))?.is_some() {
+            serde_json::json!({"_tag": "Failure", "error": {"_tag": "AskCancelled", "ask": subject}})
+        } else {
+            return Ok(asked);
+        };
+        engine.resolve(request, &subject, exit)?;
+        Ok(true)
     }
 
     fn materialize_step_declarations(
@@ -15458,7 +15696,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         let step = self
             .store
-            .step_run(subject)?
+            .step_run_fenced(subject)?
             .context("the feedback step disappeared")?;
         if step.attempt != attempt {
             return Ok(());
@@ -21255,6 +21493,7 @@ pub mod tests {
     mod seat_admission_queue;
     mod terminal_step_guard;
     mod program_engine;
+    mod program_children;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -23294,6 +23533,134 @@ mission "orchid/replay" state="ready" {
             "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":80,\"output_tokens\":30}}\n",
         );
         assert_eq!(structured_token_usage(log), Some(150));
+    }
+
+    #[test]
+    fn pending_run_projection_defers_dispatch_until_drain() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"pending-dispatch\" state=\"ready\" { goal \"Do work.\"; agent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }; step \"work\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\"; goal \"Do work.\" } }",
+            "publish-pending-dispatch",
+        );
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pending-dispatch".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "pending-dispatch".into(),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.evaluate_mission_runs().unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h5a2563345d4d owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+        ).unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(store.run_projection_pending(&run.subject).unwrap());
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert!(crate::store::finish_run_projection_tx(&transaction, &run.subject).unwrap());
+            transaction.commit().unwrap();
+        }
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert!(!runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_run_projection_defers_evaluation_until_drain() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"pending\" state=\"ready\" { goal \"Finish.\"; completion { when \"all-steps-exhausted\" }; step \"work\" { agentless } }",
+            "publish-pending",
+        );
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pending".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "pending-run".into(),
+        }).unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hc927df7b03e5 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+        ).unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let index = store.index().unwrap();
+        reconciler.evaluate_mission_runs().unwrap();
+        assert!(store.run_projection_pending(&run.subject).unwrap());
+        assert_eq!(store.index().unwrap(), index, "a pending run appends no evaluation claims");
+        assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, run.status);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert!(crate::store::finish_run_projection_tx(&transaction, &run.subject).unwrap());
+            transaction.commit().unwrap();
+        }
+        let (evaluated, _) = reconciler.evaluate_changed_mission_runs().unwrap();
+        assert_eq!(evaluated, 1, "the drain wakes the skipped run through its read dependency");
+        for _ in 0..4 {
+            reconciler.evaluate_mission_runs().unwrap();
+        }
+        assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn work_start_drains_pending_projection_before_returning_existing_work() {
+        use crate::AdhocWorkStore as _;
+        let store = Store::open_memory("node").unwrap();
+        apply_source(
+            &store,
+            "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }",
+            "work-start-seat",
+        );
+        let actor = store.desired_subjects().unwrap().into_iter()
+            .find(|declaration| declaration.kind == "agent").unwrap().subject;
+        let request = crate::model::WorkStartRequest {
+            actor,
+            title: "The committed title".into(),
+            idempotency_key: "pending-work-start".into(),
+        };
+        let step = store.start_work(&request).unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(
+            step.run.trim_start_matches("mission-run/").to_owned(),
+        )).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hd5bab3d616a3 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET title='stale projection' WHERE subject=?1",
+                [&step.subject],
+            ).unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he0d8cbf77f9b owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        let started = store.start_work(&request).unwrap();
+        assert_eq!(started.title.as_deref(), Some(request.title.as_str()));
+        assert_eq!(started.subject, step.subject);
+        assert!(!store.run_projection_pending(&step.run).unwrap());
     }
 
     #[test]
