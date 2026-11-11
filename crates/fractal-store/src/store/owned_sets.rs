@@ -300,6 +300,17 @@ fn task_parent(desired: &DesiredSubject) -> Option<&str> {
     desired.member.as_ref()?.tags.get("st3.agent").map(String::as_str)
 }
 
+/// The effect of keeping an agent retired ad hoc retired; `declared` when the source still
+/// declares it.
+fn kept_retired(retirement: &ClaimRecord, declared: bool) -> String {
+    format!(
+        "keep terminally retired by {}: {}{}",
+        retirement.actor.as_deref().unwrap_or("unknown"),
+        retirement.body["fields"]["reason"].as_str().unwrap_or_default(),
+        if declared { "; drop it from the source" } else { "" },
+    )
+}
+
 fn stop_declaration(subject: &str) -> Result<DesiredSubject, FractalError> {
     // A schedule or subscription retires through its stopped form, keeping its kind.
     let source = if let Some(name) = subject.strip_prefix("schedule/") {
@@ -1663,11 +1674,7 @@ pub fn plan_tx(
                 intent.subjects.insert(s.clone(), stop_declaration(s)?);
             }
             changes.insert(s.clone(), "retired".into());
-            effects.insert(s.clone(), format!(
-                "keep terminally retired by {}: {}; drop it from the source",
-                retirement.actor.as_deref().unwrap_or("unknown"),
-                retirement.body["fields"]["reason"].as_str().unwrap_or_default(),
-            ));
+            effects.insert(s.clone(), kept_retired(&retirement, true));
             heads.insert(s.clone(), tokens);
             continue;
         }
@@ -1786,6 +1793,16 @@ pub fn plan_tx(
                 materialize.insert(s.clone());
             }
             if live.contains_key(s) {
+                continue;
+            }
+            // An agent already retired ad hoc is not retired by this publication.
+            if m.kind == "agent"
+                && let Some(retirement) = retirements::record(transaction, s, None)?
+            {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+                heads.insert(s.clone(), intent_leaves_tx(transaction, s).map_err(internal)?);
+                changes.insert(s.clone(), "retired".into());
+                effects.insert(s.clone(), kept_retired(&retirement, false));
                 continue;
             }
             let manual = manual_member(transaction, m)?;

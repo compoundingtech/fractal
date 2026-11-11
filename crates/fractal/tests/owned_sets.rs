@@ -2050,7 +2050,7 @@ async fn terminal_retire_of_a_live_member_is_refused_through_client_v0() {
 }
 
 /// An `audit` set refuses nothing beyond `off`: each write `enforce` would refuse proceeds and
-/// records `source.audited` with that refusal.
+/// records `source.audited` with that refusal. Only the terminal retirement also opens debt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_audit_set_records_what_enforce_would_refuse() {
     let root = tempfile::tempdir().unwrap();
@@ -2072,7 +2072,8 @@ async fn an_audit_set_records_what_enforce_would_refuse() {
     let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
     d.store.retire_agent(orchard, "person/operator", "done", &token, None, "audited-retire", &[]).unwrap();
     let status = source_status(&d, true).await;
-    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    let open: Vec<_> = status["open"].as_array().unwrap().iter().map(|debt| (&debt["subject"], &debt["verb"])).collect();
+    assert_eq!(open, [(&json!(orchard), &json!("retire"))], "{status}");
     let audited: Vec<(String, String)> = status["audited"]
         .as_array()
         .unwrap()
@@ -2151,6 +2152,30 @@ async fn an_off_set_publication_keeps_an_ad_hoc_retired_member_retired() {
     assert!(planned.blockers.is_empty(), "{:?}", planned.blockers);
     assert_eq!(planned.changes[orchard], "retired");
     assert!(d.store.owned_sets().unwrap().remove(0).receipt.retired.contains_key(orchard));
+    assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
+}
+
+/// Dropping an agent retired ad hoc from the source is not a retirement by that publication, so
+/// it needs no mass-retirement confirmation, and it adopts the retire debt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_an_ad_hoc_retired_member_needs_no_retirement_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, format!("{}{ROSE}", bundle("source", false)), Some(enforce(Enforce::Audit))).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "dropped-retire", &[]).unwrap();
+    // Half of the previous membership is omitted, which would otherwise need confirmation.
+    let (planned, _) = publish_set(&d, 11, format!("version 2\n{ROSE}"), None).await;
+    assert!(!planned.mass_retirement);
+    assert_eq!(planned.changes[orchard], "retired");
+    assert_eq!(planned.effects[orchard], "keep terminally retired by person/operator: done");
+    assert_eq!(planned.reverted_debts.len(), 1, "{:?}", planned.reverted_debts);
+    assert_eq!(planned.reverted_debts[0].outcome.as_deref(), Some("adopted"));
+    let set = d.store.owned_sets().unwrap().remove(0);
+    assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+    assert!(set.receipt.retired.contains_key(orchard) && !set.receipt.members.contains_key(orchard));
     assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
 }
 

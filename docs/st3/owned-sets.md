@@ -221,8 +221,10 @@ No publication can undo a terminal retirement. A publication that still declares
 whatever the set's policy, keeps it as a retired member instead of failing with
 `recipient-retired`: its preview reports the change `retired` with the effect `keep terminally
 retired by ACTOR: REASON; drop it from the source`, and the rest of the bundle applies. The retire
-debt stays open while the source declares the member. The first publication that omits it closes the
-debt as `adopted`.
+debt stays open while the source declares the member. A publication that omits the member reports
+the same change with the effect `keep terminally retired by ACTOR: REASON`. That is not a retirement
+by the publication, so it does not count toward the `--confirm-retire` threshold. That publication
+closes the debt as `adopted`.
 
 `--force --reason TEXT` accepts the write on an `audit` or `enforce` set. The reason must be
 nonempty. Persons and agents may force (`fractal apply`, `agents stop|start|hold|suspend|resume`,
