@@ -412,7 +412,7 @@ proptest! {
 }
 
 #[test]
-fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders() {
+fn mixed_structural_and_neutral_operation_history_requires_graph_repair_in_both_orders() {
     for neutral_first in [false, true] {
         let source = node("node-a", None, None);
         let store = node("node-b", None, None);
@@ -446,8 +446,9 @@ fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders
                 let result = try_project_simple_replication_tx(
                     &tx, store.origin(), current_index_tx(&tx).unwrap(),
                 ).unwrap();
-                assert!(matches!(result, IncrementalProjection::ReplayWithContext {
-                    reason: "operation-conflict", ..
+                // A mixed history must never take the graph-neutral registry-only path.
+                assert!(matches!(result, IncrementalProjection::ProjectedWithContext {
+                    code: "operation-conflict", ..
                 }), "neutral_first={neutral_first}");
                 tx.rollback().unwrap();
             }
@@ -459,6 +460,9 @@ fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders
         assert_eq!(error.details["reason"], "conflict");
         let digests = store.replication_snapshot().unwrap().projection_digests.clone();
         store.replay_replication_graph().unwrap();
+        let replayed = store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err();
+        assert_eq!(replayed.code, error.code);
+        assert_eq!(replayed.details["reason"], error.details["reason"]);
         assert_eq!(store.replication_snapshot().unwrap().projection_digests, digests);
     }
 }
