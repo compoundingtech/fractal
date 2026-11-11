@@ -536,13 +536,17 @@ impl Runtime for FractalRuntime {
         )
     }
 
+    fn operation_claim_is_graph_neutral(&self, kind: &str) -> bool {
+        !replay_projects_kind(kind)
+    }
+
     fn project_incremental(
         &self,
         transaction: &Transaction<'_>,
         origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, FractalError> {
-        try_project_simple_replication_tx(transaction, origin, through)
+        try_project_simple_replication_tx_with_discovery(transaction, origin, through, true)
     }
 
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {

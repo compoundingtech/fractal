@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep receipt advancing when generation rediscovery is incomplete below the graph frontier.",
+  "replay": {"status": "changed", "detail": "The receipt runtime requires a complete generation-qualified discovery proof for the entire admitted replay range. Missing, partial or invalidated proof records durable deferral instead of requesting an automatic replay that the writer fence would reject."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Canonical operation and graph fold semantics are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Direct low-level projection calls retain replay guard decisions for uncommitted ranges; the Runtime adapter owns strict receipt discovery and automatic fallback safety."},
+  "manual": {"status": "none", "detail": "Explicit repair remains required for deferred projections."},
+  "recovery": {"status": "changed", "detail": "An interrupted early rediscovery page no longer strands later unrelated receipt behind an already-advanced graph frontier. Graph health stays stale while receipt advances."},
+  "downtime": {"status": "unknown", "detail": "No production timing measurement is claimed."}
+}
