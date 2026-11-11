@@ -521,8 +521,13 @@ stored-state reads and writes still grow with the envelope's claims and bytes.
 
 Receive admission has a 10-second `RECEIVE_ADMISSION_BUDGET`, reserving response time toward
 the M2 goal of a whole receive page below 15 seconds. Even an already-expired receive commits
-one chunk before it can defer. A deferred receive skips repairs and projection and uses the
-existing `deferred` receive outcome; this is telemetry, not a new wire response variant.
+one chunk before it can defer. Every deferred receive still applies repairs and attempts one
+projection chunk (at most 128 claims on the incremental path), regardless of the catch-up
+projection interval, so consecutive admission deferrals cannot starve visible state.
+Any remaining projection backlog stays deferred for the next receive. Full replay fallback
+and an individual aggregate rebuild retain their existing indivisible costs; this is not a
+wall-clock receive bound. Admission still uses the existing `deferred` receive outcome;
+this is telemetry, not a new wire response variant.
 Its local `(writer, sequence, hash)` retry cursor commits with each chunk and the existing
 admitted-index watermark. A later receive, including an empty or duplicate page, continues
 after that cursor. Completed unknown or held prefixes therefore cannot consume every retry's
@@ -533,6 +538,12 @@ also restarts the sweep for earlier holds. Receipt inventory already includes ev
 stored envelope, so a sender can stop re-offering it before admission finishes. Old senders
 may instead re-offer the unchanged page: receipt deduplication is idempotent and never rewinds
 the cursor. No request or response fields change.
+Empty or duplicate receives test admission work using only primary-key lookups in `meta`:
+an unfinished cursor or a receipt epoch different from the last completed sweep requires work.
+The completed epoch is recorded only after a non-deferred sweep, using the epoch observed at
+entry, so concurrent receipts cannot be mistaken for completed work. A missing completion
+marker requests a sweep, including on upgrade. Held-pending envelopes no longer need to be
+scanned on every idle receive.
 
 With metrics enabled, replication status samples `st.replication.pending.envelopes` by the
 configured peer that relayed each pending receipt, reusing its existing pending-envelope scan.

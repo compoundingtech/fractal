@@ -8347,16 +8347,15 @@ impl Store {
         )
     }
 
-    /// Pending receipts and an unfinished retry sweep survive process restarts. Held envelopes
-    /// alone need a signature or authority change, not repeated empty receive passes.
+    /// An unfinished sweep or receipts newer than the last completed sweep need admission.
+    /// All probes seek meta's primary key, independently of how many pending holds exist.
     pub fn replication_admission_pending(&self) -> Result<bool> {
         Ok(self.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key='replication_admission_cursor')
-                 OR EXISTS(SELECT 1 FROM replica_envelopes AS envelopes
-                     WHERE receipt_state='pending' AND NOT EXISTS(
-                         SELECT 1 FROM replica_envelope_holds AS holds
-                         WHERE holds.writer=envelopes.writer AND holds.sequence=envelopes.sequence
-                           AND holds.envelope_hash=envelopes.envelope_hash))",
+                 OR COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                     WHERE key='replication_admission_epoch'),0)
+                    != COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                     WHERE key='replication_admission_completed_epoch'),-1)",
             [], |row| row.get(0),
         )?)
     }
@@ -8399,7 +8398,7 @@ impl Store {
         Ok(admission)
     }
 
-    fn admit_replication_backlog_now(
+    /* sqlite-large-value-flow: allow-for-now flow-h90c4de381460 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ fn admit_replication_backlog_now(
         &self,
         authority: AdmissionAuthority,
         mut budget_expired: Option<&mut dyn FnMut() -> bool>,
@@ -8716,12 +8715,14 @@ impl Store {
         self.replication_timers
             .verify
             .fetch_add(outcome.verify.as_nanos() as u64, Ordering::Relaxed);
-        if !outcome.deferred && (retry_hash_mismatches || retry_subject_references
-            || cursor.is_some() || budget_expired.is_some())
-        {
+        if !outcome.deferred {
             let mut connection = self.connection.write_background();
             let transaction = connection.transaction()?;
             transaction.execute(/* sqlite-large-value: allow-for-now lv-h3f7af8ea4144 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM meta WHERE key='replication_admission_cursor'", [])?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hb8aa7ecaa82b owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO meta(key,value) VALUES('replication_admission_completed_epoch',?1)",
+                [epoch.to_string()],
+            )?;
             if retry_hash_mismatches {
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h61f70922c425 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
@@ -8910,6 +8911,14 @@ impl Store {
         self.project_replication_backlog_in_phase("replication")
     }
 
+    /// Commit one projection chunk even when this receive exhausted its admission budget.
+    /// A remaining backlog retains its deferred marker for the next receive.
+    pub fn project_replication_backlog_chunk(&self) -> Result<bool> {
+        self.project_replication_backlog_chunks(
+            || {}, || {}, "replication", |line| eprintln!("{line}"), |_| {}, true,
+        )
+    }
+
     /// Identify the caller's phase in the always-on full-replay diagnostic.
     pub fn project_replication_backlog_in_phase(&self, phase: &str) -> Result<bool> {
         self.project_replication_backlog_chunks(
@@ -8918,6 +8927,7 @@ impl Store {
             phase,
             |line| eprintln!("{line}"),
             |_| {},
+            false,
         )
     }
 
@@ -8927,7 +8937,7 @@ impl Store {
         phase: &str,
         log: impl FnMut(&str),
     ) -> Result<bool> {
-        self.project_replication_backlog_chunks(|| {}, || {}, phase, log, |_| {})
+        self.project_replication_backlog_chunks(|| {}, || {}, phase, log, |_| {}, false)
     }
 
     /// Publish bounded observations on the projection thread; observers must not read the store.
@@ -8942,6 +8952,7 @@ impl Store {
             phase,
             |line| eprintln!("{line}"),
             progress,
+            false,
         )
     }
 
@@ -8954,6 +8965,7 @@ impl Store {
             "replication",
             |line| eprintln!("{line}"),
             |_| {},
+            false,
         )
     }
 
@@ -8969,6 +8981,7 @@ impl Store {
             "replication",
             |line| eprintln!("{line}"),
             |_| {},
+            false,
         )
     }
 
@@ -9017,6 +9030,7 @@ impl Store {
         phase: &str,
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
+        single_chunk: bool,
     ) -> Result<bool> {
         let gate_wait = std::time::Instant::now();
         let _projecting = self.projection.lock();
@@ -9286,6 +9300,9 @@ impl Store {
                         self.runtime.projection_advanced(through >= target && !rebuild_pending);
                     }
                     if through < target || rebuild_pending {
+                        if single_chunk {
+                            return Ok(false);
+                        }
                         between();
                         continue;
                     }

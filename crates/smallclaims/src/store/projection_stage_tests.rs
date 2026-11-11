@@ -562,6 +562,7 @@ fn pass(stages: bool, fail: bool) -> Pass {
                     update.phase, update.frontier, update.target, update.processed, update.total
                 ))
             },
+            false,
         )
     };
     let projected = if stages {

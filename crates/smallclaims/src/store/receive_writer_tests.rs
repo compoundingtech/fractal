@@ -570,6 +570,59 @@ fn an_always_expired_receive_budget_still_drains_a_page() {
 }
 
 #[test]
+fn an_always_expired_receive_budget_still_advances_projection() {
+    let source = node("birch");
+    let target = node("cedar");
+    let count = ADMISSION_CHUNK_ENVELOPES * 3 + 1;
+    let exchange = page(&source, &target, count);
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    let mut frontier = 0_u64;
+    for _ in 0..3 {
+        let admission = target.validate_replication_backlog_for_receive(
+            Instant::now() - RECEIVE_ADMISSION_BUDGET,
+        ).unwrap();
+        assert!(admission.deferred, "admission must remain under sustained budget pressure");
+        target.apply_replication_repairs().unwrap();
+        target.project_replication_backlog_chunk().unwrap();
+        let projected: u64 = target.readers.get().query_row(
+            "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(projected > frontier, "each deferred receive must advance projection");
+        assert!(projected - frontier <= PROJECTION_CHUNK_CLAIMS as u64);
+        assert!(!target.claims_for("note/catch-up/0", None).unwrap().is_empty());
+        frontier = projected;
+    }
+    assert!(target.replication_admission_pending().unwrap());
+}
+
+#[test]
+fn completed_admission_epoch_survives_restart_and_detects_new_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("receiver.sqlite3");
+    let source = node("birch");
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    assert!(target.replication_admission_pending().unwrap(), "a missing completion marker needs a sweep");
+    let exchange = page(&source, &target, 1);
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert!(target.replication_admission_pending().unwrap());
+    target.validate_replication_backlog().unwrap();
+    assert!(!target.replication_admission_pending().unwrap());
+    drop(target);
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert!(!target.replication_admission_pending().unwrap());
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert!(!target.replication_admission_pending().unwrap(), "duplicates do not restart a completed sweep");
+    let earlier = node("alder");
+    let exchange = page(&earlier, &target, 1);
+    target.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+    assert!(target.replication_admission_pending().unwrap());
+    target.validate_replication_backlog().unwrap();
+    assert!(!target.replication_admission_pending().unwrap());
+}
+
+#[test]
 fn receive_budget_resume_survives_restart_without_duplicate_admission() {
     drain_budgeted_page(true, true, false);
 }

@@ -251,11 +251,12 @@ where
                 .map_err(anyhow::Error::msg)?;
             store.record_transport_observation(&peer, "up", None, None)?;
             let admission = store.validate_replication_backlog_for_receive(receive_started)?;
-            let (repairs, projected) = if admission.deferred {
+            let repairs = store.apply_replication_repairs()?;
+            let projected = if admission.deferred {
                 crate::receive_metrics::deferred();
-                (0, false)
+                store.project_replication_backlog_chunk()?
             } else {
-                (store.apply_replication_repairs()?, store.project_replication_backlog()?)
+                store.project_replication_backlog()?
             };
             Ok(ReplicationReceiveResponse {
                 receipt,

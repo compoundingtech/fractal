@@ -400,10 +400,8 @@ async fn replication_receive_inner(
             let admission = store
                 .validate_replication_backlog_for_receive(receive_started)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
-            let repairs = if admission.deferred { 0 } else {
-                store.apply_replication_repairs()
-                    .map_err(|error| FractalError::new("internal", error.to_string()))?
-            };
+            let repairs = store.apply_replication_repairs()
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -411,9 +409,7 @@ async fn replication_receive_inner(
         // A catching-up node defers projection; the first receive after the deferral window,
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
-        let projection = if admission.deferred {
-            None
-        } else if new_data || admission.changed || was_deferred {
+        let projection = if new_data || admission.changed || was_deferred || admission.deferred {
             let _projection = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Projection,
             );
@@ -425,9 +421,11 @@ async fn replication_receive_inner(
             let mut span = crate::otel::stage_root(
                 "st.replication.projection", "receive", receive,
             );
-            let result = admitted_projection_result(
-                store.project_replication_backlog_unless_catching_up(),
-            );
+            let result = admitted_projection_result(if admission.deferred {
+                store.project_replication_backlog_chunk().map(Some)
+            } else {
+                store.project_replication_backlog_unless_catching_up()
+            });
             if let Some(span) = span.as_mut() {
                 span.set_attribute(opentelemetry::KeyValue::new(
                     "st.replication.peer", request.peer.clone(),
@@ -453,7 +451,7 @@ async fn replication_receive_inner(
         } else {
             Some(true)
         };
-        if projection.is_none() {
+        if admission.deferred || projection.is_none() {
             smallclaims::receive_metrics::deferred();
         }
         let projected = projection.unwrap_or(false);
@@ -689,10 +687,11 @@ pub async fn shard_replication_receive(
             || store.replication_admission_pending().map_err(internal)?
         {
             let admission = store.validate_replication_backlog_for_receive(receive_started).map_err(internal)?;
+            store.apply_replication_repairs().map_err(internal)?;
             if admission.deferred {
                 smallclaims::receive_metrics::deferred();
+                store.project_replication_backlog_chunk().map_err(internal)?;
             } else {
-                store.apply_replication_repairs().map_err(internal)?;
                 store.project_replication_backlog().map_err(internal)?;
             }
         }
