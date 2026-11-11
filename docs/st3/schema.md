@@ -31,6 +31,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `glass` | `glass/person/NAME/UUID` | no | A private person workspace. |
 | `harness-question` | `harness-question/ID` | no | A question a seat's harness asked natively: question ids and option positions, never text. |
 | `host` | `host/NAME` | no | A graph host. |
+| `job` | `job/ID` | yes | An inactive durable job history, not execution authority. |
 | `lane` | `lane/RUN/LOCAL_ID` | no | A mission-run lane: an ordered line of entries its run works through front first. |
 | `loop-run` | `loop-run/GENERATION/PATH` | no | One bounded loop execution. |
 | `message` | `message/ID` | yes | A Fractal message. |
@@ -142,6 +143,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `harness.todo.observed` | `agent` | `same-subject-actor` | `append` | `latest` | `harness!:string`, `incarnation_id!:string`, `observed_at!:string`, `phases!:array`, `session_id!:string`, `source_op!:string`, `totals!:object`, `truncated!:boolean` |  |
 | `harness.usage` | `agent` | `same-subject-actor` | `append` | `latest` | `account:string`, `cache_write_1h_tokens:integer`, `cache_write_tokens:integer`, `cached_tokens:integer`, `compactions:integer`, `context_used_percent:number`, `context_used_tokens:integer`, `context_window_tokens:integer`, `cost:number`, `cost_microusd:integer`, `currency:string`, `driver!:string`, `host:string`, `incarnation_id!:string`, `input_tokens:integer`, `last_compaction_ms:integer`, `last_compaction_trigger:string`, `model:string`, `native_session_id:string`, `observed_at_unix_ms:integer`, `output_tokens:integer`, `owner_run:string`, `owner_step:string`, `pricing:string`, `pricing_provenance:array`, `reported_cost_microusd:integer`, `semantics!:string`, `total_tokens:integer`, `unpriced_tokens:integer` |  |
 | `intent.desired` | `*` | `authorized-requester` | `state-transition` | `durable` | `accountable:subject-reference(person)`, `desired:object`, `kind:string`, `revision:string` | `account`, `agent`, `doc`, `exec`, `host`, `lane`, `message`, `observer`, `objective`, `mission`, `mission-run`, `planning-session`, `pty`, `resource`, `schedule`, `step`, `stop`, `subscription` |
+| `job.recorded` | `job` | `authorized-participant` | `state-transition` | `durable` | `record!:object` |  |
 | `lane.approved` | `lane` | `authorized-participant` | `append` | `durable` | `entry!:subject-reference`, `reason:string` |  |
 | `lane.joined` | `lane` | `authorized-participant` | `append` | `durable` | `entry!:subject-reference`, `reason:string` |  |
 | `lane.left` | `lane` | `authorized-participant` | `append` | `durable` | `entry!:subject-reference`, `outcome!:string`, `reason:string` |  |

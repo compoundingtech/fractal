@@ -1,5 +1,4 @@
 use super::*;
-use rusqlite::OptionalExtension as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobsProjectionStale {
