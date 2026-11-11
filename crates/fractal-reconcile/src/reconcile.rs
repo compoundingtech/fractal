@@ -10815,7 +10815,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_reads_cursor
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (next, mut changed_runs, unseen) =
+        let crate::incremental::FeedReaders { cursor: next, readers: mut changed_runs, unseen } =
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
         if !unseen.is_empty() {
