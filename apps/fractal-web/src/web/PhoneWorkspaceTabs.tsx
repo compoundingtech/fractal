@@ -10,9 +10,11 @@ interface PhoneTab { readonly id: string; readonly label: string }
 /**
  * React Aria owns keyboard navigation. A shared panel keeps the thread's portal host and drafts mounted.
  * `trailing` sits fixed at the row's end, outside the tablist: the tabs scroll and truncate before it, never under it.
+ * `tabsHidden` keeps only `trailing`: the view shown is not one of the tabs, so no tab may claim it.
  */
-export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, trailing, children }: {
+export function PhoneWorkspaceTabs({ enabled = true, tabsHidden = false, tabs, selected, onSelect, trailing, children }: {
   readonly enabled?: boolean
+  readonly tabsHidden?: boolean
   readonly tabs: readonly PhoneTab[]
   readonly selected: string
   readonly onSelect: (id: string) => void
@@ -30,14 +32,15 @@ export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, t
   })
   const { tabListProps } = useTabList({ 'aria-label': 'Workspace views' }, state, list)
   const panelId = `${prefix}-panel`
+  const tabbed = enabled && !tabsHidden
   return <div {...stylex.props(styles.root)}>
     <div hidden={!enabled} {...stylex.props(styles.row, !enabled && styles.hidden)}>
-      <div {...(enabled ? tabListProps : {})} ref={list} {...stylex.props(styles.list)}>
+      <div {...(enabled ? tabListProps : {})} ref={list} {...stylex.props(styles.list, tabsHidden && styles.hidden)}>
         {tabs.map((tab, i) => <PhoneTabButton key={tab.id} tab={tab} state={state} id={`${prefix}-tab-${i}`} panelId={panelId} />)}
       </div>
-      {trailing === undefined ? null : <div {...stylex.props(styles.trailing)}>{trailing}</div>}
+      {trailing === undefined ? null : <div {...stylex.props(styles.trailing, tabsHidden && styles.trailingAlone)}>{trailing}</div>}
     </div>
-    <div id={panelId} role={enabled ? 'tabpanel' : undefined} aria-labelledby={enabled ? `${prefix}-tab-${index}` : undefined} tabIndex={enabled ? 0 : undefined} {...stylex.props(styles.panel)}>{children}</div>
+    <div id={panelId} role={tabbed ? 'tabpanel' : undefined} aria-labelledby={tabbed ? `${prefix}-tab-${index}` : undefined} tabIndex={tabbed ? 0 : undefined} {...stylex.props(styles.panel)}>{children}</div>
   </div>
 }
 
@@ -55,6 +58,7 @@ const styles = stylex.create({
   row: { display: 'flex', alignItems: 'stretch', flexShrink: 0, minHeight: 44, minWidth: 0, paddingInlineStart: `max(${s.sm}, env(safe-area-inset-left))`, paddingInlineEnd: `max(${s.sm}, env(safe-area-inset-right))`, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
   list: { display: 'flex', flex: '1 1 0', minWidth: 0, overflowX: 'auto' },
   trailing: { display: 'flex', alignItems: 'center', flexShrink: 0, paddingInlineStart: s.sm },
+  trailingAlone: { marginInlineStart: 'auto' },
   tab: { display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: 44, minHeight: 44, paddingInline: s.lg, flexShrink: 0, boxSizing: 'border-box', fontSize: t.uiSize, color: c.fgMuted, cursor: 'pointer', borderBottomWidth: 2, borderBottomStyle: 'solid', borderBottomColor: 'transparent', ':is([data-selected])': { color: c.fg, borderBottomColor: c.primary }, ':is([data-focus-visible])': { outline: `2px solid ${c.primary}`, outlineOffset: -2 } },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0, outline: 'none', ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: -2 } },
 })
