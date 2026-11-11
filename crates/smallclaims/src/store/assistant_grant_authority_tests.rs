@@ -12,6 +12,23 @@ const FLEET: &str = "assistant-authority-maintenance";
 const SUBJECT: &str = "custom/client/assistant-v1-0123456789abcdef01234567";
 const OWNER: &str = "human/owner";
 
+#[test]
+fn current_authority_install_and_idle_maintenance_do_not_write() {
+    let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+    let connection = store.connection.write();
+    let before = (
+        connection.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0)).unwrap(),
+    );
+    authority::install(&connection, "anchor").unwrap();
+    assert!(authority::backfill_slice(&connection, Duration::from_secs(2)).unwrap());
+    let after = (
+        connection.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0)).unwrap(),
+    );
+    assert_eq!(after, before, "unchanged install and empty queues must be read-only");
+}
+
 fn node(name: &str, anchor: Option<&str>) -> Store {
     let store = Store::open_memory(name, Arc::new(Plain)).unwrap();
     store.bind_fleet(FLEET).unwrap();

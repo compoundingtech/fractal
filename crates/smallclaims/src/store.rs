@@ -1112,6 +1112,7 @@ impl Store {
             // frame the initialization wrote, before open returns.
             connection.pragma_update(None, "synchronous", "FULL")?;
         }
+        Self::install_assistant_authority_schema(&connection, &origin)?;
         let readers = if let Some(admitted) = &admitted {
             ReadPool::new_admitted(admitted.clone())?
         } else {
@@ -1163,6 +1164,7 @@ impl Store {
         }
         runtime.finish_open_projections(&mut connection)?;
         seed_empty_projection_health(&connection)?;
+        Self::install_assistant_authority_schema(&connection, &origin)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -1260,6 +1262,21 @@ impl Store {
         Ok(fresh)
     }
 
+    // Finish DDL before constructing any readers: otherwise the first query on
+    // each preinitialized reader must discover the changed schema and reprepare.
+    fn install_assistant_authority_schema(connection: &Connection, origin: &str) -> Result<()> {
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            connection, assistant_grant_authority_bench::OpenAuthorityPhase::BeforeInstall,
+        );
+        assistant_grant_authority::install(connection, origin)?;
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            connection, assistant_grant_authority_bench::OpenAuthorityPhase::Installed,
+        );
+        Ok(())
+    }
+
     /// Wrap an opened, initialized writer connection and its read pool.
     pub fn from_connection(
         connection: Connection,
@@ -1277,15 +1294,6 @@ impl Store {
         anyhow::ensure!(
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
-        );
-        #[cfg(test)]
-        assistant_grant_authority_bench::observe_open_authority(
-            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::BeforeInstall,
-        );
-        assistant_grant_authority::install(&connection, &origin)?;
-        #[cfg(test)]
-        assistant_grant_authority_bench::observe_open_authority(
-            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::Installed,
         );
         {
             let transaction = connection.unchecked_transaction()?;
