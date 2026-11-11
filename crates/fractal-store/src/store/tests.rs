@@ -2328,8 +2328,10 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                     json!({"fields":{"state":"ready"}, "_operation":{"id":"op/malformed"}}),
                 ),
                 "operation-conflict" => (
-                    "harness.observed",
-                    json!({"fields":{"state":"ready"}, "_operation":operation}),
+                    "work.nudged",
+                    json!({"fields":{"attempt":1,"agent":"agent/node.test",
+                        "message":"message/invented-nudge","idle_since_unix_ms":"1",
+                        "reason":"invented control","waits":[]}, "_operation":operation}),
                 ),
                 "incremental-error:internal" => ("intent.desired", json!({})),
                 _ => ("harness.observed", json!({"fields":{"state":"ready"}})),

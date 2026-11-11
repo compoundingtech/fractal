@@ -17486,11 +17486,10 @@ pub fn try_project_simple_replication_tx(
             }
         }
     }
-    // Event-only claims do not change the structural graph. Their operation
-    // registry can advance with the frontier. Message sends reconcile an ambiguous
-    // receipt from that operation's indexed history, using the full replay's reducer.
-    // Other kinds retain the full replay guard for ambiguous IDs.
-    let mut reconciled_message_operations = BTreeSet::new();
+    // Event-only claims and message sends reconcile ambiguous receipts from that
+    // operation's indexed history, using the full replay's reducer. Structural
+    // kinds retain the full replay guard for ambiguous IDs.
+    let mut reconciled_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -17507,22 +17506,52 @@ pub fn try_project_simple_replication_tx(
         if repaired {
             continue;
         }
-        if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
+        let graph_neutral = !replay_projects_kind(&claim.kind);
+        if graph_neutral && reconciled_operations.contains(operation_id) {
             continue;
         }
-        if let Some((stored_digest, _, state)) =
-            operation_tx(transaction, operation_id).map_err(|error| {
+        let stored_operation = operation_tx(transaction, operation_id).map_err(|error| {
+            incremental_claim_error(internal(error), claim, "operation-registry")
+        })?;
+        let conflict = stored_operation.as_ref().is_some_and(|(digest, _, state)| {
+            digest.as_str() != request_digest || state != "active"
+        });
+        // A checkpoint can leave only tombstones, with no operations row. Before
+        // folding either case, inspect only this operation's indexed history:
+        // a structural claim sharing the key needs its projections replayed too.
+        if conflict || (graph_neutral && stored_operation.is_none()) {
+            let neutral_history = graph_neutral && (|| -> rusqlite::Result<bool> {
+                let mut statement = transaction.prepare_cached(
+                    "SELECT kind FROM claims INDEXED BY claims_operation_index
+                     WHERE json_extract(body, '$._operation.id')=?1
+                     UNION ALL
+                     SELECT kind FROM checkpoint_claims INDEXED BY checkpoint_claims_operation
+                     WHERE operation_id=?1 AND operation_id IS NOT NULL",
+                )?;
+                let mut rows = statement.query([operation_id])?;
+                while let Some(row) = rows.next()? {
+                    let kind = row.get_ref(0)?;
+                    let kind = kind.as_str().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, kind.data_type(), Box::new(error))
+                    })?;
+                    if replay_projects_kind(kind) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })().map_err(|error| {
                 incremental_claim_error(internal(error), claim, "operation-registry")
-            })?
-            && (stored_digest != request_digest || state != "active")
-        {
-            if claim.kind == "message.sent" {
+            })?;
+            if neutral_history {
                 repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                     incremental_claim_error(internal(error), claim, "operation-registry")
                 })?;
-                reconciled_message_operations.insert(operation_id.to_owned());
+                reconciled_operations.insert(operation_id.to_owned());
                 continue;
             }
+            let (stored_digest, state) = stored_operation.as_ref()
+                .map(|(digest, _, state)| (digest.as_str(), state.as_str()))
+                .unwrap_or(("", "missing"));
             crate::profile::note("replay: operation-conflict");
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason: "operation-conflict",
