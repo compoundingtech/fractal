@@ -709,8 +709,12 @@ mission "pending-conflict" state="ready" {
         }, child, None, None).unwrap()
     };
     let root = start("pending-root", None);
-    let ordinary = start("pending-ordinary", Some(&root));
-    let conflicting = start("pending-conflicting", Some(&root));
+    let first = start("pending-ordinary", Some(&root));
+    let second = start("pending-conflicting", Some(&root));
+    // Run IDs are hashes, not creation-ordered. Dispatch sorts parts by their IDs:
+    // force ordinary work to enqueue before its sibling establishes the root fence.
+    let (ordinary, conflicting) = if first.id < second.id { (first, second) } else { (second, first) };
+    assert!(ordinary.id < conflicting.id, "pending sibling must dispatch before conflicting sibling");
     let unrelated = start("pending-unrelated", None);
     let operation = "op/pending-sibling-conflict";
     {
