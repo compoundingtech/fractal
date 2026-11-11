@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Require host-page-aligned memory limits in inactive job scope plans",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Inactive scope plans reject memory.high and memory.max values that are not multiples of the caller-supplied host page size before checking heavy ceilings; no launch path is activated."},
+  "compatibility": {"status": "none", "detail": "Internal plan callers now supply the host page size; existing launch behavior and exact readback comparison are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No durable changes."}
+}

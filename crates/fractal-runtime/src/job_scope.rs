@@ -10,7 +10,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// Reads the host page size for constructing a pure `JobScopePlan`.
+pub fn page_size() -> Option<u64> {
+    // SAFETY: sysconf reads a system value and has no preconditions.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    u64::try_from(size).ok().filter(|size| *size > 0)
+}
+
 /// Writes are not atomic: an error leaves a partially configured scope, never launchable.
+/// Unit 7 may launch only when every readback match is `Measured` and true.
 pub fn apply(directory: &Path, plan: &JobScopePlan) -> io::Result<ScopeReadback> {
     for (file, value) in plan.files() {
         fs::write(directory.join(file), value.to_string())?;
@@ -67,7 +75,15 @@ mod tests {
     use fractal_jobs::Coverage;
 
     fn plan() -> JobScopePlan {
-        JobScopePlan::new(14 << 30, 16 << 30, 128, 14 << 30, 16 << 30).unwrap()
+        JobScopePlan::new(
+            14 << 30,
+            16 << 30,
+            128,
+            14 << 30,
+            16 << 30,
+            page_size().unwrap(),
+        )
+        .unwrap()
     }
     #[test]
     fn fixture_apply_match_mismatch_and_unknown() {
@@ -78,7 +94,7 @@ mod tests {
             observed
                 .matches(&plan)
                 .iter()
-                .all(|v| v.value == Some(true))
+                .all(|v| v.coverage == Coverage::Measured && v.value == Some(true))
         );
         fs::write(dir.path().join("memory.max"), "max").unwrap();
         let observed = readback(dir.path());
