@@ -189,6 +189,7 @@ pub mod records;
 mod write_principal;
 mod native_delivery;
 pub mod replication;
+mod replication_replay;
 mod runs;
 pub mod sessions;
 pub mod work;
@@ -859,6 +860,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records", get(replication::replication_records))
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
+        .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
         .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
@@ -1173,6 +1175,14 @@ async fn response_envelope_unbounded(
         request.extensions_mut().insert(ClientMessageRequestId(request_id.clone()));
     }
     let request_path = request.uri().path().to_owned();
+    let receive_correlation = (request_path == "/v1/internal/replication/receive").then(|| {
+        let id = replication::receive_correlation(request.headers());
+        request.headers_mut().insert(
+            "x-fractal-exchange-id",
+            axum::http::HeaderValue::from_str(&id.to_string()).expect("a UUID is a valid header"),
+        );
+        id
+    });
     let request_query = request.uri().query().map(str::to_owned);
     let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
     let served_remote = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1216,7 +1226,7 @@ async fn response_envelope_unbounded(
         Some(caller.clone()),
     );
     let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
-    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration");
+    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration" | "/v1/replication/replay");
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
     // supplies the envelope snapshot. All other routes keep admission snapshots.
@@ -1532,6 +1542,7 @@ async fn response_envelope_unbounded(
         Served {
             long_poll,
             remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
+            receive_correlation,
         },
     );
     finish_request_trace(otel, status);
@@ -1727,6 +1738,7 @@ fn asks_to_wait(query: &str) -> bool {
 pub struct Served {
     long_poll: bool,
     remote: bool,
+    receive_correlation: Option<uuid::Uuid>,
 }
 
 /// A client collections socket's subscription sent its first snapshot or screen.
@@ -1861,7 +1873,11 @@ fn record_request_latency(
     // Request latency is an operational sample, not a graph change. Publishing a
     // claim here causes replication and reconciliation on every node, including
     // during the contention that made the request slow in the first place.
-    eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    if let Some(correlation_id) = served.receive_correlation {
+        eprintln!("st3: slow request {path} correlation_id={correlation_id} took {} ms", elapsed.as_millis());
+    } else {
+        eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    }
 }
 
 pub use crate::model::new_request_id;
