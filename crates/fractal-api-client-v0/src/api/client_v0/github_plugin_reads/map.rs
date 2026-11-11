@@ -236,9 +236,9 @@ pub(crate) fn comment(repo: &Repo, rest: &Value) -> Result<GithubComment, Failur
         updated_at: text(rest, "updated_at"),
         reactions: REACTIONS
             .iter()
-            .filter_map(|content| {
-                let count = rest["reactions"].get(*content)?.as_u64().filter(|count| *count > 0)?;
-                Some(GithubReaction { content: *content, count })
+            .filter_map(|&content| {
+                let count = rest["reactions"].get(content)?.as_u64().filter(|count| *count > 0)?;
+                Some(GithubReaction { content, count })
             })
             .collect(),
     })
