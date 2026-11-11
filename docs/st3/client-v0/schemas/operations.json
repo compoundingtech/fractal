@@ -54,6 +54,8 @@
     { "id": "document-references.get", "method": "GET", "path": "/v1/client/document-references", "response": "DocumentReferences", "scope": "read.projections", "query": {"subject": "message/ID, mission/NAME, mission-run/ID or step-run/RUN/STEP"} },
     { "id": "publication.definition", "method": "GET", "path": "/v1/client/publication-definition", "response": "PublicationDefinition", "scope": "read.declarations" },
     { "id": "mission-declaration.get", "method": "GET", "path": "/v1/client/mission-declaration", "response": "MissionDeclaration", "scope": "read.declarations", "query": {"mission": "required mission/ subject", "revision": "optional exact published revision; defaults to latest"} },
+    { "id": "source-map.get", "method": "GET", "path": "/v1/client/source-maps", "response": "SubjectSourceMap", "scope": "read.declarations", "query": {"subject": "required agent/ or mission/ subject", "revision": "optional exact revision; defaults to the subject's current revision"} },
+    { "id": "source-blob.get", "method": "GET", "path": "/v1/client/source-blobs/{id}", "response": "SourceBlob", "scope": "read.declarations", "query": {"subject": "required agent/ or mission/ subject", "revision": "required exact revision whose source map names this sha256; other stored bytes are not found"} },
     { "id": "subject.definition", "method": "GET", "path": "/v1/client/subject-definition", "response": "SubjectDefinition" },
     { "id": "mail-backlog.summary", "method": "GET", "path": "/v1/client/mail-backlog", "response": "MailBacklog", "scope": "read.projections" },
     { "id": "slo.list", "method": "GET", "path": "/v1/client/slo", "response": "SloList", "scope": "read.projections" },

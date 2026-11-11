@@ -199,8 +199,8 @@ describe('live header parity', () => {
   it('opens the agent canonical KDL from the overflow menu in a labelled dialog that Escape closes', async () => {
     await click('More actions')
     await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL, read its whole declaration' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"][data-testid="declaration-dialog"]')
-    expect(dialog).not.toBeNull()
+    // The sheet loads its panels lazily; wait for the loaded dialog.
+    const dialog = await vi.waitFor(() => { const found = document.querySelector<HTMLElement>('[role="dialog"][data-testid="declaration-dialog"]'); expect(found).not.toBeNull(); return found })
     const heading = dialog!.querySelector('h2')
     expect(heading?.textContent).toBe(agent.id)
     expect(dialog!.getAttribute('aria-labelledby')).toBe(heading?.id)
