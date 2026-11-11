@@ -4,7 +4,7 @@ import { geometryVars as g } from '../composition-tokens.stylex'
 
 export type IconName =
   | 'search' | 'plus' | 'pencil' | 'gear' | 'swap' | 'clock'
-  | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer'
+  | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer' | 'terminal'
   | 'attach' | 'image' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'folder' | 'message' | 'dot' | 'info'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
@@ -15,13 +15,14 @@ const PATHS: Record<IconName, React.ReactNode> = {
   info: <><circle cx="8" cy="8" r="6" /><path d="M8 7v4" /><circle cx="8" cy="4.5" r=".5" fill="currentColor" /></>,
   plus: <path d="M8 3v10M3 8h10" />,
   pencil: <path d="M11.5 2.5 13.5 4.5 5 13H3v-2z" />,
-  gear: <><circle cx="8" cy="8" r="2.25" /><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.06 1.06M11.34 11.34l1.06 1.06M12.4 3.6l-1.06 1.06M4.66 11.34 3.6 12.4" /></>,
+  gear: <><circle cx="8" cy="8" r="2" /><path d="M6.39 3.21 6.35 1.3h3.3l-.04 1.91 1.73 1 1.64-.99 1.65 2.85L12.95 7v2l1.68.93-1.65 2.85-1.64-.99-1.73 1 .04 1.91h-3.3l.04-1.91-1.73-1-1.64.99-1.65-2.85L3.05 9V7L1.37 6.07l1.65-2.85 1.64.99z" /></>,
   swap: <path d="M4 5h8l-2.5-2.5M12 11H4l2.5 2.5" />,
   clock: <><circle cx="8" cy="8" r="5.5" /><path d="M8 5v3l2 1.5" /></>,
   'chevron-right': <path d="M6 3.5 10.5 8 6 12.5" />,
   'chevron-down': <path d="M3.5 6 8 10.5 12.5 6" />,
   'chevrons-left': <path d="M9.5 3.5 5 8l4.5 4.5M13 3.5 8.5 8l4.5 4.5" />,
   panel: <><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M10 3v10" /></>,
+  terminal: <><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M4.75 6.25 6.75 8l-2 1.75M8.5 10h2.75" /></>,
   more: <><circle cx="3.5" cy="8" r=".75" fill="currentColor" /><circle cx="8" cy="8" r=".75" fill="currentColor" /><circle cx="12.5" cy="8" r=".75" fill="currentColor" /></>,
   drawer: <><rect x="2" y="4" width="12" height="8" rx="1.5" /><path d="M2 7.5h12M4.5 9.75h.01M6.5 9.75h2" /></>,
   attach: <path d="M10.5 5.5 5.8 10.2a1.9 1.9 0 0 0 2.7 2.7l4.9-4.9a3.4 3.4 0 0 0-4.8-4.8L3.4 8.4a4.9 4.9 0 0 0 6.9 6.9l3.2-3.2" />,
