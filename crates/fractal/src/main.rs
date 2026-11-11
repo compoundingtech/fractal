@@ -101,6 +101,7 @@ mod fleet_cli;
 mod deploy_cli;
 mod launch_cli;
 mod migrate_cli;
+mod jobs_cli;
 mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
@@ -498,6 +499,15 @@ enum Command {
     Schema {
         #[command(subcommand)]
         command: SchemaCommand,
+    },
+    /// Submit, observe or cancel daemon-owned jobs (always JSON; no local execution).
+    #[command(after_long_help = jobs_cli::HELP)]
+    Jobs {
+        /// Requester attribution; defaults to the bound harness, run or configured person.
+        #[arg(long = "as", global = true, value_parser = parse_actor_subject)]
+        actor: Option<String>,
+        #[command(subcommand)]
+        command: jobs_cli::JobsCommand,
     },
     /// Import, inspect, and verify signed gate observations stored in git notes.
     Evidence(fractal_daemon::evidence::cli::EvidenceArgs),
@@ -6332,6 +6342,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
+        Command::Jobs { actor, command } => {
+            jobs_cli::run(&endpoint, actor.as_deref(), config.person.as_deref(), command).await
+        }
         Command::Documents { command } => run_doc(&client, command, cli.json).await,
         Command::Blobs { command } => {
             run_blobs(&endpoint, config.person.as_deref(), command, cli.json).await

@@ -31,7 +31,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Inside an agent",
-        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
+        &["work", "jobs", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
         "Running fractal on a machine or fleet",

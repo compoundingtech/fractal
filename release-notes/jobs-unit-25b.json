@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add fractal jobs submit, wait and cancel with stable JSON states, reason codes and documented exit semantics.",
+  "replay": {"status": "none", "detail": "An ambiguous submit reply triggers one receipt reconciliation using the identical captured envelope and authenticated client on the same resolved daemon endpoint. No fresh key, request digest, requester or execution host is selected. Even a typed reconciliation refusal cannot disprove the original append: it remains diagnostic context for submit-uncertain, exit 5, never permission to rerun."},
+  "schema": {"status": "none", "detail": "No routes, claim schema, generated clients or runtime records change."},
+  "rules": {"status": "none", "detail": "All jobs commands resolve requester attribution with the existing configured_actor and execution_client conventions (--as, bound harness/run, configured person), then freeze that client across reconciliation. The daemon still authenticates the requester. Wait only observes with GET and requires caller-declared --poll-ms without a default. It never cancels or submits. Cancel uses the daemon's requester-authenticated intent endpoint, never local signaling. Class and priority pass through unchanged for daemon validation."},
+  "compatibility": {"status": "none", "detail": "New commands always emit JSON. Help documents exits 0 accepted/success, 2 input/API/protocol error, 5 transport uncertainty, 10 unsuccessful command outcome, 11 withdrawn/cancelled, 12 refused, 13 failed and 14 unknown-after-host-loss. Original daemon response and outcome are retained."},
+  "downtime": {"status": "none", "detail": "No downtime or activation. Existing disabled-by-default routes and admission-not-wired behavior remain unchanged."},
+  "manual": {"status": "none", "detail": "Submit accepts a JSON envelope file or stdin, including an explicit key and execution host. If reconciliation remains ambiguous, only identical input against the same daemon may be replayed."},
+  "recovery": {"status": "none", "detail": "Wait interruption has no cancellation side effect. Unknown-after-host-loss remains an uncertain result with exit 14 and rerun_permitted false; terminal command exits and signals are not infrastructure failure reasons."}
+}
