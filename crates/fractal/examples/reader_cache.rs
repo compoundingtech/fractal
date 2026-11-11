@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: daemon_bench::NODE.into(),
-        runtime_dir: state_dir.clone(),
+        api_socket: state_dir.join("api.sock"),
         state_dir,
         pty_root: root.join("pty"),
         pty_binary: daemon_bench::stub_pty(root),

@@ -86,7 +86,7 @@ impl Daemon {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: "example".into(),
-            runtime_dir: self.root.clone(),
+            api_socket: self.root.join("api.sock"),
             state_dir: self.root.clone(),
             pty_root: self.root.join("pty"),
             pty_binary: "pty".into(),
