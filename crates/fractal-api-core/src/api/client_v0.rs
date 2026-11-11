@@ -735,7 +735,8 @@ pub fn credential_digest(credential: &str) -> String {
 pub fn administrative_get(request: &Request<Body>) -> bool {
     request.method() == axum::http::Method::GET
         && (request.uri().path().starts_with("/v1/client/assistant/grants/")
-            || request.uri().path() == "/v1/client/devices")
+            || request.uri().path() == "/v1/client/devices"
+            || jobs::requester_scoped_path(request.uri().path()))
 }
 
 pub fn authenticate(
@@ -792,6 +793,9 @@ pub fn authenticate(
                 .headers()
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
+            if jobs::requester_scoped_path(request.uri().path()) && person.is_none() {
+                return Err(forbidden("jobs require a resolved authenticated requester"));
+            }
             let bound_run = request.extensions().get::<super::BoundRun>().map(|bound| bound.0.run.as_str());
             let mut session = match person.filter(|person| person.starts_with("mission-run/")) {
                 Some(run) => ClientSession::local_run(run, bound_run)?,
