@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A mission run touches only itself and the runs it started, transitively: a claim written as `mission-run/RUN` on another run, its generations, step runs or revision proposals, a `mission-run` declaration (creation, revision, reset or cancellation) a run applies, and a cancellation requested as the run, are refused with `run-authority-denied` for any other run, whatever the run is granted",
+  "replay": {"status": "none", "detail": "No claim kind, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change. Descent is read from the existing `mission_runs.parent_step_run` and `step_runs.run_id`."},
+  "rules": {"status": "changed", "detail": "Run authority gains a reach check before grants: the run a claim touches must be the acting run or a descendant by parent step, so `write \"mission-run/*\"` reaches no sibling, parent or unrelated run. It applies in both `[programs] authority` modes, since it does not depend on a declared authority. Writers that are not mission runs are untouched."},
+  "compatibility": {"status": "changed", "detail": "A run can no longer cancel, revise, reset or declare runs outside its own subtree, nor start a top-level run; it starts runs only as the children its program starts. No production writer acts as a run on another run."},
+  "downtime": {"status": "none", "detail": "No restart or migration beyond the ordinary upgrade."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "A person or agent still cancels or revises any run it may."}
+}
