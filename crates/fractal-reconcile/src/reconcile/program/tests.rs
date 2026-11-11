@@ -105,18 +105,18 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1 });
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new() });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
-            "exit": {"_tag": "Success", "value": 1}, "ms": 5})
+            "exit": {"_tag": "Success", "value": 1}, "ms": 5, "mission": "publish", "input": {}, "for": "person/owner", "title": "Go?"})
     };
-    for t in ["journal", "done", "unresponsive"] {
+    for t in ["journal", "run", "ask", "done", "unresponsive"] {
         // An earlier attempt of the step, then the right attempt from a replaced host.
         engine.handle(&message(1, t), 1).unwrap();
         engine.handle(&message(2, t), 2).unwrap();
     }
     assert_eq!(journal_claims(&engine, step), 0);
-    assert!(engine.lock().running.contains_key(step));
+    assert!(engine.lock().running.get(step).is_some_and(|running| running.requests.is_empty()));
     assert_eq!(engine.host_fault(step, 2), None);
     // A late message for the earlier attempt never removes the attempt that replaced it, and a
     // refused entry is answered rather than left waiting (no host here, so nothing is sent).
@@ -145,7 +145,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1 });
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new() });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
     assert_eq!(engine.store.step_run(&step.subject).unwrap().unwrap().status, "failed");
