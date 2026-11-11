@@ -2054,6 +2054,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "job-terminal"
         | "job-state-uncertain"
         | "job-state-changed"
+        | "guard-unavailable"
+        | "recursive-heavy-job"
         | "invalid-answer"
         | "not-answerable"
         | "idempotency-key-expired"

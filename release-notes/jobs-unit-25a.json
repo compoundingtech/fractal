@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refuse recursive heavy-job submissions using the authenticated Unix peer generation and this host's canonical job cgroup names.",
+  "replay": {"status": "none", "detail": "No replay changes. A containment-only lookup maps accepted launch intents to job IDs with the existing unit 7 cgroup_name contract; it grants no execution authority."},
+  "schema": {"status": "none", "detail": "No claim schema changes. JobsConfig adds explicit keeper_cgroups namespace paths with an empty default; no keeper roots, timeouts or limits are inferred."},
+  "rules": {"status": "none", "detail": "Enabled submission requires an accept-time generation-pinned peer witness, stable unified-cgroup membership, and readable configured keeper roots. Missing evidence returns HTTP 503 guard-unavailable. Membership inside a host job, including descendants, returns HTTP 409 recursive-heavy-job with its job ID. Outside membership and keeper idle membership do not imply admission."},
+  "compatibility": {"status": "none", "detail": "Enabled submit without a local Unix peer witness now fails closed. Environment variables, argv, requested class and priority never substitute for kernel evidence. Jobs reads are unchanged. Missing or disabled jobs configuration remains jobs-disabled."},
+  "downtime": {"status": "none", "detail": "No downtime or activation. Submission still records only queued jobs and reports admission not wired."},
+  "manual": {"status": "none", "detail": "No operator action for disabled jobs. Explicit future activation must configure all host keeper roots in the daemon's unified-cgroup namespace."},
+  "recovery": {"status": "none", "detail": "Missing or pending projection evidence fails closed; live membership in an older recorded generation never silently grants a new submission."}
+}

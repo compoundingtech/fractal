@@ -636,6 +636,8 @@ impl Default for IdleNudgeSettings {
 pub struct JobsConfig {
     pub enabled: bool,
     pub allowed_classes: Vec<String>,
+    /// Unified cgroup namespace paths of this host's heavy keepers; no inferred roots.
+    pub keeper_cgroups: Vec<PathBuf>,
 }
 /// The config file the running daemon was started with, so its `[limits]` can be read again.
 static DAEMON_CONFIG: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
