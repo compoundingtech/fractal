@@ -1193,7 +1193,12 @@ pub struct MissionDeclarationProvenance {
 pub struct SubjectSourceMap {
     pub subject: String,
     pub revision: String,
+    /// The subject's current revision; absent when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
     pub map: SourceMapClaim,
+    /// Canonical KDL of `revision`, environment values redacted.
+    pub kdl: String,
     /// The subject's mapped revisions, newest first.
     pub revisions: Vec<SourceMapRevision>,
 }

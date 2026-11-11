@@ -4606,14 +4606,18 @@ export const SourceMapRevision = /*#__PURE__*/ (() => Schema.Struct({
 export type SourceMapRevision = typeof SourceMapRevision.Type
 export type SourceMapRevisionEncoded = typeof SourceMapRevision.Encoded
 
-/** Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, plus every revision of the subject that has one. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get). */
+/** Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, the canonical KDL of that revision, and every revision of the subject that has a map. Without `revision`, the subject's current revision. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get). */
 export const SubjectSourceMap = /*#__PURE__*/ (() => Schema.Struct({
+  /** The subject's current revision; absent when it has none. Agent declaration ids are not revisions. */
+  "current": optionalKey(Revision),
+  /** Canonical KDL of `revision`, environment values redacted; the map's node paths name its nodes. */
+  "kdl": Schema.String.annotate({ description: "Canonical KDL of `revision`, environment values redacted; the map's node paths name its nodes." }),
   "map": SourceMapClaim,
   "revision": Revision,
   /** The subject's mapped revisions, newest first. Only revisions whose render changed have one. */
   "revisions": Schema.Array(SourceMapRevision).annotate({ description: "The subject's mapped revisions, newest first. Only revisions whose render changed have one." }),
   "subject": Schema.String.check(Schema.isPattern(new RegExp("^(agent|mission)/[^\\s@]+$", "u")))
-}).annotate({ identifier: "SubjectSourceMap", description: "Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, plus every revision of the subject that has one. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get)." }))()
+}).annotate({ identifier: "SubjectSourceMap", description: "Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, the canonical KDL of that revision, and every revision of the subject that has a map. Without `revision`, the subject's current revision. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get)." }))()
 export type SubjectSourceMap = typeof SubjectSourceMap.Type
 export type SubjectSourceMapEncoded = typeof SubjectSourceMap.Encoded
 
