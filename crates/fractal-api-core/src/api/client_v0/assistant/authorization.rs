@@ -122,7 +122,7 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     let subject = subject(&id)?;
     let granted = latest(&state, &subject, GRANTED)?
         .ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
-    if granted.origin != state.store.origin() || latest(&state, &subject, REVOKED)?.is_some() {
+    if granted.origin != state.store.origin() || super::super::external_grants::revoked(&state, &granted)? {
         return Err(forbidden("read trust requires the active grant's authoritative issuer"));
     }
     let previous = effective(&state, &granted)?;
