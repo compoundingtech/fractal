@@ -1,35 +1,42 @@
 use super::keeper::{KeeperManager, KeeperScope};
 use anyhow::{Context, Result, ensure};
 use fractal_jobs::launch::LaunchRefusal;
-use std::{fs, path::PathBuf, process::Command};
+use std::{collections::HashMap, fs, io::Read, os::fd::{FromRawFd, OwnedFd}, path::PathBuf, process::Command, sync::{Arc, Mutex}};
+#[derive(Clone)]
 pub struct SystemdKeeper {
     root: PathBuf,
-    child: Option<u32>,
+    // Unreaped direct children fence numeric PIDs throughout placement.
+    fresh: Arc<Mutex<HashMap<u32, FreshKeeper>>>,
 }
 impl SystemdKeeper {
     pub fn new(cgroup_root: PathBuf) -> Self {
-        Self { root: cgroup_root, child: None }
+        Self { root: cgroup_root, fresh: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub(super) fn hierarchy_path(&self, directory: &std::path::Path) -> Result<PathBuf> {
         Ok(std::path::Path::new("/").join(directory.strip_prefix(&self.root)?))
     }
 }
-impl Drop for SystemdKeeper {
+
+struct FreshKeeper(libc::pid_t);
+impl FreshKeeper {
+    fn wait(&mut self) {
+        while self.0 != 0 {
+            let result = unsafe { libc::waitpid(self.0, std::ptr::null_mut(), 0) };
+            if result == self.0 { self.0 = 0; }
+            else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                // No other runtime code may reap this private direct child.
+                self.0 = 0;
+            }
+        }
+    }
+}
+impl Drop for FreshKeeper {
     fn drop(&mut self) {
-        if let Some(pid) = self.child.take() {
-            // Reap eventually without tying keeper lifetime to this adapter.
-            std::thread::spawn(move || {
-                let mut status = 0;
-                loop {
-                    if unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) } >= 0 {
-                        break;
-                    }
-                    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                        break;
-                    }
-                }
-            });
+        if self.0 != 0 {
+            // This PID cannot be reused: we have never reaped our direct child.
+            unsafe { libc::kill(self.0, libc::SIGKILL); }
+            self.wait();
         }
     }
 }
@@ -75,37 +82,79 @@ impl KeeperManager for SystemdKeeper {
         Ok(())
     }
     fn spawn_idle(&mut self) -> Result<u32> {
-        if let Some(pid) = self.child {
-            let mut status = 0;
-            ensure!(unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) }
-                == pid as libc::pid_t, "previous keeper child has not exited");
-            self.child = None;
-        }
-        // SAFETY: child performs ONLY async-signal-safe syscalls, never returns
-        // into Rust, never execs, and holds no FD/pipe tying it to the daemon.
-        let pid = unsafe {
-            let pid = libc::fork();
+        let mut pipe = [-1; 2];
+        // SAFETY: valid storage for two descriptors; both become owned below.
+        ensure!(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } == 0,
+            "keeper pipe: {}", std::io::Error::last_os_error());
+        let reader = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        let writer = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        // SAFETY: the child uses only async-signal-safe operations until pause;
+        // never allocate, acquire locks, unwind, or return into Rust.
+        let child = unsafe {
+            // clone without sharing flags and with a null stack has fork
+            // semantics on both supported Linux architectures (x86_64/aarch64).
+            let pid = libc::syscall(libc::SYS_clone, libc::SIGCHLD as libc::c_ulong,
+                0_usize, 0_usize, 0_usize, 0_usize) as libc::pid_t;
             if pid == 0 {
-                if libc::setsid() < 0 || libc::syscall(libc::SYS_close_range, 0_u32, u32::MAX, 0_u32) < 0 {
-                    libc::_exit(125);
+                libc::syscall(libc::SYS_close, pipe[0]);
+                if libc::syscall(libc::SYS_prctl, libc::PR_SET_NAME,
+                    c"fractal-keeper".as_ptr(), 0, 0, 0) < 0
+                    || libc::syscall(libc::SYS_setsid) < 0 {
+                    libc::syscall(libc::SYS_exit, 125);
                 }
+                // Preserve only the readiness writer. Never publish a PID until
+                // BOTH close_range calls succeed; EOF alone cannot prove that.
+                if (pipe[1] > 0 && libc::syscall(libc::SYS_close_range,
+                    0_u32, pipe[1] as u32 - 1, 0_u32) < 0)
+                    || libc::syscall(libc::SYS_close_range,
+                        pipe[1] as u32 + 1, u32::MAX, 0_u32) < 0 {
+                    libc::syscall(libc::SYS_exit, 125);
+                }
+                let keeper_pid = libc::syscall(libc::SYS_getpid) as u32;
+                if libc::syscall(libc::SYS_write, pipe[1],
+                    (&raw const keeper_pid).cast::<u8>(), size_of::<u32>()) != size_of::<u32>() as libc::c_long {
+                    libc::syscall(libc::SYS_exit, 125);
+                }
+                libc::syscall(libc::SYS_close, pipe[1]);
+                // pause is async-signal-safe; libc supplies the aarch64
+                // implementation where Linux has no dedicated SYS_pause.
                 loop { libc::pause(); }
             }
             pid
         };
-        ensure!(pid >= 0, "fork keeper: {}", std::io::Error::last_os_error());
-        self.child = Some(pid as u32);
-        Ok(pid as u32)
+        drop(writer);
+        ensure!(child >= 0, "fork keeper: {}", std::io::Error::last_os_error());
+        let keeper = FreshKeeper(child);
+        let mut bytes = [0; size_of::<u32>()];
+        let mut reader = fs::File::from(reader);
+        let published = (|| -> std::io::Result<()> {
+            reader.read_exact(&mut bytes)?;
+            // EOF confirms the final readiness FD is closed before returning.
+            let mut extra = [0];
+            match reader.read_exact(&mut extra) {
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(()),
+                Err(error) => Err(error),
+                Ok(()) => Err(std::io::Error::other("extra keeper identity bytes")),
+            }
+        })();
+        published.context("keeper failed before publishing its identity")?;
+        ensure!(u32::from_ne_bytes(bytes) == child as u32, "keeper identity mismatch");
+        self.fresh.lock().map_err(|_| anyhow::anyhow!("keeper ownership poisoned"))?
+            .insert(child as u32, keeper);
+        Ok(child as u32)
     }
     fn kill_idle(&mut self, pid: u32) -> Result<()> {
-        ensure!(self.child == Some(pid), "keeper child is not owned by this adapter");
-        // Only called for a child this manager just created and has not reaped.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            let mut status = 0;
-            ensure!(libc::waitpid(pid as libc::pid_t, &mut status, 0) >= 0, "reap keeper failed");
-        }
-        self.child = None;
+        let keeper = self.fresh.lock().map_err(|_| anyhow::anyhow!("keeper ownership poisoned"))?
+            .remove(&pid).context("not an unpublished keeper")?;
+        drop(keeper); // Kill and reap only while its numeric PID is still fenced.
+        Ok(())
+    }
+    fn commit_idle(&mut self, pid: u32) -> Result<()> {
+        let mut keeper = self.fresh.lock().map_err(|_| anyhow::anyhow!("keeper ownership poisoned"))?
+            .remove(&pid).context("not an unpublished keeper")?;
+        // After placement there are no further PID-based mutations. Only this
+        // waiter may reap the child; daemon death reparents it without killing it.
+        std::thread::Builder::new().name("fractal-keeper-reaper".into()).spawn(move || keeper.wait())?;
         Ok(())
     }
 }
@@ -131,5 +180,49 @@ mod tests {
             assert!(sent.windows(3).any(|s| s == [property, "b", "true"]));
         }
         assert!(sent.windows(3).any(|s| s == ["Slice", "s", "app-capped-heavy.slice"]));
+    }
+
+    #[test]
+    #[ignore = "real Linux fork/procfs; run in the explicit kernel pilot lane"]
+    fn forked_keeper_is_named_detached_and_survives_adapter_drop() {
+        struct Reap(OwnedFd);
+        impl Drop for Reap {
+            fn drop(&mut self) {
+                use std::os::fd::AsRawFd;
+                unsafe { libc::syscall(libc::SYS_pidfd_send_signal,
+                    self.0.as_raw_fd(), libc::SIGKILL, 0_usize, 0_u32); }
+            }
+        }
+        let mut manager = SystemdKeeper::new(PathBuf::new());
+        let pid = manager.spawn_idle().unwrap();
+        // Open while the direct child is unreaped, before placement commits.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0_u32) } as i32;
+        assert!(fd >= 0);
+        let _cleanup = Reap(unsafe { OwnedFd::from_raw_fd(fd) });
+        assert_eq!(fs::read_to_string(format!("/proc/{pid}/comm")).unwrap(), "fractal-keeper\n");
+        assert_eq!(unsafe { libc::getsid(pid as libc::pid_t) }, pid as libc::pid_t);
+        assert_eq!(fs::read_dir(format!("/proc/{pid}/fd")).unwrap().count(), 0);
+        manager.commit_idle(pid).unwrap();
+        drop(manager);
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+    }
+
+    #[test]
+    #[ignore = "real Linux fork/procfs; run in the explicit kernel pilot lane"]
+    fn dead_unpublished_keeper_remains_fenced_until_failed_placement_cleanup() {
+        let mut manager = SystemdKeeper::new(PathBuf::new());
+        let pid = manager.spawn_idle().unwrap();
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::waitid(libc::P_PID, pid, &mut status,
+            libc::WEXITED | libc::WNOWAIT) }, 0);
+        // Death after readiness does not allow PID reuse before placement or
+        // cleanup. WNOWAIT observes termination without releasing ownership.
+        assert!(manager.fresh.lock().unwrap().contains_key(&pid));
+        manager.kill_idle(pid).unwrap();
+        assert_eq!(unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(),
+            libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+        assert!(manager.kill_idle(pid).is_err()); // Never signal a stale PID.
     }
 }

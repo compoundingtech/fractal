@@ -18,6 +18,8 @@ pub trait KeeperManager {
     fn start(&mut self, name: &str, slice: &str, pid: u32) -> Result<()>;
     fn spawn_idle(&mut self) -> Result<u32>;
     fn kill_idle(&mut self, pid: u32) -> Result<()>;
+    /// End numeric-PID placement ownership only after all verification succeeds.
+    fn commit_idle(&mut self, _pid: u32) -> Result<()> { Ok(()) }
     fn mkdir(&mut self, directory: &Path) -> Result<()> { Ok(fs::create_dir(directory)?) }
     fn move_pid(&mut self, pid: u32, directory: &Path) -> Result<()> {
         Ok(fs::write(directory.join("cgroup.procs"), pid.to_string())?)
@@ -115,6 +117,7 @@ pub fn ensure_keeper(
         if let Some(pid) = fresh_pid { manager.kill_idle(pid)?; }
     }
     verified.context(LaunchRefusal::KeeperUnavailable)?;
+    if let Some(pid) = fresh_pid { manager.commit_idle(pid)?; }
     Ok(scope)
 }
 
@@ -124,11 +127,16 @@ pub fn replenish_keeper(manager: &mut dyn KeeperManager, scope: &KeeperScope) ->
     let idle = scope.directory.join("idle");
     if !populated(&idle)? {
         let pid = manager.spawn_idle()?;
-        if let Err(error) = manager.move_pid(pid, &idle) {
+        let placed = (|| {
+            manager.move_pid(pid, &idle)?;
+            ensure!(populated(&idle)?, LaunchRefusal::KeeperUnavailable);
+            Ok(())
+        })();
+        if let Err(error) = placed {
             manager.kill_idle(pid)?;
             return Err(error);
         }
-        ensure!(populated(&idle)?, LaunchRefusal::KeeperUnavailable);
+        manager.commit_idle(pid)?;
     }
     Ok(())
 }
