@@ -31,6 +31,14 @@ pub struct RecoveryRequired {
     pub updated_at_unix_ms: String,
 }
 
+pub(super) fn required(connection: &Connection) -> Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='graph' AND status='stale'
+           AND (error_code=?1 OR substr(error_code,1,length(?2))=?2))",
+        params![CODE, PREFIX], |row| row.get(0),
+    ).map_err(Into::into)
+}
+
 impl Store {
     pub fn projection_recovery(&self) -> Result<Option<RecoveryRequired>> {
         let connection = self.readers.try_get()?;
@@ -53,11 +61,7 @@ impl Store {
     }
 
     pub fn replication_projection_recovery_required(&self) -> Result<bool> {
-        self.readers.get().query_row(
-            "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='graph' AND status='stale'
-               AND (error_code=?1 OR substr(error_code,1,length(?2))=?2))",
-            params![CODE, PREFIX], |row| row.get(0),
-        ).map_err(Into::into)
+        required(&self.readers.get())
     }
 }
 

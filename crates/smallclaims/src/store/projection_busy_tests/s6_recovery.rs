@@ -78,9 +78,26 @@ fn t3_non_contention_failure_parks_with_typed_health_and_never_replays() {
     drop(store);
     let reopened = Store::open(&path, "node", runtime.clone()).unwrap();
     assert!(reopened.replication_projection_recovery_required().unwrap());
+    assert!(reopened.replication_projection_deferred());
     assert!(!reopened.project_replication_backlog().unwrap());
     assert_eq!(recovery_health(&reopened), failed);
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 0);
+    reopened.replication_status_sealed(true, Some(FLEET), &[]).unwrap();
+    let export = reopened.export_replication_summary(FLEET).unwrap();
+    assert!(export.graph_digest.is_empty());
+    assert!(export.projection_digests.is_empty());
+    assert!(reopened.replication_projection_deferred());
+    assert_eq!(recovery_health(&reopened), failed, "sealed export must not rewrite parked health");
+    assert_eq!(effect(&reopened, "busy-test-effect"), before_effect, "sealed export must not project");
+    reopened.replay_replication_graph().unwrap();
+    assert!(!reopened.replication_projection_recovery_required().unwrap());
+    assert!(reopened.project_replication_backlog().unwrap());
+    assert!(!reopened.replication_projection_deferred());
+    reopened.replication_status_sealed(true, Some(FLEET), &[]).unwrap();
+    let export = reopened.export_replication_summary(FLEET).unwrap();
+    assert!(!export.graph_digest.is_empty());
+    assert!(!export.projection_digests.is_empty());
+    assert_eq!(runtime.replays.load(Ordering::Relaxed), 1);
 }
 
 #[test]

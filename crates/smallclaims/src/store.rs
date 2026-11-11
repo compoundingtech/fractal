@@ -1302,7 +1302,8 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
-        let projection_pending = runtime.projection_work_pending(&connection)?;
+        let projection_pending = runtime.projection_work_pending(&connection)?
+            || projection_recovery::required(&connection)?;
         let connection = if let Some(admitted) = readers.admitted_handle() {
             WriterConnection::new_admitted(
                 connection, committed_index.clone(), runtime.writer_observer(), admitted,
@@ -8960,6 +8961,7 @@ impl Store {
         // Every automatic attempt checks the durable fence after joining the gate:
         // a preceding queued attempt may have parked recovery while this one waited.
         if self.replication_projection_recovery_required()? {
+            self.defer_replication_projection();
             return Ok(false);
         }
         let _timing = time_stage(&self.replication_timers.projection);
