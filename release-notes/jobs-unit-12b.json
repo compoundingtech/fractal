@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive raw cgroup usage parsers and host-stamped file reads (unit 12b)",
+  "replay": {"status": "none", "detail": "No claims or replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No host activation; gate-slot remains the admission path."},
+  "compatibility": {"status": "none", "detail": "Additive raw cpu.stat usage_usec and memory.peak parsing, plus preserved memory.events and io.stat counters. Each file read carries the caller-supplied host name and its own host timestamp, including unknown reads. Missing or malformed numeric counters are Unknown, never zero. Empty successfully read io.stat remains measured. CPU counters require start/end samples for deltas; no interval totals are inferred."},
+  "downtime": {"status": "none", "detail": "No live behavior changes."},
+  "manual": {"status": "none", "detail": "No deployment or activation steps."},
+  "recovery": {"status": "none", "detail": "No durable state changes."}
+}
