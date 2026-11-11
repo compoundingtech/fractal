@@ -856,12 +856,14 @@
     },
     "SubjectSourceMap": {
       "type": "object", "additionalProperties": false,
-      "required": ["subject", "revision", "map", "revisions"],
-      "description": "Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, plus every revision of the subject that has one. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get).",
+      "required": ["subject", "revision", "map", "kdl", "revisions"],
+      "description": "Where one agent or mission revision came from: the source.mapped claim its first mapped publication recorded, the canonical KDL of that revision, and every revision of the subject that has a map. Without `revision`, the subject's current revision. Requires read.declarations. File texts are separate content-addressed reads (source-blob.get).",
       "properties": {
         "subject": {"type": "string", "pattern": "^(agent|mission)/[^\\s@]+$"},
         "revision": {"$ref": "#/$defs/Revision"},
+        "current": {"$ref": "#/$defs/Revision", "description": "The subject's current revision; absent when it has none. Agent declaration ids are not revisions."},
         "map": {"$ref": "#/$defs/SourceMapClaim"},
+        "kdl": {"type": "string", "description": "Canonical KDL of `revision`, environment values redacted; the map's node paths name its nodes."},
         "revisions": {"type": "array", "items": {"$ref": "#/$defs/SourceMapRevision"}, "description": "The subject's mapped revisions, newest first. Only revisions whose render changed have one."}
       }
     },

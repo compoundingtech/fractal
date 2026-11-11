@@ -38,13 +38,13 @@ const sourceMapOf = (revision: string, hash: string, sequence: number) => ({
   ],
 })
 const revisions = [6, 5].map(sequence => ({ revision: `map-${sequence}`, repository: 'schickling/factory', ref: 'main', sha: String(sequence).repeat(40), sequence, set_revision: `set-${sequence}`, recorded_at_unix_ms: 1760000000000 + sequence }))
-const mapped = (revision: string, hash: string, sequence: number) => observed({ value: { _tag: 'Mapped' as const, value: decodeUnknownSync(SubjectSourceMap)({ subject: 'mission/land/code', revision, map: sourceMapOf(revision, hash, sequence), revisions }) } })
+const mapped = (revision: string, hash: string, sequence: number, goal: string) => observed({ value: { _tag: 'Mapped' as const, value: decodeUnknownSync(SubjectSourceMap)({ subject: 'mission/land/code', revision, current: 'map-6', map: sourceMapOf(revision, hash, sequence), kdl: mappedKdl(goal), revisions }) } })
 const atRevision = (revision: string, goal: string) => observed({ value: decodeUnknownSync(MissionDeclaration)({ mission: 'mission/land/code', revision, published_at: 1760000000000, text: mappedKdl(goal), legacy: false }) })
 const source = fixtureSource({ world: { now: Date.parse('2026-10-06T12:00:00.000Z'), agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' }, subjectReads: {
   missionDefinition: { 'mission/kdl-view': observed({ value: mission }), 'mission/served': observed({ value: served }), 'mission/land/code': atRevision('map-6', 'Review the diff') },
   agentDeclaration: { 'agent/denied': unavailable({ reason: 'ungranted', detail: 'read.declarations missing' }) },
-  sourceMap: { [pinnedRef('mission/land/code', 'map-6')]: mapped('map-6', helperHash(6), 6), [pinnedRef('mission/land/code', 'map-5')]: mapped('map-5', helperHash(5), 5) },
-  declarationAt: { [pinnedRef('mission/land/code', 'map-6')]: atRevision('map-6', 'Review the diff'), [pinnedRef('mission/land/code', 'map-5')]: atRevision('map-5', 'Review') },
+  // The sheet reads the current map by bare subject, older ones pinned.
+  sourceMap: { 'mission/land/code': mapped('map-6', helperHash(6), 6, 'Review the diff'), [pinnedRef('mission/land/code', 'map-5')]: mapped('map-5', helperHash(5), 5, 'Review') },
   sourceBlob: {
     [blobRef(pinnedRef('mission/land/code', 'map-6'), ownHash)]: observed({ value: decodeUnknownSync(SourceBlob)({ hash: ownHash, text: ownText }) }),
     [blobRef(pinnedRef('mission/land/code', 'map-6'), helperHash(6))]: observed({ value: decodeUnknownSync(SourceBlob)({ hash: helperHash(6), text: helperText('Review the diff') }) }),
