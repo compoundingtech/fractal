@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Sample job usage before every cgroup retirement (unit 7d)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission remains inactive; configuration remains the only source of limits."},
+  "compatibility": {"status": "changed", "detail": "Stop and abort share one retirement path: cgroup.kill, populated=0, unit-12 usage sample or typed counters-unavailable, then rmdir. The driver returns that sample, including for a never-released J. A vanished J reports counters-unavailable."},
+  "downtime": {"status": "none", "detail": "No live behavior or deployment changes."},
+  "manual": {"status": "none", "detail": "No activation or configuration defaults."},
+  "recovery": {"status": "none", "detail": "Cleanup errors remain unresolved; no retry is introduced."}
+}
