@@ -2015,6 +2015,7 @@ dependencies = [
  "fractal-attention",
  "fractal-evidence",
  "fractal-kernel",
+ "fractal-schema",
  "rusqlite",
  "serde",
  "serde_json",
