@@ -26,6 +26,7 @@ pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
 pub mod workspace_observations;
+pub mod observer_refresh;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
@@ -8274,31 +8275,9 @@ fn request_declared_resource_refresh_tx(
     operation: &ResourceRefreshOperation,
     batch_id: &str,
 ) -> Result<Vec<String>, FractalError> {
-    let desired = {
-        let mut statement = transaction
-            .prepare("SELECT subject, body, revision FROM desired WHERE kind='observer'")
-            .map_err(internal)?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(internal)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?
-    };
-    let observers = desired
+    let observers = observer_refresh::active_observers_tx(transaction)?
         .into_iter()
-        .filter_map(|(subject, body, revision)| {
-            serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|desired| crate::graph::observer_spec(&desired))
-                .filter(|spec| !spec.stopped && spec.resource == operation.resource)
-                .map(|_| (subject, revision))
-        })
+        .filter(|(_, _, spec)| spec.resource == operation.resource)
         .collect::<Vec<_>>();
     if observers.is_empty() {
         return Err(FractalError::new(
@@ -8307,25 +8286,18 @@ fn request_declared_resource_refresh_tx(
         ));
     }
     let mut claims = Vec::new();
-    for (observer, revision) in observers {
+    for (observer, revision, _) in observers {
         let attempt = hex::encode(Sha256::digest(format!(
             "st3.resource-refresh.v1\0{}\0{}\0{}",
             operation.resource, operation.id, observer
         )));
-        let claim = append_claim_tx(
+        let claim = observer_refresh::append_observer_refresh_tx(
             transaction,
             origin,
-            &observer,
-            "observer.refresh-requested",
-            None,
-            &json!({"fields": {
-                "revision": revision,
-                "attempt": attempt,
-            }}),
-            &[],
+            (&observer, &revision),
+            &attempt,
             Some(batch_id),
-        )
-        .map_err(internal)?;
+        )?;
         claims.push(claim.id);
     }
     Ok(claims)
@@ -17652,11 +17624,10 @@ pub fn try_project_simple_replication_tx(
             }
         }
     }
-    // Event-only claims do not change the structural graph. Their operation
-    // registry can advance with the frontier. Message sends reconcile an ambiguous
-    // receipt from that operation's indexed history, using the full replay's reducer.
-    // Other kinds retain the full replay guard for ambiguous IDs.
-    let mut reconciled_message_operations = BTreeSet::new();
+    // Event-only claims and message sends reconcile ambiguous receipts from that
+    // operation's indexed history, using the full replay's reducer. Structural
+    // kinds retain the full replay guard for ambiguous IDs.
+    let mut reconciled_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -17673,22 +17644,52 @@ pub fn try_project_simple_replication_tx(
         if repaired {
             continue;
         }
-        if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
+        let graph_neutral = !replay_projects_kind(&claim.kind);
+        if graph_neutral && reconciled_operations.contains(operation_id) {
             continue;
         }
-        if let Some((stored_digest, _, state)) =
-            operation_tx(transaction, operation_id).map_err(|error| {
+        let stored_operation = operation_tx(transaction, operation_id).map_err(|error| {
+            incremental_claim_error(internal(error), claim, "operation-registry")
+        })?;
+        let conflict = stored_operation.as_ref().is_some_and(|(digest, _, state)| {
+            digest.as_str() != request_digest || state != "active"
+        });
+        // A checkpoint can leave only tombstones, with no operations row. Before
+        // folding either case, inspect only this operation's indexed history:
+        // a structural claim sharing the key needs its projections replayed too.
+        if conflict || (graph_neutral && stored_operation.is_none()) {
+            let neutral_history = graph_neutral && (|| -> rusqlite::Result<bool> {
+                let mut statement = transaction.prepare_cached(
+                    "SELECT kind FROM claims INDEXED BY claims_operation_index
+                     WHERE json_extract(body, '$._operation.id')=?1
+                     UNION ALL
+                     SELECT kind FROM checkpoint_claims INDEXED BY checkpoint_claims_operation
+                     WHERE operation_id=?1 AND operation_id IS NOT NULL",
+                )?;
+                let mut rows = statement.query([operation_id])?;
+                while let Some(row) = rows.next()? {
+                    let kind = row.get_ref(0)?;
+                    let kind = kind.as_str().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, kind.data_type(), Box::new(error))
+                    })?;
+                    if replay_projects_kind(kind) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })().map_err(|error| {
                 incremental_claim_error(internal(error), claim, "operation-registry")
-            })?
-            && (stored_digest != request_digest || state != "active")
-        {
-            if claim.kind == "message.sent" {
+            })?;
+            if neutral_history {
                 repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                     incremental_claim_error(internal(error), claim, "operation-registry")
                 })?;
-                reconciled_message_operations.insert(operation_id.to_owned());
+                reconciled_operations.insert(operation_id.to_owned());
                 continue;
             }
+            let (stored_digest, state) = stored_operation.as_ref()
+                .map(|(digest, _, state)| (digest.as_str(), state.as_str()))
+                .unwrap_or(("", "missing"));
             crate::profile::note("replay: operation-conflict");
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason: "operation-conflict",
