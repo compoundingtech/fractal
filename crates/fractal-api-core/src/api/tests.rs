@@ -1253,6 +1253,84 @@ async fn native_session_reports_cannot_replace_a_successor_binding() {
 }
 
 #[test]
+fn doctor_lists_unmarked_pending_grants_without_dating_remote_history() {
+    let store = Store::open_memory("amber").unwrap();
+    let connection = store.connection.lock().expect("fixture writer");
+    for (id, kind, origin, authenticated) in [
+        ("claim/local-a", "custom.client.assistant.v1.granted", "amber", 0),
+        ("claim/local-b", "custom.client.assistant.v1.granted", "amber", 0),
+        ("claim/remote", "custom.client.assistant.v1.granted", "birch", 0),
+        ("claim/verified", "custom.client.assistant.v1.granted", "amber", 1),
+        ("claim/marked", "custom.client.assistant.v1.granted", "amber", 0),
+        ("claim/policy", "custom.client.assistant.v1.policy", "amber", 0),
+        ("claim/revoked", "custom.client.assistant.v1.revoked", "amber", 0),
+    ] {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h568eec89a376 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
+             VALUES(?1,?1,?2,?3,'person/operator',1,?4,'{}')",
+            rusqlite::params![id, kind, origin, authenticated],
+        ).unwrap();
+    }
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hac4604f86ba0 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES('claim/marked')", [],
+    ).unwrap();
+    let checks = pending_assistant_grant_checks(&connection, "amber").unwrap();
+    assert_eq!(checks.len(), 3);
+    for (check, id) in checks[..2].iter().zip(["claim/local-a", "claim/local-b"]) {
+        assert_eq!(check.name, "assistant-grant-provenance");
+        assert_eq!(check.status, "warn");
+        assert_eq!(check.message, format!(
+            "{id}: grant predates local-append provenance; re-issue; kind=custom.client.assistant.v1.granted; origin=amber; actor=person/operator"
+        ));
+    }
+    assert!(checks[2].message.starts_with("claim/remote: grant lacks local-append provenance"));
+    assert!(checks[2].message.contains("issuance age unknown"));
+    assert!(!checks[2].message.contains("predates"));
+    connection.execute(/* sqlite-large-value: allow-for-now lv-he965ae9e187f owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
+    assert!(pending_assistant_grant_checks(&connection, "amber").unwrap().is_empty());
+}
+
+#[test]
+fn doctor_lists_subject_maintenance_for_authenticated_membership_retries() {
+    let store = Store::open_memory("amber").unwrap();
+    let connection = store.connection.lock().expect("fixture writer");
+    for (id, subject, origin, sequence, authenticated, kind) in [
+        ("claim/a", "grant/consumed", "birch", 7, 1, "custom.client.assistant.v1.granted"),
+        ("claim/b", "grant/queued", "birch", 7, 1, "custom.client.assistant.v1.granted"),
+        ("claim/c", "grant/unrelated", "cedar", 8, 1, "custom.client.assistant.v1.granted"),
+        ("claim/revoke", "grant/pending-revoke", "cedar", 9, 0, "custom.client.assistant.v1.revoked"),
+    ] {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-he1ce05c0581f owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence)
+             VALUES(?1,?2,?3,?4,'person/operator',?5,?6,'{}','key/birch',?5)",
+            rusqlite::params![id, subject, kind, origin, sequence, authenticated],
+        ).unwrap();
+    }
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h20114a3e8154 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
+         VALUES('birch','key/birch',7,7,7,'claim/a')", [],
+    ).unwrap();
+    let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
+    assert_eq!(checks.len(), 2);
+    assert!(checks.iter().all(|check| check.name == "assistant-grant-provenance" && check.status == "warn"));
+    assert!(checks.iter().any(|check| check.message.contains("subject=grant/queued")
+        && check.message.contains("writer membership revalidation queued: birch")));
+    assert!(checks.iter().any(|check| check.message.contains("subject=grant/pending-revoke")
+        && check.message.contains("unauthenticated grant, policy or revocation evidence")));
+    assert!(checks.iter().all(|check| check.message.contains("generic credential rejection")));
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h25f52ee4e4eb owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_retractions SET claim_id='claim/b' WHERE writer='birch'", [],
+    ).unwrap();
+    let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
+    assert_eq!(checks.len(), 1);
+    assert!(checks[0].message.contains("subject=grant/pending-revoke"));
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h28b4c5d9b4eb owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
+    assert!(assistant_grant_subject_maintenance_checks(&connection).unwrap().is_empty());
+}
+
+#[test]
 fn doctor_flags_low_descriptor_limits_and_high_usage() {
     let low = descriptor_usage_check(256, 8192, Some(92));
     assert_eq!(low.status, "warn");

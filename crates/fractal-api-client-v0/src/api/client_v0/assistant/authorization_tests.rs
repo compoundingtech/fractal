@@ -53,6 +53,9 @@ async fn fixture_for_owner_and_principal(scopes: &[&str], pin_trust: bool, owner
             AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
+    // Owner pin responses precede bounded attachment reconciliation. Read-proof
+    // fixtures begin only after the real maintenance path lifts the bearer fence.
+    while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
     fixture.state.store.start_agent_roster_refresher().unwrap();
     crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
     fixture.state.store.start_attention_list_refresher().unwrap();
@@ -99,6 +102,108 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
     let status=response.status();
     let bytes=to_bytes(response.into_body(),64*1024).await.unwrap();
     (status,serde_json::from_slice(&bytes).unwrap(),bytes.len())
+}
+
+#[tokio::test]
+async fn p1_owner_transitions_ignore_wrong_origin_overlays_but_fence_the_subject_head() {
+    for kind in [POLICY, REVOKED] {
+        let fixture = fixture(SCOPES, false).await;
+        let subject = subject(&fixture.grant).unwrap();
+        let granted = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
+        let peer = Store::open_memory("wrong-origin").unwrap();
+        // These overlays must be authenticated data from the wrong issuer.
+        // An unsigned import instead fences the subject until it authenticates.
+        const FLEET: &str = "86700000-0000-4000-8000-000000000001";
+        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let peer_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        for store in [&*fixture.state.store, &peer] {
+            store.bind_fleet(FLEET).unwrap();
+            store.pin_fleet_anchor(anchor.public()).unwrap();
+        }
+        fixture.state.store.set_member_key(Some(anchor.clone())).unwrap();
+        peer.set_member_key(Some(peer_key.clone())).unwrap();
+        fixture.state.store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+        fixture.state.store.append_claim(&ClaimInput {
+            subject: "host/wrong-origin".into(), kind: "fleet.member-admitted".into(),
+            actor: Some(OWNER.into()),
+            fields: serde_json::from_value(json!({
+                "fleet_id": FLEET, "member_key": peer_key.public(),
+                "via": "invite", "mode": "listening", "writer_floor": 0,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let replicate = |from: &Store, to: &Store| {
+            let exchange = from.export_replication_exchange_answering(
+                FLEET, &to.replication_inventory().unwrap(),
+                &to.replication_signature_requests().unwrap(),
+            ).unwrap();
+            to.receive_replication_exchange(from.origin(), FLEET, &exchange).unwrap();
+            to.validate_replication_backlog().unwrap();
+            to.project_replication_backlog().unwrap();
+        };
+        replicate(&fixture.state.store, &peer);
+        while !peer.advance_assistant_grant_authority_backfill().unwrap() {}
+        while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+        let overlay = || {
+            let mut value = fields(&granted).unwrap().clone();
+            if kind == POLICY {
+                value["policy_revision"] = json!(999);
+                value["expires_at_unix_ms"] = json!(1);
+                value["scopes"] = json!([]);
+            }
+            let claim = peer.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some(OWNER.into()),
+                fields: serde_json::from_value(value).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            replicate(&peer, &fixture.state.store);
+            assert!(fixture.state.store.claim_by_id(&claim.id).unwrap().is_some(),
+                "wrong-origin evidence must remain in raw history without becoming authority");
+            assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap().is_none(),
+                "receipt must fence the subject before background authentication");
+            while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+            assert!(fixture.state.store.claim_has_authenticated_member_writer(&claim.id).unwrap(),
+                "wrong-origin filtering must be exercised after writer authentication");
+            assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap().is_some());
+        };
+
+        overlay();
+        let policy = serde_json::from_value::<AssistantGrantPolicy>(json!({
+            "api_version": CLIENT_API_VERSION, "scopes": SCOPES, "expires_in_seconds": 86400,
+            "disclosure_consent": true, "consent_evidence": "recorded owner consent",
+            "minimal_read_mode": "approval-once",
+        })).unwrap();
+        let Json(renewed) = update_policy(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()), AxumPath(fixture.grant.clone()),
+            Json(policy)).await.unwrap();
+        assert_eq!(renewed["policy_revision"], 2);
+        assert_eq!(renewed["revoked"], false);
+        let renewed_claim = effective(&fixture.state, &granted).unwrap();
+        assert_eq!(renewed_claim.body["evidence"], json!([granted.id]));
+
+        overlay();
+        let Json(pinned) = pin(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()), AxumPath(fixture.grant.clone()),
+            Json(fixture.trust_request())).await.unwrap();
+        assert_eq!(pinned["policy_revision"], 3);
+        assert_eq!(pinned["read_trust"]["key_id"], "approval-key/test");
+        let pinned_claim = effective(&fixture.state, &granted).unwrap();
+        assert_eq!(pinned_claim.body["evidence"], json!([renewed_claim.id]));
+
+        overlay();
+        let Json(revoked) = revoke(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone())).await.unwrap();
+        assert_eq!(revoked["revoked"], true);
+        let revocation = latest(&fixture.state, &subject, REVOKED).unwrap().unwrap();
+        assert_eq!(revocation.origin, granted.origin);
+        assert_eq!(revocation.body["evidence"], json!([pinned_claim.id]));
+        assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").is_err());
+        assert_eq!(fixture.request("/v1/client/assistant/summary", None).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(pin(State(fixture.state.clone()), Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()), Json(fixture.trust_request())).await.unwrap_err().status,
+            StatusCode::FORBIDDEN);
+    }
 }
 
 #[tokio::test]
