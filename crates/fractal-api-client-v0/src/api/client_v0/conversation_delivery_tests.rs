@@ -130,6 +130,7 @@ impl AnnotatedPage {
             None,
             CLIENT_MAX_PAGE_ITEMS,
             true,
+            &mut conversation_blocks::NativeReadAdmission::default(),
         )
         .unwrap()
         .items
