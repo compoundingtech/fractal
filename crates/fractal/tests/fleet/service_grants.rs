@@ -92,19 +92,28 @@ async fn assert_status(node: &Node, grant: &Grant, expected: u16) {
         "{} grant {}: {body}\n{}", node.name, grant.id, node.logs());
 }
 
-// With the counterexample, assistant grant 4 (index 3) and service grant 7 (index 6)
-// are active, well-formed opposite-profile grants for assistant/chatgpt. The
-// candidate suspends both: it refuses with the conflict (409 grant-profile-conflict)
-// before the service-profile refusal (403), so grant 7 answers 409, not 403.
-// Grant 3 (index 2) has a non-assistant scope,
-// so it is malformed for conflicts and stays a plain 403 service refusal.
+// The valid Assistant credential (index 3) is suspended by retained opposite-profile
+// evidence. The historical Service-on-assistant credential (index 6) is not a valid
+// Service principal: strict bearer validation refuses it before conflict detection.
+// Grant 3 (index 2) also has a non-assistant scope, so it stays a plain 403 refusal.
 fn candidate_counterexample_status(index: usize) -> u16 {
-    if index == 3 || index == 6 { 409 } else { 403 }
+    if index == 3 { 409 } else { 403 }
 }
 
 async fn assert_candidate_counterexample(node: &Node, grants: &[Grant]) {
     for (index, grant) in grants.iter().enumerate() {
-        assert_status(node, grant, candidate_counterexample_status(index)).await;
+        if index == 3 || index == 6 {
+            let (status, body) = auth_response(node, grant).await;
+            assert_eq!(status, candidate_counterexample_status(index), "{body}\n{}", node.logs());
+            let error: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(error["code"],
+                if index == 3 { "grant-profile-conflict" } else { "forbidden" }, "{body}");
+            if index == 6 {
+                assert_eq!(error["message"], "invalid service principal", "{body}");
+            }
+        } else {
+            assert_status(node, grant, candidate_counterexample_status(index)).await;
+        }
     }
 }
 
@@ -311,7 +320,14 @@ fn authority_history(node: &Node) -> Vec<(String, String)> {
     }).unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 
-fn assert_authority_projection_ready(node: &Node) {
+async fn assert_authority_projection_ready(node: &Node) {
+    // Health means serving, not that the asynchronously scheduled backfill finished.
+    wait_until("authority backfill becomes ready after daemon startup", 30, || async {
+        let reader = rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap();
+        authority_backfill_progress(&reader).1
+    }).await;
     let version: String = rusqlite::Connection::open_with_flags(
         node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ).unwrap().query_row(
@@ -452,13 +468,7 @@ async fn authority_projection_resumes_after_daemon_is_killed_with_committed_part
     assert_eq!(authority_history(&node), history, "process kill must not alter raw evidence");
 
     node.start().await;
-    wait_until("authority backfill becomes ready after daemon restart", 30, || async {
-        let reader = rusqlite::Connection::open_with_flags(
-            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ).unwrap();
-        authority_backfill_progress(&reader).1
-    }).await;
-    assert_authority_projection_ready(&node);
+    assert_authority_projection_ready(&node).await;
     let reader = rusqlite::Connection::open_with_flags(
         &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ).unwrap();
@@ -500,7 +510,7 @@ async fn previous_release_authorizes_and_revokes_after_authority_projection_roll
     node.binary = PathBuf::from(st3());
     node.start().await;
     assert_eq!(node.state_dir(), state);
-    assert_authority_projection_ready(&node);
+    assert_authority_projection_ready(&node).await;
     // The old standalone issuer had no member signature or local-append marker.
     // The upgrade preserves evidence but requires its owner to re-issue.
     assert_auth(&node, &active, false).await;
@@ -528,7 +538,7 @@ async fn previous_release_authorizes_and_revokes_after_authority_projection_roll
     node.stop();
     node.binary = PathBuf::from(st3());
     node.start().await;
-    assert_authority_projection_ready(&node);
+    assert_authority_projection_ready(&node).await;
     assert_auth(&node, &active, false).await;
     assert_auth(&node, &revoked, false).await;
     assert_retained(&node, &[active, revoked]).await;
