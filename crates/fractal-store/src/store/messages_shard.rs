@@ -475,6 +475,7 @@ impl FleetAuthority for GraphAuthority {
         FleetAuthority::fleet_generation(&self.graph()?.graph)
     }
 
+
     fn fleet_membership(&self) -> anyhow::Result<smallclaims::fleet::Membership> {
         FleetAuthority::fleet_membership(&self.graph()?.graph)
     }
