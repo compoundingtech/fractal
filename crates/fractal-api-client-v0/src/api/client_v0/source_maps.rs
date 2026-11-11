@@ -15,8 +15,9 @@ fn not_shown() -> ApiError {
     forbidden("Fractal does not show this source to this device")
 }
 
-/// `{subject, revision, map, revisions}` for one agent or mission revision; not found when that
-/// revision has no recorded map.
+/// `{subject, revision, current?, map, kdl, revisions}` for one agent or mission revision (the
+/// current one when none is named); not found when that revision has no recorded map. `kdl` is
+/// the revision's canonical redacted KDL, the text the map's node paths name.
 pub async fn get(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
@@ -33,14 +34,14 @@ pub async fn get(
     let (snapshot, value) = blocking_store(move || {
         state.store.read_snapshot(|index| {
             let (revision, map) = state.store.source_map(&subject, query.revision.as_deref())?;
-            let value = match map {
-                Some(map) => {
-                    let revisions = state.store.source_map_revisions(&subject)?;
-                    Some(json!({"subject": subject, "revision": revision, "map": map, "revisions": revisions.revisions}))
-                }
-                None => None,
-            };
-            Ok((client_snapshot_at(&state, index), value))
+            let Some(map) = map else { return Ok((client_snapshot_at(&state, index), None)) };
+            let kdl = revision_kdl(&state, &subject, &revision, index)?;
+            let revisions = state.store.source_map_revisions(&subject)?;
+            let mut value = json!({"subject": subject, "revision": revision, "map": map, "kdl": kdl, "revisions": revisions.revisions});
+            if let Some(current) = revisions.current {
+                value["current"] = json!(current);
+            }
+            Ok((client_snapshot_at(&state, index), Some(value)))
         })
     })
     .await?;
@@ -49,6 +50,21 @@ pub async fn get(
         return Err(validation("the source map exceeds the client response limit"));
     }
     Ok((Extension(snapshot), Json(value)))
+}
+
+/// Canonical KDL of an exact subject revision, environment values redacted. Agents are keyed by
+/// their content revision here, not by the declaration claim id `agent-declaration.get` names.
+fn revision_kdl(state: &AppState, subject: &str, revision: &str, index: u64) -> Result<String, FractalError> {
+    let missing = || FractalError::new("internal", format!("{subject}@{revision} has a source map but no declaration"));
+    if subject.starts_with("mission/") {
+        let (spec, _) = state.store.mission_declaration(subject, Some(revision), index)?.ok_or_else(missing)?;
+        return Ok(crate::mission_render::render_mission_kdl(&spec)?.text);
+    }
+    let mut tree = state.store.agent_declaration_at(subject, revision)?.ok_or_else(missing)?;
+    crate::graph::redact_agent_env_values(&mut tree);
+    let uris = state.store.declared_resource_uris(&crate::graph::declared_resources(&tree))
+        .map_err(|error| FractalError::new("internal", error.to_string()))?;
+    crate::graph::render_agent_desired_kdl(&tree, &uris)
 }
 
 #[derive(Deserialize)]
@@ -100,8 +116,15 @@ mod tests {
     const NAMED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const OTHER: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
-    /// One `source.mapped` claim naming `NAMED`, plus a stored blob (`OTHER`) that no map names.
-    fn record(state: &AppState, revision: &str) {
+    /// Publish the mission, then record one `source.mapped` claim for its revision naming
+    /// `NAMED`, plus a stored blob (`OTHER`) that no map names. Returns the revision.
+    fn record(state: &AppState) -> String {
+        let source = "version 2\nmission \"example/mapped\" state=\"ready\" {\n goal \"Mapped goal\"\n}\n";
+        let intent = crate::graph::parse_intent(source, "source-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "mapped", Some("person/operator")).unwrap();
+        let revision = intent.missions["example/mapped"].revision.clone();
+        let revision = revision.as_str();
         let mut connection = state.store.connection.write();
         let tx = connection.transaction().unwrap();
         for (hash, text) in [(NAMED, "export default mission({})\n"), (OTHER, "private bytes\n")] {
@@ -119,6 +142,7 @@ mod tests {
             None, &json!({ "fields": fields }), &[], None,
         ).unwrap();
         tx.commit().unwrap();
+        revision.to_owned()
     }
 
     fn session(scopes: &[&str]) -> ClientSession {
@@ -139,8 +163,8 @@ mod tests {
     async fn source_reads_require_the_declarations_grant() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "source-node");
-        record(&state, "r1");
-        for error in [map(&state, &["read.projections"], "r1").await.unwrap_err(), text(&state, &["read.projections"], NAMED, "r1").await.unwrap_err()] {
+        let r1 = record(&state);
+        for error in [map(&state, &["read.projections"], &r1).await.unwrap_err(), text(&state, &["read.projections"], NAMED, &r1).await.unwrap_err()] {
             assert_eq!(error.status, StatusCode::FORBIDDEN);
             assert_eq!(error.message, "Fractal does not show this source to this device");
         }
@@ -150,11 +174,16 @@ mod tests {
     async fn source_map_answers_mapped_revisions_and_not_found_otherwise() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "source-node");
-        record(&state, "r1");
-        let value = map(&state, &["read.declarations"], "r1").await.unwrap();
+        let r1 = record(&state);
+        let value = map(&state, &["read.declarations"], &r1).await.unwrap();
         assert_eq!(value["subject"], SUBJECT);
-        assert_eq!(value["revision"], "r1");
+        assert_eq!(value["revision"], r1);
+        assert_eq!(value["current"], r1);
         assert_eq!(value["map"]["files"][0]["blob_hash"], NAMED);
+        assert!(value["kdl"].as_str().unwrap().contains("goal \"Mapped goal\""), "{value}");
+        let current = get(State(state.clone()), Extension(session(&["read.declarations"])), Query(SourceMapQuery { subject: SUBJECT.into(), revision: None }))
+            .await.map(|(_, Json(value))| value).unwrap();
+        assert_eq!(current, value);
         assert_eq!(map(&state, &["read.declarations"], "unmapped").await.unwrap_err().status, StatusCode::NOT_FOUND);
     }
 
@@ -162,12 +191,12 @@ mod tests {
     async fn source_blob_serves_only_files_the_revision_map_names() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "source-node");
-        record(&state, "r1");
-        let named = text(&state, &["read.declarations"], NAMED, "r1").await.unwrap();
+        let r1 = record(&state);
+        let named = text(&state, &["read.declarations"], NAMED, &r1).await.unwrap();
         assert_eq!(named, json!({"hash": NAMED, "text": "export default mission({})\n"}));
         // Stored, but named by no map of this revision; and a named file under an unmapped revision.
-        assert_eq!(text(&state, &["read.declarations"], OTHER, "r1").await.unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(text(&state, &["read.declarations"], OTHER, &r1).await.unwrap_err().status, StatusCode::NOT_FOUND);
         assert_eq!(text(&state, &["read.declarations"], NAMED, "unmapped").await.unwrap_err().status, StatusCode::NOT_FOUND);
-        assert_eq!(text(&state, &["read.declarations"], "NOT-A-HASH", "r1").await.unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(text(&state, &["read.declarations"], "NOT-A-HASH", &r1).await.unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
