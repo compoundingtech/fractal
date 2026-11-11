@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive restart authority and outcome fencing contracts (unit 8a)",
+  "replay": {"status": "changed", "detail": "Pending jobs can transition to unknown-after-host-loss; recovery never requeues them or reopens terminal/unknown jobs."},
+  "schema": {"status": "none", "detail": "No database changes. Pure release-pin and resolution types only."},
+  "rules": {"status": "none", "detail": "INACTIVE: no boot hook, launcher caller or activation. Admission remains not wired until 4c-2 and explicit activation. Authority evidence is a trusted adapter contract, not request authority."},
+  "compatibility": {"status": "changed", "detail": "Same-node recovery requires the unchanged host, member key and admitted claim, an open window and authenticated recovery record. Launch and recovery share B6 receipt identity/outcome validation; exit codes never decide outcomes."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "No policy values or defaults; native execution and cargo checks not run."},
+  "recovery": {"status": "changed", "detail": "Unit 8 contracts fence uncertain launches without release, relaunch or host re-pinning. Pure tests cover unchanged authority, closed/unauthenticated/rotated evidence, pending states and receipt identity."}
+}
