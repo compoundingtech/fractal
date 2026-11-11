@@ -517,6 +517,29 @@ pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> R
     Ok(response)
 }
 
+/// One admitted, credentialed read hop that never follows a redirect: a 3xx comes back as itself,
+/// for a caller that maps it (the client GitHub plugin reads report `moved` and never fetch it).
+pub async fn send_read_once(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    let url = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .map(|request| request.url().to_string())
+        .context("GitHub read request cannot be built")?;
+    let request_auth = auth.request_scope();
+    let mut selected = if url.ends_with("/graphql") { request_auth.clone() } else { read_auth_for_url(&url, &request_auth) };
+    let fallback = match &selected {
+        GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
+        _ => None,
+    };
+    let principal = selected.cache_principal().to_owned();
+    let mut response = send_selected_read(request, &mut selected).await?;
+    let ineligible = request_auth.used_fallback()
+        || fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        || selected.cache_principal() != principal;
+    response.extensions_mut().insert(ReadCacheEligibility(!ineligible));
+    Ok(response)
+}
+
 async fn send_selected_read(request: reqwest::RequestBuilder, auth: &mut GithubAuth) -> Result<reqwest::Response> {
     let read = request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request| {
         request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD ||
