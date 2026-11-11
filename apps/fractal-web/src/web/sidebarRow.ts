@@ -3,11 +3,12 @@ import { statuses, type SidebarMissionInfo } from '../../../../packages/fractal-
 import type { Agent, DataSource, Feed } from '../data/source.ts'
 import type { FeedSync } from '../data/feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
-import type { AgentSubagent } from '../data/source.ts'
+import type { AgentSubagent, AgentWork } from '../data/source.ts'
 import type { Attention, Mission } from '@fractal/client/schema'
 import * as Option from 'effect/Option'
 import { isWaitingForAnswer } from '../data/attention.ts'
 import { contextOccupancy } from '../data/contextOccupancy.ts'
+import { missionDisplayTitle } from '../missions/missionTitle.ts'
 
 const missionSlug = (id: string): string => id.split('/').at(-1) ?? id
 
@@ -44,6 +45,17 @@ export const sidebarMissionFeedsAtom = (source: DataSource) => Atom.make(get => 
   attentionSync: source.sync === undefined ? undefined : get(source.sync.attention),
 }))
 
+const workStepName = (work: AgentWork): string => work.title || work.goal || work.path
+
+// WorkLabel has no generation field. A matching step is strongest evidence; otherwise
+// require the summary's generation to agree with the mission's current run generation.
+const workRun = ({ mission, work }: { readonly mission: Mission | undefined; readonly work: AgentWork | undefined }) => {
+  const runs = mission?.run_details?.filter(run => run.id === work?.runId) ?? []
+  return runs.find(run => run.current_steps.some(step => step.id === work?.id) ||
+    Option.getOrUndefined(run.steps)?.some(step => step.id === work?.id)) ??
+    runs.find(run => run.generation_id === mission?.run_generations[run.id])
+}
+
 /** Join retained feeds only: no per-seat read, queue-size estimate, or synthetic decision handle. */
 export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: {
   readonly agent: Agent
@@ -53,30 +65,32 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
   const work = agent.currentWork?.[0]
   const id = work?.missionId ?? agent.mission
   if (id === undefined) return { _tag: 'None' }
-  const mission = missions.find(mission => mission.id === id)
-  const runs = mission?.run_details?.filter(run => run.id === work?.runId) ?? []
-  // WorkLabel has no generation field. A matching step is strongest evidence; otherwise
-  // require the summary's generation to agree with the mission's current run generation.
-  const run = runs.find(run => run.current_steps.some(step => step.id === work?.id) ||
-    Option.getOrUndefined(run.steps)?.some(step => step.id === work?.id)) ??
-    runs.find(run => run.generation_id === mission?.run_generations[run.id])
+  const titleOf = (missionId: string, source: AgentWork | undefined) =>
+    missionDisplayTitle({ title: missions.find(mission => mission.id === missionId)?.title ?? missionId.replace(/^mission\//, ''), work: source })
+  const run = workRun({ mission: missions.find(mission => mission.id === id), work })
   const question = attention.find(card => isWaitingForAnswer(card) &&
     ((work !== undefined && (card.step_run_id === work.id || card.blocked?.step_run_id === work.id || card.source_id === work.id)) ||
       card.conversation_id === agent.ref || card.conversation_ids?.some(id => id === agent.ref) ||
       card.requester_id === agent.ref || card.source_id === agent.ref) &&
     (card.detail.trim().length > 0 || card.title.trim().length > 0))
-  const queued = new Map<string, { readonly id: string; readonly slug: string }>()
+  const others = new Map<string, AgentWork>()
+  for (const other of agent.currentWork ?? []) if (other.missionId !== id && !others.has(other.missionId)) others.set(other.missionId, other)
+  const queued = new Map<string, { readonly id: string; readonly slug: string; readonly title: string }>()
   for (const upcoming of agent.upcomingWork ?? []) {
-    if (upcoming.missionId === id || queued.has(upcoming.missionId)) continue
-    queued.set(upcoming.missionId, { id: upcoming.missionId, slug: missionSlug(upcoming.missionId) })
+    if (upcoming.missionId === id || others.has(upcoming.missionId) || queued.has(upcoming.missionId)) continue
+    queued.set(upcoming.missionId, { id: upcoming.missionId, slug: missionSlug(upcoming.missionId), title: titleOf(upcoming.missionId, upcoming) })
   }
   return {
-    _tag: 'Mission', id, slug: missionSlug(id),
+    _tag: 'Mission', id, slug: missionSlug(id), title: titleOf(id, work),
+    ...(others.size === 0 ? {} : { alsoCurrent: [...others.values()].map(other => {
+      const run = workRun({ mission: missions.find(mission => mission.id === other.missionId), work: other })
+      return { id: other.missionId, slug: missionSlug(other.missionId), title: titleOf(other.missionId, other), progress: run === undefined ? { _tag: 'Unknown' as const } : { _tag: 'Known' as const, ...run.progress }, step: { _tag: 'Step' as const, name: workStepName(other) } }
+    }) }),
     progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
     eta: run === undefined || ['completed', 'failed', 'cancelled'].includes(run.status) || Option.isSome(run.completed_at)
       ? undefined : Option.getOrUndefined(run.eta),
     step: question !== undefined ? { _tag: 'Waiting', question: question.detail.trim() || question.title } :
-      work === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: work.title || work.path },
+      work === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: workStepName(work) },
     queued: [...queued.values()],
   }
 }

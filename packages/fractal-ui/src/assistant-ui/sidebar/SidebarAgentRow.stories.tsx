@@ -248,6 +248,7 @@ export const scenarioExemptions: readonly string[] = [
   'DensitiesAndChildren:contract-fixture',
   'FrozenWorkingVersusIdle:contract-fixture',
   'HoverCardKnown:contract-fixture',
+  'HoverCardMissions:contract-fixture',
   'HoverCardUnknown:contract-fixture',
   'PhoneFocusNoHover:contract-fixture',
   'PhoneTouchTargets:contract-fixture',
@@ -257,6 +258,23 @@ export const scenarioExemptions: readonly string[] = [
 ]
 type Story = StoryObj
 export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
+const missionsRow: Row = { ...knownRow, ref: 'agent/missions', id: 'missions', title: 'Mission session', description: 'Fix the review gate',
+  mission: 'mission/example/review', missionContext: {
+    _tag: 'Mission', id: 'mission/example/review', slug: 'review', title: 'example/review', progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Fix the review gate' },
+    queued: Array.from({ length: 7 }, (_, index) => ({ id: `mission/person-ask/${index}`, slug: `0123456789abcdef${index}`, title: `Queued goal ${index + 1}` })),
+  } }
+export const HoverCardMissions: Story = { tags: ['critical'], name: 'Hover card · current and queued missions', render: () => <main {...stylex.props(styles.root)}><CardPair row={missionsRow} /></main>, play: async ({ canvasElement }) => {
+  // The card's module loads on demand.
+  const missions = within(await within(canvasElement).findByTestId('hover-missions', {}, { timeout: hoverSettleTimeout }))
+  const items = missions.getAllByRole('listitem')
+  await expect(items[0]).toHaveTextContent('example/review2/5Fix the review gate')
+  // About five rows: the current mission and four queued, then the remainder as a count.
+  await expect(items).toHaveLength(5)
+  await expect(missions.getByText('+3 more')).toBeVisible()
+  await expect(canvasElement.textContent).not.toContain('0123456789abcdef')
+  // The goal is the current step here, so the card does not say it twice.
+  await expect(within(canvasElement).getByTestId('hover-facts').textContent?.match(/Fix the review gate/g)).toHaveLength(1)
+} }
 export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
