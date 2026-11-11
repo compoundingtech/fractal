@@ -134,6 +134,9 @@ pub struct Request {
     /// The program bundles the set declares, base64 by sha256, as `ApplyRequest` carries them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub program_bundles: BTreeMap<String, String>,
+    /// Apply only: recorded beside the commit, excluded from every digest and the preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_map: Option<fractal_schema::source_map::SourceMap>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

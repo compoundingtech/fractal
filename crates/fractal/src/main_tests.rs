@@ -8718,6 +8718,7 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             unmanaged_allow: vec![],
             force: false,
             reason: None,
+            source_map: None,
             dry_run: false,
             at_index: None,
             actor: Some("person/test".into()),
