@@ -116,6 +116,7 @@ fn attach_default_probe_worker() -> Result<()> {
                             "one".into(),
                             24,
                             80,
+                            None,
                         )),
                     });
                 }
@@ -211,7 +212,7 @@ fn attach_redraw_cost() {
         cursor: None,
         stale: None,
         ended: None,
-        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120)),
+        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120, None)),
     });
     if std::env::var_os("FRACTAL_TUI_BENCH_ALERT").is_some() {
         ui.world.attention = Load::Ready(vec![ask(AGENT)]);
