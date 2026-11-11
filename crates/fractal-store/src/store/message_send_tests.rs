@@ -144,9 +144,15 @@ fn message_operation_conflict_receipt_cost_depends_on_its_own_history() {
             tx.commit().unwrap();
         }
         FULL_REPLAYS.with(|replays| replays.set(0));
-        let work = SqliteWorkScope::start();
-        store.project_replication_backlog().unwrap();
-        let cost = work.finish();
+        // Reader discovery may page through retained evidence before lending the writer.
+        // Measure the projection loan, whose work must stay keyed to this operation.
+        let mut work = None;
+        store.project_replication_backlog_with_progress("message-conflict-cost", |progress| {
+            if progress.phase == "project-incremental" && work.is_none() {
+                work = Some(SqliteWorkScope::start());
+            }
+        }).unwrap();
+        let cost = work.unwrap().finish();
         assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
         eprintln!(
             "message conflict receipt prior_claims={count} statements={} vm_steps={} fullscan_steps={}",

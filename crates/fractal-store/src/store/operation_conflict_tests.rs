@@ -8,6 +8,7 @@ fn operation_conflict_receipts_match_full_replay_in_opposite_orders() {
     for kind in ["custom.test.observed", "intent.desired"] {
         let sources = [Store::open_memory("early").unwrap(), Store::open_memory("late").unwrap()];
         let mut ids = Vec::new();
+        let subject = if kind == "intent.desired" { "exec/conflict" } else { "custom/test/conflict" };
         for (number, source) in sources.iter().enumerate() {
             let mut connection = source.connection.write();
             let tx = connection.transaction().unwrap();
@@ -16,7 +17,7 @@ fn operation_conflict_receipts_match_full_replay_in_opposite_orders() {
             } else { json!({"fields":{"number":number}}) };
             body["_operation"] = json!({"id":"op/conflict-parity",
                 "request_digest":if number == 0 { "digest-z" } else { "digest-a" }});
-            ids.push(append_claim_record_tx(&tx, &source.origin, "exec/conflict", kind,
+            ids.push(append_claim_record_tx(&tx, &source.origin, subject, kind,
                 None, &body, &[], None).unwrap().id);
             tx.commit().unwrap();
         }
@@ -32,6 +33,7 @@ fn operation_conflict_receipts_match_full_replay_in_opposite_orders() {
                 let exchange = exchange_from(source, &target.replication_inventory().unwrap());
                 target.receive_replication_exchange(&source.origin, TEST_FLEET, &exchange).unwrap();
                 target.validate_replication_backlog().unwrap();
+                assert!(target.claim_by_id(&ids[index]).unwrap().is_some(), "{kind}: claim must be admitted");
                 target.project_replication_backlog_with_log("conflict-test", |line| logs.push(line.to_owned())).unwrap();
             }
             assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "{kind}/{reverse}");
@@ -199,7 +201,7 @@ fn operation_conflict_github_event_observers_never_replay_during_receipt() {
                 ("event".into(), json!("checks-failed")),
                 ("observer".into(), json!(format!("observer/github/{}", source.origin))),
                 ("at".into(), json!(format!("2026-11-10T23:0{number}:00.000Z"))),
-                ("detail".into(), json!(format!("observed by {}", source.origin))),
+                ("detail".into(), json!({"observer":source.origin})),
                 ("head_sha".into(), json!(format!("head-{number}"))),
             ]),
             evidence: Vec::new(), expected_subject: None,
@@ -236,7 +238,7 @@ fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
         let mut connection = source.connection.write();
         let tx = connection.transaction().unwrap();
         for number in 0..smallclaims::store::PROJECTION_CHUNK_CLAIMS {
-            append_claim_record_tx(&tx, "source", "custom/multi-chunk", "custom.test.observed",
+            append_claim_record_tx(&tx, "source", "custom/test/multi-chunk", "custom.test.observed",
                 None, &json!({"fields":{"number":number}}), &[], None).unwrap();
         }
         for digest in ["a", "b"] {
@@ -248,9 +250,13 @@ fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
     }
     let target = Store::open_memory("target").unwrap();
     target.bind_fleet(TEST_FLEET).unwrap();
-    let exchange = exchange_from(&source, &target.replication_inventory().unwrap());
-    target.receive_replication_exchange("source", TEST_FLEET, &exchange).unwrap();
-    target.validate_replication_backlog().unwrap();
+    // Replication exports bounded pages; admit every page before testing projection chunks.
+    loop {
+        let exchange = exchange_from(&source, &target.replication_inventory().unwrap());
+        if exchange.envelopes.is_empty() { break; }
+        target.receive_replication_exchange("source", TEST_FLEET, &exchange).unwrap();
+        target.validate_replication_backlog().unwrap();
+    }
     assert!(target.index().unwrap() > smallclaims::store::PROJECTION_CHUNK_CLAIMS as u64);
     target.connection.write().execute(
         /* sqlite-large-value: allow-for-now lv-hf0bbe1f00bc2 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", [],

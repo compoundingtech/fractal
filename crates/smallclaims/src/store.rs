@@ -8871,7 +8871,11 @@ impl Store {
             // No receipt history is read under this loan: only the bounded page's evidence
             // and watermark are committed. The evidence set survives subsequent passes.
             let mut connection = self.connection.write();
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| internal(error)
+                    .with_detail("projection_stage", "begin-immediate")
+                    .with_detail("projection_frontier_unknown", true))?;
             if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
             for (operation, evidence) in conflicts {
                 tx.execute(
@@ -8912,7 +8916,16 @@ impl Store {
         // Finish the backlog observed at entry. New receives can admit more between chunks;
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
-        self.discover_operation_conflicts(target)?;
+        self.discover_operation_conflicts(target).map_err(|error| {
+            // Discovery lends the same writer before the projection chunk. Preserve its
+            // typed contention boundary, health and deferred retry state as for that chunk.
+            let error = crate::error::typed(error);
+            if error.is_sqlite_contention() {
+                self.note_projection_contention();
+                self.log_projection_failure(&error, phase, 0, target, &mut log);
+            }
+            error
+        })?;
         let mut chunked = false;
         let mut processed = 0_u64;
         loop {
