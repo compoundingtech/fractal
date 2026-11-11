@@ -62,11 +62,22 @@ fn a_program_effects_descendant_binds_its_run() {
     let mut line = String::new();
     std::io::BufReader::new(effect.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
     let pid: u32 = line.trim().parse().unwrap();
+    // `$!` is printed before the child has exec'd. Until then /proc shows the forked shell's
+    // environment, which would not exercise a cleared descendant; mid-exec it shows none, which
+    // the walk refuses as Unavailable. `comm` changes first, so read it before `environ`.
+    let proc = |file: &str| std::fs::read(format!("/proc/{pid}/{file}")).unwrap_or_default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut cleared = false;
+    while !cleared && std::time::Instant::now() < deadline {
+        cleared = proc("comm") == b"sleep\n" && proc("environ") == b"MARKER=1\0";
+        if !cleared { std::thread::sleep(std::time::Duration::from_millis(5)); }
+    }
     let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
     let ancestry = harness_ancestor(pid, Some(&peer));
     effect.kill().unwrap();
     let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
     effect.wait().unwrap();
+    assert!(cleared, "the effect's descendant never ran `sleep` with a cleared environment");
     assert_eq!(ancestry, HarnessAncestry::Run(RunCredential::new("secret")));
 }
 
@@ -11860,6 +11871,8 @@ mission "agent-health" state="ready" {
     let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
     assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
+    // Readiness and a queued step are not words from the agent.
+    assert!(resources[0]["last_prose_at"].is_null(), "{}", resources[0]);
 
     let healthy_cut = store.index().unwrap();
     let harness = |driver: &str, incarnation: &str, key: &str| {

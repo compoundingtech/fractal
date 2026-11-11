@@ -19,8 +19,8 @@ const DELTA_LIMIT: usize = 10_000;
 
 /// Claim kinds that no attention source reads, whatever their subject: harness timelines and
 /// usage, messages (attention leaves messages to conversations), transport and workspace
-/// observations, daemon diagnostics, and a person's glasses and arrangements. Lease renewals
-/// move no step's status, run or ask. These are most of a busy host's claims.
+/// observations, daemon diagnostics, and a person's glasses, arrangements and read positions.
+/// Lease renewals move no step's status, run or ask. These are most of a busy host's claims.
 const UNREAD_KINDS: &[&str] = &[
     "harness.timeline",
     "harness.usage",
@@ -35,6 +35,7 @@ const UNREAD_KINDS: &[&str] = &[
     "glass.upserted",
     "glass.deleted",
     "arrangement.edited",
+    "read-position.advanced",
     "work.renewed",
 ];
 

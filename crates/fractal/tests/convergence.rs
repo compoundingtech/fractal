@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v20.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v21.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -129,6 +129,31 @@ fn the_corpus_generates_valid_deployment_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_read_position_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let spec = &corpus()[fractal_schema::read_positions::KIND];
+    let input = world.claim_of(spec, 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let expected = world.nodes[0].store.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.nodes[0].store.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    let actual = world.oracle.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.oracle.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 1);
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1034,6 +1059,22 @@ impl World {
                 idempotency_key: Some(self.fresh("usage")),
             });
         }
+        if spec.kind == fractal_schema::read_positions::KIND {
+            let conversation = self.subject_of("agent", index)?;
+            return Some(ClaimInput {
+                subject: fractal_schema::read_positions::subject(PERSON),
+                kind: spec.kind.clone(),
+                actor: Some(PERSON.into()),
+                fields: BTreeMap::from([
+                    ("owner".into(), json!(PERSON)),
+                    ("conversation".into(), json!(conversation)),
+                    ("at_ms".into(), json!(self.now())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("read")),
+            });
+        }
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = if spec.kind == "message.expired" {
             // Expiry requires existing sent mail. A fresh subject would make every random
@@ -1883,6 +1924,7 @@ const _: () = assert!(NEVER_TRIMS.len() <= 3);
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
+    eprintln!("convergence corpus v21 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2111,7 +2153,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v21.json"
         }))
         .unwrap(),
     )
