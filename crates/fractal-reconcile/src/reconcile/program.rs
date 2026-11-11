@@ -121,7 +121,8 @@ struct Inner {
     /// By step: the attempt and the last host or liveness failure that stopped it.
     faults: HashMap<String, (u32, String)>,
     /// By step: the attempt this engine ended itself (its program finished or its worker was
-    /// terminated). That attempt never starts again, even before the step's new state is written.
+    /// terminated) while it writes the step's new state ([`ProgramEngine::settle`]). No dispatch
+    /// restarts that attempt in between.
     ended: HashMap<String, u32>,
 }
 
@@ -160,12 +161,7 @@ impl ProgramEngine {
         }) {
             return Ok(Dispatched::Running);
         }
-        // A pass may hand over a view read before the attempt ended: one this engine ended, whose
-        // step's new state may not be written yet, or one its step left. Neither starts again.
-        if inner.ended.get(&dispatch.step) == Some(&dispatch.attempt) {
-            return Ok(Dispatched::Left(format!("the program of attempt {} already ended", dispatch.attempt)));
-        }
-        if let Some(reason) = self.left(&dispatch.step, dispatch.attempt)? {
+        if let Some(reason) = self.ended_or_left(&inner, &dispatch.step, dispatch.attempt)? {
             return Ok(Dispatched::Left(reason));
         }
         let generation = match self.ensure_host(&mut inner) {
@@ -198,6 +194,16 @@ impl ProgramEngine {
         inner.running.insert(dispatch.step.clone(), Running { dispatch, generation });
         send(&inner, &message);
         Ok(Dispatched::Started)
+    }
+
+    /// Why `attempt` must not start, read under the engine lock. A pass may hand over a view read
+    /// before the attempt ended: one this engine is ending, whose step's new state is not written
+    /// yet, or one its step left.
+    fn ended_or_left(&self, inner: &Inner, step: &str, attempt: u32) -> Result<Option<String>> {
+        if inner.ended.get(step) == Some(&attempt) {
+            return Ok(Some(format!("the program of attempt {attempt} already ended")));
+        }
+        self.left(step, attempt)
     }
 
     fn runs(&self, dispatch: &Dispatch) -> bool {
@@ -543,27 +549,25 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
-        {
-            let mut inner = self.lock();
-            if !forget(&mut inner, step, attempt, generation) {
-                return Ok(());
-            }
-            inner.ended.insert(step.to_owned(), attempt);
-        }
-        if self.left(step, attempt)?.is_some() {
+        if !self.end(step, attempt, generation, None) {
             return Ok(());
         }
         let exit = &message["exit"];
-        let (status, reason) = match exit["_tag"].as_str() {
-            Some("Success") => match self.write_journal(step, attempt, program, RESULT_KEY, "completed", &json!({"value": exit["value"]}), None) {
-                Ok(_) => ("completed", None),
-                Err(error) => ("failed", Some(format!("the program's result could not be journaled: {error}"))),
-            },
-            _ => ("failed", Some(failure_reason(&exit["error"]))),
-        };
-        self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
-        eprintln!("fractal: program {step} {status}");
-        (self.wake)(step);
+        let written = self.settle(step, attempt, || {
+            let (status, reason) = match exit["_tag"].as_str() {
+                Some("Success") => match self.write_journal(step, attempt, program, RESULT_KEY, "completed", &json!({"value": exit["value"]}), None) {
+                    Ok(_) => ("completed", None),
+                    Err(error) => ("failed", Some(format!("the program's result could not be journaled: {error}"))),
+                },
+                _ => ("failed", Some(failure_reason(&exit["error"]))),
+            };
+            self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
+            Ok(status)
+        })?;
+        if let Some(status) = written {
+            eprintln!("fractal: program {step} {status}");
+            (self.wake)(step);
+        }
         Ok(())
     }
 
@@ -572,20 +576,44 @@ impl ProgramEngine {
     fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
-        {
-            let mut inner = self.lock();
-            if !forget(&mut inner, step, attempt, generation) {
-                return Ok(());
-            }
-            inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
-            inner.ended.insert(step.to_owned(), attempt);
+        if !self.end(step, attempt, generation, Some(&reason)) {
+            return Ok(());
         }
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
-        if self.left(step, attempt)?.is_none() {
-            self.store.set_step_state_unless_terminal(step, "failed", Some(&reason))?;
-        }
+        self.settle(step, attempt, || self.store.set_step_state_unless_terminal(step, "failed", Some(&reason)))?;
         (self.wake)(step);
         Ok(())
+    }
+
+    /// Forget `attempt` of `step` as ended by this engine, with the `fault` that stopped it; false
+    /// when this engine no longer runs exactly that attempt on that host generation.
+    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>) -> bool {
+        let mut inner = self.lock();
+        if !forget(&mut inner, step, attempt, generation) {
+            return false;
+        }
+        if let Some(fault) = fault {
+            inner.faults.insert(step.to_owned(), (attempt, fault.to_owned()));
+        }
+        inner.ended.insert(step.to_owned(), attempt);
+        true
+    }
+
+    /// Write the new state of a step whose `attempt` this engine just ended, unless the step
+    /// already left it; what `write` returned, or `None` when the step had left. Then the attempt
+    /// is no longer held as ended: the store says it ended, or, when the read or write failed, the
+    /// next pass resumes it as before.
+    fn settle<T>(&self, step: &str, attempt: u32, write: impl FnOnce() -> Result<T>) -> Result<Option<T>> {
+        let settled = match self.left(step, attempt) {
+            Ok(Some(_)) => Ok(None),
+            Ok(None) => write().map(Some),
+            Err(error) => Err(error),
+        };
+        let mut inner = self.lock();
+        if inner.ended.get(step) == Some(&attempt) {
+            inner.ended.remove(step);
+        }
+        settled
     }
 
     /// Ping the host; replace one whose last ping went unanswered past its deadline.
