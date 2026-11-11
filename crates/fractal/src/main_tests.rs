@@ -1815,7 +1815,7 @@ fn a_program_effect_acts_as_its_run() {
 /// grant still take only a person or an agent.
 #[test]
 fn a_run_is_a_mission_publication_actor() {
-    for actor in ["person/operator", "agent/fleet/worker", "mission-run/abc"] {
+    for actor in ["person/operator", "agent/example/worker", "mission-run/abc"] {
         assert_eq!(parse_mission_publication_actor(actor).as_deref(), Ok(actor));
     }
     for actor in ["mission-run/", "mission-run/abc/", "mission/abc", "person/", "abc"] {
