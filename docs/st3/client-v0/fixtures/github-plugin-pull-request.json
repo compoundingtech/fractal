@@ -1,0 +1,55 @@
+{
+  "status": "found",
+  "fetched_at": "2026-11-07T06:40:00Z",
+  "stale": false,
+  "item": {
+    "owner": "acme",
+    "repo": "garden",
+    "number": 7,
+    "url": "https://github.com/acme/garden/pull/7",
+    "title": "Water the beds on a schedule",
+    "body": "Adds a scheduler that waters each bed once per day.\n\n## Changes\n\n- `Scheduler` reads bed moisture before watering\n- Skips beds marked `dormant`\n\nCloses #9.\n\n![moisture chart](https://github.com/acme/garden/assets/1/chart.png)\n",
+    "state": "open",
+    "draft": false,
+    "merge_state": "blocked",
+    "review_decision": "changes_requested",
+    "author": {
+      "login": "ada",
+      "url": "https://github.com/ada"
+    },
+    "base_ref": "main",
+    "head_ref": "ada/water-schedule",
+    "head_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "additions": 214,
+    "deletions": 37,
+    "changed_files": 3,
+    "commits": 4,
+    "comments": 2,
+    "created_at": "2026-11-05T09:12:00Z",
+    "updated_at": "2026-11-07T05:58:00Z",
+    "merged_at": null,
+    "closed_at": null,
+    "labels": [
+      {
+        "name": "enhancement",
+        "color": "a2eeef"
+      },
+      {
+        "name": "needs-review",
+        "color": "fbca04"
+      }
+    ],
+    "requested_reviewers": [
+      "grace"
+    ],
+    "closing_issues": [
+      {
+        "owner": "acme",
+        "repo": "garden",
+        "number": 9,
+        "title": "Beds dry out over the weekend",
+        "state": "open"
+      }
+    ]
+  }
+}
