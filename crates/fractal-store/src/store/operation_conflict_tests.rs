@@ -41,13 +41,12 @@ fn operation_conflict_receipts_match_full_replay_in_opposite_orders() {
             let health = target.replication_status(false, None, &[]).unwrap();
             let conflict = health.unhealthy.iter().find(|row| row.error_code.as_deref() == Some("operation-conflict")).unwrap();
             let detail: Value = serde_json::from_str(conflict.error_message.as_ref().unwrap()).unwrap();
-            assert_eq!(detail["operation_conflict_count"], 1);
+            assert_eq!(target.idempotency_conflicts(1).unwrap().0, 1);
             assert_eq!(detail["projection_operation_id"], "op/conflict-parity");
             assert!(ids.iter().any(|id| detail["projection_claim_id"] == *id));
             let log = logs.iter().find_map(|line| line.strip_prefix("fractal: projection failure detail ")).unwrap();
             let log: Value = serde_json::from_str(log).unwrap();
             assert_eq!(log["code"], "operation-conflict");
-            assert_eq!(log["operation_conflict_count"], 1);
             assert_eq!(log["operation_id"], "op/conflict-parity");
             assert!(ids.iter().any(|id| log["previous_claim_id"] == *id));
             answers.push(incremental);
@@ -59,13 +58,14 @@ fn operation_conflict_receipts_match_full_replay_in_opposite_orders() {
 #[test]
 fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
     let store = Store::open_memory("fixture").unwrap();
+    let operation_id = format!("op/large-conflict-{}", "x".repeat(300));
     {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         for number in 0..=OPERATION_CONFLICT_REFOLD_CLAIMS {
             let mut body = json!({"subject":"exec/large-conflict","kind":"exec","desired":{"number":number}});
             if number == 0 {
-                body["_operation"] = json!({"id":"op/large-conflict","request_digest":"digest-z"});
+                body["_operation"] = json!({"id":operation_id,"request_digest":"digest-z"});
             }
             append_claim_record_tx(&tx, "peer", "exec/large-conflict", "intent.desired", None,
                 &body, &[], None).unwrap();
@@ -85,7 +85,7 @@ fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
         let tx = connection.transaction().unwrap();
         append_claim_record_tx(&tx, "peer", "exec/large-conflict", "intent.desired", None,
             &json!({"subject":"exec/large-conflict","kind":"exec","desired":{"number":"new"},
-                "_operation":{"id":"op/large-conflict","request_digest":"digest-a"}}), &[], None).unwrap();
+                "_operation":{"id":operation_id,"request_digest":"digest-a"}}), &[], None).unwrap();
         append_claim_record_tx(&tx, "peer", "custom/later-conflict", "custom.test.observed", None,
             &json!({"fields":{},"_operation":{"id":"op/later-event","request_digest":"b"}}), &[], None).unwrap();
         tx.commit().unwrap();
@@ -98,8 +98,8 @@ fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
     let health = store.replication_status(false, None, &[]).unwrap();
     assert!(health.unhealthy.iter().any(|row| row.status == "stale"
         && row.error_code.as_deref() == Some("operation-conflict-refold-limit")
-        && row.error_message.as_deref().unwrap().contains("op/large-conflict")));
-    assert!(health.unhealthy.iter().any(|row| row.aggregate.ends_with("op/later-event")
+        && row.aggregate.contains(&operation_id)));
+    assert!(health.unhealthy.iter().any(|row| row.aggregate.contains("op/later-event")
         && row.status == "indeterminate" && row.error_code.as_deref() == Some("operation-conflict")));
     let detail = logs.iter().find_map(|line| line.strip_prefix("fractal: projection failure detail ")).unwrap();
     let detail: Value = serde_json::from_str(detail).unwrap();
@@ -107,6 +107,22 @@ fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
     assert_eq!(detail["refold_error_code"], "operation-conflict-refold-limit");
     store.project_replication_backlog().unwrap();
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    let stale_key = health.unhealthy.iter().find(|row| row.status == "stale").unwrap().aggregate.clone();
+    let stale_message = health.unhealthy.iter().find(|row| row.aggregate == stale_key).unwrap().error_message.clone();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "exec/another-subject", "intent.desired", None,
+            &json!({"subject":"exec/another-subject","kind":"exec","desired":{},
+                "_operation":{"id":operation_id,"request_digest":"digest-b"}}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.project_replication_backlog().unwrap();
+    let health = store.replication_status(false, None, &[]).unwrap();
+    let original = health.unhealthy.iter().find(|row| row.aggregate == stale_key).unwrap();
+    assert_eq!(original.status, "stale");
+    assert_eq!(original.error_message, stale_message);
+    assert_eq!(before, desired());
 }
 
 #[test]
@@ -183,4 +199,86 @@ fn operation_conflict_github_event_observers_never_replay_during_receipt() {
         answers.push(before);
     }
     assert_eq!(answers[0], answers[1]);
+}
+
+#[test]
+fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
+    let source = Store::open_memory("source").unwrap();
+    {
+        let mut connection = source.connection.write();
+        let tx = connection.transaction().unwrap();
+        for number in 0..smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append_claim_record_tx(&tx, "source", "custom/multi-chunk", "custom.test.observed",
+                None, &json!({"fields":{"number":number}}), &[], None).unwrap();
+        }
+        for digest in ["a", "b"] {
+            append_claim_record_tx(&tx, "source", "custom/multi-chunk-conflict", "custom.test.observed",
+                None, &json!({"fields":{},"_operation":{"id":"op/second-chunk","request_digest":digest}}),
+                &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let target = Store::open_memory("target").unwrap();
+    target.bind_fleet(TEST_FLEET).unwrap();
+    let exchange = exchange_from(&source, &target.replication_inventory().unwrap());
+    target.receive_replication_exchange("source", TEST_FLEET, &exchange).unwrap();
+    target.validate_replication_backlog().unwrap();
+    assert!(target.index().unwrap() > smallclaims::store::PROJECTION_CHUNK_CLAIMS as u64);
+    target.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-hf0bbe1f00bc2 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", [],
+    ).unwrap();
+    FULL_REPLAYS.with(|count| count.set(0));
+    target.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(target.replication_status(false, None, &[]).unwrap().unhealthy.iter().any(|row|
+        row.error_code.as_deref() == Some("operation-conflict-replay-deferred")));
+    {
+        let mut connection = target.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "exec/after-deferred", "intent.desired", None,
+            &json!({"subject":"exec/after-deferred","kind":"exec","desired":{"value":"projected"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    target.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(target.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM desired WHERE subject='exec/after-deferred')",
+        [], |row| row.get::<_, bool>(0),
+    ).unwrap());
+}
+
+#[test]
+fn operation_conflict_refold_failure_restores_every_prior_desired_column() {
+    let store = Store::open_memory("fixture").unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "exec/refold-failure", "intent.desired", None,
+            &json!({"subject":"exec/refold-failure","kind":"exec","desired":{"value":"prior"},
+                "_operation":{"id":"op/refold-failure","request_digest":"z"}}), &[], None).unwrap();
+        append_claim_record_tx(&tx, "peer", "exec/refold-failure", "intent.desired",
+            None, &json!({}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    let bytes = || store.readers.get().query_row(
+        "SELECT json_array(subject,kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step)
+         FROM desired WHERE subject='exec/refold-failure'", [], |row| row.get::<_, String>(0),
+    ).unwrap().into_bytes();
+    let before = bytes();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "exec/refold-failure", "intent.desired", None,
+            &json!({"subject":"exec/refold-failure","kind":"exec","desired":{"value":"new"},
+                "_operation":{"id":"op/refold-failure","request_digest":"a"}}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog().unwrap();
+    assert_eq!(before, bytes());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(store.replication_status(false, None, &[]).unwrap().unhealthy.iter().any(|row|
+        row.status == "stale" && row.aggregate.contains("op/refold-failure")));
 }

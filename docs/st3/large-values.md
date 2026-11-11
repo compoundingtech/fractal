@@ -604,7 +604,7 @@ per-writer reclamation boundary in the eventual bounded representation.
 ## Operation-conflict bounded refold (#9101)
 
 Reviewed for [dotfiles#9101](https://github.com/schickling/dotfiles/issues/9101):
-`fractal_store::store` owns `lv-h00461836c5f4` and `lv-h3b9353d94be0`,
+`fractal_store::store` owns `lv-hdacd188e0574` and `lv-h3b9353d94be0`,
 which retain operation/claim identifiers and typed conflict/refold diagnostics in
 the existing `projection_health` text columns. These are metadata, not claim bodies;
 the remaining debt is bounding every identifier and diagnostic representation and
@@ -617,3 +617,9 @@ step is the same bounded-identifier representation as the other operation sites.
 Fixture-only `lv-hc0649a7fe6c7` and `lv-hf161f602d783` retain synthetic checkpoint
 metadata and stale-health setup to prove the no-replay fence. Their owners are
 `fractal_store::store::operation_conflict_tests`; no production population is added.
+
+The atomic-degradation correction also owns `lv-ha8b524108446` and
+`lv-he57da1ef4545`: the former retains the independent replay reason while receipt
+advances, and the latter clears only the successfully refolded subject's stale
+diagnostic. Both retain metadata, never claim bodies, with the same bounding debt.
+`lv-hf0bbe1f00bc2` is the second-chunk stale-health regression fixture.

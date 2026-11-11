@@ -17203,9 +17203,15 @@ fn check_conflict_refold_size(claims: usize) -> Result<(), FractalError> {
     Ok(())
 }
 
+struct OperationConflictDiagnostic {
+    error: FractalError,
+    // Full operation and subject identities; never derive a durable key from display context.
+    health_key: String,
+}
+
 fn refold_after_operation_conflict(
     transaction: &Transaction<'_>,
-    diagnostics: &mut [FractalError],
+    diagnostics: &mut [OperationConflictDiagnostic],
     affected: &[usize],
     project: impl FnOnce() -> Result<(), FractalError>,
 ) -> Result<(), FractalError> {
@@ -17217,20 +17223,30 @@ fn refold_after_operation_conflict(
     }
     let _reset = Reset(CONFLICT_REFOLD.replace(true));
     match project() {
-        Ok(()) => transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h53bf80630f0f owner=fractal_store::store TODO=trace-statement-and-value-representation */ "RELEASE operation_conflict_refold").map_err(internal),
+        Ok(()) => {
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h53bf80630f0f owner=fractal_store::store TODO=trace-statement-and-value-representation */ "RELEASE operation_conflict_refold").map_err(internal)?;
+            for &index in affected {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-he57da1ef4545 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='indeterminate',error_code='operation-conflict',error_message=?1 WHERE aggregate=?2",
+                    params![serde_json::to_string(&diagnostics[index].error.details).map_err(internal)?,
+                        diagnostics[index].health_key],
+                ).map_err(internal)?;
+            }
+            Ok(())
+        },
         Err(error) => {
             transaction.execute_batch(
                 /* sqlite-large-value: allow-for-now lv-hc33c6f16bf1d owner=fractal_store::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO operation_conflict_refold; RELEASE operation_conflict_refold",
             ).map_err(internal)?;
             for &index in affected {
                 let diagnostic = &mut diagnostics[index];
-                diagnostic.details.insert("projection_degraded".into(), json!(true));
-                diagnostic.details.insert("refold_error_code".into(), json!(error.code));
+                diagnostic.error.details.insert("projection_degraded".into(), json!(true));
+                diagnostic.error.details.insert("refold_error_code".into(), json!(error.code));
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h3b9353d94be0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale', error_code=?1, error_message=?2
                      WHERE aggregate=?3",
-                    params![error.code, json!({"conflict":diagnostic.details,"repair_error":error.message}).to_string(),
-                        format!("projection:operation-conflict:{}", diagnostic.details["projection_operation_id"].as_str().unwrap_or(""))],
+                    params![error.code, json!({"conflict":diagnostic.error.details,"repair_error":error.message}).to_string(),
+                        diagnostic.health_key],
                 ).map_err(internal)?;
             }
             Ok(())
@@ -17257,6 +17273,31 @@ pub fn try_project_all_simple_replication_tx(
     .map(|decision| matches!(decision, IncrementalProjection::Projected | IncrementalProjection::ProjectedWithContext { .. }))
 }
 
+// A whole-log replay is unsafe while this log contains conflicting operations. Keep the
+// independent replay requirement visible, but let bounded receipt move past it. Repair is
+// explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
+fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, reason: &str) -> Result<bool, FractalError> {
+    let conflict: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM operations WHERE state='conflict')
+         OR EXISTS(SELECT 1 FROM claims incoming INDEXED BY claims_operation_index
+           JOIN claims other INDEXED BY claims_operation_index
+             ON json_extract(other.body,'$._operation.id')=json_extract(incoming.body,'$._operation.id')
+           WHERE json_extract(incoming.body,'$._operation.id') IS NOT NULL
+             AND json_extract(other.body,'$._operation.request_digest')<>json_extract(incoming.body,'$._operation.request_digest')
+             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=incoming.id OR id=other.id))",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    if conflict {
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha8b524108446 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES ('projection:deferred-replay','stale','operation-conflict-replay-deferred',?1,?2)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![reason, now_ms().to_string()],
+        ).map_err(internal)?;
+    }
+    Ok(conflict)
+}
+
 pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
@@ -17270,10 +17311,13 @@ pub fn try_project_simple_replication_tx(
         )
         .optional()
         .map_err(internal)?;
-    let Some((status, frontier)) = health else {
-        return Ok(replay_needed("missing-health"));
+    let (status, frontier) = match health {
+        Some(health) => health,
+        None if defer_replay_for_operation_conflict(transaction, "missing-health")? => ("healthy".to_owned(), 0),
+        None => return Ok(replay_needed("missing-health")),
     };
-    if status != "healthy" {
+    if status != "healthy"
+        && !defer_replay_for_operation_conflict(transaction, "unhealthy-projection")? {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17456,6 +17500,10 @@ pub fn try_project_simple_replication_tx(
                     unsupported_conflict_subjects.insert(claim.subject.clone());
                     continue;
                 }
+            }
+            if defer_replay_for_operation_conflict(transaction, reason)? {
+                unsupported_conflict_subjects.insert(claim.subject.clone());
+                continue;
             }
             crate::profile::note(&format!("replay: {reason}"));
             return Ok(IncrementalProjection::ReplayWithContext {
@@ -17695,25 +17743,23 @@ pub fn try_project_simple_replication_tx(
             }).map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
             let canonical_claim_id = operation_tx(transaction, operation_id)
                 .map_err(internal)?.map(|(_, id, _)| id);
-            let count: u64 = transaction.query_row(
-                "SELECT COUNT(*) FROM operations WHERE state='conflict'", [], |row| row.get(0),
-            ).map_err(internal)?;
             let mut diagnostic = incremental_claim_error(
                 FractalError::new("operation-conflict", "conflicting operation reconciled canonically without replay"),
                 claim, "operation-registry",
             ).with_detail("previous_claim_id", previous_claim_id)
-             .with_detail("canonical_claim_id", canonical_claim_id)
-             .with_detail("operation_conflict_count", count);
+             .with_detail("canonical_claim_id", canonical_claim_id);
             if unsupported_conflict_subjects.contains(&claim.subject) {
                 diagnostic.details.insert("projection_degraded".into(), json!(true));
                 diagnostic.details.insert("refold_error_code".into(), json!("operation-conflict-no-bounded-refold"));
             }
+            let health_key = format!("projection:operation-conflict:{}", json!([operation_id, claim.subject]));
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h00461836c5f4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hdacd188e0574 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
                  VALUES (?1,?2,?3,?4,?5)
                  ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
-                    error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
-                params![format!("projection:operation-conflict:{operation_id}"),
+                    error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms
+                 WHERE projection_health.status<>'stale'",
+                params![health_key,
                     if unsupported_conflict_subjects.contains(&claim.subject) { "stale" } else { "indeterminate" },
                     if unsupported_conflict_subjects.contains(&claim.subject) { "operation-conflict-no-bounded-refold" } else { "operation-conflict" },
                     serde_json::to_string(&diagnostic.details).map_err(internal)?, now_ms().to_string()],
@@ -17727,7 +17773,7 @@ pub fn try_project_simple_replication_tx(
                 aggregate_conflicts.entry(aggregate.clone()).or_default().push(index);
                 mark_dirty(&mut dirty, aggregate, "operation conflict canonical refold");
             }
-            conflict_diagnostics.push(diagnostic);
+            conflict_diagnostics.push(OperationConflictDiagnostic { error: diagnostic, health_key });
             continue;
         }
         register_operation_tx(transaction, claim).map_err(|error| {
@@ -17943,17 +17989,15 @@ pub fn try_project_simple_replication_tx(
         None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
-    if unsupported_conflict_subjects.is_empty() {
-        owned_sets::project_tx(transaction)
-            .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
-    }
+    owned_sets::project_excluding_tx(transaction, &unsupported_conflict_subjects)
+        .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
     // Prefer a degraded subject's identifiers over an unrelated later event-only conflict.
-    let diagnostic = conflict_diagnostics.iter().rposition(|error|
-        error.details.get("projection_degraded").and_then(Value::as_bool) == Some(true))
+    let diagnostic = conflict_diagnostics.iter().rposition(|diagnostic|
+        diagnostic.error.details.get("projection_degraded").and_then(Value::as_bool) == Some(true))
         .or_else(|| conflict_diagnostics.len().checked_sub(1));
     Ok(match diagnostic {
         Some(index) => {
-            let diagnostic = conflict_diagnostics.swap_remove(index);
+            let diagnostic = conflict_diagnostics.swap_remove(index).error;
             IncrementalProjection::ProjectedWithContext { code: diagnostic.code, details: diagnostic.details }
         },
         None => IncrementalProjection::Projected,
@@ -18167,6 +18211,10 @@ pub fn project_claim_isolated_tx(
             transaction
                 .execute_batch(/* sqlite-large-value: allow-for-now lv-h0dbb3a5ec63d owner=fractal_store::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO project_claim; RELEASE project_claim")
                 .map_err(internal)?;
+            // A bounded aggregate refold must be atomic, not a partial replay with holes.
+            if CONFLICT_REFOLD.get() {
+                return Err(error);
+            }
             transaction
                 .execute(
                     /* sqlite-large-value: allow-for-now lv-ha5591425e84e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, error_code, error_message, updated_at_unix_ms)

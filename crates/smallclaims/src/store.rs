@@ -8957,9 +8957,9 @@ impl Store {
                              WHERE operation_id=json_extract(incoming.body,'$._operation.id')
                                AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
                              ORDER BY request_digest,id LIMIT 1))
-                         FROM claims incoming LEFT JOIN operations
+                         FROM claims incoming INDEXED BY claims_operation_index LEFT JOIN operations
                            ON operations.id=json_extract(incoming.body,'$._operation.id')
-                         WHERE incoming.store_index>?1 AND incoming.store_index<=?2
+                         WHERE json_extract(incoming.body,'$._operation.id') IS NOT NULL
                            AND (operations.state='conflict'
                              OR operations.request_digest<>json_extract(incoming.body,'$._operation.request_digest')
                              OR EXISTS(SELECT 1 FROM claims other INDEXED BY claims_operation_index
@@ -8972,22 +8972,17 @@ impl Store {
                                  AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)))
                            AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=incoming.id)
                          ORDER BY incoming.store_index DESC LIMIT 1",
-                        params![frontier, through], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
                     ).optional().map_err(internal)?;
                     if let Some((claim_id, operation_id, previous_claim_id)) = conflict {
-                        let count: u64 = transaction.query_row(
-                            "SELECT COUNT(*) + NOT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND state='conflict')
-                             FROM operations WHERE state='conflict'", [&operation_id], |row| row.get(0),
-                        ).map_err(internal)?;
                         let error = FractalError::new("operation-conflict-projection-degraded",
                             json!({"operation_id":operation_id,"claim_id":claim_id,
-                                "previous_claim_id":previous_claim_id,"operation_conflict_count":count,
+                                "previous_claim_id":previous_claim_id,
                                 "fallback_refused":reason}).to_string())
                             .with_detail("projection_stage", "operation-conflict-no-replay")
                             .with_detail("projection_operation_id", operation_id)
                             .with_detail("projection_claim_id", claim_id)
-                            .with_detail("previous_claim_id", previous_claim_id)
-                            .with_detail("operation_conflict_count", count);
+                            .with_detail("previous_claim_id", previous_claim_id);
                         self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                         return Err(error);
                     }
