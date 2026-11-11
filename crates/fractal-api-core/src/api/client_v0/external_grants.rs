@@ -161,7 +161,7 @@ pub fn principal(source: &Value) -> Result<&str, ApiError> {
                 && component(parts.next()) && parts.next().is_none()
         }).ok_or_else(|| forbidden("invalid service principal"));
     }
-    crate::store::assistant_write::principal(source)
+    authority::principal(source)
         .ok_or_else(|| forbidden("invalid assistant principal"))
 }
 pub const BEGUN: &str = "custom.client.assistant.v1.begun";
@@ -511,6 +511,29 @@ mod tests {
     thread_local! {
         pub(super) static SERVICE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         pub(super) static ADMISSION_NOW: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[test]
+    fn strict_principal_reuses_projection_identity_only_for_assistant_profiles() {
+        assert_eq!(principal(&json!({})).unwrap(), PRINCIPAL);
+        for profile in [None, Some("assistant")] {
+            for identity in ["assistant/chatgpt", "assistant/mcp"] {
+                let mut fields = json!({"principal":identity});
+                if let Some(profile) = profile { fields["profile"] = json!(profile); }
+                assert_eq!(principal(&fields).unwrap(), identity);
+            }
+        }
+        assert!(principal(&json!({"profile":"assistant","principal":"plugin/test/reader"})).is_err());
+        assert_eq!(principal(&json!({"profile":"service","principal":"plugin/test/reader"})).unwrap(),
+            "plugin/test/reader");
+        for identity in ["assistant/chatgpt", "assistant/mcp"] {
+            let legacy = json!({"profile":"service","principal":identity});
+            assert_eq!(projection_principal(&legacy).unwrap(), identity);
+            assert!(principal(&legacy).is_err(), "management identity must not admit a Service bearer");
+        }
+        for invalid in [Value::Null, json!("assistant/other"), json!("person/owner"), json!(7)] {
+            assert!(principal(&json!({"principal":invalid})).is_err());
+        }
     }
 
     fn concurrent_grants(profiles: [&str; 2], seed_conflicting_service: bool) -> (usize, usize, usize) {

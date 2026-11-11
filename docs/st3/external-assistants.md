@@ -33,13 +33,13 @@ scopes only.** The production setup below deliberately omits write scopes.
 ### Owner setup and permissions
 
 On the daemon host, the configured owning person begins pairing through the
-trusted-local CLI. `person/robin` below is a fixture: use the configured owner,
+trusted-local CLI. `person/owner` below is a fixture: use the configured owner,
 not a new identity chosen by the client. Record disclosure consent before issuance;
 the CLI's `--disclose-to-openai` flag is still required and does not grant a
 different provider or unrelated caller disclosure permission.
 
 ```sh
-fractal devices --as person/robin pair --assistant assistant/mcp \
+fractal devices --as person/owner pair --assistant assistant/mcp \
   --scope read.assistant.summary --scope read.assistant.attention \
   --scope read.assistant.agents --scope read.assistant.missions \
   --scope read.assistant.conversation \
@@ -138,8 +138,8 @@ not an enforced allowlist (Q21 / [#3250](https://github.com/compoundingtech/frac
 Inspect or revoke the exact grant from the trusted-local owner CLI:
 
 ```sh
-fractal devices --as person/robin grant inspect GRANT_ID
-fractal devices --as person/robin grant revoke GRANT_ID
+fractal devices --as person/owner grant inspect GRANT_ID
+fractal devices --as person/owner grant revoke GRANT_ID
 ```
 
 Revocation is authoritative and survives restart; deleting a profile or removing
@@ -335,7 +335,7 @@ edit. On the daemon host, use the configured owner and original assistant
 principal with only explicitly approved scopes and recorded disclosure consent:
 
 ```sh
-fractal devices --as person/OWNER pair --assistant assistant/mcp \
+fractal devices --as person/owner pair --assistant assistant/mcp \
   --scope read.assistant.summary \
   --disclose-to-openai --consent-evidence '<recorded owner consent reference>'
 fractal devices complete MEMBER_URL PAIRING_ID --assistant \

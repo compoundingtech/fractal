@@ -12,13 +12,13 @@
 //! install + resumable backfill, not insert-time maintenance.
 //!
 //! Real-store cold-cache run (Linux, run alone in a fresh process):
-//! `AUTHORITY_REAL_STORE=/restore/claims.sqlite3 AUTHORITY_REAL_ORIGIN=dev3 cargo test -p smallclaims --lib store::assistant_grant_authority_bench::assistant_grant_authority_measure_real_store -- --exact --ignored --nocapture --test-threads=1`
+//! `AUTHORITY_REAL_STORE=/restore/claims.sqlite3 AUTHORITY_REAL_ORIGIN=source-daemon cargo test -p smallclaims --lib store::assistant_grant_authority_bench::assistant_grant_authority_measure_real_store -- --exact --ignored --nocapture --test-threads=1`
 //! Use a freshly restored working copy from the current main build; this is the
 //! cold-cache condition. The harness writes to it and does not reset projections,
 //! checkpoint, or restore it. Restore again for each measurement. Agents cannot
 //! use `echo 3 | sudo tee /proc/sys/vm/drop_caches`; `vmtouch -e` or
 //! `dd iflag=nocache` eviction is optional, not performed by this test.
-//! The origin defaults to dev3; override it with the source daemon's node name.
+//! AUTHORITY_REAL_ORIGIN is required; set it to the source daemon's node name.
 //! Store::open includes install and the committed two-second startup slice.
 //! Test-only hooks time those exact operations, without repeating them. Background
 //! slices call the production Store maintenance entrypoint, including membership
@@ -225,7 +225,8 @@ fn assistant_grant_authority_measure_real_store() {
         .expect("set AUTHORITY_REAL_STORE to the restored claims.sqlite3 working copy"));
     assert!(path.is_file(), "AUTHORITY_REAL_STORE must be an existing store, not a new fixture");
     assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("claims.sqlite3"));
-    let origin = std::env::var("AUTHORITY_REAL_ORIGIN").unwrap_or_else(|_| "dev3".into());
+    let origin = std::env::var("AUTHORITY_REAL_ORIGIN")
+        .expect("set AUTHORITY_REAL_ORIGIN to the source daemon's node name for the restored store");
     let (db_bytes_before, wal_bytes_before) = physical_bytes(&path);
     let (baseline_rss_kib, baseline_peak_kib) = memory_kib();
     let started = Instant::now();
