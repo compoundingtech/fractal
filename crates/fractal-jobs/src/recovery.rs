@@ -69,6 +69,16 @@ pub enum Resolution {
     Outcome { outcome: HolderOutcome },
 }
 
+/// Retained in the authenticated recovery record, including after an uncertain
+/// release. Missing counters are explicit evidence, never a synthetic zero.
+/// Samples are boxed in memory; serde retains the same tagged sample payload.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "usage", content = "value", rename_all = "kebab-case")]
+pub enum RecoveryUsage {
+    Sample(Box<crate::scope::observation::RawScopeUsage>),
+    CountersUnavailable(crate::launch::CountersUnavailable),
+}
+
 /// Applies only after runtime fencing/observation and authenticated recording.
 /// Terminal/unknown states are not reopened. Pending jobs become unknown rather
 /// than re-entering the queue; cancellation remains attached to unknown state.

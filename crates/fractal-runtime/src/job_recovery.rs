@@ -5,6 +5,8 @@ use anyhow::{Context, Result, ensure};
 use fractal_jobs::{host_authority::JobHostBinding, launch::{LaunchIntent, cgroup_name, keeper_name},
     recovery::{ProcessIdentity, Released}};
 use std::{fs, io::ErrorKind, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
+mod sequence;
+pub use sequence::{RecoveryAuthentication, RecoveryJournal, RecoveryRequest, RecoveryResult};
 
 #[derive(Clone, Debug)]
 pub struct LocatedJob {

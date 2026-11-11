@@ -1,6 +1,7 @@
 //! Pure readback parsing; absent or malformed counters are unknown, not zero.
 use super::JobScopePlan;
 use crate::{Coverage, Covered};
+use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScopeLimit {
     Value(u64),
@@ -42,13 +43,28 @@ pub fn parse_limit(text: &str) -> Covered<ScopeLimit> {
         Err(_) => unknown("invalid cgroup limit"),
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeSample<T> {
     pub host: String,
+    // Tagged JobRecord decoding buffers through serde ContentDeserializer,
+    // which supports u64 but not u128. Preserve the in-memory unit 12b API.
+    #[serde(with = "millis_wire")]
     pub unix_time_ms: u128,
     pub reading: Covered<T>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+mod millis_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = u64::try_from(*value).map_err(serde::ser::Error::custom)?;
+        value.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        u64::deserialize(deserializer).map(u128::from)
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawScopeUsage {
     pub cpu_usage_usec: ScopeSample<u64>,
     pub memory_peak: ScopeSample<u64>,
