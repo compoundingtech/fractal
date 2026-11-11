@@ -279,7 +279,12 @@ fn a_redirect_is_reported_only_when_it_names_a_typed_github_item() {
     ] {
         assert_eq!(moved_to(location), None, "{location}");
     }
-    let Err(Failure::Unavailable { .. }) = classify(Raw { status: 301, location: Some("https://api.github.com/repositories/1/pulls/7".into()), ..Raw::default() }, false) else {
+    // GitHub's rename and transfer form is resolved by one more read, never followed.
+    assert_eq!(
+        classify(Raw { status: 301, location: Some("https://api.github.com/repositories/1/pulls/7".into()), ..Raw::default() }, false).err(),
+        Some(Failure::Relocated { repository_id: 1, number: Some(7) })
+    );
+    let Err(Failure::Unavailable { .. }) = classify(Raw { status: 301, location: Some("https://api.github.com/user/1".into()), ..Raw::default() }, false) else {
         panic!("an untyped redirect is unavailable")
     };
     for status in [302, 307, 308, 500, 502, 401] {
@@ -404,5 +409,91 @@ async fn routes_require_the_projection_scope_and_typed_paths() {
     ] {
         let status = app(paired.clone()).oneshot(request(uri)).await.unwrap().status();
         assert!(status.is_client_error(), "{uri}: {status}");
+    }
+}
+
+/// Canned GitHub: each request path answers the next response queued for it; any other is a test failure.
+struct Canned(std::sync::Mutex<Vec<(&'static str, Raw)>>, AtomicUsize);
+
+impl Canned {
+    fn new(responses: Vec<(&'static str, Raw)>) -> Self {
+        Self(std::sync::Mutex::new(responses), AtomicUsize::new(0))
+    }
+
+    fn fetch(&self, path: String) -> Result<Raw, Failure> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        let mut responses = self.0.lock().unwrap();
+        let index = responses.iter().position(|(expected, _)| *expected == path).unwrap_or_else(|| panic!("unexpected GitHub request {path}"));
+        Ok(responses.remove(index).1)
+    }
+}
+
+fn redirect(location: &str) -> Raw {
+    Raw { status: 301, location: Some(location.into()), ..Raw::default() }
+}
+
+fn repository(full_name: &str) -> Raw {
+    Raw { status: 200, cacheable: true, body: serde_json::to_vec(&json!({ "id": 42, "full_name": full_name })).unwrap(), ..Raw::default() }
+}
+
+async fn read(cache: &std::sync::Mutex<Cache>, canned: &Canned, path: &str) -> Result<Fetched, Failure> {
+    rest_read(cache, path, |path, _| std::future::ready(canned.fetch(path))).await
+}
+
+#[tokio::test]
+async fn a_renamed_repository_is_moved_with_the_requested_number() {
+    let cache = std::sync::Mutex::new(Cache::default());
+    let canned = Canned::new(vec![
+        ("/repos/acme/garden/pulls/7", redirect("https://api.github.com/repositories/42/pulls/7")),
+        ("/repositories/42", repository("acme/orchard")),
+    ]);
+    let moved = GithubMovedTo { owner: "acme".into(), repo: "orchard".into(), number: Some(7) };
+    assert_eq!(read(&cache, &canned, "/repos/acme/garden/pulls/7").await.unwrap_err(), Failure::Moved(moved.clone()));
+    // The move is remembered like any answer: the next read asks GitHub nothing.
+    assert_eq!(read(&cache, &canned, "/repos/acme/garden/pulls/7").await.unwrap_err(), Failure::Moved(moved));
+    assert_eq!(canned.1.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_transferred_repository_is_moved_to_its_new_owner() {
+    let cache = std::sync::Mutex::new(Cache::default());
+    let canned = Canned::new(vec![
+        ("/repos/acme/garden/issues/9", redirect("https://api.github.com/repositories/42/issues/9")),
+        ("/repositories/42", repository("acme-garden/garden")),
+        ("/repos/acme/garden/issues/comments/1832451234", redirect("https://api.github.com/repositories/42/issues/comments/1832451234")),
+        ("/repos/acme/garden/actions/runs/9001", redirect("https://api.github.com/repositories/42/actions/runs/9001")),
+    ]);
+    let to = |number| Failure::Moved(GithubMovedTo { owner: "acme-garden".into(), repo: "garden".into(), number });
+    assert_eq!(read(&cache, &canned, "/repos/acme/garden/issues/9").await.unwrap_err(), to(Some(9)));
+    // A comment or a run names no item number; the repository lookup is shared through the cache.
+    assert_eq!(read(&cache, &canned, "/repos/acme/garden/issues/comments/1832451234").await.unwrap_err(), to(None));
+    assert_eq!(read(&cache, &canned, "/repos/acme/garden/actions/runs/9001").await.unwrap_err(), to(None));
+    assert_eq!(
+        serde_json::to_value(to(Some(7)).into_read::<GithubPullRequest>()).unwrap(),
+        fixture!("moved"),
+    );
+}
+
+#[tokio::test]
+async fn an_unresolvable_relocation_is_unavailable() {
+    for (location, lookup) in [
+        // A second redirect is never followed.
+        ("https://api.github.com/repositories/42/pulls/7", Some(redirect("https://api.github.com/repositories/43"))),
+        // GitHub cannot be read, or names something that is not a typed repository.
+        ("https://api.github.com/repositories/42/pulls/7", Some(Raw { status: 502, ..Raw::default() })),
+        ("https://api.github.com/repositories/42/pulls/7", Some(repository("acme/../etc"))),
+        ("https://api.github.com/repositories/42/pulls/7", Some(repository("no-slash"))),
+        // A non-numeric id or another host is never looked up.
+        ("https://api.github.com/repositories/abc/pulls/7", None),
+        ("https://api.github.com/repositories/0/pulls/7", None),
+        ("https://example.com/repositories/42/pulls/7", None),
+    ] {
+        let cache = std::sync::Mutex::new(Cache::default());
+        let mut responses = vec![("/repos/acme/garden/pulls/7", redirect(location))];
+        responses.extend(lookup.map(|raw| ("/repositories/42", raw)));
+        let canned = Canned::new(responses);
+        let failure = read(&cache, &canned, "/repos/acme/garden/pulls/7").await.unwrap_err();
+        assert!(matches!(failure, Failure::Unavailable { .. }), "{location}: {failure:?}");
+        assert!(canned.0.lock().unwrap().is_empty(), "{location}: an expected request was not sent");
     }
 }
