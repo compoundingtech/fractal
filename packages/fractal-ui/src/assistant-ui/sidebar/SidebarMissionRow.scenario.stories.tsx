@@ -84,17 +84,17 @@ export const ScenarioRoster: StoryObj<Args> = {
     const roster = await within(canvasElement).findByRole('region', { name: 'Scenario roster' })
     const tree = await within(roster).findByRole('treegrid', { name: 'Scenario agents' })
     await waitFor(() => expect(within(tree).getAllByRole('row').length).toBeGreaterThan(0))
-    const missionRows = within(tree).getAllByRole('row').filter(row => row.querySelector('[data-mission-pill]') !== null)
+    const missionRows = within(tree).getAllByRole('row').filter(row => row.querySelector('[data-mission]') !== null)
     await expect(missionRows.length).toBeGreaterThan(0)
     for (const row of missionRows) {
-      const pill = row.querySelector('[data-mission-pill]')!
+      const mission = row.querySelector('[data-mission]')!
       const title = row.querySelector('[data-row-column="title"]')!.textContent!.trim()
       const step = row.querySelector('[data-row-field="step"]')!.textContent!.trim()
-      const slug = pill.getAttribute('data-mission-pill')!
+      const slug = mission.getAttribute('data-mission')!
       const status = row.querySelector('[data-milestone-row]')!.getAttribute('data-status') as AgentStatus
       await expect(row.getAttribute('aria-label')?.startsWith(`${title}, `)).toBe(true)
       await expect(row).toHaveAccessibleName(`${title}, ${statuses[status].label}, Mission ${slug}, Step ${step}`)
-      await expect(pill.querySelector('[data-mission-progress]')).toBeNull()
+      await expect(row.querySelector('[data-mission-progress]')).toBeNull()
       await expect(row.getAttribute('aria-label')).not.toMatch(/\d+ of \d+ steps/)
     }
   },
