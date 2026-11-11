@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refuse nested non-keeper supervision before allocating a jobs proof cgroup.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "No admission or authorization changes."},
+  "compatibility": {"status": "none", "detail": "The shared supervisor is unchanged. The proof refuses an inherited supervisor marker without a keeper rather than starting a nested guardian that an outer subreaper could kill before cleanup."},
+  "downtime": {"status": "none", "detail": "Manual proof tooling only."},
+  "manual": {"status": "changed", "detail": "Run scripts/jobs-rolling-upgrade-proof directly rather than through an existing non-keeper fractal_test_process.py supervisor. Unsupported nesting exits with a clear message before keeper allocation."},
+  "recovery": {"status": "changed", "detail": "Prevents an outer supervisor's cancellation cleanup from SIGKILLing a nested keeper owner and leaking its jobs-proof-* cgroup. Direct runs retain guardian-owned cleanup and the final cgroup absence check."}
+}

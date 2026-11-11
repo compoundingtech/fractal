@@ -27,6 +27,12 @@ released=$(realpath "$released"); head=$(realpath "$head")
 [[ -x $released && -x $head && $released != "$head" ]] || exit 2
 cgroup_parent=$(realpath "$cgroup_parent")
 [[ $cgroup_parent == /sys/fs/cgroup/* && -f $cgroup_parent/cgroup.events ]]
+# An outer subreaper would own (and SIGKILL) a nested keeper guardian before
+# that guardian could clean up. Reject its marker before allocating any keeper.
+if [[ -n ${FRACTAL_TEST_SUPERVISOR:-} && -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]]; then
+  echo 'Refusing nested supervision without a keeper; run jobs-rolling-upgrade-proof directly, not through fractal_test_process.py.' >&2
+  exit 2
+fi
 if [[ -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]] || ! python3 "$supervisor" --is-supervised; then
   exec python3 "$supervisor" --keeper-cgroup-parent "$cgroup_parent" -- "$0" "${arguments[@]}"
 fi
