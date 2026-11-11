@@ -148,6 +148,7 @@ pub enum ErrorCode {
     AgentRosterNotReady,
     AgentRosterCutNotReady,
     MessageSelectorsNotReady,
+    DatabaseBusy,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,

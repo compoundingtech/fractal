@@ -94,6 +94,20 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### GitHub event observation fold inventory
+
+`fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds
+the repository's subject prefix bounds and selects the canonical first observation per event
+subject. It reads existing subject, fields JSON and accepted-time TEXT values, retaining the
+current inline representation rather than adding storage. The eventual reference representation
+must preserve whole canonical fields and subject identity before listing limits are applied.
+`fractal_github::idle_holds` owns `lv-haa1264e7b371`, replacing `lv-h13f5ed40c752`:
+its queue-exit reader binds the thread's exit-subject bounds and reads one canonical accepted-time
+TEXT value per event subject. The canonical selector also reads claim/batch identity and position
+metadata. Both are dynamic SQL readers, not size proofs. Their maintainers retain the
+`trace-statement-and-value-representation` task; representation changes must not count repeated
+observations as new events or move a queue-exit time.
+
 ### Client operation admission inventory (PR #5921)
 
 The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,

@@ -186,12 +186,46 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
 /// physical-effect authorization must independently fence the current declaration. Read failure invalidates every cached proof.
 pub fn install_cache_observer(graph: &GraphStore, runtime: &Arc<FractalRuntime>) {
     let weak = Arc::downgrade(runtime);
+    // Caches are cold while this observer is installed. Thereafter inspect only new local
+    // observations by their primary key: a drain can replace run rows without moving the
+    // replicated claim frontier, whether a receive or an external action drained the queue.
+    let local_cursor = Mutex::new(graph.readers.get().query_row(
+        "SELECT COALESCE(MAX(id),0) FROM local_observations", [], |row| row.get::<_, u64>(0),
+    ).ok());
     let observer = graph.connection.observe_commits(move |connection| {
         if let Some(runtime) = weak.upgrade() {
             *runtime
                 .publication_cache_epoch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = cache_epoch(connection).ok();
+            let finished = {
+                let mut cursor = local_cursor.lock().unwrap_or_else(PoisonError::into_inner);
+                let after = cursor.unwrap_or(0);
+                let next = connection.query_row(
+                    "SELECT COALESCE(MAX(id),?1),
+                            COALESCE(MAX(kind='run-projection.finished'),0)
+                     FROM local_observations WHERE id>?1",
+                    [after], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, bool>(1)?)),
+                );
+                match next {
+                    Ok((index, finished)) => {
+                        let uninitialized = cursor.is_none();
+                        *cursor = Some(index);
+                        finished || uninitialized
+                    }
+                    Err(_) => {
+                        *cursor = None;
+                        true
+                    }
+                }
+            };
+            if finished {
+                // Forget, rather than refold: an in-flight fold of the pre-drain rows must
+                // not republish after this commit at the same claim cut and frontier.
+                runtime.published_missions.forget();
+                runtime.published_work.forget();
+                runtime.published_views.invalidate();
+            }
         }
     });
     *runtime

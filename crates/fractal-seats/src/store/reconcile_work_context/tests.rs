@@ -1176,10 +1176,20 @@ fn the_per_step_work_read_parses_a_runs_definition_once_for_all_its_steps() {
 
 #[test]
 fn creating_a_run_parses_its_definition_once_for_all_its_steps() {
+    let store = fixture(0);
     crate::store::DEFINITIONS_PARSED.with(|parsed| parsed.set(0));
-    let store = fixture(300);
+    // Fenced creation normally runs on the batch writer; a draining fence can instead
+    // execute on this thread. Count both execution sites, not just the caller.
+    store.connection.batched(|_| -> Result<()> {
+        crate::store::DEFINITIONS_PARSED.with(|parsed| parsed.set(0));
+        Ok(())
+    }).unwrap().unwrap();
+    add_run(&store, 300, "batch-work");
+    let writer_parses = store.connection.batched(|_| -> Result<usize> {
+        Ok(crate::store::DEFINITIONS_PARSED.with(std::cell::Cell::get))
+    }).unwrap().unwrap();
     assert_eq!(
-        crate::store::DEFINITIONS_PARSED.with(std::cell::Cell::get),
+        writer_parses + crate::store::DEFINITIONS_PARSED.with(std::cell::Cell::get),
         1,
         "the run view that creating a run returns reads the pinned definition once, not for each step"
     );
