@@ -3788,6 +3788,8 @@ export type SubjectDefinition = {
 };
 
 export type SubjectSourceMap = {
+  current?: Revision;
+  kdl: string;
   map: SourceMapClaim;
   revision: Revision;
   revisions: Array<SourceMapRevision>;
