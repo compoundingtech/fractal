@@ -481,6 +481,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
+    (
+        "POST /v1/replication/replay",
+        "explicit planned-window operator replay holds the writer; covered by replication_replay::tests",
+    ),
     ("POST /v1/rules/set", "sets an authority rule"),
     (
         "POST /v1/client/actions",

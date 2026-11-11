@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: cover transcript tail day separators across local midnight, live appends after midnight, and same-day episodes.",
+  "replay": {"status": "none", "detail": "Test coverage only; no replay or projection behavior changes."},
+  "schema": {"status": "none", "detail": "No schema or persistent data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination changes."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, protocol or harness behavior changes."},
+  "downtime": {"status": "none", "detail": "No startup work or service interruption."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or rollback restrictions."}
+}

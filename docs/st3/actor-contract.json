@@ -1749,6 +1749,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st replication replay": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st replication signatures resume": {
         "actor": "optional",
         "accepts_person": true,
