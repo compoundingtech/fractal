@@ -92,6 +92,12 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const setHovered = (value: boolean) => { setRowHovered(value); if (!value) card.setOpen(false) }
   const [countExplained, setCountExplained] = React.useState(false)
   const [menuFocused, setMenuFocused] = React.useState(false)
+  const [overlays, setOverlays] = React.useState({ mission: false, menu: false, details: false })
+  const overlayOpen = overlays.mission || overlays.menu || overlays.details
+  const changeOverlayOpen = (kind: keyof typeof overlays, open: boolean) => {
+    if (open) card.setOpen(false)
+    setOverlays(previous => ({ ...previous, [kind]: open }))
+  }
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
   const unavailable = !displayOnly && row.missionContext?._tag === 'Unavailable'
@@ -106,14 +112,8 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     ? <span data-row-column="attention" role="img" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenNeeds)} />
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null
   const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
-  // A row's interactive overlays supersede its passive preview, including keyboard and virtual activation.
-  const dismissPreviewForOverlay = (target: EventTarget) => {
-    if (target instanceof Element && target.closest('[aria-haspopup="menu"], [aria-haspopup="dialog"]') !== null) card.setOpen(false)
-  }
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
-    onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if ((event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); card.intend(false) }}
-    onFocusCapture={event => dismissPreviewForOverlay(event.target)}
-    onClickCapture={event => dismissPreviewForOverlay(event.target)}
+    onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if (!overlayOpen && (event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); if (!overlayOpen) card.intend(false) }}
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
@@ -123,7 +123,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={statusLabel} statusSince={row.statusSince} variant="Marks" needsYou={attention === 'needs-you'} freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <span data-count-scope onPointerEnter={() => card.setOpen(false)} onPointerLeave={() => card.intend(true)} {...stylex.props(styles.countScope)}><SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} /></span>}
+      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <span data-count-scope onPointerEnter={() => card.setOpen(false)} onPointerLeave={() => { if (!overlayOpen) card.intend(true) }} {...stylex.props(styles.countScope)}><SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} /></span>}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -134,16 +134,16 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     {!displayOnly && touchDisclosure !== undefined && <span data-row-column="touch-disclosure" {...stylex.props(styles.touchDisclosureSlot)}>{touchDisclosure}</span>}
     <span data-row-column="line2" data-mission-info={mission === undefined ? undefined : (row.missionInfo?._tag ?? 'Live').toLowerCase()} data-menu-overlay={menuOverlay || undefined} {...stylex.props(styles.line2, mission !== undefined && styles.line2Mission, touchRow && styles.line2BeforeMenu, !displayOnly && !touch && queuedMission && styles.line2ClearsMenu, !displayOnly && touchDisclosure !== undefined && styles.touchDisclosureLine2, menuOverlay && styles.line2Faded)}>
       {mission !== undefined
-        ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} needsYou={attention === 'needs-you'} onOpen={onOpenMission} />
+        ? <SidebarMissionLine mission={mission} info={row.missionInfo} touch={touch} now={now} frozen={frozen} needsYou={attention === 'needs-you'} onOpen={onOpenMission} onOverlayOpenChange={open => changeOverlayOpen('mission', open)} />
         : <>{unavailable
           ? <span data-mission-unavailable {...stylex.props(styles.unavailable)}><svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" {...stylex.props(styles.warningIcon)}><path d="M6 1 11 10H1Z" fill="none" stroke="currentColor" /><path d="M6 4v3m0 1v1" stroke="currentColor" /></svg> Mission info unavailable</span>
           : <span data-row-field="status-label">{statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
     {/* The hover card and the actions' overlays portal into the row's themed surface, so a light root gets light overlays. */}
     {!displayOnly && <>
-      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
+      <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)} onMenuOpenChange={open => changeOverlayOpen('menu', open)} onDetailsOpenChange={open => changeOverlayOpen('details', open)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
-      <HoverCardSurface isOpen={card.isOpen && !countExplained} onOpenChange={card.setOpen} triggerRef={anchor} placement="right top" label={`Reported details for ${row.title}`}>
+      <HoverCardSurface isOpen={card.isOpen && !countExplained && !overlayOpen} onOpenChange={card.setOpen} triggerRef={anchor} placement="right top" label={`Reported details for ${row.title}`}>
         <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
       </HoverCardSurface>
     </>}

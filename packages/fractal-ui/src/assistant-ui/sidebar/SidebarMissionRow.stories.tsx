@@ -342,6 +342,8 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const menu = trigger.closest('[data-milestone-row]')!.querySelector('[data-agent-menu]')!.getBoundingClientRect()
   if (canvasElement.querySelector('[data-narrow]') === null) await expect(trigger.getBoundingClientRect().right).toBeLessThanOrEqual(menu.left + 0.5)
   // Hover alone never opens the queue; the row may independently show its agent hover card.
+  trigger.focus()
+  await expect(trigger).toHaveFocus()
   await userEvent.hover(trigger)
   const started = performance.now()
   do {
@@ -353,7 +355,8 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   if (!window.matchMedia(touchPointerQuery).matches) {
     await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).not.toBeNull())
   }
-  await userEvent.click(trigger)
+  // RAC's keyboard press need not dispatch a click or focus event on this already-focused trigger.
+  await userEvent.keyboard(' ')
   const dialog = await waitFor(() => { const element = queuedDialog(); expect(element).not.toBeNull(); expect(element).toBeVisible(); return element! })
   await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
@@ -366,6 +369,15 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
     expect(box.bottom).toBeLessThanOrEqual(window.innerHeight)
   })
   await waitFor(() => expect(dialog).toHaveFocus())
+  await userEvent.unhover(trigger)
+  await userEvent.hover(missionRow)
+  const reentered = performance.now()
+  do {
+    await expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull()
+    const frame = Promise.withResolvers<void>()
+    requestAnimationFrame(() => frame.resolve())
+    await frame.promise
+  } while (performance.now() - reentered < 700)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(queuedDialog()).toBeNull())
   await waitFor(() => expect(trigger).toHaveFocus())

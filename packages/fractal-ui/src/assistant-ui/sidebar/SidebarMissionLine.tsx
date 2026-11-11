@@ -67,6 +67,7 @@ export interface SidebarMissionLineProps {
   readonly titleAbove?: boolean
   /** Makes the mission run of the line its own target, opening this mission ref. Omitted, the line is plain text. Pass a stable callback. */
   readonly onOpen?: (mission: string) => void
+  readonly onOverlayOpenChange?: (open: boolean) => void
 }
 
 /**
@@ -74,13 +75,13 @@ export interface SidebarMissionLineProps {
  * With `onOpen` that whole run is one button, its own press target that opens the mission rather than the agent. A retained ring
  * stays outside it, as the "Mission info" target, and a live "+N" follows it.
  */
-export function SidebarMissionLine({ mission, info = live, touch = false, now, frozen = false, needsYou = false, titleAbove = false, onOpen }: SidebarMissionLineProps) {
+export function SidebarMissionLine({ mission, info = live, touch = false, now, frozen = false, needsYou = false, titleAbove = false, onOpen, onOverlayOpenChange }: SidebarMissionLineProps) {
   const { step, queued, slug } = mission
   const muted = info._tag !== 'Live'
   const adHoc = isAdHocMissionSlug(slug)
   const adHocText = adHoc && step._tag !== 'Waiting' && !titleAbove ? mission.title : undefined
   const triggerSlot = (mark: boolean) => <span data-line2-slot="mission" data-mission-info={info._tag.toLowerCase()} data-mission-updated-at={info._tag !== 'Live' ? info.updatedAt : undefined} {...stylex.props(styles.missionSlot, touch && styles.missionSlotTouch, muted && styles.mutedInk)}>
-    <MissionInfoTrigger mission={mission} adHoc={adHoc} mark={mark} info={info} queued={queued} touch={touch} now={now} />
+    <MissionInfoTrigger mission={mission} adHoc={adHoc} mark={mark} info={info} queued={queued} touch={touch} now={now} onOpenChange={onOverlayOpenChange} />
   </span>
   const mainMark = !muted && !adHoc && mission.progress._tag === 'Known'
   const main = <>
@@ -136,12 +137,12 @@ const queuedNoun = (count: number) => count === 1 ? 'mission' : 'missions'
  * pseudo-element), stays inside its own row and ends before the trailing columns. Its name comes from its content: progress,
  * the queue and, for retained info, why it is muted.
  */
-function MissionInfoTrigger({ mission, adHoc, mark, info, queued, touch, now }: { readonly mission: Mission; readonly adHoc: boolean; readonly mark: boolean; readonly info: SidebarMissionInfo; readonly queued: Mission['queued']; readonly touch: boolean; readonly now: number | undefined }) {
+function MissionInfoTrigger({ mission, adHoc, mark, info, queued, touch, now, onOpenChange }: { readonly mission: Mission; readonly adHoc: boolean; readonly mark: boolean; readonly info: SidebarMissionInfo; readonly queued: Mission['queued']; readonly touch: boolean; readonly now: number | undefined; readonly onOpenChange?: (open: boolean) => void }) {
   const retained = info._tag !== 'Live'
   const hasProgress = mark && !adHoc && mission.progress._tag === 'Known'
   const clock = React.useMemo(() => now === undefined ? undefined : fixedClock(now), [now])
   const body = <MissionInfoBody info={info} queued={queued} />
-  return <DialogTrigger>
+  return <DialogTrigger onOpenChange={onOpenChange}>
     <Button data-mission-trigger={retained ? 'info' : 'queued'} data-queued-missions={queued.length > 0 ? queued.length : undefined} {...stylex.props(styles.trigger, touch && styles.triggerTouch)}>
       {mark && <MissionProgressMark progress={adHoc ? { _tag: 'Unknown' } : mission.progress} retained={retained} />}
       {queued.length > 0 && <span data-queued-count={queued.length} {...stylex.props(styles.count)}>{hasProgress && <VisuallyHidden>, </VisuallyHidden>}+{queued.length}<VisuallyHidden> more {queuedNoun(queued.length)} queued</VisuallyHidden></span>}
