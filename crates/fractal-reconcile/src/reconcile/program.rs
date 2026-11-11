@@ -91,6 +91,8 @@ pub enum Dispatched {
     /// No host could be started to run it; the step keeps its state and the engine reports the
     /// reason through [`ProgramEngine::host_fault`].
     HostDown(String),
+    /// The step no longer runs this attempt (the reason says why); nothing was started.
+    Left(String),
 }
 
 struct Host {
@@ -138,7 +140,8 @@ impl ProgramEngine {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Start or resume `dispatch` unless the live host already runs that attempt.
+    /// Start or resume `dispatch` unless the live host already runs that attempt or its step no
+    /// longer runs it.
     pub fn dispatch(self: &Arc<Self>, dispatch: Dispatch) -> Result<Dispatched> {
         if self.runs(&dispatch) {
             return Ok(Dispatched::Running);
@@ -153,6 +156,12 @@ impl ProgramEngine {
             running.dispatch.attempt == dispatch.attempt && inner.host.as_ref().is_some_and(|host| host.generation == running.generation)
         }) {
             return Ok(Dispatched::Running);
+        }
+        // A pass may hand over a view read before this engine stopped the attempt. The engine
+        // writes the step's new state under this lock when it stops one (`done`, `unresponsive`),
+        // so the store read here sees it: an attempt its step left is never started again.
+        if let Some(reason) = self.left(&dispatch.step, dispatch.attempt)? {
+            return Ok(Dispatched::Left(reason));
         }
         let generation = match self.ensure_host(&mut inner) {
             Ok(generation) => generation,
@@ -529,7 +538,9 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
-        if !forget(&mut self.lock(), step, attempt, generation) {
+        // Held until the step's state is written, so no dispatch restarts the attempt in between.
+        let mut inner = self.lock();
+        if !forget(&mut inner, step, attempt, generation) {
             return Ok(());
         }
         if self.left(step, attempt)?.is_some() {
@@ -544,6 +555,7 @@ impl ProgramEngine {
             _ => ("failed", Some(failure_reason(&exit["error"]))),
         };
         self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
+        drop(inner);
         eprintln!("fractal: program {step} {status}");
         (self.wake)(step);
         Ok(())
@@ -554,17 +566,17 @@ impl ProgramEngine {
     fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
-        {
-            let mut inner = self.lock();
-            if !forget(&mut inner, step, attempt, generation) {
-                return Ok(());
-            }
-            inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
+        // Held until the step's failure is written, so no dispatch restarts the attempt in between.
+        let mut inner = self.lock();
+        if !forget(&mut inner, step, attempt, generation) {
+            return Ok(());
         }
+        inner.faults.insert(step.to_owned(), (attempt, reason.clone()));
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
         if self.left(step, attempt)?.is_none() {
             self.store.set_step_state_unless_terminal(step, "failed", Some(&reason))?;
         }
+        drop(inner);
         (self.wake)(step);
         Ok(())
     }
@@ -630,7 +642,7 @@ impl ProgramEngine {
                     None
                 }
                 Ok(Dispatched::HostDown(reason)) => Some(reason),
-                Ok(Dispatched::Running | Dispatched::Started) => continue,
+                Ok(Dispatched::Running | Dispatched::Started | Dispatched::Left(_)) => continue,
                 Err(error) => Some(format!("resuming the program after its host exited: {error:#}")),
             };
             if let Some(reason) = failure {

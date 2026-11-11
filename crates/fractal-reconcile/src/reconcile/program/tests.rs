@@ -126,6 +126,36 @@ fn messages_for_another_attempt_or_host_change_nothing() {
     assert_eq!(engine.host_fault(step, 1), None);
 }
 
+/// A pass may hand the engine a view read before the engine stopped an attempt. The engine
+/// re-reads the step and starts nothing for an attempt its step left, keeping the fault that
+/// stopped it.
+#[test]
+fn a_dispatch_for_an_attempt_its_step_left_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let step = engine.store.start_program_step_for_tests();
+    let hash = engine.store.put_blob(b"export default 1").unwrap();
+    let dispatch = |attempt: u32| Dispatch {
+        step: step.subject.clone(),
+        attempt,
+        run: step.run.clone(),
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None },
+        payload: BTreeMap::new(),
+        env: BTreeMap::new(),
+        cwd: "/".into(),
+    };
+    let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
+    engine.lock().faults.insert(step.subject.clone(), (1, reason.into()));
+    engine.store.set_step_run_state_for_tests(&step.subject, "failed", 1);
+    assert_eq!(engine.dispatch(dispatch(1)).unwrap(), Dispatched::Left("the step is failed at attempt 1".into()));
+    // A retry moved the step on: the earlier attempt still starts nothing.
+    engine.store.set_step_run_state_for_tests(&step.subject, "working", 2);
+    assert_eq!(engine.dispatch(dispatch(1)).unwrap(), Dispatched::Left("the step is working at attempt 2".into()));
+    assert_eq!(engine.host_fault(&step.subject, 1).as_deref(), Some(reason));
+    let inner = engine.lock();
+    assert!(inner.host.is_none() && inner.running.is_empty());
+}
+
 #[test]
 fn recorded_groups_are_killed_only_when_their_leader_is_verified() {
     use std::os::unix::process::CommandExt as _;
