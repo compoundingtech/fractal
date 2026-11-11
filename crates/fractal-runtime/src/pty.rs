@@ -286,7 +286,7 @@ impl std::fmt::Debug for PtyRuntime {
 impl PtyRuntime {
     pub fn new(root: PathBuf) -> Self {
         crate::warn_if_degraded("st3");
-        Self {
+        let runtime = Self {
             binary: "pty".into(),
             root,
             spawn_timeout: SPAWN_PUBLICATION_TIMEOUT,
@@ -294,7 +294,11 @@ impl PtyRuntime {
             command_environment: None,
             unlaned_seat: None,
             registry_snapshot: std::sync::Arc::default(),
+        };
+        if let Err(error) = runtime.reconcile_producers() {
+            tracing::warn!(error = %error, "PTY producer startup reconciliation incomplete");
         }
+        runtime
     }
 
     /// Set only by the daemon's seat runtime, never inferred from ambient environment.

@@ -54,7 +54,7 @@ fn coalesced_initial_snapshot_uses_its_geometry_before_a_later_shrink() {
     // Queue the entire stream before the attach thread can read it: the first
     // socket read sees both geometries, not just the one belonging to SCREEN.
     assert_eq!(daemon.write(&coalesced).unwrap(), coalesced.len());
-    let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30);
+    let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30, None);
     let mut reader = PacketReader::new();
     let mut pending = VecDeque::new();
     assert_eq!(
@@ -104,7 +104,7 @@ fn coalesced_initial_snapshot_uses_its_geometry_before_a_later_shrink() {
 fn cell_metrics_preserve_requested_dimensions_under_shared_geometry_constraints() {
     let (tui, mut daemon) = UnixStream::pair().unwrap();
     daemon.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30);
+    let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30, None);
     let mut reader = PacketReader::new();
     let mut pending = VecDeque::new();
     let attach = next_packet(&mut daemon, &mut reader, &mut pending);

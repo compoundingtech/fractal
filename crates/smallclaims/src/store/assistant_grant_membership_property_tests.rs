@@ -130,7 +130,7 @@ fn assert_raw_projection_oracle(store: &Store, expected_windows: &Windows, conte
     let authenticated: Vec<_> = pending.iter().filter_map(|(claim, trusted)|
         trusted.then_some(*claim)).collect();
     let text = |value: &str| SqlValue::Text(value.to_owned());
-    let optional_text = |value: Option<&str>| value.map_or(SqlValue::Null, |value| text(value));
+    let optional_text = |value: Option<&str>| value.map_or(SqlValue::Null, text);
     let mut expected_authority = Vec::new();
     let mut expected_effective = Vec::new();
     for grant in authenticated.iter().copied().filter(|claim| claim.kind == GRANTED) {

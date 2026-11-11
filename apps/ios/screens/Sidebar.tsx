@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { ActionSheetIOS, Alert, Modal, PanResponder, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -7,6 +7,8 @@ import { openAlerts } from '@fractal/views';
 import type { ArrangementOperation } from '../../../clients/typescript/fractal-client';
 import { Banners, StatusLine, useListsOnFocus, useMissionsOnFocus } from '../chrome';
 import { agentGlyph, agentRows } from '../agentsView';
+import { readPositions } from '../qualityNative';
+import { UNREAD_LABEL, unreadMark } from '../readPosition';
 import { missionTitle, missionWord, wordStyle } from '../missionsView';
 import { navigationRef, type RootScreen } from '../navigation';
 import { rememberResources, sidebarGroups, sidebarResourceMatches, type SidebarChoices, type SidebarResource } from '../sidebarView';
@@ -144,10 +146,13 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     }
   };
   const handle = (target: DragTarget) => editable && !/^(session|pty)\//.test(target.id) ? <DragHandle title={target.title} onBegin={() => { setDragging(true); scroll.current?.getNativeScrollRef()?.measureInWindow((_: number, y: number) => { screenY.current = y; }); }} onEnd={() => setDragging(false)} onDrop={y => drop(target, y)} /> : null;
+  useSyncExternalStore(readPositions.subscribe, () => readPositions.revision);
   const row = (resource: SidebarResource, folder: string | null) => {
     const target = { id: resource.id, folder, resource, title: resource.title }, glyph = mark(resource);
+    const agent = agentsById.get(resource.id), unread = agent ? unreadMark(readPositions.read(agent.target), agent.lastProseAt) : undefined;
+    const right = needs.has(resource.id) || unread ? <>{unread ? <T color={theme.accent} bold>{unread}</T> : null}{needs.has(resource.id) ? <T color={theme.person}>●</T> : null}</> : undefined;
     return <View key={resource.id} onLayout={e => positions.current.set(resource.id, e.nativeEvent.layout)} style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <View style={{ flex: 1 }}><ListRow glyph={glyph.glyph} glyphColor={glyph.color} title={resource.title} right={needs.has(resource.id) ? <T color={theme.person}>●</T> : undefined} second={resource.missing ? `${resource.id} · unavailable` : resource.kind} onPress={resource.missing ? undefined : () => open(resource)} onLongPress={editable && !/^(session|pty)\//.test(resource.id) ? () => move(resource) : undefined} /></View>{handle(target)}
+      <View style={{ flex: 1 }}><ListRow glyph={glyph.glyph} glyphColor={glyph.color} title={resource.title} right={right} accessibilityLabel={unread ? `${resource.title}, ${UNREAD_LABEL}` : undefined} second={resource.missing ? `${resource.id} · unavailable` : resource.kind} onPress={resource.missing ? undefined : () => open(resource)} onLongPress={editable && !/^(session|pty)\//.test(resource.id) ? () => move(resource) : undefined} /></View>{handle(target)}
     </View>;
   };
   const heading = (id: string, title: string, count: number, collapsed: boolean, folder?: string) => <View key={id} onLayout={e => positions.current.set(id, e.nativeEvent.layout)} style={{ flexDirection: 'row', alignItems: 'center' }}>

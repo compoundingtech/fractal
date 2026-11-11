@@ -149,7 +149,10 @@ fn attachment_budget_product(remote: bool, bases_first: bool, budget: Duration) 
         attachment_assert_fenced(store, grants, old_witnesses);
     }
     let mut slices = 0;
-    let mut pairs = 0;
+    let mut pairs: usize = store.readers.get().query_row(
+        "SELECT pair_inserts FROM attachment_slice_work", [], |row| row.get(0),
+    ).unwrap();
+    assert!(pairs<=TRANSITIONS,"local management must materialize at most one pair per transition append");
     let mut candidates = 0;
     let mut completions = 0;
     // Includes authentication/cursor bookkeeping as well as every possible pair
@@ -199,6 +202,63 @@ fn verified_attachment_cartesian_product_shares_the_full_slice_budget_in_both_di
 fn local_attachment_zero_duration_is_one_unit_and_finishes_in_both_directions() {
     for bases_first in [true, false] {
         attachment_budget_product(false, bases_first, Duration::ZERO);
+    }
+}
+
+#[test]
+fn local_owner_transition_materializes_only_one_pair_and_keeps_bearer_fenced() {
+    for bases in [1, 19, 129] {
+        let store = node("owner-management-bound",None);
+        let grants = attachment_append_group(&store,true,bases);
+        drain_authority(&store);
+        attachment_install_counter(&store.connection.write());
+        let policy = append(&store,SUBJECT,POLICY,fields());
+        let connection = store.readers.get();
+        let pairs: usize = connection.query_row(
+            "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id=?1",
+            [&policy.id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(pairs,1,"local request expanded its {bases}-base history");
+        let newest = authority::management_latest(&connection,SUBJECT,GRANTED).unwrap().unwrap();
+        assert!(grants.iter().any(|grant| grant.id==newest.id));
+        assert_eq!(authority::management_transition(&connection,&newest,POLICY)
+            .unwrap().unwrap().id,policy.id);
+        assert!(authority::subject_ready(&connection,SUBJECT).is_err());
+        assert!(authority::transition(&connection,&newest,POLICY).is_err());
+        drop(connection);
+        drain_authority(&store);
+        let pairs: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id=?1",
+            [&policy.id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(pairs,bases,"background work must finish all remaining pairs");
+    }
+}
+
+#[test]
+fn owner_management_preserves_transitions_before_a_new_unattached_base() {
+    for kind in [POLICY,REVOKED] {
+        let store = node("owner-transition-order",None);
+        let first = append(&store,SUBJECT,GRANTED,fields());
+        drain_authority(&store);
+        let mut changed = fields();
+        changed["policy_revision"] = json!(7);
+        let transition = append(&store,SUBJECT,kind,changed);
+        let second = append(&store,SUBJECT,GRANTED,fields());
+        let connection = store.readers.get();
+        assert_eq!(authority::management_latest(&connection,SUBJECT,GRANTED)
+            .unwrap().unwrap().id,second.id);
+        let attached: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?2)",
+            params![transition.id,second.id],|row| row.get(0),
+        ).unwrap();
+        assert!(!attached,"fixture must retain the missing reverse attachment");
+        assert_ne!(first.id,second.id);
+        let current = authority::management_transition(&connection,&second,kind)
+            .unwrap().expect("a new base cannot erase an existing transition");
+        assert_eq!(current.id,transition.id);
+        if kind==POLICY { assert_eq!(current.body["fields"]["policy_revision"],7); }
+        assert!(authority::transition(&connection,&second,kind).is_err());
     }
 }
 

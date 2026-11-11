@@ -577,6 +577,27 @@ pub fn latest(connection: &Connection, subject: &str, kind: &str) -> Result<Opti
         params![subject,kind], |row| row.get(0)).optional().map_err(internal)?;
     record.map(decode).transpose()
 }
+
+/// Management evidence only. Callers must authenticate the authoritative owner;
+/// this must never be used to authorize a bearer while its subject is fenced.
+pub fn management_latest(connection: &Connection, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
+    let record: Option<String> = connection.query_row(
+        "SELECT record FROM assistant_grant_authority WHERE grant_subject=?1 AND kind=?2 ORDER BY store_index DESC LIMIT 1",
+        params![subject,kind], |row| row.get(0)).optional().map_err(internal)?;
+    record.map(decode).transpose()
+}
+
+/// Owner management follows the newest authenticated subject transition, not
+/// attachment progress for this base. Ambiguous identities fail closed instead
+/// of treating an unattached revocation or policy as absent.
+pub fn management_transition(connection: &Connection, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
+    let transition = management_latest(connection,&granted.subject,kind)?;
+    if transition.as_ref().is_some_and(|claim| !transition_valid(granted,claim)) {
+        return Err(FractalError::new("assistant-grant-subject-not-ready",
+            "owner management transition identity does not match the current grant"));
+    }
+    Ok(transition)
+}
 pub const CANDIDATES_QUERY: &str = "SELECT grant_record FROM assistant_grant_effective
     WHERE ?3 IS NOT NULL AND principal=?1 AND owner=?2 AND revoked=0 AND expires_at>?3
       AND (?4 IS NULL OR claim_id<>?4) AND (?5 IS NULL OR profile<>?5)
@@ -681,8 +702,9 @@ fn recompute_base(connection: &Connection, base_id: &str) -> Result<()> {
 }
 // Authentication creates constant-sized state; opposite-side history is queued.
 fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
-    if claim.kind==GRANTED && structurally_valid(claim,claim) {
-        if insert_authority(connection,claim,claim)? { recompute_base(connection,&claim.id)?; }
+    if claim.kind==GRANTED && structurally_valid(claim,claim)
+        && insert_authority(connection,claim,claim)? {
+        recompute_base(connection,&claim.id)?;
     }
     let kinds: &[&str] = if claim.kind==GRANTED { &[POLICY,REVOKED] } else { &[GRANTED] };
     for kind in kinds {
@@ -781,6 +803,15 @@ fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bo
     refresh_claim_with_authentication(connection,id,membership_current,None)
 }
 
+#[derive(Default)]
+struct PreviousAuthentication {
+    admitted: bool,
+    key: Option<String>,
+    sequence: Option<u64>,
+    hash: Option<String>,
+    position: Option<i64>,
+}
+
 fn refresh_claim_with_authentication(connection: &Connection, id: &str,
     membership_current: bool, verified: Option<Authentication>) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
@@ -814,13 +845,16 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
             "SELECT EXISTS(SELECT 1 FROM assistant_grant_local_appends WHERE claim_id=?1)",
             [&claim.id], |row| row.get(0),
         )?;
-        let previous: Option<(bool,Option<String>,Option<u64>,Option<String>,Option<i64>)> = connection.query_row(
+        let previous: Option<PreviousAuthentication> = connection.query_row(
             "SELECT authenticated,auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
              FROM assistant_grant_pending WHERE claim_id=?1",
-            [&claim.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+            [&claim.id], |row| Ok(PreviousAuthentication {
+                admitted: row.get(0)?, key: row.get(1)?, sequence: row.get(2)?,
+                hash: row.get(3)?, position: row.get(4)?,
+            }),
         ).optional()?;
-        let (admitted, previous_key, previous_sequence, previous_hash, previous_position) =
-            previous.unwrap_or((false,None,None,None,None));
+        let PreviousAuthentication { admitted, key: previous_key, sequence: previous_sequence,
+            hash: previous_hash, position: previous_position } = previous.unwrap_or_default();
         // Trust depends on precise evidence, never monotonic admission. Retraction
         // tasks target that dependency; local append is a separate durable fact.
         let authentication = if let Some(verified) = verified {
@@ -852,6 +886,21 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
                OR assistant_grant_pending.auth_envelope_hash IS NOT excluded.auth_envelope_hash
                OR assistant_grant_pending.auth_record_position IS NOT excluded.auth_record_position",
             params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?,proof_key,proof_sequence,proof_hash,proof_position])? != 0;
+        // One local transition may materialize only its newest base pair for
+        // owner management. All other pairs stay queued, and bearer fences stay
+        // intact. No base/transition product is visited in the append request.
+        if changed && !admitted && authenticated && local_append && claim.kind!=GRANTED
+            && let Some(base) = management_latest(connection,&claim.subject,GRANTED)?
+            && transition_valid(&base,&claim) {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h41fad2bc67c1 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
+                 SELECT claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record
+                 FROM assistant_grant_effective WHERE claim_id=?1", [&base.id],
+            )?;
+            if insert_authority(connection,&claim,&base)? {
+                recompute_base(connection,&base.id)?;
+            }
+        }
         if changed && !admitted && authenticated { attach_claim(connection,&claim)?; }
         if admitted && !authenticated { rebuild_authenticated_subject(connection,&claim)?; }
         if matches!(authentication, Authentication::Pending) {
@@ -1083,8 +1132,8 @@ impl MembershipUpdate {
                     None => enqueue(old_start,old_end)?,
                     Some((start,end)) => {
                         if *start>old_start { enqueue(old_start,old_end.min(start-1))?; }
-                        if let Some(end) = end {
-                            if *end<old_end { enqueue(old_start.max(end+1),old_end)?; }
+                        if let Some(end) = end && *end<old_end {
+                            enqueue(old_start.max(end+1),old_end)?;
                         }
                     }
                 }
@@ -1186,11 +1235,21 @@ fn proof_invalidation_one(connection: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+struct RetractionRange<'a> {
+    task: i64,
+    writer: &'a str,
+    key: &'a str,
+    lower: u64,
+    upper: u64,
+    sequence: i64,
+    claim: &'a str,
+}
+
 // Coverage restoration immediately exempts covered dependencies from fencing.
 // Lazily subtract its intersection from one queued range per budget unit, so
 // cancellation itself never expands into an unbounded writer transaction.
-fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, key: &str,
-    lower: u64, upper: u64, sequence: i64, claim: &str) -> Result<bool> {
+fn trim_restored_retraction(connection: &Connection, range: RetractionRange<'_>) -> Result<bool> {
+    let RetractionRange { task, writer, key, lower, upper, sequence, claim } = range;
     let window: Option<MembershipWindow> = connection.query_row(
         "SELECT start,end FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
         params![writer,key], |row| Ok((row.get(0)?,row.get(1)?)),
@@ -1214,16 +1273,34 @@ fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, ke
     Ok(true)
 }
 
+struct AdditionTask {
+    task: i64,
+    writer: String,
+    key: String,
+    lower: u64,
+    upper: u64,
+    sequence: i64,
+    hash: String,
+    position: i64,
+    after: String,
+    claim: String,
+}
+
 // Each addition seeks only indexed grant work, then that grant's own receipts.
 // A claim selection, receipt verification or completed claim costs one unit.
 fn addition_one(connection: &Connection) -> Result<bool> {
     let Some((owner,_)) = queue_owner(connection,"addition")? else { return Ok(false); };
-    let task: Option<(i64,String,String,u64,u64,i64,String,i64,String,String)> = connection.query_row(
+    let task: Option<AdditionTask> = connection.query_row(
         "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim
          FROM assistant_grant_additions WHERE id=?1", [&owner],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)),
+        |row| Ok(AdditionTask {
+            task: row.get(0)?, writer: row.get(1)?, key: row.get(2)?,
+            lower: row.get(3)?, upper: row.get(4)?, sequence: row.get(5)?,
+            hash: row.get(6)?, position: row.get(7)?, after: row.get(8)?, claim: row.get(9)?,
+        }),
     ).optional()?;
-    let Some((task,writer,key,lower,upper,sequence,hash,position,after,claim)) = task else { return Ok(false); };
+    let Some(AdditionTask { task, writer, key, lower, upper, sequence, hash, position,
+        after, claim }) = task else { return Ok(false); };
     if claim.is_empty() {
         let next: Option<String> = connection.query_row(
             "SELECT claim_id FROM assistant_grant_auth_work WHERE writer=?1 AND claim_id>?2 ORDER BY claim_id LIMIT 1",
@@ -1333,7 +1410,9 @@ fn retraction_one(connection: &Connection) -> Result<bool> {
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
     ).optional()?;
     let Some((task,writer,key,lower,upper,sequence,id)) = task else { return Ok(false); };
-    if trim_restored_retraction(connection,task,&writer,&key,lower,upper,sequence,&id)? {
+    if trim_restored_retraction(connection, RetractionRange {
+        task, writer: &writer, key: &key, lower, upper, sequence, claim: &id,
+    })? {
         return Ok(true);
     }
     let pending: Option<(u64,String)> = connection.query_row(

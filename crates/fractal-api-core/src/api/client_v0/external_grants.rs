@@ -225,7 +225,7 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
             // authoritative owner must still be able to retire that evidence.
             let revoke_principal = authority::principal(&value)
                 .ok_or_else(|| forbidden("invalid external grant revocation principal"))?;
-            let granted = authority::latest(&state.store.readers.get(), &subject, GRANTED)
+            let granted = authority::management_latest(&state.store.readers.get(), &subject, GRANTED)
                 .map_err(authority_error)?.ok_or_else(|| forbidden("assistant grant is absent"))?;
             if actor != owning_person(state)? || granted.actor.as_deref() != Some(actor)
                 || granted.origin != state.store.origin()
@@ -303,13 +303,37 @@ pub fn revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError
 pub fn effective(state: &AppState, granted: &ClaimRecord) -> Result<ClaimRecord, ApiError> {
     Ok(transition(state, granted, POLICY)?.unwrap_or_else(|| granted.clone()))
 }
+// These management reads require the configured authoritative owner, never a
+// bearer. Attachment work may fence bearer authorization after a committed write.
+pub fn owner_grant(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
+    let granted = authority::management_latest(&state.store.readers.get(), &subject(id)?, GRANTED)
+        .map_err(authority_error)?.ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
+    if granted.origin != state.store.origin() || granted.actor.as_deref()!=Some(owning_person(state)?) {
+        return Err(forbidden("assistant management requires its authoritative owner"));
+    }
+    Ok(granted)
+}
+pub fn owner_effective(state: &AppState, granted: &ClaimRecord) -> Result<ClaimRecord, ApiError> {
+    Ok(authority::management_transition(&state.store.readers.get(),granted,POLICY)
+        .map_err(authority_error)?.unwrap_or_else(|| granted.clone()))
+}
+pub fn owner_revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError> {
+    Ok(authority::management_transition(&state.store.readers.get(),granted,REVOKED)
+        .map_err(authority_error)?.is_some())
+}
+pub fn owner_projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
+    projection_record(&owner_effective(state,granted)?,owner_revoked(state,granted)?)
+}
+
 pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
-    let policy = effective(state, granted)?;
-    let source = fields(&policy)?;
+    projection_record(&effective(state,granted)?,revoked(state,granted)?)
+}
+fn projection_record(policy: &ClaimRecord, revoked: bool) -> Result<Value, ApiError> {
+    let source = fields(policy)?;
     let mut value = json!({"kind":"assistant-grant","id":source["grant_id"],
         "principal":projection_principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
         "expires_at":client_timestamp(source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0)),
-        "revoked":revoked(state, granted)?});
+        "revoked":revoked});
     for name in ["session_actor","device_id","key_id","scopes","policy_revision",
                  "minimal_read_mode","recipient_allowlist","disclosure_consent","consent_evidence"] {
         value[name] = source[name].clone();
