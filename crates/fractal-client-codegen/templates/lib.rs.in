@@ -1823,9 +1823,10 @@ impl Client {
             }
             if wanted_cut.is_none()
                 && let Err(ClientError::Api(_, _, envelope)) = &outcome
-                && envelope.details.get("reason").and_then(serde_json::Value::as_str)
-                    == Some("work-list-not-fresh")
-                && let Some(cut) = envelope.details.get("wanted_cut").and_then(serde_json::Value::as_u64)
+                && let Some(reason) = envelope.details.get("reason")
+                && reason.as_str() == Some("work-list-not-fresh")
+                && let Some(cut) = envelope.details.get("wanted_cut")
+                && let Some(cut) = cut.as_u64()
             {
                 use std::fmt::Write as _;
                 write!(&mut path, "&min_cut={cut}").expect("writing to a String cannot fail");
