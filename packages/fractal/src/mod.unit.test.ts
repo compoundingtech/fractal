@@ -347,6 +347,26 @@ agent "example/worker" {
   })
 })
 
+describe('agent lifecycle', () => {
+  it.each(['standing', 'owner', 'bounded'] as const)('emits lifecycle %s as a native child', (lifecycle) => {
+    expect(emit([agent({ id: 'example/worker', lifecycle })])).toBe(
+      `version 2
+agent "example/worker" {
+  lifecycle "${lifecycle}"
+}
+`,
+    )
+  })
+
+  it('emits no lifecycle child when unset', () => {
+    expect(emit([agent({ id: 'example/worker' })])).not.toContain('lifecycle')
+  })
+
+  it('rejects an unknown lifecycle value', () => {
+    expect(() => agent({ id: 'example/worker', lifecycle: 'project' })).toThrow()
+  })
+})
+
 // These are authoring contracts, not assertions about person authentication.
 describe('attributed human gates', () => {
   it('keeps person references distinct from imported agent references', () => {
