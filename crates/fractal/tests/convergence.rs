@@ -1969,9 +1969,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 }
 
 /// Corpus v22 adds `source.mapped` to kind selection, shifting the shared RNG schedule; hosted
-/// linux-tests on the storage PR left seeds 34 and 74 untrimmed. The never-trim set is
-/// characterized by hosted CI; a lightly loaded runner diverges from it (#6210).
-const NEVER_TRIMS: &[u64] = &[34, 74];
+/// linux-tests on the storage PR left seed 34 untrimmed. The never-trim set is characterized by
+/// hosted CI; a lightly loaded runner diverges from it (#6210).
+const NEVER_TRIMS: &[u64] = &[34];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
