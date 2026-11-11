@@ -7586,8 +7586,8 @@ impl Store {
 
     /// Event-only envelopes do not change the structural graph and can advance from a healthy
     /// frontier. The incremental projector also handles selected structural and run claims from
-    /// a healthy frontier. Keep the full replay for stale projections and ambiguous operation or
-    /// renewal ordering.
+    /// a healthy frontier. Stale projections and ambiguous operation ordering require
+    /// explicit operator recovery; live projection never runs a full-store replay.
     ///
     /// A kind belongs here only when a full replay does nothing with its claims but record their
     /// event and operation, and no projection reads them while it builds the graph: then the
@@ -17089,7 +17089,9 @@ fn claims_in_replay_order_tx(
     subjects: &BTreeSet<String>,
     generations: &BTreeSet<String>,
     kinds: Option<&[&str]>,
+    through: Option<u64>,
 ) -> Result<Vec<ClaimRecord>, FractalError> {
+    let through = through.unwrap_or(i64::MAX as u64).min(i64::MAX as u64);
     let kind_filter = kinds
         .map(|kinds| {
             format!(
@@ -17108,6 +17110,7 @@ fn claims_in_replay_order_tx(
                     {}
              FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE {filter}{kind_filter}
+               AND claims.store_index<=?3
                AND NOT EXISTS (SELECT 1 FROM replica_records
                                WHERE replica_records.claim_id=claims.id
                                  AND replica_records.state='repaired')",
@@ -17124,7 +17127,7 @@ fn claims_in_replay_order_tx(
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-h0679c44a6a1a owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query("claims.subject=?1"))
         .map_err(internal)?;
     for subject in subjects {
-        for claim in by_subject.query_map([subject], row).map_err(internal)? {
+        for claim in by_subject.query_map(params![subject, rusqlite::types::Null, through], row).map_err(internal)? {
             found.push(claim.map_err(internal)?);
         }
     }
@@ -17136,7 +17139,7 @@ fn claims_in_replay_order_tx(
         let start = format!("step-run/{generation}/");
         let end = format!("step-run/{generation}0");
         for claim in by_range
-            .query_map(params![start, end], row)
+            .query_map(params![start, end, through], row)
             .map_err(internal)?
         {
             found.push(claim.map_err(internal)?);
@@ -17221,7 +17224,7 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
                 .map(|proposal| format!("revision-proposal/{proposal}")),
         )
         .collect::<BTreeSet<_>>();
-    let claims = claims_in_replay_order_tx(transaction, &subjects, &generations, None)?;
+    let claims = claims_in_replay_order_tx(transaction, &subjects, &generations, None, None)?;
     holds::rebuilt(claims.len());
     for run in runs {
         for sql in [
@@ -17325,6 +17328,8 @@ fn note_run_projection_finished_tx(
 fn rebuild_base_aggregate_tx(
     transaction: &Transaction<'_>,
     aggregate: &Aggregate,
+    preserve_selection: bool,
+    through: u64,
 ) -> Result<(), FractalError> {
     let (subject, kind) = match aggregate {
         Aggregate::Desired(subject) => (subject, "intent.desired"),
@@ -17336,12 +17341,12 @@ fn rebuild_base_aggregate_tx(
     #[cfg(any(test, feature = "test-support"))]
     BASE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     match aggregate {
-        Aggregate::Desired(subject) => {
+        Aggregate::Desired(subject) if !preserve_selection => {
             transaction
                 .execute(/* sqlite-large-value: allow-for-now lv-he8205da6531e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [subject])
                 .map_err(internal)?;
         }
-        Aggregate::Mission(subject) => {
+        Aggregate::Mission(subject) if !preserve_selection => {
             transaction
                 .execute(
                     /* sqlite-large-value: allow-for-now lv-h03200f357e2c owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_definitions WHERE mission_id=?1",
@@ -17356,6 +17361,7 @@ fn rebuild_base_aggregate_tx(
         &BTreeSet::from([subject.clone()]),
         &BTreeSet::new(),
         Some(&[kind]),
+        Some(through),
     )?;
     holds::rebuilt(claims.len());
     for claim in &claims {
@@ -17364,10 +17370,10 @@ fn rebuild_base_aggregate_tx(
                 "intent.desired" => {
                     let desired = serde_json::from_value::<DesiredSubject>(claim.body.clone())
                         .map_err(internal)?;
-                    select_replicated_desired(transaction, claim, &desired)
+                    select_replicated_desired_with_ownership(transaction, claim, &desired, Some(preserve_selection))
                 }
                 "doc.bound" => select_replicated_document(transaction, claim, claim.store_index),
-                _ => select_replicated_mission(transaction, claim, claim.store_index),
+                _ => select_replicated_mission_with_ownership(transaction, claim, claim.store_index, Some(preserve_selection)),
             }
         })?;
     }
@@ -17397,7 +17403,7 @@ fn incremental_claim_error(error: FractalError, claim: &ClaimRecord, stage: &'st
     }
 }
 
-/// Retain the guard reason for the always-on log at the actual fallback boundary.
+/// Retain the typed reason at the live projection's explicit-recovery boundary.
 fn replay_needed(reason: &'static str) -> IncrementalProjection {
     crate::profile::note(&format!("replay: {reason}"));
     IncrementalProjection::Replay(reason)
@@ -17803,6 +17809,7 @@ fn try_project_simple_replication_inner_tx(
                     | "agent.retired"
                     | "agent.renamed"
                     | "mission.renamed"
+                    | "owned-set.revised"
                     | "work.person-asked"
                     | "work.person-reassigned"
                     | "work.person-done"
@@ -18162,6 +18169,18 @@ fn try_project_simple_replication_inner_tx(
             })?;
         }
     }
+    // Ownership is evaluated at this committed prefix, not at a later admitted receipt.
+    // Multiple historical owners still hold their physical selection; they are not a
+    // projection fault. Event-only chunks need no receipt scan for this policy.
+    let prefix_owners = if claims.iter().any(|claim|
+        matches!(claim.kind.as_str(), "intent.desired" | "mission.published"))
+        || dirty.iter().any(|aggregate|
+            matches!(aggregate, Aggregate::Desired(_) | Aggregate::Mission(_)))
+    {
+        owned_sets::owners_at(transaction, Some(through))?
+    } else {
+        BTreeMap::new()
+    };
     let mut aggregates = BTreeMap::<String, Option<Aggregate>>::new();
     // A claim is left to its aggregate's rebuild when that aggregate is dirty, and left waiting
     // when it is about a run tree that nothing has created yet.
@@ -18197,13 +18216,15 @@ fn try_project_simple_replication_inner_tx(
                     .map_err(|error| {
                         incremental_claim_error(internal(error), claim, "desired-decode")
                     })?;
-                select_replicated_desired(transaction, claim, &desired)
+                select_replicated_desired_with_ownership(transaction, claim, &desired,
+                    Some(prefix_owners.contains_key(&claim.subject)))
                     .map_err(|error| incremental_claim_error(error, claim, "claim-project"))?;
             }
             "doc.bound" => select_replicated_document(transaction, claim, claim.store_index)
                 .map_err(|error| incremental_claim_error(error, claim, "claim-project"))?,
             "mission.published" => {
-                select_replicated_mission(transaction, claim, claim.store_index)
+                select_replicated_mission_with_ownership(transaction, claim, claim.store_index,
+                    Some(prefix_owners.contains_key(&claim.subject)))
                     .map_err(|error| incremental_claim_error(error, claim, "claim-project"))?;
             }
             "mission-run.created" => project_mission_run_created(transaction, claim)
@@ -18256,8 +18277,14 @@ fn try_project_simple_replication_inner_tx(
         .iter()
         .partition(|aggregate| matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)));
     for aggregate in bases {
+        // Keep last-good owned rows while still materializing revision history and
+        // retirement overlays. Only the final owned-set fold replaces their selection.
+        let preserve_selection = match aggregate {
+            Aggregate::Desired(subject) | Aggregate::Mission(subject) => prefix_owners.contains_key(subject),
+            _ => false,
+        };
         holds::stage("rebuild-base", || {
-            rebuild_base_aggregate_tx(transaction, aggregate)
+            rebuild_base_aggregate_tx(transaction, aggregate, preserve_selection, through)
         })
         .map_err(|error| {
             let subject = match aggregate {
@@ -18319,7 +18346,7 @@ fn try_project_simple_replication_inner_tx(
         None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
-    owned_sets::project_tx(transaction)
+    owned_sets::project_incremental_tx(transaction, through, &claims)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
     Ok(IncrementalProjection::Projected)
 }
@@ -18619,9 +18646,21 @@ pub fn select_replicated_desired(
     claim: &ClaimRecord,
     desired: &DesiredSubject,
 ) -> Result<(), FractalError> {
+    select_replicated_desired_with_ownership(transaction, claim, desired, None)
+}
+
+fn select_replicated_desired_with_ownership(
+    transaction: &Transaction<'_>,
+    claim: &ClaimRecord,
+    desired: &DesiredSubject,
+    known_ownership: Option<bool>,
+) -> Result<(), FractalError> {
     // Replication projects the signed storage subject, never a receiver-local public alias.
     // Only newly authored declarations are normalized at admission.
-    if claim.body.get("owned_set").is_some() || owned_sets::owner(transaction, &desired.subject, None)?.is_some() {
+    if claim.body.get("owned_set").is_some() || match known_ownership {
+        Some(owned) => owned,
+        None => owned_sets::owner(transaction, &desired.subject, None)?.is_some(),
+    } {
         return Ok(());
     }
     // Read the physical row directly: conflict fencing belongs to admission, not replay.
@@ -19689,6 +19728,15 @@ pub fn select_replicated_mission(
     claim: &ClaimRecord,
     created_index: u64,
 ) -> Result<(), FractalError> {
+    select_replicated_mission_with_ownership(transaction, claim, created_index, None)
+}
+
+fn select_replicated_mission_with_ownership(
+    transaction: &Transaction<'_>,
+    claim: &ClaimRecord,
+    created_index: u64,
+    known_ownership: Option<bool>,
+) -> Result<(), FractalError> {
     let mission = serde_json::from_value::<MissionSpec>(claim.body.clone()).map_err(|error| {
         FractalError::new(
             "invalid-mission-claim",
@@ -19744,7 +19792,10 @@ pub fn select_replicated_mission(
             )
             .map_err(internal)?;
     }
-    if claim.body.get("owned_set").is_some() || owned_sets::owner(transaction, &claim.subject, None)?.is_some() {
+    if claim.body.get("owned_set").is_some() || match known_ownership {
+        Some(owned) => owned,
+        None => owned_sets::owner(transaction, &claim.subject, None)?.is_some(),
+    } {
         return Ok(());
     }
     let current: Option<(String, String)> = transaction

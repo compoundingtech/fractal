@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
-//! A real, isolated daemon pauses inside canonical replay. Observation must work while SQLite
-//! holds its write transaction, then advance to serving only after both listeners bind.
+//! A real, isolated daemon pauses before incremental projection. Observation must work while
+//! SQLite holds its write transaction, then advance to serving only after both listeners bind.
 
 use fractal_daemon::MissionsStore;
 use std::collections::BTreeMap;
@@ -33,6 +33,47 @@ fn command(root: &Path) -> Command {
         .current_dir(root)
         .stdin(Stdio::null());
     command
+}
+
+#[test]
+fn ordinary_and_generated_cli_fail_fast_during_full_replay_with_a_long_wait_allowance() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for directory in ["home/.config/st3", "run"] {
+        std::fs::create_dir_all(root.path().join(directory)).unwrap();
+    }
+    let socket = root.path().join("run/api.sock");
+    // A real refused endpoint, with a live readiness writer but no serving API.
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    let startup = fractal_daemon::startup::Startup::begin(&socket).unwrap();
+    startup.phase("full-replay/resources");
+    for args in [
+        &["agents", "ls"][..],
+        &["work", "ls", "--as", "agent/replay-readiness-probe"][..],
+    ] {
+        let mut child = command(root.path())
+            .args(["--daemon-wait", "60"])
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("{args:?} waited through full replay despite its fail-fast contract: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success(), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("daemon starting"), "{args:?}: {stderr}");
+        assert!(stderr.contains("full-replay/resources"), "{args:?}: {stderr}");
+    }
 }
 
 #[test]
@@ -206,7 +247,7 @@ fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_miss
 }
 
 #[test]
-fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
+fn parked_projection_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -233,8 +274,8 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
                 .unwrap();
         }
         store.project_replication_backlog().unwrap();
-        // Model an already-started store: the one-time canonical settlement otherwise replays
-        // and repairs graph health before the backlog projector sees the forced fallback.
+        // Model an already-started store: migration must not repair the deliberately
+        // missing health before the live projector exercises its terminal fence.
         store.settle_runs_for_canonical_replay().unwrap();
         assert!(store.index().unwrap() >= 3);
     }
@@ -273,15 +314,13 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     }
     let readiness = fractal_daemon::startup::read(&socket).unwrap();
     assert_eq!(readiness.status, "starting");
-    assert_eq!(readiness.phase, "full-replay/base-claims");
+    assert_eq!(readiness.phase, "project-incremental");
     assert_eq!(readiness.frontier, Some(0));
     assert!(readiness.target.unwrap() >= 3);
-    assert_eq!(readiness.processed, Some(0));
-    // This fixture contains only harness observations. Base progress counts bodies with
-    // a base projection, while target still names the full uncommitted source frontier.
-    assert_eq!(readiness.total, Some(0));
+    assert_eq!(readiness.processed, None);
+    assert_eq!(readiness.total, None);
     let early_log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(early_log.contains("fractal: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
+    assert!(!early_log.contains("fractal: projection full replay"), "{early_log}");
     assert!(!early_log.contains("st3: startup phases "), "{early_log}");
     // Both addresses exist early, but neither is listening or queueing a request
     // while projection is uncommitted. Keep the main refusal/phase contract.
@@ -300,30 +339,30 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(!doctor.status.success());
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-    assert_eq!(report["startup"]["phase"], "full-replay/base-claims");
+    assert_eq!(report["startup"]["phase"], "project-incremental");
     assert_eq!(report["startup"]["status"], "starting");
     assert!(!String::from_utf8_lossy(&doctor.stderr).contains("fractal setup"), "{doctor:?}");
     assert!(!String::from_utf8_lossy(&doctor.stderr).contains("st setup"), "{doctor:?}");
     let started = Instant::now();
-    let ordinary = command(root).args(["agents", "ls"]).output().unwrap();
+    let ordinary = command(root).args(["--daemon-wait", "0", "agents", "ls"]).output().unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "CLI waited through replay"
+        "CLI exceeded its explicit zero wait"
     );
     assert!(!ordinary.status.success());
     assert!(String::from_utf8_lossy(&ordinary.stderr).contains("daemon starting"));
-    assert!(String::from_utf8_lossy(&ordinary.stderr).contains("full-replay/base-claims"));
+    assert!(String::from_utf8_lossy(&ordinary.stderr).contains("project-incremental"));
     let started = Instant::now();
     let generated = command(root)
-        .args(["work", "ls", "--as", "agent/replay-readiness-probe"])
+        .args(["--daemon-wait", "0", "work", "ls", "--as", "agent/projection-readiness-probe"])
         .output()
         .unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "generated CLI waited through replay"
+        "generated CLI exceeded its explicit zero wait"
     );
     assert!(!generated.status.success());
-    assert!(String::from_utf8_lossy(&generated.stderr).contains("full-replay/base-claims"));
+    assert!(String::from_utf8_lossy(&generated.stderr).contains("project-incremental"));
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -366,7 +405,7 @@ fi
             service["services"][0]["state"]
                 .as_str()
                 .unwrap()
-                .contains("full-replay/base-claims")
+                .contains("project-incremental")
         );
     }
     std::fs::write(root.join("barrier/release"), b"resume").unwrap();
@@ -387,10 +426,14 @@ fi
     assert!(std::os::unix::net::UnixStream::connect(root.join("run/client.sock")).is_ok());
     let readiness = fractal_daemon::startup::read(&socket).unwrap();
     assert_eq!(readiness.phase, "ready");
-    assert_eq!(readiness.frontier, readiness.target);
+    assert_ne!(readiness.frontier, readiness.target, "serving is not projection convergence");
     let doctor = command(root).args(["doctor", "--json"]).output().unwrap();
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["startup"]["status"], "serving");
+    let recovery = report["checks"].as_array().unwrap().iter()
+        .find(|check| check["name"] == "replication-projection-recovery-required").unwrap();
+    assert_eq!(recovery["status"], "fail");
+    assert!(recovery["message"].as_str().unwrap().contains("last-good frontier unknown"));
     let log = std::fs::read_to_string(&log_path).unwrap();
     let timing_lines = log
         .lines()
@@ -418,14 +461,13 @@ fi
     }
     assert!((phase_sum_ms - total_ms).abs() < 0.001, "{timings}");
     eprintln!("st3: startup phases {}", timing_lines[0]);
-    let fallbacks = log
-        .lines()
-        .filter(|line| line.starts_with("fractal: projection full replay"))
-        .collect::<Vec<_>>();
-    assert_eq!(fallbacks.len(), 1, "{log}");
-    assert!(
-        fallbacks[0].contains("phase=startup/project-replication-backlog reason=missing-health")
-    );
+    assert!(!log.lines().any(|line| line.starts_with("fractal: projection full replay")), "{log}");
+    let transitions = log.lines()
+        .filter_map(|line| line.strip_prefix("fractal: projection recovery required "))
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>();
+    assert_eq!(transitions.len(), 1, "{log}");
+    assert_eq!(transitions[0]["reason_code"], "missing-health");
+    assert_eq!(transitions[0]["frontier"], Value::Null);
     #[cfg(target_os = "linux")]
     {
         let service = command(root)

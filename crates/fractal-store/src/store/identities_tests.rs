@@ -451,8 +451,21 @@ fn mixed_structural_and_neutral_operation_history_requires_replay_in_both_orders
                 }), "neutral_first={neutral_first}");
                 tx.rollback().unwrap();
             }
-            store.project_replication_backlog().unwrap();
+            if neutral == neutral_first {
+                assert!(store.project_replication_backlog().unwrap());
+            } else {
+                let frontier = store.readers.get().query_row(
+                    "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                    [], |row| row.get::<_, Option<u64>>(0),
+                ).unwrap();
+                assert!(!store.project_replication_backlog().unwrap());
+                let parked = store.projection_recovery().unwrap().unwrap();
+                assert_eq!(parked.reason_code, "operation-conflict");
+                assert_eq!(parked.frontier, frontier);
+            }
         }
+        store.replay_replication_graph().unwrap();
+        assert!(!store.replication_projection_recovery_required().unwrap());
         assert_eq!(operation_tx(&store.readers.get(), operation).unwrap().unwrap().2, "conflict");
         let error = store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err();
         assert_eq!(error.code, "lifecycle-unavailable");

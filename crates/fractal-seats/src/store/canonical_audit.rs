@@ -1015,12 +1015,38 @@ fn every_shared_projection_agrees_after_shuffle_restart_and_checkpoint() {
     for (name, order) in schedules {
         let path = directory.path().join(format!("{name}.sqlite3"));
         let mut target = Store::open(&path, name).unwrap();
+        target.bind_fleet(TEST_FLEET).unwrap();
+        let mut parked = false;
         for index in order {
-            receive_and_project(
-                &target,
-                "alder",
+            target.receive_replication_exchange(
+                "alder", TEST_FLEET,
                 &exchange_of("alder", vec![exchange.envelopes[index].clone()]),
-            );
+            ).unwrap();
+            target.validate_replication_backlog().unwrap();
+            target.apply_replication_repairs().unwrap();
+            let mut lines = Vec::new();
+            let projected = target.project_replication_backlog_with_log(
+                "test", |line| lines.push(line.to_owned()),
+            ).unwrap();
+            if !projected {
+                let recovery = target.projection_recovery().unwrap().unwrap();
+                assert_eq!(recovery.reason_code, "internal", "{name}");
+                assert!(recovery.message.as_deref().unwrap().contains("FOREIGN KEY constraint failed"), "{name}");
+                if !parked {
+                    let detail: Value = serde_json::from_str(lines.iter().find_map(
+                        |line| line.strip_prefix("fractal: projection failure detail "),
+                    ).unwrap()).unwrap();
+                    assert_eq!(detail["stage"], "claim-project", "{name}");
+                    assert_eq!(detail["claim_kind"], "revision-proposal.created", "{name}");
+                }
+                parked = true;
+            } else {
+                assert!(!parked, "{name}: parked projection must not retry automatically");
+            }
+        }
+        if parked {
+            target.replay_replication_graph().unwrap();
+            assert!(!target.replication_projection_recovery_required().unwrap());
         }
         // Check the schedule really changed local admission order, not only transport order.
         assert_ne!(
