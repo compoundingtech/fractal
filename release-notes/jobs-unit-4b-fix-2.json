@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Restore the OptionalExtension trait imports required by standalone unit 4b jobs queries and receipts.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "Keep OptionalExtension in each jobs child module until unit 7a introduces it in their shared parent scope. This restores standalone compilation without changing queries, durable records or wire compatibility."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
