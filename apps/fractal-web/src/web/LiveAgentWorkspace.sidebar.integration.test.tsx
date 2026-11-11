@@ -177,7 +177,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
     }
   })
   expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
-  expect(row().querySelector('[data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission]')).toBeNull()
   const warning = row().querySelector('[data-mission-unavailable]')!
   expect(warning.textContent).toContain('Mission info unavailable')
   expect(warning.querySelector('svg')).not.toBeNull()
@@ -185,7 +185,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
   expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
   await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
   expect(row().getAttribute('aria-label')).toBe('Worker, Working')
-  expect(row().querySelector('[data-mission-unavailable], [data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission-unavailable], [data-mission]')).toBeNull()
   expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
 })
 
@@ -315,17 +315,18 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
   const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('Idle;')
+  // A live mark says the state alone; the qualifier appears only once the observation is not live.
+  expect(status()).toBe('Idle')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   expect(registry.get(agents)).toBe(retained)
   expect(freshness()).toBe('stale')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · Idle')
-  expect(status()).toContain('Last verified · Idle;')
+  expect(status()).toContain('Last verified · Idle; stale observation')
   expect(status()).toContain('stale observation')
   await act(async () => registry.set(connection, { _tag: 'Live' }))
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('live observation')
+  expect(status()).toBe('Idle')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
