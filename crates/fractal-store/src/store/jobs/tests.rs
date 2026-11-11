@@ -30,7 +30,7 @@ pub(super) fn submission(id: &str, key: &str) -> JobRecord {
         "command":{"argv":["fixture"],"cwd":"."},
         "resources":{"cpu_millicores":1,"memory_bytes":1,"io_weight":1,
             "tasks_max":1,"expected_duration_ms":1,"run_timeout_ms":null,
-            "priority":0,"requested_class":"fixture","storage_request":null,"delegated_reservations":null}
+            "priority":"background","requested_class":"fixture","storage_request":null,"delegated_reservations":null}
     })).unwrap();
     JobRecord::Submitted {
         binding: JobHostBinding { job_id: id.into(), execution_host: "fixture-host".into(),
@@ -320,4 +320,100 @@ fn launch_refusal_requires_the_recorded_generation() {
     assert!(history[3].refusal.as_ref().unwrap()
         .contains("job-launch-intent-mismatch"));
     assert!(matches!(job_by_id(&tx, &id).unwrap().unwrap().state, JobState::Refused { .. }));
+}
+
+/// Receipt-level persistence is the idempotency mechanism. A cannot commit
+/// until B's SQLite busy handler proves B tried to reserve under A's write lock.
+#[test]
+fn contended_connections_persist_one_idempotency_receipt_and_reuse_its_job_id() {
+    use fractal_jobs::identity::{IdempotencyDecision, decide_idempotency};
+    use std::{
+        sync::{Condvar, Mutex, mpsc},
+        time::{Duration, Instant},
+    };
+
+    const WAIT: Duration = Duration::from_secs(30);
+    static CONTENTION: (Mutex<(bool, Option<Instant>)>, Condvar) =
+        (Mutex::new((false, None)), Condvar::new());
+
+    fn observe_busy(_attempt: i32) -> bool {
+        let mut state = CONTENTION.0.lock().unwrap();
+        state.0 = true;
+        CONTENTION.1.notify_one();
+        let retry = state.1.is_some_and(|deadline| Instant::now() < deadline);
+        drop(state);
+        if retry {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        retry
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("jobs.sqlite");
+    let mut setup = Connection::open(&path).unwrap();
+    setup
+        .execute_batch(
+            "CREATE TABLE claims(id TEXT PRIMARY KEY,kind TEXT,subject TEXT);
+             CREATE TABLE replica_records(claim_id TEXT,state TEXT);",
+        )
+        .unwrap();
+    create_schema(&setup).unwrap();
+    let id = job_id("person/fixture", "concurrent");
+    let JobRecord::Submitted { identity, .. } = submission(&id, "concurrent") else {
+        unreachable!()
+    };
+    *CONTENTION.0.lock().unwrap() = (false, None);
+    let (reserved, start_loser) = mpsc::channel();
+    let (winner, loser) = std::thread::scope(|scope| {
+        let (path, identity, id) = (&path, &identity, &id);
+        let winner = scope.spawn(move || {
+            let mut connection = Connection::open(path).unwrap();
+            connection.busy_timeout(WAIT).unwrap();
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let existing = receipt_for_key(&tx, &identity.requester, &identity.key).unwrap();
+            let decision = decide_idempotency(identity, existing).unwrap();
+            receipts::reserve_receipt(&tx, identity, id).unwrap();
+            reserved.send(()).unwrap();
+            let (state, _) = CONTENTION
+                .1
+                .wait_timeout_while(CONTENTION.0.lock().unwrap(), WAIT, |state| !state.0)
+                .unwrap();
+            assert!(state.0, "B must contend before A releases its write lock");
+            drop(state);
+            tx.commit().unwrap();
+            decision
+        });
+        let loser = scope.spawn(move || {
+            let mut connection = Connection::open(path).unwrap();
+            connection.busy_handler(Some(observe_busy)).unwrap();
+            start_loser.recv_timeout(WAIT).unwrap();
+            CONTENTION.0.lock().unwrap().1 = Some(Instant::now() + WAIT);
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("B retries SQLITE_BUSY for up to 30 seconds");
+            let existing = receipt_for_key(&tx, &identity.requester, &identity.key).unwrap();
+            let decision = decide_idempotency(identity, existing).unwrap();
+            receipts::reserve_receipt(&tx, identity, id).unwrap();
+            tx.commit().unwrap();
+            decision
+        });
+        (winner.join().unwrap(), loser.join().unwrap())
+    });
+    assert_eq!(winner, IdempotencyDecision::NewJob);
+    assert_eq!(loser, IdempotencyDecision::ExistingJob(id.clone()));
+    let tx = setup.transaction().unwrap();
+    let counts: (u64, u64) = tx
+        .query_row(
+            "SELECT count(*),count(DISTINCT job_id) FROM job_receipts WHERE requester=?1 AND key=?2",
+            params![identity.requester, identity.key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(counts, (1, 1));
+    assert_eq!(
+        receipt_for_key(&tx, &identity.requester, &identity.key).unwrap(),
+        Some((identity.request_digest, id))
+    );
 }
