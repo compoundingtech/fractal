@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn projection_recovery_raises_one_operator_failure_until_explicit_replay() {
