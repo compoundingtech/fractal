@@ -295,12 +295,12 @@ pub async fn fleet_membership_view(
 // Only a missing/refused new socket permits legacy routing, never an HTTP failure
 // or an error after a request may have reached the worker.
 async fn leave_authority_request(
-    runtime_dir: &Path,
+    api_socket: &Path,
     state_dir: &Path,
     timeout: Duration,
     request: impl Fn(reqwest::Client) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, ApiError> {
-    let current = smallclaims::sync::leave_state_socket(runtime_dir);
+    let current = smallclaims::sync::leave_state_socket(api_socket).map_err(ApiError::internal)?;
     let send = async |path: &Path| {
         tracing::debug!(socket = %path.display(), "requesting leave authority");
         let http = reqwest::Client::builder()
@@ -349,7 +349,7 @@ pub async fn fleet_leave_state(
         }));
     }
     let snapshot = leave_authority_request(
-        &state.runtime_dir,
+        &state.api_socket,
         &state.state_dir,
         Duration::from_secs(5),
         |http| http.get("http://localhost/v1/internal/fleet/leave-state"),
@@ -389,7 +389,7 @@ pub async fn fleet_pairing_admission(
         ApiError::internal(anyhow::anyhow!("this fleet has no member signing key"))
     })?;
     let response = leave_authority_request(
-        &state.runtime_dir,
+        &state.api_socket,
         &state.state_dir,
         Duration::from_secs(30),
         |http| http.post("http://localhost/v1/internal/fleet/pairing-admission")
@@ -477,13 +477,13 @@ mod leave_socket_tests {
             if refused {
                 // Leave a stale socket inode, as after an old worker exits.
                 drop(tokio::net::UnixListener::bind(
-                    smallclaims::sync::leave_state_socket(&runtime),
+                    smallclaims::sync::leave_state_socket(&runtime.join("api.sock")).unwrap(),
                 ).unwrap());
             }
             let legacy = root.path().join("fleet/leave-state.sock");
             let server = serve(&legacy, StatusCode::OK).await;
             let response = leave_authority_request(
-                &runtime, root.path(), Duration::from_secs(5),
+                &runtime.join("api.sock"), root.path(), Duration::from_secs(5),
                 |http| http.get("http://localhost/"),
             ).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -496,14 +496,14 @@ mod leave_socket_tests {
         let root = tempfile::tempdir().unwrap();
         let runtime = root.path().join("run");
         let current = serve(
-            &smallclaims::sync::leave_state_socket(&runtime),
+            &smallclaims::sync::leave_state_socket(&runtime.join("api.sock")).unwrap(),
             StatusCode::SERVICE_UNAVAILABLE,
         ).await;
         let legacy = serve(
             &root.path().join("fleet/leave-state.sock"), StatusCode::OK,
         ).await;
         let response = leave_authority_request(
-            &runtime, root.path(), Duration::from_secs(5),
+            &runtime.join("api.sock"), root.path(), Duration::from_secs(5),
             |http| http.get("http://localhost/"),
         ).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

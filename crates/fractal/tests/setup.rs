@@ -1498,7 +1498,7 @@ async fn onboarding_api(
         notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0_u64).0,
         node: "studio".into(),
-        runtime_dir: state_dir.clone(),
+        api_socket: state_dir.join("api.sock"),
         state_dir: state_dir.clone(),
         pty_root: state_dir.join("pty"),
         pty_binary: "pty".into(),
