@@ -1,12 +1,28 @@
 use super::*;
 
+// Recording fixtures exercise the transaction logic independently of kernel containment.
+// Recursion boundary tests use the real router in recursion::tests.
+async fn submit(
+    State(state): State<AppState>,
+    Extension(session): Extension<client_v0::ClientSession>,
+    config: Option<Extension<JobsConfig>>,
+    body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let config = enabled(config.as_ref().map(|config| &config.0))?;
+    client_v0::require_scope(&session, "control.work")?;
+    let raw = body.map_err(|_| refused("invalid-request", StatusCode::UNPROCESSABLE_ENTITY))?.0;
+    submit_recording(state, session, config, raw)
+}
+
 fn session(actor: &str) -> Extension<client_v0::ClientSession> {
     Extension(client_v0::ClientSession::for_tests_scoped(actor, actor, &["control.work", "read.projections"]))
 }
 fn config() -> Option<Extension<JobsConfig>> {
-    Some(Extension(JobsConfig { enabled: true, allowed_classes: vec!["heavy".into()] }))
+    Some(Extension(JobsConfig {
+        enabled: true, allowed_classes: vec!["heavy".into()], ..JobsConfig::default()
+    }))
 }
-fn input(key: &str) -> Value {
+pub(super) fn input(key: &str) -> Value {
     json!({"key":key,"execution_host":"node","request":{
         "source":{"kind":"content","sha256":vec![1;32]},
         "environment":{"kind":"exact","value":{}},
@@ -15,7 +31,7 @@ fn input(key: &str) -> Value {
             "expected_duration_ms":1,"run_timeout_ms":null,"priority":"background",
             "requested_class":"heavy","storage_request":null,"delegated_reservations":null}}})
 }
-fn state(root: &std::path::Path) -> AppState {
+pub(super) fn state(root: &std::path::Path) -> AppState {
     let state = super::super::tests_shared::state(root);
     let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
     state.store.bind_fleet("jobs-fixture").unwrap();
@@ -54,7 +70,9 @@ async fn disabled_routes_fail_closed_and_staleness_is_typed() {
     let state = super::super::tests_shared::state(root.path());
     assert!(!JobsConfig::default().enabled);
     assert_eq!(enabled(Some(&JobsConfig::default())).unwrap_err().code, "jobs-disabled");
-    assert!(enabled(Some(&JobsConfig { enabled: true, allowed_classes: vec![] })).is_err());
+    assert!(enabled(Some(&JobsConfig {
+        enabled: true, ..JobsConfig::default()
+    })).is_err());
     assert_eq!(submit(State(state.clone()), session("person/a"), None, Ok(Json(input("x")))).await.unwrap_err().code, "jobs-disabled");
     assert_eq!(show(State(state.clone()), session("person/a"), None, AxumPath("job/x".into())).await.unwrap_err().code, "jobs-disabled");
     assert_eq!(list(State(state), session("person/a"), None, Query(ListQuery::default())).await.unwrap_err().code, "jobs-disabled");

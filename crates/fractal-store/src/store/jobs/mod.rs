@@ -230,6 +230,7 @@ mod recovery;
 pub use recovery::{RecoveryFacts, recovery_facts};
 pub use receipts::{job_id, receipt_for_key};
 pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, jobs_for_requester, queue_for_host};
+pub use queries::job_for_cgroup;
 
 
 #[cfg(test)]

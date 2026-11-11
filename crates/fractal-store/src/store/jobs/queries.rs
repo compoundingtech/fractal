@@ -145,3 +145,32 @@ pub fn history_by_job(connection: &Transaction<'_>, id: &str) -> Result<Vec<Hist
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
+
+/// Identify containment, never execution authority. A live peer in an old J still refuses.
+pub fn job_for_cgroup(
+    tx: &Transaction<'_>,
+    host: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    let pending: Option<String> = tx.query_row(
+        "SELECT subject FROM job_pending ORDER BY subject LIMIT 1", [], |row| row.get(0),
+    ).optional()?;
+    if let Some(subject) = pending {
+        return Err(JobsProjectionStale { subject }.into());
+    }
+    let mut statement = tx.prepare(
+        "SELECT id FROM jobs INDEXED BY jobs_queue WHERE execution_host=?1 ORDER BY id",
+    )?;
+    for id in statement.query_map([host], |row| row.get::<_, String>(0))? {
+        let id = id?;
+        for row in history_by_job(tx, &id)? {
+            if row.refusal.is_some() { continue; }
+            if let JobRecord::LaunchIntent { intent, .. } = serde_json::from_value(row.record)?
+                && fractal_jobs::launch::cgroup_name(&id, &intent) == name
+            {
+                return Ok(Some(id));
+            }
+        }
+    }
+    Ok(None)
+}

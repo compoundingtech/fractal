@@ -6,6 +6,8 @@ use fractal_jobs::{JobPriority, host_authority::JobHostBinding, identity::*};
 use fractal_store::jobs::{self as projection, JobRecord, JobRow, JobsProjectionStale};
 use smallclaims::fleet::MemberState;
 
+mod recursion;
+
 /// Every jobs method is requester-private, including reads and future intent routes.
 pub fn requester_scoped_path(path: &str) -> bool {
     path == "/v1/client/jobs" || path.starts_with("/v1/client/jobs/")
@@ -82,7 +84,18 @@ pub async fn submit(
 ) -> Result<Json<Value>, ApiError> {
     let config = enabled(config.as_ref().map(|config| &config.0))?;
     client_v0::require_scope(&session, "control.work")?;
+    recursion::guard(&state, &session, config)?;
     let raw = body.map_err(|_| refused("invalid-request", StatusCode::UNPROCESSABLE_ENTITY))?.0;
+    submit_recording(state, session, config, raw)
+}
+
+/// Recording logic after the daemon has established caller process containment.
+fn submit_recording(
+    state: AppState,
+    session: client_v0::ClientSession,
+    config: &JobsConfig,
+    raw: Value,
+) -> Result<Json<Value>, ApiError> {
     let submission = decode(raw, config)?;
     let identity = IdempotencyKey { requester: session.actor.clone(), key: submission.key,
         request_digest: submission.request.digest() };

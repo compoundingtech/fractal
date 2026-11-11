@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Complete the jobs configuration roundtrip fixture with an explicitly empty keeper cgroup list.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "The existing optional keeper-cgroup list is an empty vector when omitted. Update only the test expectation introduced before this field, without changing production configuration defaults or recursion policy."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
