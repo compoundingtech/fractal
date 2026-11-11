@@ -47,6 +47,8 @@
 "arrangement.edited" = { class = "durable" }
 "attention.requested" = { class = "durable" }
 "attention.resolved" = { class = "durable" }
+# Job transitions include immutable bindings and idempotency receipts; never rotate them.
+"job.recorded" = { class = "durable" }
 "checkpoint.excused" = { class = "durable" }
 "checkpoint.sealed" = { class = "durable" }
 "checkpoint.verified" = { class = "durable" }

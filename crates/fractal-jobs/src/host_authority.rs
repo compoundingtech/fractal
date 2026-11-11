@@ -19,10 +19,10 @@ pub struct JobHostBinding {
 /// Trusted membership facts, resolved independently of the submitted binding.
 #[derive(Clone, Copy, Debug)]
 pub struct HostAuthority<'a> {
-    pub host: &'a str,
-    pub declaration: &'a str,
+    host: &'a str,
+    declaration: &'a str,
     /// False for an ended/revoked incarnation; no wall-clock lease is invented.
-    pub current: bool,
+    current: bool,
 }
 
 /// Supply only after signature, membership-root, nonce and authenticated writer
@@ -31,9 +31,9 @@ pub struct HostAuthority<'a> {
 /// Deliberately not deserializable: untrusted request JSON is not trusted facts.
 #[derive(Clone, Copy, Debug)]
 pub struct AuthenticatedJobBinding<'a> {
-    pub binding: &'a JobHostBinding,
-    pub origin: &'a str,
-    pub signer: &'a str,
+    binding: &'a JobHostBinding,
+    origin: &'a str,
+    signer: &'a str,
 }
 
 /// Facts must come from one consistent store snapshot. `None` for an existing
@@ -41,9 +41,9 @@ pub struct AuthenticatedJobBinding<'a> {
 /// unable to resolve facts must refuse before calling this pure decision.
 #[derive(Clone, Copy, Debug)]
 pub struct HostAuthorityEvidence<'a> {
-    pub authority: Option<HostAuthority<'a>>,
-    pub authenticated: Option<AuthenticatedJobBinding<'a>>,
-    pub existing_binding: Option<&'a JobHostBinding>,
+    authority: Option<HostAuthority<'a>>,
+    authenticated: Option<AuthenticatedJobBinding<'a>>,
+    existing_binding: Option<&'a JobHostBinding>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,3 +106,8 @@ pub fn decide_host_authority(
     }
     Admit
 }
+
+// No production constructor: a future trusted adapter must verify the complete
+// anchored history and obtain a consistent membership/binding snapshot first.
+#[cfg(test)]
+mod tests;

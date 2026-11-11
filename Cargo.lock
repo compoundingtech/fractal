@@ -2527,6 +2527,7 @@ dependencies = [
  "fractal-delivery-base",
  "fractal-drivers",
  "fractal-github-base",
+ "fractal-jobs",
  "fractal-kernel",
  "fractal-missions-base",
  "fractal-runtime",

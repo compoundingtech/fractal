@@ -25,6 +25,8 @@ pub mod test_support;
 pub mod backup;
 pub mod conversation_delivery;
 pub mod external_sessions;
+#[path = "store/jobs/mod.rs"]
+pub mod jobs;
 pub mod recorder_receipts;
 pub mod replication_worker_build;
 pub mod launch_contract;

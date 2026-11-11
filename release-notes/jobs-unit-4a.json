@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive durable jobs schema and a bounded canonical history fold, including malformed-record and repair invalidation hardening.",
+  "replay": {"status": "changed", "detail": "Register jobs across append, replication, flush, rebuild and graph replay. Only job subjects are folded in shared canonical order; empty rebuild/replay writes nothing. Illegal transitions, binding conflicts and malformed records remain refused raw history. Direct and fields-enveloped bodies normalize identically. No whole-log fallback."},
+  "schema": {"status": "changed", "detail": "Add job.recorded/job subjects, durable retention, jobs/queue/history/receipt/pending tables and a partial jobs-claim index. Subject-scoped replica-record repair triggers enqueue affected jobs. Receipt-bearing claims never rotate away."},
+  "rules": {"status": "changed", "detail": "Host-authority evidence fields are private with no production constructor. Projected and replicated facts are history only, never execution grants. Gate-slot remains admission."},
+  "compatibility": {"status": "changed", "detail": "Inactive domain projection only. Indexed public queries, receipt population and read-only pending fences belong to stacked unit 4b. Existing projector order is preserved."},
+  "downtime": {"status": "none", "detail": "No host activation."},
+  "manual": {"status": "none", "detail": "No operator action. Automatic runtime repair-page dispatch remains separately gated; existing domain hooks drain pending subjects."},
+  "recovery": {"status": "changed", "detail": "Explicit rebuild reconstructs canonical histories; malformed schema-admitted records cannot poison open/rebuild. Oversized subject refolds refuse before projection mutation."}
+}
