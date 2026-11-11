@@ -111,6 +111,7 @@ pub mod claim_ranges;
 pub mod first_sync;
 pub mod principals;
 pub mod projection_digest;
+pub mod projection_recovery;
 pub mod repair_ledger;
 pub mod retired;
 pub mod retired_facts;
@@ -1301,7 +1302,8 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
-        let projection_pending = runtime.projection_work_pending(&connection)?;
+        let projection_pending = runtime.projection_work_pending(&connection)?
+            || projection_recovery::required(&connection)?;
         let connection = if let Some(admitted) = readers.admitted_handle() {
             WriterConnection::new_admitted(
                 connection, committed_index.clone(), runtime.writer_observer(), admitted,
@@ -8790,13 +8792,38 @@ impl Store {
 
     /// Replay the graph from nothing now, as a restored store does once its claims are back.
     pub fn replay_replication_graph(&self) -> Result<()> {
+        self.replay_replication_graph_inner(|| {})
+    }
+
+    #[cfg(test)]
+    fn replay_replication_graph_before_completion(&self, before_completion: impl FnOnce()) -> Result<()> {
+        self.replay_replication_graph_inner(before_completion)
+    }
+
+    fn replay_replication_graph_inner(&self, before_completion: impl FnOnce()) -> Result<()> {
         crate::profile::note("projection: full replay");
         let _replay = crate::profile::span("projection/full-replay");
         let mut connection = self.connection.write();
+        let generation = self.replication_projection_state.load(Ordering::Acquire);
         let _timing = time_stage(&self.replication_timers.projection);
         let transaction = connection.transaction()?;
+        let health = transaction.query_row(
+            "SELECT last_good_store_index,error_code FROM projection_health WHERE aggregate='graph'",
+            [], |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).optional()?;
+        let frontier = health.and_then(|(frontier, code)|
+            projection_recovery::last_good(frontier, code.as_deref()));
+        let target = current_index_tx(&transaction)?;
+        match frontier {
+            Some(frontier) => eprintln!("{}", full_replay_log_line("operator-replay", "explicit", frontier, target)),
+            None => eprintln!("{}: projection full replay phase=operator-replay reason=explicit frontier=unknown target={target}",
+                projection_diagnostic_prefix()),
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        FULL_REPLAYS.with(|replays| replays.set(replays.get() + 1));
         self.runtime.replay_from_nothing(&transaction)?;
         self.runtime.after_projection(&transaction)?;
+        let pending = self.runtime.projection_work_pending(&transaction)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h9513a9e75a35 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
@@ -8805,6 +8832,12 @@ impl Store {
             params![current_index_tx(&transaction)?, now_ms().to_string()],
         )?;
         transaction.commit()?;
+        before_completion();
+        if !pending {
+            let _ = self.replication_projection_state.compare_exchange(
+                generation, generation & !1, Ordering::AcqRel, Ordering::Acquire,
+            );
+        }
         drop(connection);
         self.runtime.forget_views();
         Ok(())
@@ -8814,9 +8847,10 @@ impl Store {
         self.project_replication_backlog_in_phase("replication")
     }
 
-    /// Identify the caller's phase in the always-on full-replay diagnostic.
+    /// Identify the caller's phase in the terminal projection diagnostic.
     pub fn project_replication_backlog_in_phase(&self, phase: &str) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            || {},
             || {},
             || {},
             phase,
@@ -8831,7 +8865,7 @@ impl Store {
         phase: &str,
         log: impl FnMut(&str),
     ) -> Result<bool> {
-        self.project_replication_backlog_chunks(|| {}, || {}, phase, log, |_| {})
+        self.project_replication_backlog_chunks(|| {}, || {}, || {}, phase, log, |_| {})
     }
 
     /// Publish bounded observations on the projection thread; observers must not read the store.
@@ -8841,6 +8875,7 @@ impl Store {
         progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            || {},
             || {},
             || {},
             phase,
@@ -8854,6 +8889,7 @@ impl Store {
     pub fn project_replication_backlog_with_yield(&self, between: impl FnMut()) -> Result<bool> {
         self.project_replication_backlog_chunks(
             between,
+            || {},
             || {},
             "replication",
             |line| eprintln!("{line}"),
@@ -8870,9 +8906,21 @@ impl Store {
         self.project_replication_backlog_chunks(
             || {},
             before_clear,
+            || {},
             "replication",
             |line| eprintln!("{line}"),
             |_| {},
+        )
+    }
+
+    /// Synchronize a queued automatic attempt without clock sleeps.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn project_replication_backlog_before_gate(
+        &self,
+        before_gate: impl FnOnce(),
+    ) -> Result<bool> {
+        self.project_replication_backlog_chunks(
+            || {}, || {}, before_gate, "replication", |line| eprintln!("{line}"), |_| {},
         )
     }
 
@@ -8918,13 +8966,21 @@ impl Store {
         &self,
         mut between: impl FnMut(),
         mut before_clear: impl FnMut(),
+        before_gate: impl FnOnce(),
         phase: &str,
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
+        before_gate();
         let gate_wait = std::time::Instant::now();
         let _projecting = self.projection.lock();
         crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
+        // Every automatic attempt checks the durable fence after joining the gate:
+        // a preceding queued attempt may have parked recovery while this one waited.
+        if self.replication_projection_recovery_required()? {
+            self.defer_replication_projection();
+            return Ok(false);
+        }
         let _timing = time_stage(&self.replication_timers.projection);
         self.defer_replication_projection();
         self.last_replication_projection_unix_ms
@@ -8986,7 +9042,7 @@ impl Store {
             let through = through.unwrap_or(target.max(frontier));
             // A healthy, already-projected source needs no projection transaction.
             // In particular, an empty peer wake must not spend another runtime's
-            // deferred maintenance allowance. Missing/stale health still retries.
+            // deferred maintenance allowance. Missing/stale health instead parks recovery.
             let rebuild_pending = self.runtime.projection_work_pending(&transaction)?;
             let source_empty = count == 0 && frontier == target && !rebuild_pending
                 && !self.verdicts_due.load(Ordering::Acquire)
@@ -9014,9 +9070,9 @@ impl Store {
                 );
                 error
             };
-            let result = (|| -> Result<bool, FractalError> {
+            let result = (|| -> Result<(), FractalError> {
                 if source_empty {
-                    return Ok(false);
+                    return Ok(());
                 }
                 if final_drain {
                     stages.enter("finish-projection-work");
@@ -9025,90 +9081,33 @@ impl Store {
                     crate::receive_metrics::final_drain(started.elapsed());
                     finished?;
                     self.runtime.after_projection(&transaction)?;
-                    return Ok(false);
+                    return Ok(());
                 }
-                // Non-contention incremental failures retain the full replay fallback,
-                // which quarantines claims it cannot project. SQLite contention defers below.
                 stages.enter("incremental");
                 transaction
                     .execute_batch(/* sqlite-large-value: allow-for-now lv-h3065fb44d5f1 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "SAVEPOINT project_incremental")
                     .map_err(internal)?;
                 let incremental = crate::profile::span("projection/incremental");
-                let fallback_reason =
-                    match self
-                        .runtime
-                        .project_incremental_chunk(&transaction, &self.origin, through)
-                    {
-                        Ok(projected) => {
-                            transaction
-                                .execute_batch(/* sqlite-large-value: allow-for-now lv-h479424100c1a owner=smallclaims::store TODO=trace-statement-and-value-representation */ "RELEASE project_incremental")
-                                .map_err(internal)?;
-                            match projected {
-                                IncrementalProjection::Projected => None,
-                                IncrementalProjection::Replay(reason) => Some(reason.to_owned()),
-                                IncrementalProjection::ReplayWithContext { reason, details } => {
-                                    let message = details
-                                        .get("projection_error")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or(reason)
-                                        .to_owned();
-                                    let error = FractalError {
-                                        code: reason,
-                                        message,
-                                        details,
-                                    };
-                                    self.log_projection_failure(
-                                        &error, phase, frontier, target, &mut log_staged,
-                                    );
-                                    Some(reason.to_owned())
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
-                            if error.is_sqlite_contention() {
-                                // Roll back the whole chunk below. Replaying the same claims
-                                // cannot repair a connection lock and would lengthen its hold.
-                                return Err(error);
-                            }
-                            crate::profile::note(&format!(
-                                "replay: incremental failed: {}",
-                                error.code
-                            ));
-                            transaction
-                                .execute_batch(
-                                    /* sqlite-large-value: allow-for-now lv-hd77214424e20 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO project_incremental; RELEASE project_incremental",
-                                )
-                                .map_err(internal)?;
-                            Some(format!("incremental-error:{}", error.code))
-                        }
-                    };
-                drop(incremental);
-                let projected = fallback_reason.is_none();
-                if let Some(reason) = fallback_reason {
-                    log_staged(&full_replay_log_line(phase, &reason, frontier, target));
-                    stages.enter("replay");
-                    #[cfg(any(test, feature = "test-support"))]
-                    FULL_REPLAYS.with(|replays| replays.set(replays.get() + 1));
-                    let _replay = crate::profile::span("projection/full-replay");
-                    crate::profile::note("projection: full replay");
-                    self.runtime
-                        .replay_from_nothing_with_progress(&transaction, &mut |stage| {
-                            progress_staged(ProjectionProgress {
-                                phase: stage.phase,
-                                frontier,
-                                target,
-                                processed: stage.processed,
-                                total: stage.total,
-                            });
-                        }).map_err(|error| {
-                            let error = error.with_detail("projection_stage", "full-replay");
-                            self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
-                            error
-                        })?;
-                } else {
-                    crate::profile::note("projection: incremental");
+                match self.runtime.project_incremental_chunk(&transaction, &self.origin, through)? {
+                    IncrementalProjection::Projected => {
+                        transaction
+                            .execute_batch(/* sqlite-large-value: allow-for-now lv-h479424100c1a owner=smallclaims::store TODO=trace-statement-and-value-representation */ "RELEASE project_incremental")
+                            .map_err(internal)?;
+                    }
+                    IncrementalProjection::Replay(reason) => {
+                        return Err(FractalError::new(reason,
+                            format!("incremental projection requires explicit recovery: {reason}")));
+                    }
+                    IncrementalProjection::ReplayWithContext { reason, details } => {
+                        return Err(FractalError {
+                            code: reason,
+                            message: details.get("projection_error")
+                                .and_then(Value::as_str).unwrap_or(reason).to_owned(),
+                            details,
+                        });
+                    }
                 }
+                drop(incremental);
                 stages.enter("after-projection");
                 self.runtime
                     .after_projection(&transaction)
@@ -9117,20 +9116,13 @@ impl Store {
                         self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                         error
                     })?;
-                Ok(!projected)
+                Ok(())
             })();
             match result {
-                Ok(replayed) => {
+                Ok(()) => {
                     let rebuild_pending = self.runtime.projection_work_pending(&transaction)
                         .map_err(record_error)?;
                     stages.enter("health");
-                    // A fallback replay folds the whole log, including anything admitted after
-                    // this pass started. An incremental chunk advances only its bounded frontier.
-                    let through = if replayed {
-                        current_index_tx(&transaction)?
-                    } else {
-                        through
-                    };
                     if source_empty {
                         transaction.rollback()?;
                     } else {
@@ -9147,20 +9139,17 @@ impl Store {
                         transaction.commit_with_deferred_runtime()
                             .map_err(internal).map_err(record_error)?;
                         crate::receive_metrics::projection_chunk();
-                        // A fallback replay folds the whole log in this one hold.
                         crate::windows::holds::covered(
                             "projected claims",
-                            usize::try_from(if replayed { through } else { count }).unwrap_or(usize::MAX),
+                            usize::try_from(count).unwrap_or(usize::MAX),
                         );
                     }
-                    if !replayed {
-                        processed += count;
-                    }
+                    processed += count;
                     progress_staged(ProjectionProgress {
                         phase: if source_empty { "projection-current" } else { "projection-committed" },
                         frontier: through,
                         target,
-                        processed: (!replayed).then_some(processed),
+                        processed: Some(processed),
                         total: None,
                     });
                     // Snapshot while admission is excluded by the writer. Admission marks
@@ -9182,9 +9171,7 @@ impl Store {
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
                     chunked |= through < target || rebuild_pending;
-                    if replayed {
-                        self.runtime.forget_views();
-                    } else if chunked {
+                    if chunked {
                         // Only more of the admitted claims projected: published lists keep
                         // serving what readers had until they refold once the backlog is in.
                         self.runtime.projection_advanced(through >= target && !rebuild_pending);
@@ -9239,8 +9226,23 @@ impl Store {
                      VALUES ('graph', 'stale', ?1, ?2, ?3)
                      ON CONFLICT(aggregate) DO UPDATE SET status='stale', error_code=excluded.error_code,
                         error_message=excluded.error_message, updated_at_unix_ms=excluded.updated_at_unix_ms",
-                    params![error.code, error.message, now_ms().to_string()],
+                    params![projection_recovery::error_code(error.code),
+                        format!("{}: {}; automatic retry disabled",
+                            error.code, error.message),
+                        now_ms().to_string()],
                 )?;
+                    let diagnostic = json!({
+                        "event": "replication.projection.recovery_required",
+                        "code": "projection-recovery-required",
+                        "reason_code": error.code,
+                        "frontier": health.as_ref().and_then(|(frontier, _)| *frontier),
+                        "target": target,
+                        "phase": phase.chars().take(128).collect::<String>(),
+                        "correlation_id": Value::Null,
+                        "receive_phase": Value::Null,
+                    });
+                    log_staged(&format!("{}: projection recovery required {diagnostic}",
+                        projection_diagnostic_prefix()));
                     stages.enter("release");
                     return Ok(false);
                 }
@@ -9248,8 +9250,9 @@ impl Store {
         }
     }
 
-    /// A quiet peer wake does not need to replay the entire graph. A stale or
-    /// missing projection still gets a retry, including after a failed wake.
+
+    /// Whether graph health needs operator recovery. Live passes preserve a durable
+    /// recovery-required fence rather than automatically replaying stale projections.
     pub fn replication_projection_needs_recovery(&self) -> Result<bool> {
         let connection = self.readers.get();
         let status: Option<String> = connection

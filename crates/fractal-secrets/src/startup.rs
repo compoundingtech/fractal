@@ -362,7 +362,9 @@ impl Startup {
             status.total = progress.total;
         });
         #[cfg(feature = "test-support")]
-        if progress.phase == "full-replay/base-claims" && progress.processed == Some(0) {
+        if progress.phase == "project-incremental"
+            || (progress.phase == "full-replay/base-claims" && progress.processed == Some(0))
+        {
             pause_startup_replay();
         }
     }

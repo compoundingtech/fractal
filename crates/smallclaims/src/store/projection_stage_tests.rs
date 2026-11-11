@@ -277,7 +277,6 @@ fn project(store: &Store, label: &str, progress: impl FnMut(ProjectionProgress))
 fn each_point_inside_the_loan_is_charged_to_its_own_stage() {
     for point in [
         "incremental",
-        "replay",
         "after-projection",
         "health",
         "commit",
@@ -291,10 +290,6 @@ fn each_point_inside_the_loan_is_charged_to_its_own_stage() {
         let armed = Arc::new(AtomicBool::new(false));
         match point {
             "incremental" | "after-projection" => *runtime.slow.lock().unwrap() = Some(point),
-            "replay" => {
-                runtime.replay.store(true, Ordering::Relaxed);
-                *runtime.slow.lock().unwrap() = Some(point);
-            }
             "health" => {
                 // The chunk's healthy upsert updates the existing graph row.
                 let writer = store.connection.write();
@@ -339,7 +334,7 @@ fn each_point_inside_the_loan_is_charged_to_its_own_stage() {
             }
         });
         let row = if point == "log" {
-            // The full-replay line goes to the caller's log sink under the writer.
+            // Failure detail and terminal transition reach the log sink under the writer.
             let mut slept = false;
             crate::performance::with_cpu(Some(label.as_str()), None, || {
                 store
@@ -401,7 +396,7 @@ fn a_chunk_that_projects_reports_every_stage_of_its_loan_and_no_other() {
 }
 
 #[test]
-fn a_replay_is_charged_apart_from_the_progress_it_reports() {
+fn a_replay_guard_reports_incremental_progress_without_running_replay() {
     let runtime = Arc::new(StageRuntime::default());
     let (_dir, store) = store(&runtime, 1);
     runtime.replay.store(true, Ordering::Relaxed);
@@ -410,10 +405,12 @@ fn a_replay_is_charged_apart_from_the_progress_it_reports() {
         calls += 1;
         std::thread::sleep(Duration::from_millis(100));
     });
-    // project-incremental, the replay's own stage and projection-committed.
-    assert_eq!(calls, 3);
-    assert!(stage(&row, "callbacks") >= 300.0, "{row}");
-    assert!(stage(&row, "replay") < QUICK, "{row}");
+    // Only the bounded incremental attempt reports progress; the guard parks.
+    assert_eq!(calls, 1);
+    assert!(stage(&row, "callbacks") >= 100.0, "{row}");
+    assert!(row["stages"].get("replay").is_none(), "{row}");
+    assert!(!runtime.calls.lock().unwrap().iter().any(|call| call == "replay"));
+    assert!(store.replication_projection_recovery_required().unwrap());
     assert_whole(&row);
 }
 
@@ -434,15 +431,17 @@ fn a_failed_chunk_charges_its_log_lines_rollback_and_stale_health() {
             .unwrap();
         assert!(!projected);
     });
-    // The incremental failure, the full-replay line and the replay failure.
-    assert_eq!(lines, 3);
+    // One failure detail and one durable terminal transition; never a replay line.
+    assert_eq!(lines, 2);
     let row = staged_row(&store, label);
-    for name in ["incremental", "replay", "rollback", "health", "release"] {
+    for name in ["incremental", "rollback", "health", "release"] {
         assert!(row["stages"].get(name).is_some(), "{name} in {row}");
     }
-    assert!(stage(&row, "callbacks") >= 300.0, "{row}");
+    assert!(stage(&row, "callbacks") >= 200.0, "{row}");
     assert!(row["unattributed_ms"].as_f64().unwrap() < QUICK, "{row}");
     assert_whole(&row);
+    assert!(row["stages"].get("replay").is_none(), "{row}");
+    assert!(!runtime.calls.lock().unwrap().iter().any(|call| call == "replay"));
     let status: String = store
         .readers
         .get()
@@ -552,6 +551,7 @@ fn pass(stages: bool, fail: bool) -> Pass {
     let mut lines = vec![];
     let mut run = || {
         store.project_replication_backlog_chunks(
+            || {},
             || {},
             || {},
             "test",
