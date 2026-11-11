@@ -40,7 +40,7 @@ pub async fn get(
                 }
                 None => None,
             };
-            Ok::<_, FractalError>((client_snapshot_at(&state, index), value))
+            Ok((client_snapshot_at(&state, index), value))
         })
     })
     .await?;
@@ -79,7 +79,7 @@ pub async fn blob(
                 map["files"].as_array().into_iter().flatten().any(|file| file["blob_hash"].as_str() == Some(hash.as_str()))
             });
             let bytes = if named { state.store.source_blob(&hash)?.map(|bytes| (hash, bytes)) } else { None };
-            Ok::<_, FractalError>((client_snapshot_at(&state, index), bytes))
+            Ok((client_snapshot_at(&state, index), bytes))
         })
     })
     .await?;
@@ -90,4 +90,84 @@ pub async fn blob(
         return Err(validation("the source file exceeds the client response limit"));
     }
     Ok((Extension(snapshot), Json(value)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SUBJECT: &str = "mission/example/mapped";
+    const NAMED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const OTHER: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// One `source.mapped` claim naming `NAMED`, plus a stored blob (`OTHER`) that no map names.
+    fn record(state: &AppState, revision: &str) {
+        let mut connection = state.store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for (hash, text) in [(NAMED, "export default mission({})\n"), (OTHER, "private bytes\n")] {
+            tx.execute("INSERT OR IGNORE INTO blobs(hash, bytes, size) VALUES (?1, ?2, ?3)", rusqlite::params![hash, text.as_bytes(), text.len() as u64]).unwrap();
+        }
+        let fields = json!({
+            "subject": SUBJECT, "revision": revision, "set_revision": "owned-set/factory@s1",
+            "repository": "schickling/factory", "ref": "main", "sha": "a".repeat(40), "sequence": 1,
+            "files": [{"repository": "schickling/factory", "path": "graph/example/mapped/mission.ts", "blob": "b0", "blob_hash": NAMED}],
+            "declaration": 0, "inputs": [0],
+            "nodes": [{"kdl": "mission[example/mapped]", "kdlLines": [2, 4], "span": {"file": 0, "start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 26}}, "frames": []}],
+        });
+        smallclaims::store::append_claim_record_tx(
+            &tx, &state.store.origin, &fractal_schema::source_map::claim_subject(SUBJECT, revision), "source.mapped",
+            None, &json!({ "fields": fields }), &[], None,
+        ).unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn session(scopes: &[&str]) -> ClientSession {
+        ClientSession::for_tests_scoped("client/test", "person/operator", scopes)
+    }
+
+    async fn map(state: &AppState, scopes: &[&str], revision: &str) -> Result<Value, ApiError> {
+        get(State(state.clone()), Extension(session(scopes)), Query(SourceMapQuery { subject: SUBJECT.into(), revision: Some(revision.into()) }))
+            .await.map(|(_, Json(value))| value)
+    }
+
+    async fn text(state: &AppState, scopes: &[&str], hash: &str, revision: &str) -> Result<Value, ApiError> {
+        blob(State(state.clone()), Extension(session(scopes)), AxumPath(hash.into()), Query(SourceBlobQuery { subject: SUBJECT.into(), revision: revision.into() }))
+            .await.map(|(_, Json(value))| value)
+    }
+
+    #[tokio::test]
+    async fn source_reads_require_the_declarations_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "source-node");
+        record(&state, "r1");
+        for error in [map(&state, &["read.projections"], "r1").await.unwrap_err(), text(&state, &["read.projections"], NAMED, "r1").await.unwrap_err()] {
+            assert_eq!(error.status, StatusCode::FORBIDDEN);
+            assert_eq!(error.message, "Fractal does not show this source to this device");
+        }
+    }
+
+    #[tokio::test]
+    async fn source_map_answers_mapped_revisions_and_not_found_otherwise() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "source-node");
+        record(&state, "r1");
+        let value = map(&state, &["read.declarations"], "r1").await.unwrap();
+        assert_eq!(value["subject"], SUBJECT);
+        assert_eq!(value["revision"], "r1");
+        assert_eq!(value["map"]["files"][0]["blob_hash"], NAMED);
+        assert_eq!(map(&state, &["read.declarations"], "unmapped").await.unwrap_err().status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn source_blob_serves_only_files_the_revision_map_names() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "source-node");
+        record(&state, "r1");
+        let named = text(&state, &["read.declarations"], NAMED, "r1").await.unwrap();
+        assert_eq!(named, json!({"hash": NAMED, "text": "export default mission({})\n"}));
+        // Stored, but named by no map of this revision; and a named file under an unmapped revision.
+        assert_eq!(text(&state, &["read.declarations"], OTHER, "r1").await.unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(text(&state, &["read.declarations"], NAMED, "unmapped").await.unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(text(&state, &["read.declarations"], "NOT-A-HASH", "r1").await.unwrap_err().status, StatusCode::BAD_REQUEST);
+    }
 }
