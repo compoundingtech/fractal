@@ -73,7 +73,8 @@ async fn replay_concurrent_call_is_rejected_before_waiting_for_writer() {
     let error = tokio::time::timeout(Duration::from_secs(1), replay(State(state), Extension(ClientTransportBoundary::Unix), Json(ReplayRequest { confirm: true }))).await.unwrap().unwrap_err();
     assert_eq!(error.code, "replication-replay-in-progress");
     drop(writer);
-    first.await.unwrap().unwrap();
+    let Json(result) = first.await.unwrap().unwrap();
+    assert_eq!(result["result"], "healthy");
 }
 
 #[tokio::test]
