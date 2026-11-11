@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a private test-only jobs admission boundary with an always-disabled registry and no constructible execution grant.",
+  "replay": {"status": "none", "detail": "No production replay caller or hook. Test-only replay checks immutable signed content without membership, local identity, binding, clock or host-state lookups."},
+  "schema": {"status": "none", "detail": "No production schema changes. The private adapter requires a distinct admitted-binding table; its absence is LookupUnavailable, never proven absence. Historical jobs rows are not admitted bindings."},
+  "rules": {"status": "none", "detail": "No production registration or callsites. The entire private module is cfg(test), and lookup returns None for EVERY kind, including job.recorded. A real signature without post-sealing nonce/writer-window proof refuses local execution."},
+  "compatibility": {"status": "none", "detail": "Registry/validator types, snapshot reads and real local identity source are test-only. LocalExecutionGrant is private and uninhabited. Remote facts can yield only HistoryOnly, not an execution grant."},
+  "downtime": {"status": "none", "detail": "Inactive, test-only implementation."},
+  "manual": {"status": "none", "detail": "No operator action. Separate approval and prerequisite rollout are required before 4c-2 admission hooks."},
+  "recovery": {"status": "none", "detail": "No execution state is written and no recovery or full-replay trigger is added."}
+}

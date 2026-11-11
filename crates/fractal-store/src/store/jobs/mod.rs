@@ -161,3 +161,7 @@ pub use queries::{HistoryRow, JobRow, history_by_job, job_by_id, queue_for_host}
 
 #[cfg(test)]
 mod tests;
+
+// 4c-1 is unreachable in production; 4c-2 separately owns activation of hooks.
+#[cfg(test)]
+mod admission;
