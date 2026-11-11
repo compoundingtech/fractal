@@ -10879,8 +10879,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// incremental pass would have missed: the claims it wrote since `mark`, and a due time
     /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
     /// limit it found, which no skipping pass would have woken for. Nothing when another writer,
-    /// such as the program engine settling a step, changed something among its `reads` while it
-    /// ran: the evaluation acted on that change, and the next pass is marked for it anyway.
+    /// such as the program engine settling a step, changed something its last evaluation also
+    /// read while it ran: a skipping pass is woken through those reads, so the next pass is
+    /// marked for it anyway. A key read for the first time wakes nothing and excuses nothing.
     fn missed_by_skipping(
         &self,
         item: &str,
@@ -10898,7 +10899,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A failed read of the feed keeps the correction.
         if !missed.is_empty()
             && mark.feed.is_some_and(|since| {
-                crate::incremental::changed_by_others(&self.store, since, reads, &missed[..wrote])
+                let woken: BTreeSet<String> =
+                    self.incremental.reads_of(item).intersection(reads).cloned().collect();
+                crate::incremental::changed_by_others(&self.store, since, &woken, &missed[..wrote])
                     .unwrap_or(false)
             })
         {
