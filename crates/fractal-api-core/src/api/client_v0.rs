@@ -252,6 +252,13 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
     if matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked") {
         return false;
     }
+    // A read position is shown only by its own collection, which shows nothing else.
+    if collection == fractal_schema::read_positions::COLLECTION {
+        return kind != fractal_schema::read_positions::KIND;
+    }
+    if kind == fractal_schema::read_positions::KIND {
+        return true;
+    }
     match collection {
         "machines" if kind == "transport.observed" => return false,
         "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
@@ -334,6 +341,7 @@ const ACTIONS: &[&str] = &[
     "arrangement.edit",
     "harness.answer",
     "arrangement.membership.edit",
+    "read-position.advance",
     "attention.resolve",
     "review.approve",
     "review.reject",
@@ -397,6 +405,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "prompt.respond",
     "arrangement.edit",
     "arrangement.membership.edit",
+    "read-position.advance",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -556,9 +565,25 @@ impl ClientSession {
         };
         // Free mode: an agent's local session holds every scope a person's does. Its actions
         // still record the agent as their actor.
-        Ok(Self {
-            actor: person.into(),
-            authority_actor: person.into(),
+        Ok(Self::acting(person))
+    }
+
+    /// A program effect's local session, acting as `run` (docs/st3/program-engine.md §3). Only a
+    /// request its run credential binds to that same run may name it; run authority then decides
+    /// each write.
+    pub fn local_run(run: &str, bound_run: Option<&str>) -> Result<Self, ApiError> {
+        if bound_run != Some(run) {
+            return Err(forbidden(
+                "a trusted Unix client acts as a mission run only when its run credential binds that run",
+            ));
+        }
+        Ok(Self::acting(run))
+    }
+
+    fn acting(actor: &str) -> Self {
+        Self {
+            actor: actor.into(),
+            authority_actor: actor.into(),
             pairing_grant: None,
             pairing_issued_here: false,
             grant_expires_at: None,
@@ -566,14 +591,14 @@ impl ClientSession {
             transport: "unix",
             local_peer: false,
             peer_process: None,
-            custom_forms,
+            custom_forms: false,
             conversation_blocks: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
-        })
+        }
     }
 
     pub fn pairing() -> Self {
@@ -638,6 +663,9 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangement-placement-migration", "version":1, "state":if session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
+    // Synced read positions: list, follow and advance the session person's own positions.
+    // Granted only when all three are allowed, so a client never sends a doomed advance.
+    capabilities.push(json!({"id":"read-positions", "version":1, "state":if session.allows("read.projections") && session.allows("read.arrangements") && session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         if *action == "harness.answer" {
             return super::harness_questions::capability(state, session);
@@ -759,7 +787,8 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "messages-paging.v2")
         });
-    if let Some(web) = request.extensions().get::<LocalWebSession>() {
+    if let Some(web) = request.extensions().get::<LocalWebSession>()
+        && !request.headers().contains_key(AUTHORIZATION) {
         let mut session = ClientSession::local(Some(&web.person))?;
         session.actor = format!("client/local-web/{}", web.id);
         session.transport = "local-web";
@@ -775,10 +804,15 @@ pub fn authenticate(
                 .headers()
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
-            let mut session = ClientSession::local(person)?;
+            let bound_run = request.extensions().get::<super::BoundRun>().map(|bound| bound.0.run.as_str());
+            let mut session = match person.filter(|person| person.starts_with("mission-run/")) {
+                Some(run) => ClientSession::local_run(run, bound_run)?,
+                None => ClientSession::local(person)?,
+            };
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
+                || bound_run.is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
                 || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
@@ -811,6 +845,9 @@ pub fn authenticate(
     let digest = credential_digest(credential);
     if let Some(session) = assistant::authenticate(state, &digest, transport)? {
         assistant::authorize_route(&session, request)?;
+        if external_grants::is_service(&session) {
+            external_grants::audit_service_read(state, &session)?;
+        }
         return Ok(session);
     }
     let pairings = state
@@ -1060,7 +1097,9 @@ pub fn mission_list_cards_with(
                 else if steps.iter().any(|s| s.status=="blocked") {"blocked"} else {"system"};
             let shown=steps.iter().map(|step| json!({
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
-                "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
+                "attempt":step.attempt,
+                "assignee":step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                "claimant":step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
                 "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
                 "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),
@@ -2524,7 +2563,6 @@ fn native_slice_page_impl(
     let filter_digest = native_page_filter_digest(query)?;
     let requested_limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS)
         .clamp(1, CLIENT_MAX_PAGE_ITEMS);
-    crate::otel::roster_attribute("st.conversation.requested_limit", requested_limit as i64);
     if let Some(cursor) = &cursor {
         if cursor.session_id != session_id
             || cursor.collection != format!("timeline/{session_id}")
@@ -2544,6 +2582,7 @@ fn native_slice_page_impl(
         }
     }
     let limit = cursor.as_ref().map_or(requested_limit, |cursor| cursor.limit);
+    crate::otel::roster_attribute("st.conversation.requested_limit", limit as i64);
     let expires_at_unix_ms = cursor.as_ref().map_or_else(
         || client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS),
         |cursor| cursor.expires_at_unix_ms,
@@ -4570,6 +4609,8 @@ pub fn action_scope(action: &str) -> Option<&'static str> {
         }
         "pairing" => "control.pairing",
         "arrangement" => "control.arrangements",
+        // Read positions are person workspace state, granted with arrangements.
+        "read-position" => "control.arrangements",
         _ => return None,
     })
 }

@@ -40,6 +40,69 @@ fn test_state(root: &Path) -> AppState {
 }
 
 #[tokio::test]
+async fn sender_outcome_fixtures_render_raw_status_and_delivery_reason() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/fixtures/message-sender-outcomes.json")).unwrap();
+    for message in cases["items"].as_array().unwrap() {
+        let phase = message["state"].as_str().unwrap();
+        let reason = match phase {
+            "expired" => "cutoff-uncertain-attempt",
+            "delivered" => "the native transport accepted the message; waiting for recipient read",
+            "read" => "the recipient has read the message",
+            _ => panic!("unexpected fixture state"),
+        };
+        let case = serde_json::json!({
+            "id":message["id"], "subject":message["id"], "from":message["from"], "to":message["to"],
+            "content":message["content"], "created_index":1, "status":phase, "status_from":message["status_from"],
+            "delivery":{"phase":phase, "state":if phase == "delivered" { "pending" } else { phase }, "reason":reason}
+        });
+        for list in [false, true] {
+            for json in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let socket = root.path().join("sender.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let response = if list {
+                    serde_json::json!({"items":[case], "limit":100, "has_more":false, "next_cursor":null})
+                } else { case.clone() };
+                let response = serde_json::json!({"api_version":"fractal.v1", "value":response}).to_string();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let mut byte = [0];
+                        assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                        request.push(byte[0]);
+                    }
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response.len(), response).as_bytes()).await.unwrap();
+                });
+                let args = if list { vec!["conversations", "ls", "agent/sender"] }
+                    else { vec!["conversations", "status", case["id"].as_str().unwrap()] };
+                let output = if json { run_cli(&socket, &args).await }
+                    else { run_cli_human(&socket, &args).await };
+                assert!(output.status.success(), "{}", failure(&output));
+                if json {
+                    let value = value(&output);
+                    if list { assert_eq!(value[0]["status"], case["status"]); }
+                    else { assert_eq!(value["delivery"], case["delivery"]); }
+                } else {
+                    let text = String::from_utf8(output.stdout).unwrap();
+                    assert!(text.contains(case["status"].as_str().unwrap()), "{text}");
+                    if !list {
+                        assert!(text.contains(case["delivery"]["reason"].as_str().unwrap()), "{text}");
+                    } else {
+                        assert!(!text.contains("unknown"), "{text}");
+                    }
+                }
+                server.await.unwrap();
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn ordinary_agent_list_and_tree_cli_send_no_freshness_barrier() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     for (args, path) in [
@@ -2874,7 +2937,7 @@ agent "queue-chief" {
 mission "queued-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step in each run."
-  step "work" { assigned-to "agent/queue-seat" }
+  step "work" { assigned-to "agent/client-v0-cli.queue-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();
@@ -3164,10 +3227,10 @@ async fn agents_and_missions_show_print_what_the_worker_last_reported() {
 agent "reporter" { workspace "/tmp"; command "true" }
 mission "reported-work" state="ready" {
   goal "Show what the worker said."
-  step "docs" { assigned-to "agent/reporter" }
+  step "docs" { assigned-to "agent/client-v0-cli.reporter" }
   step "build" {
     title "Build the parser"
-    assigned-to "agent/reporter"
+    assigned-to "agent/client-v0-cli.reporter"
   }
 }
 "#;
@@ -3356,7 +3419,7 @@ agent "queued-alias-seat" { workspace "/tmp"; command "true" }
 mission "queued-alias-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step."
-  step "work" { assigned-to "agent/queued-alias-seat" }
+  step "work" { assigned-to "agent/client-v0-cli.queued-alias-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();

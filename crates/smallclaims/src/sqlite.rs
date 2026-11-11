@@ -488,6 +488,7 @@ pub struct WriterGuard<'a> {
     /// When profiling, when this thread took the writer.
     pub acquired: Option<std::time::Instant>,
     writer_operation: Option<telemetry::WriterOperation>,
+    receive_hold: Option<crate::receive_metrics::WriterSample>,
     /// The connection's changed-row count when it was lent, so the rows this thread changed are
     /// noted for it when it gives the connection back; see `touched::writes`.
     pub changes_at_lend: u64,
@@ -818,6 +819,8 @@ impl WriterConnection {
             mutation_observer: self.mutation_observer.as_ref(),
             acquired: crate::profile::writer_acquired(wait),
             writer_operation,
+            receive_hold: crate::receive_metrics::capture().as_ref().map(|context|
+                crate::receive_metrics::WriterSample::start(context, enqueued.elapsed())),
         })
     }
 
@@ -901,6 +904,8 @@ impl WriterConnection {
             mutation_observer: self.mutation_observer.as_ref(),
             acquired: crate::profile::writer_acquired(wait),
             writer_operation,
+            receive_hold: crate::receive_metrics::capture().as_ref().map(|context|
+                crate::receive_metrics::WriterSample::start(context, enqueued.elapsed())),
         }
     }
 
@@ -931,6 +936,8 @@ impl WriterConnection {
     /// queued with it, and answer once that transaction commits. An `Err` from `job` rolls back
     /// only its own savepoint. The outer `Err` is a commit that failed, which undid every write in
     /// the batch.
+    /// Each callback inherits its caller's raw clock overrides and restores the writer's
+    /// context before shared transaction finalizers run; an unset clock stays execution-time.
     #[track_caller]
     pub fn batched<'job, T: Send + 'job, E: Send + 'job>(
         &self,
@@ -943,6 +950,7 @@ impl WriterConnection {
         let changed = &changed_rows;
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
+        let clock = crate::store::ClockContext::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -950,13 +958,17 @@ impl WriterConnection {
         let run: Box<dyn FnOnce(&Transaction<'_>) -> bool + Send + '_> = Box::new(move |tx| {
             drop(waiting);
             let before = tx.total_changes();
+            let job = || {
+                let _clock = clock.enter();
+                job(tx)
+            };
             let (result, written) = if capture {
                 crate::touched::record_wrote(|| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(tx)))
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
                 })
             } else {
                 (
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(tx))),
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)),
                     Vec::new(),
                 )
             };
@@ -1113,6 +1125,7 @@ fn run_write_batch(
     ),
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
+    let _receive_shared = crate::receive_metrics::enter_shared();
     let (queue, window) = intake;
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
     // The first caller owns transaction setup too; later jobs acquire at their savepoint.
@@ -1139,6 +1152,8 @@ fn run_write_batch(
     let transaction_timer = crate::windows::Timer::start(crate::windows::StoreWork::WriteTransaction);
     let mut answers = Vec::new();
     let mut lend = None;
+    let mut receive_shared = crate::receive_metrics::SharedFinalization::new();
+    let prepare_started = std::time::Instant::now();
     let (transaction, mut failure) = {
         let _scope = crate::task_cpu::blocking_scope("writer.batch.setup");
         {
@@ -1160,6 +1175,7 @@ fn run_write_batch(
             (transaction, failure)
         }
     };
+    receive_shared.prepared(prepare_started.elapsed());
     let mut job = Some(first);
     while let Some(current) = job.take() {
         let WriterJob::Batched {
@@ -1174,6 +1190,7 @@ fn run_write_batch(
             lend = Some(current);
             break;
         };
+        receive_shared.participant(holder.receive());
         if let Some(batch) = &mut attribution {
             let waited = enqueued.elapsed();
             if waited >= batch.wait {
@@ -1202,6 +1219,9 @@ fn run_write_batch(
                 let _entered = crate::profile::enter(profile.as_ref());
                 let acquired = crate::profile::writer_acquired(wait);
                 let running = std::time::Instant::now();
+                let _receive = holder.receive().map(crate::receive_metrics::Context::enter);
+                let receive_hold = holder.receive().map(|context|
+                    crate::receive_metrics::WriterSample::start(context, enqueued.elapsed()));
                 hold.running(&holder);
                 // Include SQLite savepoint bookkeeping, not only the submitted callback.
                 // The captured profile remains current; nested CPU wrappers leave their CPU
@@ -1216,6 +1236,7 @@ fn run_write_batch(
                             .execute_batch(/* sqlite-large-value: allow-for-now lv-h2013f7d4439f owner=smallclaims::sqlite TODO=trace-statement-and-value-representation */ "ROLLBACK TO batched_write; RELEASE batched_write")
                     }
                 })();
+                drop(receive_hold);
                 crate::profile::writer_released(acquired);
                 hold.ran(&holder, running.elapsed());
                 failure = savepoint.err().map(anyhow::Error::from);
@@ -1229,7 +1250,12 @@ fn run_write_batch(
                 }
             }
             // A batch that failed to begin answers its first write with the error.
-            _ => drop(run),
+            _ => {
+                if let Some(context) = holder.receive() {
+                    context.writer_wait(enqueued.elapsed());
+                }
+                drop(run);
+            }
         }
         answers.push((done, writer_operation));
         if failure.is_none()
@@ -1244,6 +1270,13 @@ fn run_write_batch(
     let op_count = answers.len();
     // Shared transaction work has its own operation, never the first submitter's. Do not
     // keep this scope entered while running jobs: Op::enter preserves an existing origin.
+    if let Some(batch_id) = receive_shared.batch_id() {
+        hold.shared_receive_batch(batch_id);
+        if let Some(writer) = writer_telemetry {
+            writer.set_holder(None);
+        }
+    }
+    receive_shared.finalizing();
     let committed = {
         // A lexical guard does not capture connection while transaction still borrows it.
         // Consume the transaction first, then borrow connection for postcommit observers.
@@ -1296,6 +1329,7 @@ fn run_write_batch(
         }
         committed.map_err(|error| format!("{error:#}"))
     };
+    let _ = receive_shared.finish();
     // Finish samples before callers snapshot their operations. End holds before ACK
     // delivery too: channel backpressure is no longer counted as writer-held time.
     drop(hold);
@@ -1374,6 +1408,9 @@ impl Drop for WriterGuard<'_> {
                 .saturating_sub(self.changes_at_lend),
         );
         crate::profile::writer_released(self.acquired.take());
+        // Complete before returning the connection: the receive can snapshot immediately after
+        // this guard drops, before the writer thread has observed the return.
+        drop(self.receive_hold.take());
         let _ = self.give_back.send(connection);
         // The loan remains held through finalization, observer notification and return.
         drop(self.writer_operation.take());
@@ -2441,6 +2478,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_batch_links_two_receive_requests_and_restores_callback_context() {
+        use crate::receive_metrics::{RequestMetrics, Stage, Timer, capture};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE claims(store_index INTEGER PRIMARY KEY)").unwrap();
+        let fifo = crate::fifo::Queue::enabled_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let requests = [
+            RequestMetrics::new("receive-a".into()),
+            RequestMetrics::new("receive-b".into()),
+        ];
+        let mut answers = Vec::new();
+        for (metrics, stage) in requests.iter().zip([Stage::ReceiptIngest, Stage::Repairs]) {
+            let _request = metrics.enter();
+            let _stage = Timer::start(stage);
+            let expected_id = capture().unwrap().correlation_id().to_owned();
+            let (done, answer) = std::sync::mpsc::sync_channel(1);
+            let enqueued = std::time::Instant::now();
+            fifo.send_at(enqueued, || sender.send(WriterJob::Batched {
+                run: Box::new(move |_| {
+                    let context = capture().expect("the callback inherits its request");
+                    assert_eq!(context.correlation_id(), expected_id);
+                    assert_eq!(context.stage(), stage);
+                    true
+                }),
+                profile: None,
+                wait: None,
+                holder: crate::windows::holds::Holder::current(),
+                enqueued,
+                done,
+            }).map_err(Box::new)).unwrap();
+            answers.push(answer);
+        }
+        assert!(capture().is_none());
+        let first = receiver.recv().unwrap();
+        drop(sender);
+        assert!(run_write_batch(
+            &mut connection, first, (&receiver, std::time::Duration::MAX),
+            &AtomicU64::new(0), &(AtomicU64::new(0), AtomicU64::new(0)),
+            (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
+            &fifo,
+        ).is_none());
+        assert!(capture().is_none(), "shared work never keeps a submitter's context");
+        for answer in answers {
+            answer.recv().unwrap().unwrap();
+        }
+        let first = requests[0].snapshot();
+        let second = requests[1].snapshot();
+        assert_eq!(first.shared_finalizations, 1);
+        assert_eq!(second.shared_finalizations, 1);
+        assert!(first.first_shared_batch.is_some());
+        assert_eq!(first.first_shared_batch, second.first_shared_batch);
+        assert_eq!(first.last_shared_batch, second.last_shared_batch);
+        assert_eq!(first.phases[Stage::Repairs as usize].writer_hold, std::time::Duration::ZERO);
+        assert_eq!(second.phases[Stage::ReceiptIngest as usize].writer_hold, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn one_batch_keeps_each_jobs_clock_and_restores_the_enclosing_context() {
+        use crate::store::{ClockContext, clock_snapshot, now_ms, set_thread_clock};
+
+        let original = ClockContext::capture();
+        let _restore = original.enter();
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE claims(store_index INTEGER PRIMARY KEY)").unwrap();
+        let fifo = crate::fifo::Queue::enabled_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut answers = Vec::new();
+        for at in [100, 200] {
+            let clock = {
+                let _restore = original.enter();
+                set_thread_clock(Some(at));
+                let _snapshot = clock_snapshot();
+                set_thread_clock(Some(at + 1));
+                ClockContext::capture()
+            };
+            let (done, answer) = std::sync::mpsc::sync_channel(1);
+            let enqueued = std::time::Instant::now();
+            fifo.send_at(enqueued, || sender.send(WriterJob::Batched {
+                run: Box::new(move |_| {
+                    assert_eq!(ClockContext::capture(), original);
+                    {
+                        let _clock = clock.enter();
+                        assert_eq!(ClockContext::capture(), clock);
+                        assert_eq!(now_ms(), at);
+                    }
+                    assert_eq!(ClockContext::capture(), original);
+                    true
+                }),
+                profile: None,
+                wait: None,
+                holder: crate::windows::holds::Holder::current(),
+                enqueued,
+                done,
+            }).map_err(Box::new)).unwrap();
+            answers.push(answer);
+        }
+        let first = receiver.recv().unwrap();
+        drop(sender);
+        let batches = (AtomicU64::new(0), AtomicU64::new(0));
+        assert!(run_write_batch(
+            &mut connection, first, (&receiver, std::time::Duration::MAX),
+            &AtomicU64::new(0), &batches,
+            (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
+            &fifo,
+        ).is_none());
+        for answer in answers {
+            answer.recv().unwrap().unwrap();
+        }
+        assert_eq!(batches.0.load(Ordering::Relaxed), 1);
+        assert_eq!(batches.1.load(Ordering::Relaxed), 2);
+        assert_eq!(ClockContext::capture(), original);
+    }
+
+    #[test]
     fn roster_reader_timing_is_scoped_and_restored_on_unwind() {
         thread_local! {
             static REPORTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -3069,7 +3221,17 @@ mod commit_observer_tests {
         let writer = writer();
         let (recorded, observations) = mpsc::channel();
         let index = writer.committed_index.clone();
+        let metrics = crate::receive_metrics::RequestMetrics::new("receive-loan".into());
+        let observer_metrics = metrics.clone();
         let observer = writer.observe_commits(move |connection| {
+            let context = crate::receive_metrics::capture().expect("loan observer keeps receive context");
+            assert_eq!(context.correlation_id(), "receive-loan");
+            assert_eq!(context.stage(), crate::receive_metrics::Stage::Projection);
+            assert_eq!(
+                observer_metrics.snapshot().phases[crate::receive_metrics::Stage::Projection as usize].writer_hold,
+                std::time::Duration::ZERO,
+                "hold accounting must not finish before observer cleanup",
+            );
             let authority: i64 = connection
                 .query_row("SELECT authority FROM claims", [], |row| row.get(0))
                 .unwrap();
@@ -3082,6 +3244,8 @@ mod commit_observer_tests {
                 .unwrap();
         });
         {
+            let _request = metrics.enter();
+            let _phase = crate::receive_metrics::Timer::start(crate::receive_metrics::Stage::Projection);
             let mut connection = writer.write();
             let transaction = connection.transaction().unwrap();
             transaction
@@ -3091,6 +3255,11 @@ mod commit_observer_tests {
             assert!(matches!(observations.try_recv(), Err(TryRecvError::Empty)));
         }
         assert_eq!(observations.recv().unwrap(), (true, 1, 1));
+        assert!(
+            metrics.snapshot().phases[crate::receive_metrics::Stage::Projection as usize].writer_hold
+                > std::time::Duration::ZERO,
+            "loan accounting finishes synchronously before guard drop returns",
+        );
         drop(observer);
         writer
             .batched(|transaction| transaction.execute("UPDATE claims SET authority=2", []))

@@ -299,9 +299,9 @@ fn item_data_types(
 /// A pull request is reviewed once for each head it is ready at: when it first appears open and
 /// ready, when a draft becomes ready, and when a new head replaces one that was known. Nothing
 /// else starts a review. A closure, a merge, a reopening at the same head, a title edit, and a
-/// field that an older build did not record never do, because st would review a head it already
-/// saw or one nobody can act on. A known item with no known head proves nothing, so a head first
-/// recorded for it is a baseline.
+/// field an older build did not record never do. A positively marked creation receipt has not
+/// observed a head: only its first ready head needs a review. Unmarked head-less priors remain
+/// a baseline, including observations made by older builds.
 fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
     // An item resource names the head `head_sha`; a listing names it `head`.
     let head_of = |item: &Value| {
@@ -324,6 +324,7 @@ fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
     };
     let prior_head = head_of(prior);
     prior.get("draft").and_then(Value::as_bool) == Some(true)
+        || (prior_head.is_none() && prior.get("receipt_only") == Some(&Value::Bool(true)))
         || prior_head.is_some_and(|prior_head| Some(prior_head) != head)
 }
 
@@ -376,6 +377,7 @@ fn item_facts(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    facts.remove("receipt_only");
     for (name, value) in seen.as_object().into_iter().flatten() {
         let name = match name.as_str() {
             "new" => continue,
@@ -824,7 +826,7 @@ fn agent_working_since_at(
     Ok(since.and_then(|time| time.parse().ok()))
 }
 
-/// The current generation's steps of actor `?1` (every actor when null), with finished and
+/// The current generation's steps of actor spelling JSON `?1` (every actor when null), with finished and
 /// pending ones when `?2`, and agentless ones when `?3` and no actor is named. With `open_only`
 /// the finished steps are left out in SQL, word for word the predicate of
 /// `step_runs_open_index`, so the read covers the fleet's open steps and not every step it ran.
@@ -850,9 +852,9 @@ fn work_at_snapshot_query_of(open_only: bool, selected: &str) -> String {
          WHERE {selected} (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
            AND (?1 IS NULL
-                OR assignee=?1
-                OR lease_owner=?1
-                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1))
+                OR assignee IN (SELECT value FROM json_each(?1))
+                OR lease_owner IN (SELECT value FROM json_each(?1))
+                OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1))))
            AND (?2 OR status NOT IN ('pending','completed','failed','cancelled'))
            {open}
          ORDER BY created_at_unix_ms, step_path"

@@ -408,6 +408,33 @@ fn timeline_read_exports_owner_subphases_on_existing_request_span() {
 }
 
 #[test]
+fn timeline_continuation_exports_the_inherited_nondefault_limit() {
+    let fixture = NativeBoundaryFixture::new("timeline-continuation-limit");
+    fixture.append(0, 4);
+    let session = ClientSession::local(Some("person/example")).unwrap();
+    let snapshot = new_client_snapshot(&fixture.state);
+    let first = timeline_value(
+        &fixture.state, &snapshot, &session, &fixture.session_id,
+        &ClientListQuery { limit: Some(2), ..Default::default() },
+    ).unwrap().0;
+    let cursor = first["page"]["next_cursor"].as_str().unwrap().to_owned();
+    let spans = crate::otel::capture_test_spans(|| {
+        let span = tracing::info_span!("timeline-continuation-proof");
+        let _entered = span.enter();
+        let page = timeline_value(
+            &fixture.state, &snapshot, &session, &fixture.session_id,
+            &ClientListQuery { cursor: Some(cursor), ..Default::default() },
+        ).unwrap().0;
+        assert_eq!(page["page"]["limit"], 2);
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    });
+    let span = spans.iter().find(|span| span.name == "timeline-continuation-proof").unwrap();
+    let requested = span.attributes.iter().find(|attribute|
+        attribute.key.as_str() == "st.conversation.requested_limit").unwrap();
+    assert_eq!(requested.value, opentelemetry::Value::I64(2));
+}
+
+#[test]
 fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -282,11 +282,11 @@ pub fn record_conversation_relay_read(owner: &str, operation: &'static str, elap
 mod conversation_metrics_tests {
     #[test]
     fn owner_labels_are_bounded_to_the_configured_fleet() {
-        let label = |owner| super::conversation_owner(owner, "node-a", ["node-b", "node-c"].into_iter());
-        assert_eq!(label("host/node-a"), "local");
-        assert_eq!(label("host/node-b"), "host/node-b");
-        assert_eq!(label("host/node-c"), "host/node-c");
-        for owner in ["node-b", "host/new-peer", "session/secret", "host/", "host/node-b/session/id"] {
+        let label = |owner| super::conversation_owner(owner, "local-node", ["alpha", "beta"].into_iter());
+        assert_eq!(label("host/local-node"), "local");
+        assert_eq!(label("host/alpha"), "host/alpha");
+        assert_eq!(label("host/beta"), "host/beta");
+        for owner in ["alpha", "host/new-peer", "session/secret", "host/", "host/alpha/session/id"] {
             assert_eq!(label(owner), "unknown", "{owner}");
         }
     }
@@ -839,6 +839,26 @@ pub fn record_http_request_duration(
         ],
     );
 }
+/// Count only bounded mutation refusals caused by pending run projections. Labels use the
+/// router's bounded route template and HTTP method, never a run, step, person or raw URL.
+pub fn record_run_projection_drain_refusal(method: &str, route: &str) {
+    if !metrics_enabled() {
+        return;
+    }
+    static REFUSALS: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::LazyLock::new(|| {
+            opentelemetry::global::meter("st3.http")
+                .u64_counter("st.run_projection.drain.refusals")
+                .with_unit("{refusal}")
+                .with_description("Mutation refusals after the bounded run projection drain wait")
+                .build()
+        });
+    REFUSALS.add(1, &[
+        KeyValue::new("http.request.method", method.to_owned()),
+        KeyValue::new("http.route", route.to_owned()),
+    ]);
+}
+
 
 /// Bounded reasons a mailbox stream checks its authority; never label metrics with a seat.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -918,6 +938,27 @@ fn record_github_response_metric(
         KeyValue::new("github.repository", repository.to_owned()),
         KeyValue::new("github.resource", resource),
         KeyValue::new("github.response.kind", if not_modified { "not_modified" } else { "charged" }),
+    ]);
+}
+
+static GITHUB_WEBHOOK_DELIVERIES: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.github")
+            .u64_counter("st.github.webhook.deliveries")
+            .with_description("GitHub webhook deliveries this daemon received, by event and outcome")
+            .with_unit("{delivery}")
+            .build()
+    });
+
+/// One webhook delivery. `event` is a bounded label (`other` for events the receiver does not
+/// know); `outcome` is `refreshed`, `ignored`, `unauthorized`, `unavailable` or `invalid`.
+pub fn github_webhook_delivery(event: &'static str, outcome: &'static str) {
+    if !metrics_enabled() {
+        return;
+    }
+    GITHUB_WEBHOOK_DELIVERIES.add(1, &[
+        KeyValue::new("github.event", event),
+        KeyValue::new("outcome", outcome),
     ]);
 }
 

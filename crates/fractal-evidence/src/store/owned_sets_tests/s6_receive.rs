@@ -22,12 +22,32 @@ fn effective_view(store: &Store) -> Value {
     json!({"sets": selected, "subjects": subjects})
 }
 
+fn canonical_inputs(store: &Store) -> Vec<(smallclaims::store::canonical::ClaimKey, Value)> {
+    let batch = store.export_replication_for_heads(&std::collections::BTreeMap::new()).unwrap();
+    assert!(batch.batches.len() < 512, "oracle fixture must not reach the export page cap");
+    let connection = store.readers.get();
+    let mut inputs = batch.batches.iter().flat_map(|batch| &batch.claims).map(|claim| {
+        (smallclaims::store::canonical::claim_key(&connection, &claim.id).unwrap(),
+            json!({"id": claim.id, "subject": claim.subject, "kind": claim.kind,
+                "origin": claim.origin, "actor": claim.actor, "body": claim.body,
+                "predecessors": claim.predecessors}))
+    }).collect::<Vec<_>>();
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    inputs
+}
+
 fn assert_replay_parity(store: &Store, seed: u64, step: usize) {
     let incremental = effective_view(store);
     // Replay a separate store so the oracle never repairs the incremental target
     // between arrivals. Compare every prefix, including intermediate holds.
     let replay = Store::open_memory("replay-oracle").unwrap();
-    share(store, &replay);
+    let batch = store.export_replication_for_heads(&std::collections::BTreeMap::new()).unwrap();
+    assert!(batch.batches.len() < 512, "seed={seed}, step={step}: export page cap");
+    replay.import_replication(&store.origin, &batch).unwrap();
+    assert_eq!(replay.replica_heads().unwrap(), store.replica_heads().unwrap(),
+        "seed={seed}, step={step}: oracle must admit every source batch");
+    assert_eq!(canonical_inputs(&replay), canonical_inputs(store),
+        "seed={seed}, step={step}: replay requires identical canonical inputs and keys");
     replay.connection.batched(replay_graph_from_nothing_tx).unwrap().unwrap();
     assert_eq!(effective_view(&replay), incremental, "seed={seed}, step={step}");
 }
@@ -146,6 +166,7 @@ fn t5_late_lower_sorting_reference_applies_after_reopen_with_existing_frontier()
     receive_and_project(&target, "amber", &exchange_from(&source, &target.replication_inventory().unwrap()));
     let (reference, receipt) = incomplete_revision(&target);
     assert!(!target.owned_sets().unwrap()[0].blockers.is_empty());
+    assert!(target.project_replication_backlog().unwrap());
     let frontier = target.readers.get().query_row(
         "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
         [], |row| row.get::<_, u64>(0)).unwrap();

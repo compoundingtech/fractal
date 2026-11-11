@@ -26,6 +26,7 @@ pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
 pub mod workspace_observations;
+pub mod observer_refresh;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
@@ -61,6 +62,7 @@ mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
+pub mod read_positions;
 pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
@@ -72,6 +74,9 @@ pub mod schedule_active_run_tests;
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
+mod program_bundles;
+pub mod run_credentials;
+pub mod run_authority;
 pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -175,6 +180,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus, UsageSummary, WorkSelector, WorkWakeView};
+use fractal_kernel::program_journal::{self, ProgramFault, ProgramJournal, ProgramRunView};
 #[cfg(any(test, feature = "test-support"))]
 use crate::model::WorkRequest;
 #[cfg(test)]
@@ -228,6 +234,7 @@ use smallclaims::windows::holds;
 
 
 pub mod accounts;
+pub mod declared_objectives;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod roster_admission;
@@ -260,6 +267,9 @@ pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-mis
 /// The explicitly owned weekly API readiness fault.
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
+mod run_fence;
+#[cfg(any(test, feature = "test-support"))]
+pub mod rebuild_observer;
 pub mod revision_seats;
 pub mod delegation;
 pub mod claim_pages;
@@ -350,6 +360,10 @@ mod wake_lookup_tests;
 mod status_summary_tests;
 #[cfg(test)]
 mod run_eta_tests;
+#[cfg(test)]
+mod run_credentials_tests;
+#[cfg(test)]
+mod run_authority_tests;
 #[cfg(test)]
 mod run_eta_review_tests;
 pub mod client_summary;
@@ -803,7 +817,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6e39e16546c7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1ae4f9ad11c9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -853,6 +867,12 @@ CREATE INDEX IF NOT EXISTS claims_timeline_activity_time_index
 ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
 WHERE kind='harness.timeline'
   AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result');
+-- Prose lookups must not walk newer tool traffic or user prompts, including an empty result.
+CREATE INDEX IF NOT EXISTS claims_timeline_prose_time_index
+ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+  AND json_extract(body, '$.fields.role')='assistant';
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
@@ -953,6 +973,9 @@ WHERE kind='custom.client.pairing-completed';
 CREATE INDEX IF NOT EXISTS claims_assistant_v1_credential_index
 ON claims(json_extract(body, '$.fields.credential_hash'), store_index)
 WHERE kind='custom.client.assistant.v1.granted';
+-- Match parameterized admission by kind and effective principal, including legacy ChatGPT grants.
+CREATE INDEX IF NOT EXISTS claims_assistant_v1_principal_index
+ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
 -- A runtime incarnation's claims about a subject by acceptance time, so when a session began
 -- and last changed are two seeks instead of a read of every claim the subject has. The
 -- expression is INCARNATION_OF_CLAIM, which queries repeat so the planner uses this index.
@@ -1406,6 +1429,11 @@ ON local_observations(dedupe_key) WHERE dedupe_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS local_observations_timeline_index
 ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id)
 WHERE kind='harness.timeline';
+CREATE INDEX IF NOT EXISTS local_observations_timeline_prose_index
+ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id, after_store_index, observed_at_unix_ms)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+  AND json_extract(body, '$.fields.role')='assistant';
 -- The roster cache's local frontier: the newest agent timeline row a graph cut can see. Only
 -- an agent's timeline rows can change a roster card, so this partial covering index bounds the
 -- frontier lookup by newer agent timeline rows alone; heartbeats, telemetry and every other
@@ -2432,6 +2460,10 @@ pub struct ChildMissionContext {
     pub root_run_id: String,
     pub parent_step_run: String,
     pub default_selector: Option<WorkSelector>,
+    /// Who starts the child when it is not its requester: `mission-run/PARENT` for a child a
+    /// program starts. Its creation claims are written as this actor, and run authority takes it
+    /// as the child's starter (docs/st3/program-engine.md §3).
+    pub started_by: Option<String>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -2754,6 +2786,60 @@ pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
 pub type HumanAttention = (BTreeSet<String>, Vec<fractal_ui_model::missions::Gate>);
 
 impl Store {
+    /// Decision reads must wait for the run's committed pending projection work.
+    pub fn run_projection_pending(&self, subject: &str) -> Result<bool> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        if connection.is_autocommit() {
+            let transaction = connection.unchecked_transaction()?;
+            run_projection_pending_tx(&transaction, subject).map_err(anyhow::Error::new)
+        } else {
+            run_and_root_projection_pending(&connection, subject).map_err(anyhow::Error::new)
+        }
+    }
+
+    /// Publish a committed caller-driven drain, even when it appended no replicated claim.
+    /// Call only after the transaction containing `finish_run_projection_tx` committed.
+    pub fn run_projection_finished(&self) {
+        self.fractal.projection_advanced(true);
+    }
+
+    /// Fence a mutation that reads its own run or step and the ancestor root.
+    pub fn with_run_fence<T: Send, E: From<FractalError> + Send>(
+        &self,
+        subject: &str,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        run_fence::execute(&self.graph, Some(RunMutationFence::Run(subject)),
+            Some(run_fence::API_TURN_BUDGET), action)
+    }
+
+    /// Fence a mutation that reads descendants, capacity or other cross-run state.
+    pub fn with_all_runs_fenced<T: Send, E: From<FractalError> + Send>(
+        &self,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        run_fence::execute(&self.graph, Some(RunMutationFence::All),
+            Some(run_fence::API_TURN_BUDGET), action)
+    }
+
+    /// Daemon-only decisions may finish the finite pending set without a client budget.
+    pub fn with_all_runs_fenced_internal<T: Send, E: From<FractalError> + Send>(
+        &self,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        run_fence::execute(&self.graph, Some(RunMutationFence::All), None, action)
+    }
+
+    /// Daemon-only counterpart of `with_run_fence`.
+    pub fn with_run_fence_internal<T: Send, E: From<FractalError> + Send>(
+        &self,
+        subject: &str,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        run_fence::execute(&self.graph, Some(RunMutationFence::Run(subject)), None, action)
+    }
+
     /// The explicitly registered keyed views for this graph. This getter performs no reads
     /// or installation; availability and source coverage must be checked in a snapshot.
     pub fn ivm_views(&self) -> Option<Arc<smallclaims::ivm::Views>> {
@@ -3149,32 +3235,7 @@ impl Store {
 
     /// The reason for an open fault on `subject` in `scope`, if the latest record is a fault.
     pub fn reconcile_fault(&self, subject: &str, scope: &str) -> Result<Option<String>> {
-        let connection = self.readers.get();
-        let body: Option<String> = connection
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-hb42a56e4a272 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-                    "SELECT body FROM claims WHERE subject=?1 AND kind='reconcile.fault'
-                   AND json_extract(body, '$.fields.scope')=?2
-                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-                ),
-                params![subject, scope],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(body) = body else {
-            return Ok(None);
-        };
-        let body: Value = serde_json::from_str(&body)?;
-        let fields = body.get("fields").unwrap_or(&body);
-        Ok(
-            (fields.get("status").and_then(Value::as_str) == Some("faulted")).then(|| {
-                fields
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            }),
-        )
+        Ok(reconcile_fault_tx(&self.readers.get(), subject, scope)?)
     }
 
     /// Latest preparation outcome for one message and the recipient's current incarnation.
@@ -3315,6 +3376,31 @@ impl Store {
             publication::CommitChecks {
                 owned: None,
                 guard: Some(guard),
+                force: None,
+            },
+        )
+    }
+
+    /// Publish plain declarations, accepting ad hoc changes to owned-set members as source
+    /// debt with `reason`. Each forced member holds until its set publishes again.
+    pub fn apply_forced(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        key: &str,
+        actor: Option<&str>,
+        reason: &str,
+    ) -> Result<ApplyResponse, FractalError> {
+        self.apply_as_impl(
+            intent,
+            expected,
+            key,
+            actor,
+            None,
+            publication::CommitChecks {
+                owned: None,
+                guard: None,
+                force: Some(reason),
             },
         )
     }
@@ -3351,9 +3437,8 @@ impl Store {
     ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
-        let publication::CommitChecks { owned, guard } = checks;
-        self.connection
-            .batched(|transaction| -> Result<ApplyResponse, FractalError> {
+        let publication::CommitChecks { owned, guard, force } = checks;
+        let apply = |transaction: &Transaction<'_>| -> Result<ApplyResponse, FractalError> {
                 declared_admission::validate_publication(transaction, &self.origin, intent)?;
                 agent_charter::validate_publication(transaction, &self.origin, intent)?;
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
@@ -3391,16 +3476,21 @@ impl Store {
                 schedule_standby::validate_publication(transaction, &self.origin, intent)?;
                 mission_capacity::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
+                program_bundles::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
                 let mut one_shot_sets = BTreeMap::new();
+                let mut forced = BTreeMap::<String, (owned_sets::View, owned_sets::Verb)>::new();
+                let mut audited = Vec::new();
                 if let (Some(plan), Some(options)) = (&owned_plan, owned) {
+                    owned_sets::check_publisher(plan, actor)?;
                     owned_sets::validate_apply(plan, options)?;
                     if plan.preview.noop {
                         return cache_local_apply_receipt_tx(transaction,ApplyResponse {
                             changed: false, store_index: current_index_tx(transaction).map_err(internal)?,
                             batch_id: None, claim_ids: Vec::new(), subject_tokens: BTreeMap::new(),
                             reconcile_subjects: Vec::new(), resolved_kdl: String::new(), operations: Vec::new(),
+                            source_debts_recorded: Vec::new(), source_debts_reverted: Vec::new(),
                         },local_receipt,idempotency_key);
                     }
                 } else {
@@ -3412,7 +3502,33 @@ impl Store {
                             one_shot_sets.insert(subject.clone(), set);
                             continue;
                         }
-                        owned_sets::refuse_unmanaged(transaction, subject)?;
+                        // A mission run materializes its own declarations; source does not route run starts,
+                        // so a claimed namespace does not gate them. Set members still refuse them.
+                        if intent.subjects.get(subject).is_some_and(|desired| desired.owner_run.is_some()) {
+                            owned_sets::refuse_unmanaged(transaction, subject)?;
+                            continue;
+                        }
+                        let new = owned_sets::owner(transaction, subject, None)?.is_none()
+                            && match intent.subjects.get(subject) {
+                                Some(_) => intent_leaves_tx(transaction, subject).map_err(internal)?.is_empty(),
+                                None => mission_definition_token_tx(transaction, subject.trim_start_matches("mission/"))
+                                    .map_err(internal)?.is_empty(),
+                            };
+                        let verb = match (new, intent.subjects.get(subject)) {
+                            (true, _) => owned_sets::Verb::Create,
+                            (false, Some(desired)) => owned_sets::Verb::of_declaration(transaction, desired)?,
+                            (false, None) => match intent.missions.values().find(|m| &m.subject == subject) {
+                                Some(mission) if mission_state_name(&mission.state) == "retired" => owned_sets::Verb::MissionRetire,
+                                _ => owned_sets::Verb::MissionPublish,
+                            },
+                        };
+                        match owned_sets::gate(transaction, subject, verb, force)? {
+                            owned_sets::Gate::Allow => {}
+                            owned_sets::Gate::Force(view) => {
+                                forced.insert(subject.clone(), (*view, verb));
+                            }
+                            owned_sets::Gate::Audit(view, refused) => audited.push((subject.clone(), *view, verb, *refused)),
+                        }
                     }
                 }
                 let intent = owned_plan.as_ref().map_or(intent, |p| &p.intent);
@@ -3540,6 +3656,8 @@ impl Store {
                     }
                 }
                 for declaration in intent.mission_runs.values() {
+                    // A run declares only on itself and the runs it started.
+                    run_authority::admit_reach_tx(transaction, actor, &declaration.subject, "declare")?;
                     let actual = latest_claim_id_tx(transaction, &declaration.subject)
                         .map_err(internal)?
                         .into_iter()
@@ -3783,6 +3901,8 @@ impl Store {
                         reconcile_subjects: Vec::new(),
                         resolved_kdl: String::new(),
                         operations: Vec::new(),
+                        source_debts_recorded: Vec::new(),
+                        source_debts_reverted: Vec::new(),
                     };
                     transaction
                         .execute(
@@ -3795,6 +3915,14 @@ impl Store {
                         .map_err(internal)?;
                     return cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key);
                 }
+                let forced_diffs = if forced.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    declarations::diffs(transaction, intent,
+                        forced.keys().map(String::as_str).filter(|s| intent.subjects.contains_key(*s)),
+                        Some(current_index_tx(transaction).map_err(internal)?))?
+                };
+                let mut forced_claims = Vec::new();
                 let now = write_time(transaction, &self.origin).map_err(internal)?;
                 let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
                 let previous_hash = previous_batch_hash(transaction, &self.origin).map_err(internal)?;
@@ -3825,6 +3953,8 @@ impl Store {
                         );
                         continue;
                     }
+                    // A run declares only what its authority grants, as it writes any claim.
+                    run_authority::admit_tx(transaction, &self.origin, actor, "intent.desired", subject, &BTreeMap::new())?;
                     let predecessors = intent_leaves_tx(transaction, subject).map_err(internal)?;
                     let mut body = serde_json::to_value(desired).map_err(internal)?;
                     if let Some(plan) = &owned_plan
@@ -3886,6 +4016,9 @@ impl Store {
                     insert_event(transaction, store_index, "intent.desired", subject, &body)
                         .map_err(internal)?;
                     claim_ids.push(claim_id.clone());
+                    if forced.contains_key(subject) {
+                        forced_claims.push((subject.clone(), claim_id.clone(), revision.clone()));
+                    }
                     tokens.insert(subject.clone(), vec![claim_id]);
                     reconcile_subjects.push(subject.clone());
                 }
@@ -3905,6 +4038,8 @@ impl Store {
                         );
                         continue;
                     }
+                    // A run publishes only the missions its authority grants (`publish ID`).
+                    run_authority::admit_tx(transaction, &self.origin, actor, "mission.published", &mission.subject, &BTreeMap::new())?;
                     let predecessors =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
                     let mut body = serde_json::to_value(mission).map_err(internal)?;
@@ -3963,6 +4098,9 @@ impl Store {
                     )
                     .map_err(internal)?;
                     claim_ids.push(claim_id.clone());
+                    if forced.contains_key(&mission.subject) {
+                        forced_claims.push((mission.subject.clone(), claim_id.clone(), mission.revision.clone()));
+                    }
                     tokens.insert(mission.subject.clone(), vec![claim_id]);
                 }
                 for declaration in intent.mission_runs.values() {
@@ -4227,6 +4365,20 @@ impl Store {
                         reason: "the replacement claim resolved the invalid record".into(),
                     });
                 }
+                let mut source_debts_recorded = Vec::new();
+                for (subject, claim_id, revision) in &forced_claims {
+                    let (view, verb) = &forced[subject];
+                    let debt = owned_sets::record_debt_tx(transaction, &self.origin, view, subject, *verb,
+                        owned_sets::Forced::Declaration { claim: claim_id, revision }, forced_diffs.get(subject), actor,
+                        force.unwrap_or_default(), Some(&batch_id))?;
+                    claim_ids.push(debt.id.clone());
+                    source_debts_recorded.push(debt);
+                }
+                for (subject, view, verb, refused) in &audited {
+                    let record = owned_sets::record_audit_tx(transaction, &self.origin, view, subject, *verb,
+                        actor, refused, Some(&batch_id))?;
+                    claim_ids.push(record.id);
+                }
                 if let Some(plan) = &owned_plan {
                     let receipt = owned_sets::commit_tx(transaction, &self.origin, plan, actor, &batch_id)?;
                     tokens.insert(plan.preview.set.clone(), vec![receipt.id.clone()]);
@@ -4246,6 +4398,9 @@ impl Store {
                     reconcile_subjects,
                     resolved_kdl: String::new(),
                     operations: operation_receipts,
+                    source_debts_recorded,
+                    source_debts_reverted: owned_plan.as_ref()
+                        .map(|plan| plan.preview.reverted_debts.clone()).unwrap_or_default(),
                 };
                 transaction
                     .execute(
@@ -4257,12 +4412,36 @@ impl Store {
                     )
                     .map_err(internal)?;
                 cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key)
-            })
-            .map_err(|error| FractalError::new("internal", error))?
+            };
+        if intent.mission_runs.is_empty() {
+            self.connection.batched(apply)
+                .map_err(|error| FractalError::new("internal", error))?
+        } else {
+            self.with_all_runs_fenced(apply)
+        }
     }
 
     pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
         self.append_claim_outcome(input).map(|(claim, _)| claim)
+    }
+
+    /// Revalidate a cross-run action after draining all pending parts, in the claim's own
+    /// transaction. Operation replays and mismatches retain ordinary append precedence.
+    pub fn append_claim_with_run_projection(
+        &self,
+        input: &ClaimInput,
+        admission: &ClaimAdmission<'_>,
+    ) -> Result<ClaimRecord, FractalError> {
+        let (claim, _) = append_claim_with_commit_context(
+            &self.graph, input, None, None, None, None,
+            ClaimCommitContext {
+                admission: Some(admission),
+                all_run_projections: true,
+                ..Default::default()
+            },
+        )?;
+        self.run_projection_finished();
+        Ok(claim)
     }
 
     /// Append a scheduler failure receipt only while its operation and desired revision remain current.
@@ -4319,9 +4498,27 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        self.claims_page_matching_with_kinds(
+            filter, owner_run, after_index, before_index, descending, limit, None,
+        )
+    }
+
+    /// Match `filter` and restrict allowed kinds in SQL before selecting or decoding page rows.
+    /// `None` leaves kinds unrestricted; an empty allowlist selects no claims.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claims_page_matching_with_kinds(
+        &self,
+        filter: ClaimsFilter<'_>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+        allowed_kinds: Option<&[&str]>,
+    ) -> Result<ClaimsPage> {
         let (subject, lower, upper) = claim_pages::subject_match(filter)?;
         let connection = self.readers.get();
-        let query = claims_page_query(subject, filter.kind.is_some(), descending);
+        let query = claims_page_query(subject, filter.kind.is_some(), descending, allowed_kinds.is_some());
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4330,8 +4527,9 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
-        let values: [&dyn rusqlite::ToSql; 6] =
-            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper];
+        let allowed_kinds_json = allowed_kinds.map(serde_json::to_string).transpose()?;
+        let values: [&dyn rusqlite::ToSql; 7] =
+            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper, &allowed_kinds_json];
         // Each query names its highest parameter; the unused ones below it stay NULL.
         let bound = statement.parameter_count();
         let rows = statement.query_map(
@@ -4848,8 +5046,7 @@ impl Store {
     ) -> Result<OperationalRepairResult, FractalError> {
         let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction().map_err(internal)?;
+        self.with_all_runs_fenced(|transaction| {
         if let Some(receipt) = transaction
             .query_row(
                 /* sqlite-large-value: allow-for-now lv-h689aadac7c87 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
@@ -4875,7 +5072,6 @@ impl Store {
                 .collect::<Vec<_>>();
             affected_subjects.sort();
             affected_subjects.dedup();
-            transaction.commit().map_err(internal)?;
             return Ok(OperationalRepairResult {
                 api_version: "st3.operational-repair.v0".into(),
                 token: token.into(),
@@ -4886,9 +5082,8 @@ impl Store {
                 receipt_claim_id: Some(receipt.0),
             });
         }
-
         let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
-            &transaction, now_ms(), &self.origin, native_evidence,
+            transaction, now_ms(), &self.origin, native_evidence,
         ).map_err(internal)?, &filter).map_err(internal)?;
         if plan.token != token {
             return Err(FractalError::new(
@@ -4902,7 +5097,6 @@ impl Store {
             .with_detail("current_token", plan.token));
         }
         if plan.items.is_empty() {
-            transaction.commit().map_err(internal)?;
             return Ok(OperationalRepairResult {
                 api_version: plan.api_version,
                 token: token.into(),
@@ -4927,7 +5121,7 @@ impl Store {
                     let operation_id = item.details["operation"]["id"].as_str()
                         .ok_or_else(|| FractalError::new("invalid-repair-plan", "missing runtime operation"))?;
                     runtime_starts::retain_runtime_start_producer_closed_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         operation_id,
                         item.details.get("native_evidence"),
@@ -4945,7 +5139,7 @@ impl Store {
                             )
                         })?;
                     claim_ids.extend(cancel_descendant_mission_runs_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         generation,
                         "daemon/runtime",
@@ -4955,7 +5149,7 @@ impl Store {
                 }
                 "orphaned-readiness" => {
                     if let Some(claim) = repair_step_state_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         "cancelled",
@@ -4967,7 +5161,7 @@ impl Store {
                 }
                 "expired-claim" => {
                     if let Some(claim) = repair_step_state_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         "ready",
@@ -4994,7 +5188,7 @@ impl Store {
                         .and_then(Value::as_u64)
                         .unwrap_or_default();
                     let claim = append_claim_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         "harness.diagnostic",
@@ -5016,7 +5210,7 @@ impl Store {
                 }
                 "impossible-state" => {
                     claim_ids.extend(repair_impossible_run_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         &item.reason,
@@ -5025,7 +5219,7 @@ impl Store {
                 }
                 "cancelled-final-stall" => {
                     claim_ids.extend(repair_impossible_run_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         &item.reason,
@@ -5045,7 +5239,7 @@ impl Store {
                         })?;
                     for step_run in step_runs.iter().filter_map(Value::as_str) {
                         if let Some(claim) = repair_step_state_tx(
-                            &transaction,
+                            transaction,
                             &self.origin,
                             step_run,
                             "ready",
@@ -5088,7 +5282,7 @@ impl Store {
             reason.push_str(&serde_json::to_string(&closures).map_err(internal)?);
         }
         let receipt = append_claim_tx(
-            &transaction,
+            transaction,
             &self.origin,
             &repair_subject,
             "repair.applied",
@@ -5103,7 +5297,6 @@ impl Store {
             None,
         )
         .map_err(internal)?;
-        transaction.commit().map_err(internal)?;
         Ok(OperationalRepairResult {
             api_version: plan.api_version,
             token: token.into(),
@@ -5112,6 +5305,7 @@ impl Store {
             affected_subjects,
             claim_ids,
             receipt_claim_id: Some(receipt.id),
+        })
         })
     }
 
@@ -6849,29 +7043,12 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
-        let connection = self.readers.get();
-        let order = if descending { "DESC" } else { "ASC" };
-        let query = format!(
-            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-             FROM claims WHERE subject=?1 AND kind=?2 AND (?3 IS NULL OR store_index<?3)
-             ORDER BY store_index {order} LIMIT ?4"
-        );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9b3b2893e731 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
-        let rows = statement.query_map(
-            params![subject, kind, before_index, limit.saturating_add(1) as u64],
-            claim_from_row,
-        )?;
-        let mut claims = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        let next_cursor = if claims.len() > limit {
-            claims.pop();
-            claims.last().map(|claim| claim.store_index)
-        } else {
-            None
-        };
-        Ok(ClaimsPage {
-            claims,
-            next_cursor,
-        })
+        Ok(claims_for_subject_kind_at_tx(&self.readers.get(), subject, kind, before_index, descending, limit)?)
+    }
+
+    /// The current attempt's journal of a program step, from its newest `limit` entries.
+    pub fn program_journal(&self, step: &str, attempt: u32, limit: usize) -> Result<ProgramJournal> {
+        Ok(program_journal_tx(&self.readers.get(), step, attempt, limit)?)
     }
 
     /// Bounded timeline history for exactly one runtime incarnation. The
@@ -7190,7 +7367,7 @@ impl Store {
                AND (?3 IS NULL OR store_index<?3)
              ORDER BY store_index {order} LIMIT ?4"
         );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h136410fb8620 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9b3b2893e731 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         let rows = statement.query_map(
             params![
                 subject,
@@ -7228,7 +7405,7 @@ impl Store {
              FROM claims WHERE kind=?1 AND (?2 IS NULL OR store_index<?2)
              ORDER BY store_index {order} LIMIT ?3"
         );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfe84a7d32f14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h136410fb8620 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         let rows = statement.query_map(
             params![kind, before_index, limit.saturating_add(1) as u64],
             claim_from_row,
@@ -7409,6 +7586,7 @@ impl Store {
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
+                | "read-position.advanced"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -7434,6 +7612,7 @@ impl Store {
                 | "resource.observed"
                 | "subscription.state"
                 | "message.closed"
+                | "message.expired"
                 | "message.delivered"
                 | "message.read"
                 | "message.sent"
@@ -7933,7 +8112,7 @@ fn adopt_declared_mission_revision_tx(
             &[],
             Some(batch_id),
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         if status == "draining" {
             transaction
                 .execute(
@@ -8028,7 +8207,7 @@ fn adopt_declared_mission_revision_tx(
                 &[],
                 Some(batch_id),
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
             claim_ids.push(claim.id);
         }
     }
@@ -8075,7 +8254,7 @@ fn adopt_declared_mission_revision_tx(
         &[],
         Some(batch_id),
     )
-    .map_err(internal)?;
+    .map_err(smallclaims::error::typed)?;
     claim_ids.push(superseded.id);
     claim_ids.extend(terminalize_generation_steps_tx(
         transaction,
@@ -8103,7 +8282,7 @@ fn adopt_declared_mission_revision_tx(
         &[],
         Some(batch_id),
     )
-    .map_err(internal)?;
+    .map_err(smallclaims::error::typed)?;
     claim_ids.push(created.id);
     Ok((claim_ids, false))
 }
@@ -8191,31 +8370,9 @@ fn request_declared_resource_refresh_tx(
     operation: &ResourceRefreshOperation,
     batch_id: &str,
 ) -> Result<Vec<String>, FractalError> {
-    let desired = {
-        let mut statement = transaction
-            .prepare("SELECT subject, body, revision FROM desired WHERE kind='observer'")
-            .map_err(internal)?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(internal)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?
-    };
-    let observers = desired
+    let observers = observer_refresh::active_observers_tx(transaction)?
         .into_iter()
-        .filter_map(|(subject, body, revision)| {
-            serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|desired| crate::graph::observer_spec(&desired))
-                .filter(|spec| !spec.stopped && spec.resource == operation.resource)
-                .map(|_| (subject, revision))
-        })
+        .filter(|(_, _, spec)| spec.resource == operation.resource)
         .collect::<Vec<_>>();
     if observers.is_empty() {
         return Err(FractalError::new(
@@ -8224,25 +8381,18 @@ fn request_declared_resource_refresh_tx(
         ));
     }
     let mut claims = Vec::new();
-    for (observer, revision) in observers {
+    for (observer, revision, _) in observers {
         let attempt = hex::encode(Sha256::digest(format!(
             "st3.resource-refresh.v1\0{}\0{}\0{}",
             operation.resource, operation.id, observer
         )));
-        let claim = append_claim_tx(
+        let claim = observer_refresh::append_observer_refresh_tx(
             transaction,
             origin,
-            &observer,
-            "observer.refresh-requested",
-            None,
-            &json!({"fields": {
-                "revision": revision,
-                "attempt": attempt,
-            }}),
-            &[],
+            (&observer, &revision),
+            &attempt,
             Some(batch_id),
-        )
-        .map_err(internal)?;
+        )?;
         claims.push(claim.id);
     }
     Ok(claims)
@@ -11467,6 +11617,25 @@ pub fn append_claim_tx_with_assistant_answer(
     forced_batch: Option<&str>,
     authorization: Option<&assistant_write::AssistantWriteAuthorization>,
 ) -> Result<ClaimRecord> {
+    append_claim_tx_admitted(transaction, origin, subject, kind, actor, body, predecessors, forced_batch,
+        authorization, false)
+}
+
+/// `source_forced`: the subject's owning set already admitted this declaration as a forced
+/// write with source debt ([`owned_sets::gate`]), so the plain set-member refusal is skipped.
+#[allow(clippy::too_many_arguments)]
+fn append_claim_tx_admitted(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    forced_batch: Option<&str>,
+    authorization: Option<&assistant_write::AssistantWriteAuthorization>,
+    source_forced: bool,
+) -> Result<ClaimRecord> {
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
         if kind != "message.sent" || actor != Some(authorization.principal())
@@ -11525,8 +11694,36 @@ pub fn append_claim_tx_with_assistant_answer(
         body,
         predecessors,
         forced_batch,
+        source_forced,
     )
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+// Expansion preserves main's writer spelling. A later spelling switch needs a durable
+// one-way fence and a historical reader floor before this bridge can be contracted.
+fn legacy_work_claimant<'a>(kind: &str, fields: &'a BTreeMap<String, Value>) -> Option<&'a str> {
+    if !matches!(kind, "work.claimed" | "work.renewed" | "work.progress" | "work.extended") {
+        return None;
+    }
+    fields.get("claimant").and_then(Value::as_str).filter(|claimant| {
+        fractal_schema::canonical_agent_actor(claimant).is_some_and(|canonical| {
+            canonical.starts_with("agent/") && canonical.as_ref() != *claimant
+        })
+    })
+}
+
+fn replicated_work_validation_fields<'a>(
+    kind: &str,
+    fields: &'a BTreeMap<String, Value>,
+) -> std::borrow::Cow<'a, BTreeMap<String, Value>> {
+    let Some(claimant) = legacy_work_claimant(kind, fields) else {
+        return std::borrow::Cow::Borrowed(fields);
+    };
+    let mut validation = fields.clone();
+    validation.insert("claimant".into(), json!(fractal_schema::canonical_agent_actor(claimant)));
+    std::borrow::Cow::Owned(validation)
+}
+// LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
 
 #[allow(clippy::too_many_arguments)]
 /* sqlite-large-value-flow: allow-for-now flow-h1f241b496964 owner=fractal_store::store TODO=prepare-body-and-predecessor-values */ fn append_admitted_claim_tx(
@@ -11538,11 +11735,12 @@ pub fn append_claim_tx_with_assistant_answer(
     body: &Value,
     predecessors: &[String],
     forced_batch: Option<&str>,
+    source_forced: bool,
 ) -> Result<ClaimRecord> {
     fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     agent_charter::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
-    if matches!(kind, "intent.desired" | "mission.published") {
+    if matches!(kind, "intent.desired" | "mission.published") && !source_forced {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
@@ -11553,12 +11751,15 @@ pub fn append_claim_tx_with_assistant_answer(
         .map_err(anyhow::Error::new)?;
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    run_authority::admit_tx(transaction, origin, actor, kind, subject, &fields)
+        .map_err(anyhow::Error::new)?;
     human_review_reassignment::admit_reassignment(transaction, kind, &fields)
         .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
@@ -11641,6 +11842,28 @@ pub fn append_receipt_claim_tx(
         predecessors,
         forced_batch,
     )?;
+    register_operation_tx(transaction, &record)?;
+    Ok(record)
+}
+
+/// [`append_receipt_claim_tx`] for a declaration of a set member that [`owned_sets::gate`]
+/// admitted as forced in this transaction; the caller records its source debt in the same
+/// transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn append_source_forced_receipt_claim_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    key: &str,
+) -> Result<ClaimRecord> {
+    let mut body = body.clone();
+    smallclaims::store::idempotency::attach(&mut body, key)?;
+    let record = append_claim_tx_admitted(transaction, origin, subject, kind, actor, &body, predecessors, None,
+        None, true)?;
     register_operation_tx(transaction, &record)?;
     Ok(record)
 }
@@ -11906,6 +12129,9 @@ fn message_view_at_with_desired(
             }
             actual["status"] = json!(marked);
         }
+    }
+    if let Some(status) = message_expiry::status(connection, subject)? {
+        actual["status"] = json!(status);
     }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
@@ -16122,6 +16348,9 @@ pub fn classify_replicated_claim_with_registry(
     claim: &ClaimRecord,
     registry: &fractal_schema::Registry,
 ) -> Result<ReplicatedClaimAdmission, FractalError> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+    // Signed legacy ownership can arrive before its row. Projection checks eligibility.
+    // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
     if matches!(claim.kind.as_str(), "agent.launcher-bound" | "agent.helper-launched" | "client.action-result") {
         return Err(FractalError::new("invalid-replicated-claim",
             "helper launcher authority, launch history, and client action receipts cannot be admitted from peers"));
@@ -16139,7 +16368,8 @@ pub fn classify_replicated_claim_with_registry(
             ),
         )
     })?;
-    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &fields) {
+    let validation_fields = replicated_work_validation_fields(&claim.kind, &fields);
+    if let Err(error) = registry.validate_replicated_claim(&claim.subject, &claim.kind, &validation_fields) {
         // A peer may already publish a field introduced by a newer schema. Keep
         // that authenticated record retryable so an upgrade can admit the
         // original claim without replacing or rewriting it.
@@ -16181,6 +16411,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::glasses::validate_owner(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::read_positions::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
@@ -16326,7 +16558,7 @@ fn replay_projects_kind(kind: &str) -> bool {
 /// tree whose root never ended (see `run_part_of_tx`), or the desired subject, document or
 /// mission one claim is about. Rebuilding one costs what its own history costs, not what the
 /// store's does.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Aggregate {
     RunTree(String),
     RunPart(String),
@@ -16338,7 +16570,13 @@ pub enum Aggregate {
 /// Mark an aggregate to be rebuilt, and say why in the profile: which trigger rebuilds run trees
 /// on a busy node decides which of them is worth fixing. The reason is one of a fixed list of
 /// strings, so the profile gains at most that many counters; nothing is read to decide it.
-fn mark_dirty(dirty: &mut BTreeSet<Aggregate>, aggregate: Aggregate, reason: &str) {
+fn mark_dirty(dirty: &mut BTreeSet<Aggregate>, aggregate: Aggregate, reason: &'static str) {
+    #[cfg(any(test, feature = "test-support"))]
+    match &aggregate {
+        Aggregate::RunPart(id) => rebuild_observer::note_dirty("run-part", id, reason),
+        Aggregate::RunTree(id) => rebuild_observer::note_dirty("run-tree", id, reason),
+        _ => {}
+    }
     if matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)) && crate::profile::enabled() {
         crate::profile::note(&format!("projection: run tree dirty: {reason}"));
     }
@@ -16370,7 +16608,7 @@ fn aggregate_of_tx(
 /// The run a generation belongs to: from the graph, or from the claims that create it when the
 /// generation is not projected yet.
 fn generation_run_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     generation: &str,
 ) -> Result<Option<String>, FractalError> {
     if let Some(run) = transaction
@@ -16431,7 +16669,7 @@ fn generation_run_tx(
 /// The root run of the mission run tree `subject` belongs to: a run, a generation, a step run
 /// or a revision proposal.
 pub fn run_tree_of_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, FractalError> {
     match run_of_subject_tx(transaction, subject)? {
@@ -16443,7 +16681,7 @@ pub fn run_tree_of_tx(
 /// The run a run-tree subject belongs to: the run itself, a generation's or step's run, or a
 /// proposal's run.
 fn run_of_subject_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, FractalError> {
     Ok(if let Some(run) = subject.strip_prefix("mission-run/") {
@@ -16484,7 +16722,7 @@ fn run_of_subject_tx(
 }
 
 /// The root a run names, or the owner of an ask run, or the run itself.
-fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, FractalError> {
+fn run_root_tx(transaction: &Connection, run: &str) -> Result<String, FractalError> {
     if let Some(root) = transaction
         .query_row(
             "SELECT root_run_id FROM mission_runs WHERE id=?1",
@@ -16544,7 +16782,7 @@ fn string_column_tx(
 /// schedule or subscription that delivers a run is named the same way, as `step-run/` and its
 /// subject.
 fn parent_step_of_run_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     run: &str,
 ) -> Result<Option<String>, FractalError> {
     if let Some(parent) = transaction
@@ -16579,7 +16817,7 @@ fn step_generation(parent: &str) -> Option<&str> {
 }
 
 /// Whether a root run has ended, or any claim ends it: projected so, or claimed so in any order.
-fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, FractalError> {
+fn run_ever_ended_tx(transaction: &Connection, run: &str) -> Result<bool, FractalError> {
     transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1
@@ -16609,7 +16847,7 @@ fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, F
 ///
 /// A tree whose root has ended, or whose links have not all arrived, rebuilds whole.
 pub fn run_part_of_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<Aggregate>, FractalError> {
     let Some(tree) = run_tree_of_tx(transaction, subject)? else {
@@ -16661,6 +16899,15 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _rebuild = rebuild_observer::note_rebuild("run-part", top, false);
+    struct RebuildTiming(std::time::Instant);
+    impl Drop for RebuildTiming {
+        fn drop(&mut self) {
+            smallclaims::receive_metrics::rebuild_part(self.0.elapsed());
+        }
+    }
+    let _timing = RebuildTiming(std::time::Instant::now());
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -16894,6 +17141,8 @@ fn claims_in_replay_order_tx(
 /// the replay's order and passes.
 pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
     #[cfg(any(test, feature = "test-support"))]
+    let _rebuild = rebuild_observer::note_rebuild("run-tree", root, false);
+    #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
     crate::profile::note("projection: run tree rebuilt");
@@ -17032,7 +17281,33 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
             })?;
         }
     }
-    reapply_local_work_lease_renewals_tx(transaction)
+    reapply_local_work_lease_renewals_tx(transaction)?;
+    if projection_work_pending_tx(transaction)? {
+        // Claims already advanced their cursor in earlier chunks. Publish a durable local
+        // change for every rebuilt run so incremental decision readers revisit skipped work.
+        note_run_projection_finished_tx(transaction, runs)?;
+    }
+    Ok(())
+}
+
+fn note_run_projection_finished_tx(
+    transaction: &Transaction<'_>,
+    runs: &BTreeSet<String>,
+) -> Result<(), FractalError> {
+    for run in runs {
+        let subject = format!("mission-run/{run}");
+        smallclaims::touched::note_wrote(|| subject.clone());
+        insert_local_observation_tx(transaction, "projection", &ClaimInput {
+            subject,
+            kind: "run-projection.finished".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }, now_ms())?;
+    }
+    Ok(())
 }
 
 /// Rebuild one desired subject, document or mission from its own claims in the replay's order.
@@ -17133,23 +17408,248 @@ pub fn try_project_all_simple_replication_tx(
     .map(|decision| decision == IncrementalProjection::Projected)
 }
 
+// Pending rebuilds are projection state, committed with the chunk that skips their claims.
+// A restart resumes them even if the claim frontier has already reached the admitted index.
+const PENDING_RUN_REBUILD: &str = "projection-run-rebuild:*";
+
+fn pending_run_rebuilds_tx(connection: &Connection) -> Result<BTreeSet<Aggregate>, FractalError> {
+    let mut statement = connection
+        .prepare("SELECT value FROM meta WHERE key GLOB ?1 ORDER BY key")
+        .map_err(internal)?;
+    let values = statement.query_map([PENDING_RUN_REBUILD], |row| row.get::<_, String>(0))
+        .map_err(internal)?;
+    values.map(|value| {
+        serde_json::from_str(&value.map_err(internal)?).map_err(internal)
+    }).collect()
+}
+
+fn pending_run_rebuild_key(aggregate: &Aggregate) -> Result<String, FractalError> {
+    Ok(format!("projection-run-rebuild:{}", serde_json::to_string(aggregate).map_err(internal)?))
+}
+
+fn projection_work_pending_tx(connection: &Connection) -> Result<bool, FractalError> {
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB ?1)",
+        [PENDING_RUN_REBUILD], |row| row.get(0)).map_err(internal)
+}
+
+fn finish_projection_work_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
+    let Some(aggregate) = pending_run_rebuilds_tx(transaction)?.into_iter().next() else {
+        return Ok(());
+    };
+    rebuild_pending_run_tx(transaction, &aggregate)
+}
+
+fn normalize_pending_run_tx(transaction: &Transaction<'_>, aggregate: Aggregate) -> Result<Aggregate, FractalError> {
+    let Aggregate::RunPart(top) = &aggregate else {
+        return Ok(aggregate);
+    };
+    let subject = format!("mission-run/{top}");
+    match run_part_of_tx(transaction, &subject)? {
+        Some(current) if current == aggregate => Ok(aggregate),
+        // A changed partition can only widen pending work, never discard part of it.
+        _ => Ok(Aggregate::RunTree(run_tree_of_tx(transaction, &subject)?.unwrap_or_else(|| top.clone()))),
+    }
+}
+
+fn rebuild_pending_run_tx(transaction: &Transaction<'_>, aggregate: &Aggregate) -> Result<(), FractalError> {
+    let effective = normalize_pending_run_tx(transaction, aggregate.clone())?;
+    match &effective {
+        Aggregate::RunTree(root) => holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root))?,
+        Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top))?,
+        _ => return Err(FractalError::new("invalid-pending-rebuild", "pending rebuild is not a run aggregate")),
+    }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8a1016207aaf owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(aggregate)?])
+        .map_err(internal)?;
+    if let Aggregate::RunTree(root) = &effective {
+        for pending in pending_run_rebuilds_tx(transaction)? {
+            let top = match &pending {
+                Aggregate::RunTree(top) | Aggregate::RunPart(top) => top,
+                _ => continue,
+            };
+            if run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.as_ref() == Some(root) {
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hb06ed251a5f3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(&pending)?])
+                    .map_err(internal)?;
+            }
+        }
+    }
+    if !projection_work_pending_tx(transaction)? {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h4aef87558ab0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='healthy',error_code=NULL,error_message=NULL
+             WHERE aggregate='graph' AND error_code='pending-projection-work'",
+            [],
+        ).map_err(internal)?;
+    }
+    Ok(())
+}
+
+fn pending_run_for_subject_tx(
+    transaction: &Connection,
+    subject: &str,
+) -> Result<Option<Aggregate>, FractalError> {
+    if !projection_work_pending_tx(transaction)? {
+        return Ok(None);
+    }
+    let part = run_part_of_tx(transaction, subject)?;
+    let tree = run_tree_of_tx(transaction, subject)?;
+    for candidate in part.iter().cloned().chain(tree.as_ref().map(|root| Aggregate::RunTree(root.clone()))) {
+        let pending: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+            [pending_run_rebuild_key(&candidate)?], |row| row.get(0),
+        ).map_err(internal)?;
+        if pending {
+            return Ok(Some(candidate));
+        }
+    }
+    if !matches!(part, Some(Aggregate::RunTree(_))) {
+        return Ok(None);
+    }
+    // A terminal root can merge parts after their markers committed. Only that exceptional
+    // whole-tree lookup needs to inspect the old partition's markers.
+    // These markers cover only the serialized projection pass (or its interrupted prefix),
+    // not historical rebuilds; each successful drain deletes its marker.
+    for pending in pending_run_rebuilds_tx(transaction)? {
+        if Some(&pending) == part.as_ref()
+            || matches!(&pending, Aggregate::RunTree(root) if Some(root) == tree.as_ref())
+        {
+            return Ok(Some(pending));
+        }
+        let top = match &pending {
+            Aggregate::RunTree(top) | Aggregate::RunPart(top) => top,
+            _ => continue,
+        };
+        if run_part_of_tx(transaction, &format!("mission-run/{top}"))? == part && part.is_some() {
+            return Ok(Some(pending));
+        }
+    }
+    Ok(None)
+}
+
+/// Decision paths wait for both their run's part and its ancestor root's part.
+/// Read-only views may continue serving the previously published tree while it is pending.
+pub fn run_projection_pending_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+) -> Result<bool, FractalError> {
+    run_and_root_projection_pending(transaction, subject)
+}
+
+fn run_and_root_projection_pending(
+    connection: &Connection,
+    subject: &str,
+) -> Result<bool, FractalError> {
+    if !projection_work_pending_tx(connection)? {
+        return Ok(false);
+    }
+    if pending_run_for_subject_tx(connection, subject)?.is_some() {
+        return Ok(true);
+    }
+    let Some(root) = run_tree_of_tx(connection, subject)? else {
+        return Ok(false);
+    };
+    let root = format!("mission-run/{root}");
+    smallclaims::touched::note_read(|| root.clone());
+    Ok(pending_run_for_subject_tx(connection, &root)?.is_some())
+}
+
+/// A local writer drains its run's pending part before making a decision from projected rows.
+pub fn finish_run_projection_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+) -> Result<bool, FractalError> {
+    let Some(pending) = pending_run_for_subject_tx(transaction, subject)? else {
+        return Ok(false);
+    };
+    rebuild_pending_run_tx(transaction, &pending)?;
+    Ok(true)
+}
+
+/// Cross-run decisions drain all pending parts, including runs not projected yet.
+/// Notify with `Store::run_projection_finished` only after the transaction commits.
+pub fn finish_all_run_projections_tx(
+    transaction: &Transaction<'_>,
+) -> Result<bool, FractalError> {
+    let drained = projection_work_pending_tx(transaction)?;
+    while projection_work_pending_tx(transaction)? {
+        finish_projection_work_tx(transaction)?;
+    }
+    Ok(drained)
+}
+
+#[derive(Clone, Copy)]
+enum RunMutationFence<'a> {
+    Run(&'a str),
+    All,
+}
+
+
 pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     through: u64,
 ) -> Result<IncrementalProjection, FractalError> {
-    let health: Option<(String, u64)> = transaction
+    try_project_simple_replication_inner_tx(transaction, origin, through, false)
+}
+
+/// A standalone ask is projected atomically by its local writer. Unrelated claims'
+/// global canonical times cannot invalidate that independent run. Competing foreign
+/// history or descendants keep the ordinary canonical rebuild path.
+fn local_standalone_ask_applied_tx(
+    transaction: &Transaction<'_>,
+    claim: &ClaimRecord,
+    origin: &str,
+) -> Result<bool, FractalError> {
+    if claim.origin != origin || claim.kind != "work.person-asked" {
+        return Ok(false);
+    }
+    let fields = &claim.body["fields"];
+    if fields.get("origin_step").is_some_and(|value| !value.is_null())
+        || fields.get("mission_spec").is_none()
+    {
+        return Ok(false);
+    }
+    let Some(run_subject) = fields.get("run").and_then(Value::as_str) else { return Ok(false) };
+    let Some(run) = run_subject.strip_prefix("mission-run/") else { return Ok(false) };
+    let Some(generation_subject) = fields.get("generation").and_then(Value::as_str) else { return Ok(false) };
+    let Some(generation) = generation_subject.strip_prefix("run-generation/") else { return Ok(false) };
+    transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM step_runs AS step
+             JOIN run_generations AS generation ON generation.id=step.generation_id
+             JOIN mission_runs AS run ON run.id=step.run_id
+             WHERE step.subject=?1 AND step.run_id=?2 AND step.generation_id=?3
+               AND generation.run_id=?2 AND run.root_run_id=?2 AND step.definition_hash=?7
+         )
+         AND NOT EXISTS(SELECT 1 FROM mission_runs WHERE root_run_id=?2 AND id<>?2)
+         AND NOT EXISTS(
+             SELECT 1 FROM claims WHERE subject IN (?1,?5,?6) AND origin<>?4
+         )",
+        params![claim.subject, run, generation, origin, run_subject, generation_subject, claim.id],
+        |row| row.get(0),
+    ).map_err(internal)
+}
+
+
+fn try_project_simple_replication_inner_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    through: u64,
+    defer_runs: bool,
+) -> Result<IncrementalProjection, FractalError> {
+    let health: Option<(String, u64, Option<String>)> = transaction
         .query_row(
-            "SELECT status, last_good_store_index FROM projection_health WHERE aggregate='graph'",
+            "SELECT status, last_good_store_index, error_code FROM projection_health WHERE aggregate='graph'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((status, frontier)) = health else {
+    let Some((status, frontier, error_code)) = health else {
         return Ok(replay_needed("missing-health"));
     };
-    if status != "healthy" {
+    if status != "healthy"
+        && !(status == "stale" && error_code.as_deref() == Some("pending-projection-work")
+            && projection_work_pending_tx(transaction)?)
+    {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17207,6 +17707,9 @@ pub fn try_project_simple_replication_tx(
     // A claim that reaches a part of the graph out of the replay's order marks that part to be
     // rebuilt from its own claims; everything else extends the graph as it arrives.
     let mut dirty = BTreeSet::<Aggregate>::new();
+    for pending in pending_run_rebuilds_tx(transaction)? {
+        dirty.insert(normalize_pending_run_tx(transaction, pending)?);
+    }
     // The planning sessions this range's claims are about, or `None` when one names no session
     // and only the whole planning projection can say where it belongs.
     let mut planning_sessions = Some(BTreeSet::<&str>::new());
@@ -17263,6 +17766,16 @@ pub fn try_project_simple_replication_tx(
         }
     }
     for claim in &claims {
+        let local_ask_applied = local_standalone_ask_applied_tx(transaction, claim, origin)
+            .map_err(|error| incremental_claim_error(error, claim, "local-ask-projection"))?;
+        #[cfg(any(test, feature = "test-support"))]
+        if local_ask_applied
+            && let Some(run) = claim.body["fields"]["run"].as_str()
+                .and_then(|run| run.strip_prefix("mission-run/"))
+        {
+            rebuild_observer::note_applied("run-part", run);
+            rebuild_observer::note_applied("run-tree", run);
+        }
         let has_operation = claim.body.get("_operation").is_some();
         // Supported work transitions already share canonical ordering and affected-tree
         // repair with replay. An operation identity alone changes neither the work fields
@@ -17333,10 +17846,14 @@ pub fn try_project_simple_replication_tx(
         if matches!(
             claim.kind.as_str(),
             "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-cancelled"
-        ) && let Some(aggregate) = aggregate_of_tx(transaction, claim)
+        ) && !local_ask_applied && let Some(aggregate) = aggregate_of_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
         {
-            mark_dirty(&mut dirty, aggregate, "person ask, answer or cancel");
+            mark_dirty(&mut dirty, aggregate, if claim.origin == origin {
+                "person-guard"
+            } else {
+                "foreign-person-guard"
+            });
         }
         // A receipt chooses one destination for independent concurrent repairs. It can arrive
         // after either repair's work claims, so rebuild their trees when that choice changes.
@@ -17378,14 +17895,14 @@ pub fn try_project_simple_replication_tx(
             // A document keeps the earliest binding of each version, whatever order the
             // bindings arrive in, so only a repair rebuilds one. Rebuilding every version of a
             // document that is republished all day costs more with each version.
-            if ((out_of_order && claim.kind != "doc.bound") || repaired)
+            if ((out_of_order && claim.kind != "doc.bound" && !local_ask_applied) || repaired)
                 && let Some(aggregate) = aggregate_of_tx(transaction, claim)
                     .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
             {
                 let reason = if repaired {
                     "repaired claim"
                 } else {
-                    "structural claim sorting before projected ones"
+                    "global-out-of-order"
                 };
                 mark_dirty(&mut dirty, aggregate, reason);
             }
@@ -17609,6 +18126,18 @@ pub fn try_project_simple_replication_tx(
         }
         latest_work_by_subject.insert(&claim.subject, claim.accepted_at_unix_ms);
     }
+    let mut covered_parts = Vec::new();
+    for aggregate in &dirty {
+        if let Aggregate::RunPart(top) = aggregate
+            && let Some(root) = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?
+            && dirty.contains(&Aggregate::RunTree(root))
+        {
+            covered_parts.push(aggregate.clone());
+        }
+    }
+    for part in covered_parts {
+        dirty.remove(&part);
+    }
     for claim in &claims {
         insert_event(
             transaction,
@@ -17655,7 +18184,10 @@ pub fn try_project_simple_replication_tx(
             }
         };
         Ok(match aggregate {
-            Some(aggregate) => dirty.contains(&aggregate),
+            Some(aggregate) => dirty.contains(&aggregate)
+                || (matches!(aggregate, Aggregate::RunPart(_))
+                    && run_tree_of_tx(transaction, &claim.subject)?
+                        .is_some_and(|root| dirty.contains(&Aggregate::RunTree(root)))),
             None => claim.kind != "mission-run.created" && run_tree_kind(&claim.kind),
         })
     };
@@ -17752,7 +18284,17 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_subject", subject)
         })?;
     }
+    if defer_runs {
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-heceb932b7114 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+            .map_err(internal)?;
+    }
     for aggregate in trees {
+        if defer_runs {
+            let value = serde_json::to_string(aggregate).map_err(internal)?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h9138a3691eef owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![pending_run_rebuild_key(aggregate)?, value]).map_err(internal)?;
+            continue;
+        }
         let (rebuilt, root) = match aggregate {
             Aggregate::RunTree(root) => (
                 holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
@@ -17769,6 +18311,10 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_stage", "run-tree-rebuild")
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
+    }
+    if !defer_runs {
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hec593db44a4b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+            .map_err(internal)?;
     }
     match planning_sessions {
         Some(sessions) => {
@@ -17818,6 +18364,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     transaction: &Transaction<'_>,
     progress: &mut dyn FnMut(ReplayProgress),
 ) -> Result<(), FractalError> {
+    let pending = pending_run_rebuilds_tx(transaction)?;
     let mut stage = |phase| {
         progress(ReplayProgress {
             phase,
@@ -17848,6 +18395,27 @@ fn replay_graph_from_nothing_with_progress_tx(
     for replay in projectors::GRAPH_REPLAY {
         stage(replay.phase);
         (replay.run)(transaction).map_err(internal)?;
+    }
+    if !pending.is_empty() {
+        // Replay also finishes deferred parts. Keep their fences until all rebuilt rows
+        // and completion observations commit together, including wakes for skipped runs.
+        let mut finished = pending.iter().filter_map(|aggregate| match aggregate {
+            Aggregate::RunTree(root) | Aggregate::RunPart(root) => Some(root.clone()),
+            _ => None,
+        }).collect::<BTreeSet<_>>();
+        let runs = {
+            let mut statement = transaction.prepare("SELECT id FROM mission_runs").map_err(internal)?;
+            statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
+                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
+        };
+        for run in runs {
+            if pending_run_for_subject_tx(transaction, &format!("mission-run/{run}"))?.is_some() {
+                finished.insert(run);
+            }
+        }
+        note_run_projection_finished_tx(transaction, &finished)?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h801bff7f7812 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+            .map_err(internal)?;
     }
     Ok(())
 }
@@ -18678,6 +19246,22 @@ pub fn project_mission_run_update(
         if current_attempt != Some(claim_attempt) {
             return Ok(());
         }
+        // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+        let validation_fields = schema_fields_for_body(&claim.kind, &claim.body).map_err(internal)?;
+        if let Some(claimant) = legacy_work_claimant(&claim.kind, &validation_fields) {
+            let (assignee, available, agentless): (Option<String>, String, bool) = transaction.query_row(
+                "SELECT assignee, available_to, agentless FROM step_runs WHERE subject=?1",
+                [&claim.subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).map_err(internal)?;
+            let available: Vec<String> = serde_json::from_str(&available).map_err(internal)?;
+            if agentless || !(work_actor_matches(assignee.as_deref(), claimant)
+                || available.iter().any(|candidate| work_actor_matches(Some(candidate), claimant)))
+            {
+                return Err(FractalError::new("invalid-work-claimant",
+                    "legacy work claimant is not eligible for the target step"));
+            }
+        }
+        // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
         if claim.kind == "work.handoff-returned" {
             transaction.prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-h26512c176d95 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
@@ -19305,7 +19889,7 @@ impl RosterStepRow {
     }
 }
 
-/// The held and ready agent steps of seat `?1`, or of every seat when null. The unfinished-step
+/// The held and ready agent steps of seat spellings `?1`, or of every seat when null. The unfinished-step
 /// predicate, word for word that of `step_runs_open_index`, reads the fleet's open steps rather
 /// than every step the store has run.
 const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assignee, lease_owner,
@@ -19314,7 +19898,8 @@ const SEAT_STEP_ROWS: &str = "SELECT subject, run_id, step_path, status, assigne
      WHERE agentless=0
        AND status IN ('ready', 'claimed', 'working', 'verifying')
        AND status NOT IN ('completed','failed','cancelled')
-       AND (?1 IS NULL OR assignee=?1 OR lease_owner=?1)
+       AND (?1 IS NULL OR assignee IN (SELECT value FROM json_each(?1))
+            OR lease_owner IN (SELECT value FROM json_each(?1)))
        AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
        AND NOT ((status='ready' OR (status IN ('claimed','working','verifying')
                   AND lease_expires_at_unix_ms IS NOT NULL
@@ -19352,15 +19937,15 @@ impl SeatQueueInputs {
     }
 }
 
-/// When each seat `?1` (every seat when null) joined each open run it has a step in, and the
+/// When each seat spelling in `?1` (every seat when null) joined each open run it has a step in, and the
 /// run's status. It reads from the open runs to their steps, in that order: from the steps,
 /// SQLite reads every step any seat was ever assigned before it finds the open runs among them.
-/// Every seat's queue moves (`?2` null), or one seat's, that no repair replaced, in graph order.
+/// Every seat's queue moves (`?2` null), or one seat's spelling array, that no repair replaced, in graph order.
 pub fn seat_queue_moves_query() -> String {
     canonical_sql(
         "SELECT claims.id, claims.subject, claims.actor, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
+         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
            AND NOT EXISTS (
                SELECT 1 FROM replica_records
                WHERE replica_records.claim_id=claims.id
@@ -19373,30 +19958,49 @@ pub fn seat_queue_moves_query() -> String {
 pub fn seat_queue_joins_query() -> String {
     format!(
         "SELECT step_runs.assignee, step_runs.run_id,
-                MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
+                MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status,
+                MAX(step_runs.generation_id=mission_runs.current_generation_id)
          FROM mission_runs CROSS JOIN step_runs ON step_runs.run_id=mission_runs.id
          WHERE {OPEN_MISSION_RUN}
            AND mission_runs.phase<>'terminal'
            AND step_runs.agentless=0
            AND step_runs.assignee IS NOT NULL
-           AND (?1 IS NULL OR step_runs.assignee=?1)
+           AND (?1 IS NULL OR step_runs.assignee IN (SELECT value FROM json_each(?1)))
          GROUP BY step_runs.assignee, step_runs.run_id
-         HAVING MAX(step_runs.generation_id=mission_runs.current_generation_id)=1
          ORDER BY step_runs.assignee, step_runs.run_id"
     )
 }
 
-/// When seat `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
+/// When a seat spelling in `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
 /// run's status. `+step_runs.assignee` keeps SQLite on the run's own steps (`step_runs_run_index`):
 /// through the assignee index it read every step the seat was ever assigned, once per named run,
 /// and a seat that has moved its queue often names a hundred runs on every claim.
 pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
     "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
      FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-     WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
+     WHERE +step_runs.assignee IN (SELECT value FROM json_each(?1))
+       AND step_runs.run_id=?2 AND step_runs.agentless=0";
 
-/// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
-/// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
+pub use crate::seat_queue::work_actor_matches;
+
+/// Exact persisted spellings of one logical work actor, as a JSON array for indexed SQL reads.
+/// Only a prefixless name that canonicalizes back to the same actor is an alias.
+pub fn work_actor_spellings_json(actor: &str) -> String {
+    let Some(canonical) = fractal_schema::canonical_agent_actor(actor) else {
+        return "[]".into();
+    };
+    let legacy = canonical.strip_prefix("agent/").filter(|legacy| {
+        fractal_schema::canonical_agent_actor(legacy).as_deref() == Some(canonical.as_ref())
+    });
+    match legacy {
+        Some(legacy) => json!([canonical, legacy]).to_string(),
+        None => json!([canonical]).to_string(),
+    }
+}
+
+/// [`work_at_snapshot_query`] for one actor's JSON spelling array `?1`.
+/// The reconciler reads each running seat's steps on every pass; the actor's steps are found
+/// through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
 /// step the store ever ran.
 pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
@@ -19410,10 +20014,10 @@ pub fn seat_work_at_snapshot_query(open_only: bool) -> String {
                 lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
          FROM step_runs
          WHERE rowid IN (
-                 SELECT rowid FROM step_runs WHERE assignee=?1
-                 UNION SELECT rowid FROM step_runs WHERE lease_owner=?1
+                 SELECT rowid FROM step_runs WHERE assignee IN (SELECT value FROM json_each(?1))
+                 UNION SELECT rowid FROM step_runs WHERE lease_owner IN (SELECT value FROM json_each(?1))
                  UNION SELECT rowid FROM step_runs WHERE available_to!='[]'
-                   AND EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1)
+                   AND EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1)))
                )
            AND (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
@@ -19436,6 +20040,14 @@ pub fn seat_queue_inputs_tx(
     seat_queue_inputs_of_tx(connection, agent, None)
 }
 
+/// Queue inputs for mutation admission, without merging actor aliases.
+pub fn seat_queue_inputs_literal_tx(
+    connection: &Connection,
+    agent: Option<&str>,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    seat_queue_inputs_matching_tx(connection, agent, None, false)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Named-run probes `seat_queue_inputs_of_tx` made on this thread, for tests.
@@ -19455,9 +20067,22 @@ pub fn seat_queue_inputs_of_tx(
     agent: Option<&str>,
     only: Option<&BTreeSet<String>>,
 ) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    seat_queue_inputs_matching_tx(connection, agent, only, true)
+}
+
+fn seat_queue_inputs_matching_tx(
+    connection: &Connection,
+    agent: Option<&str>,
+    only: Option<&BTreeSet<String>>,
+    aliases: bool,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    let actor_spellings = |actor: &str| {
+        if aliases { work_actor_spellings_json(actor) } else { json!([actor]).to_string() }
+    };
+    let spellings = agent.map(actor_spellings);
     let mut seats = BTreeMap::<String, SeatQueueInputs>::new();
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd2995294a599 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_moves_query())?;
-    let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, agent], |row| {
+    let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, spellings], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -19468,6 +20093,12 @@ pub fn seat_queue_inputs_of_tx(
     })?;
     for row in rows {
         let (claim_id, subject, actor, body, accepted_at) = row?;
+        let subject = if aliases {
+            fractal_schema::canonical_agent_actor(&subject)
+                .map(std::borrow::Cow::into_owned).unwrap_or(subject)
+        } else {
+            subject
+        };
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         let text = |name: &str| fields.get(name).and_then(Value::as_str).map(str::to_owned);
@@ -19504,24 +20135,31 @@ pub fn seat_queue_inputs_of_tx(
     drop(statement);
 
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9270afe17ad4 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_joins_query())?;
-    let rows = statement.query_map(params![agent], |row| {
+    let rows = statement.query_map(params![spellings], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, bool>(4)?,
         ))
     })?;
     for row in rows {
-        let (seat, run_id, joined_at, status) = row?;
+        let (seat, run_id, joined_at, status, current) = row?;
+        let seat = if aliases {
+            fractal_schema::canonical_agent_actor(&seat)
+                .map(std::borrow::Cow::into_owned).unwrap_or(seat)
+        } else {
+            seat
+        };
         let run = format!("mission-run/{run_id}");
         let inputs = seats.entry(seat).or_default();
-        inputs.joins.push(QueueJoin {
-            run: run.clone(),
-            at_unix_ms: u128::try_from(joined_at).unwrap_or_default(),
-        });
+        let at_unix_ms = u128::try_from(joined_at).unwrap_or_default();
+        inputs.joins.push(QueueJoin { run: run.clone(), at_unix_ms });
         inputs.statuses.insert(run.clone(), status);
-        inputs.live.insert(run);
+        if current {
+            inputs.live.insert(run);
+        }
     }
     drop(statement);
 
@@ -19529,7 +20167,17 @@ pub fn seat_queue_inputs_of_tx(
     if let Some(only) = only {
         seats.retain(|seat, _| only.contains(seat));
     }
+    seats.retain(|_, inputs| !inputs.live.is_empty() || !inputs.moves.is_empty());
     for (seat, inputs) in &mut seats {
+        inputs.joins.retain(|join| inputs.live.contains(&join.run));
+        // Mixed spellings can contribute different generations of the same run.
+        // Keep their earliest join, but only current-generation membership makes it live.
+        inputs.joins.sort_unstable_by(|left, right| {
+            left.run.cmp(&right.run).then(left.at_unix_ms.cmp(&right.at_unix_ms))
+        });
+        inputs.joins.dedup_by(|left, right| left.run == right.run);
+        inputs.statuses.retain(|run, _| inputs.live.contains(run));
+        let spellings = actor_spellings(seat);
         let moves = inputs
             .moves
             .iter()
@@ -19542,7 +20190,7 @@ pub fn seat_queue_inputs_of_tx(
             #[cfg(any(test, feature = "test-support"))]
             NAMED_RUN_PROBES.with(|probes| probes.set(probes.get() + 1));
             let joined = statement
-                .query_row(/* sqlite-large-value: allow-for-now lv-h79c5fdb57d22 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![seat, run_id], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-hf01b6d5cecf5 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![spellings, run_id], |row| {
                     Ok((
                         row.get::<_, Option<i64>>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -21711,7 +22359,7 @@ pub fn terminalize_generation_steps_tx(
             &[],
             batch_id,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(claim.id);
     }
     Ok(claim_ids)
@@ -22181,7 +22829,7 @@ pub fn cancel_descendant_mission_runs_tx(
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(run_claim.id);
         let generation_claim = append_claim_tx(
             transaction,
@@ -22193,7 +22841,7 @@ pub fn cancel_descendant_mission_runs_tx(
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(generation_claim.id);
     }
     Ok(claim_ids)
@@ -22354,6 +23002,11 @@ pub fn mission_run_view_and_definition_tx(
     view.outcome = mission_run_outcome_tx(connection, &view)?;
     if presentation {
         view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
+        if !view.steps.is_empty()
+            && let Some(mission) = definitions.of(connection, &view.generation)?
+        {
+            view.programs = program_run_views_tx(connection, &view, mission)?;
+        }
     }
     Ok((view, mission))
 }
@@ -22464,6 +23117,7 @@ pub fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         steps: Vec::new(),
         loops: Vec::new(),
+        programs: Vec::new(),
         stuck_gates: Vec::new(),
         scheduler_fault: None,
     })
@@ -22626,6 +23280,126 @@ pub fn loop_run_views_tx(
     Ok(loops)
 }
 
+/// Each program step of `run` with its current attempt's journal and open program fault.
+pub fn program_run_views_tx(
+    connection: &Connection,
+    run: &MissionRunView,
+    mission: &MissionSpec,
+) -> rusqlite::Result<Vec<ProgramRunView>> {
+    let mut programs = Vec::new();
+    for step in &run.steps {
+        let Some(program) = crate::mission::find_step(mission, &step.step).and_then(|spec| spec.program.as_ref())
+        else {
+            continue;
+        };
+        let mut fault = None;
+        for scope in [program_journal::HOST_FAULT_SCOPE, program_journal::STALLED_FAULT_SCOPE] {
+            if let Some(reason) = reconcile_fault_tx(connection, &step.subject, scope)? {
+                fault = Some(ProgramFault { scope: scope.to_owned(), reason });
+                break;
+            }
+        }
+        programs.push(ProgramRunView {
+            step_run: step.subject.clone(),
+            path: step.step.clone(),
+            attempt: step.attempt,
+            bundle_hash: program.bundle_hash.clone(),
+            stalled_after_ms: program_journal::stalled_after_ms(program),
+            journal: program_journal_tx(connection, &step.subject, step.attempt, program_journal::VIEW_ENTRIES)?,
+            fault,
+        });
+    }
+    Ok(programs)
+}
+
+/// One attempt's journal of a program step from the step's newest `limit` entries. Every entry of
+/// an earlier attempt is older than the current attempt's first, so the page holds the current
+/// attempt's newest entries.
+pub fn program_journal_tx(
+    connection: &Connection,
+    step: &str,
+    attempt: u32,
+    limit: usize,
+) -> rusqlite::Result<ProgramJournal> {
+    let page = claims_for_subject_kind_at_tx(connection, step, program_journal::JOURNAL_KIND, None, true, limit)?;
+    let current = |claim: &&ClaimRecord| claim.body.pointer("/fields/attempt").and_then(Value::as_u64) == Some(u64::from(attempt));
+    let truncated = page.next_cursor.is_some() && page.claims.last().is_some_and(|claim| current(&claim));
+    Ok(ProgramJournal::fold(
+        page.claims
+            .iter()
+            .filter(current)
+            .map(|claim| (claim.body.get("fields").unwrap_or(&claim.body), claim.accepted_at_unix_ms)),
+        truncated,
+    ))
+}
+
+/// Bounded claim history for one subject/kind projection, backed by the composite index.
+pub fn claims_for_subject_kind_at_tx(
+    connection: &Connection,
+    subject: &str,
+    kind: &str,
+    before_index: Option<u64>,
+    descending: bool,
+    limit: usize,
+) -> rusqlite::Result<ClaimsPage> {
+    let order = if descending { "DESC" } else { "ASC" };
+    let query = format!(
+        "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+         FROM claims WHERE subject=?1 AND kind=?2 AND (?3 IS NULL OR store_index<?3)
+         ORDER BY store_index {order} LIMIT ?4"
+    );
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfe84a7d32f14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
+    let rows = statement.query_map(
+        params![subject, kind, before_index, limit.saturating_add(1) as u64],
+        claim_from_row,
+    )?;
+    let mut claims = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let next_cursor = if claims.len() > limit {
+        claims.pop();
+        claims.last().map(|claim| claim.store_index)
+    } else {
+        None
+    };
+    Ok(ClaimsPage {
+        claims,
+        next_cursor,
+    })
+}
+
+/// The reason for an open fault on `subject` in `scope`, if the latest record is a fault.
+pub fn reconcile_fault_tx(
+    connection: &Connection,
+    subject: &str,
+    scope: &str,
+) -> rusqlite::Result<Option<String>> {
+    let body: Option<String> = connection
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-hb42a56e4a272 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT body FROM claims WHERE subject=?1 AND kind='reconcile.fault'
+                   AND json_extract(body, '$.fields.scope')=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+            ),
+            params![subject, scope],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let body: Value = serde_json::from_str(&body)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(body.len(), rusqlite::types::Type::Text, Box::new(error)))?;
+    let fields = body.get("fields").unwrap_or(&body);
+    Ok(
+        (fields.get("status").and_then(Value::as_str) == Some("faulted")).then(|| {
+            fields
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        }),
+    )
+}
+
 pub fn revision_proposal_view_tx(
     connection: &Connection,
     proposal_id: &str,
@@ -22712,6 +23486,8 @@ pub fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, inc
 pub mod tests;
 #[cfg(test)]
 mod real_part_rebuild_bench;
+#[cfg(test)]
+mod real_part_fence_bench;
 
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
@@ -22818,8 +23594,9 @@ pub fn verify_replica_batch(batch: &ReplicaBatch) -> Result<(), FractalError> {
                     ),
                 )
             })?;
+            let validation_fields = replicated_work_validation_fields(&claim.kind, &fields);
             fractal_schema::registry()
-                .validate_claim(&claim.subject, &claim.kind, &fields)
+                .validate_claim(&claim.subject, &claim.kind, &validation_fields)
                 .map_err(|error| {
                     FractalError::new(
                         "invalid-replicated-claim",
@@ -22885,6 +23662,10 @@ pub fn append_claim_with_subject_fences(
 }
 
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
+pub type ClaimFieldPreparation<'a> = dyn Fn(&Connection, &ClaimInput)
+    -> Result<BTreeMap<String, Value>, FractalError> + Sync + 'a;
+/// Writes that belong with a newly appended claim, in its transaction; a replay runs none.
+pub type ClaimFollowUp<'a> = dyn Fn(&Transaction<'_>, &ClaimRecord) -> Result<(), FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22896,10 +23677,18 @@ pub struct ClaimCommitContext<'a> {
     /// Runtime append owns cross-file expiry/receipt serialization.
     pub expiry_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
+    /// Run subjects whose pending parts must drain before a new operation is admitted.
+    pub run_projection_subjects: &'a [String],
+    /// Implicit cross-run selection needs the entire pending set, not an optimistic candidate.
+    pub all_run_projections: bool,
+    /// Derive request fields before hashing, preserving the base operation digest format.
+    pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Dedicated client operations publish a native receipt in the same transaction.
     pub client_operation: bool,
+    /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
+    pub then: Option<&'a ClaimFollowUp<'a>>,
     /// Write the claim as a build from before its kind became a local observation did: a
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
@@ -23002,21 +23791,32 @@ pub fn append_claim_with_commit_context(
             || local_code(input)
             || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
         let connection = graph.readers.get();
         admission(&connection)?;
         let input = identities::normalize_claim_input(&connection, input)?;
         return append_local_observation_fenced(graph, &input, event_runtime);
     }
     if latest_retention(&input.kind) {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
         let connection = graph.readers.get();
         admission(&connection)?;
         let input = identities::normalize_claim_input(&connection, input)?;
         return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
     }
-    // One claim in a savepoint of the writer's next batch; its caller hears back once that
-    // batch commits.
-    graph.connection
-        .batched(|transaction| -> Result<(ClaimRecord, bool), FractalError> {
+    // Probe before consuming callbacks or deriving persisted request fields. On pending
+    // work the executor returns the first writer before taking the projection gate.
+    let run_fence = if context.all_run_projections || context.run_projection_subjects.len() > 1 {
+        Some(RunMutationFence::All)
+    } else {
+        context.run_projection_subjects.first().map(|subject| RunMutationFence::Run(subject))
+    };
+    run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
+        |transaction| -> Result<(ClaimRecord, bool), FractalError> {
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -23030,6 +23830,12 @@ pub fn append_claim_with_commit_context(
                 assistant_input.fields.insert("assistant_owner".into(), json!(authorization.owner));
                 assistant_input.fields.insert("assistant_session_actor".into(), json!(authorization.actor));
                 &assistant_input
+            } else { input };
+            let mut prepared_input;
+            let input = if let Some(prepare) = context.prepare_request_fields {
+                prepared_input = input.clone();
+                prepared_input.fields = prepare(transaction, input)?;
+                &prepared_input
             } else { input };
             let operation = identities::claim_operation(input)?;
             if let Some((subject, revision, current)) = observer_completion {
@@ -23312,6 +24118,7 @@ pub fn append_claim_with_commit_context(
                 &body,
                 &predecessors,
                 None,
+                false,
             )
             .map_err(claim_append_error)?;
             if operation.is_some() {
@@ -23321,6 +24128,9 @@ pub fn append_claim_with_commit_context(
             })()?;
             if context.client_operation && outcome.1 {
                 crate::pairing::append_operation_receipt_tx(transaction, &outcome.0).map_err(internal)?;
+            }
+            if outcome.1 && let Some(then) = context.then {
+                then(transaction, &outcome.0)?;
             }
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
@@ -23344,7 +24154,6 @@ pub fn append_claim_with_commit_context(
             }
             Ok(outcome)
         })
-        .map_err(|error| FractalError::new("internal", error))?
 }
 
 pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
@@ -23363,6 +24172,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::glasses::validate_owner(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::read_positions::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;

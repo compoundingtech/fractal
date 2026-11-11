@@ -1254,7 +1254,7 @@ done, the pull requests still refused on the old key can be lifted in either of 
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st3` and the retained `docs/vrs` migration reference, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
-on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
+on which the whole gate passed. `slo` (`include_str!` of `slo/objectives.kdl` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
 `claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st3` (`crates/fractal/tests/invariants.rs` includes
 `docs/st3/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an

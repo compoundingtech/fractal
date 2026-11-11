@@ -4,3 +4,4 @@
  */
 export * as Fractal from './fractal.ts'
 export * from './mod.ts'
+export { objectiveNode } from './objective.ts'

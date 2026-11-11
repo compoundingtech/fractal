@@ -107,6 +107,15 @@
       "behavior": "real typed client over Unix transport: stale fence refused without writes; version-2 membership edit accepted after restart; exact replay after another restart adds no duplicate claim and preserves owner, actor, and projected root placement"
     },
     {
+      "action": "read-position.advance",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::read_position_advances_survive_stale_fences_and_restarts",
+        "crates/fractal-api-client-v0/src/api/client_v0/read_positions/tests.rs::advances_only_move_forward_and_report_the_stored_position",
+        "crates/fractal-api-client-v0/src/api/client_v0/read_positions/tests.rs::other_people_can_neither_read_nor_advance_a_persons_positions"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; advance accepted after restart; exact replay after another restart adds no claim; an older or equal advance completes without a claim and reports the stored larger position; another person's advance and list are forbidden"
+    },
+    {
       "action": "attention.resolve",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::unavailable_actions_refuse_before_and_after_restart_without_writes"
@@ -2380,6 +2389,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st source status",
+      "description": "Show each set's source policy, open and closed source debt and, with --audit, audit records",
+      "tests": [
+        "crates/fractal/tests/owned_sets.rs::forced_writes_record_debt_until_the_next_publication_closes_it"
+      ],
+      "verification": "the command's daemon route over isolated disk-backed Unix daemons; forced debt, convergence and closure"
+    },
+    {
       "command": "st store prepare-indexes",
       "description": "Build and verify mandatory owner indexes offline; stop all store writers first",
       "tests": [
@@ -2787,7 +2804,8 @@
       "command": "st work resume",
       "description": "Start the execution clock again after `work wait`",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal/tests/exec_clock_wait.rs::an_exec_that_waits_longer_than_its_step_timeout_completes"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
@@ -2877,7 +2895,8 @@
       "command": "st work wait",
       "description": "Stop the execution clock while claimed work waits for something outside this seat",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal/tests/exec_clock_wait.rs::an_exec_that_waits_longer_than_its_step_timeout_completes"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
@@ -2891,6 +2910,14 @@
     }
   ],
   "stui_effects": [
+    {
+      "effect": "AdvanceReadPosition",
+      "tests": [
+        "crates/fractal-tui/src/ui/glass.rs::presented_reads_queue_the_latest_advance_only_when_live_and_supported",
+        "crates/fractal-tui/src/ui/live.rs::read_positions_advance_in_st_and_list_by_the_larger_from_any_device"
+      ],
+      "verification": "presented-prose reducer queues the latest read only while live with read-position support and one advance in flight; real Unix-socket adapter advances and lists positions, preserves the larger value across devices, merges server confirmation and refuses another person's reads"
+    },
     {
       "effect": "RetryConversation",
       "tests": [

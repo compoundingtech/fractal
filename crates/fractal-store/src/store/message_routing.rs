@@ -22,6 +22,12 @@ pub fn legacy_reason(store: &Store, input: &ClaimInput) -> Result<Option<&'stati
     if input.kind != "message.sent" {
         return Ok(Some("not-a-message"));
     }
+    // A mission run's send stays on the graph append, where its run authority decides it
+    // (docs/st3/program-engine.md §3); the stream append has no such decision.
+    let sender = input.fields.get("from").and_then(Value::as_str);
+    if [input.actor.as_deref(), sender].into_iter().flatten().any(|party| party.starts_with("mission-run/")) {
+        return Ok(Some("run-sender"));
+    }
     if messages_shard::shard(store).is_none() {
         return Ok(Some("no-shard"));
     }

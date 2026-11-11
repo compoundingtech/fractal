@@ -237,7 +237,8 @@
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
-    "crates/fractal-daemon/hooks/pi-channel.ts"
+    "crates/fractal-daemon/hooks/pi-channel.ts",
+    "slo/objectives.kdl"
    ]
   },
   "fractal-migrate": {
@@ -248,6 +249,7 @@
   },
   "fractal-missions": {
    "extra": [
+    "crates/fractal-attention/src/store/attention.rs",
     "crates/fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz",
     "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"

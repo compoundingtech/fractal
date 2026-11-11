@@ -79,10 +79,19 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v18.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v21.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
+}
+
+/// Whether every replica admits `kind` only from a keyed member's signed envelope, by the
+/// daemon's own admission rule.
+fn keyed_only(kind: &str) -> bool {
+    use smallclaims::store::Runtime as _;
+    static RUNTIME: std::sync::LazyLock<fractal_store::store::FractalRuntime> =
+        std::sync::LazyLock::new(Default::default);
+    RUNTIME.requires_keyed_envelope(kind)
 }
 
 #[test]
@@ -120,6 +129,31 @@ fn the_corpus_generates_valid_deployment_inputs() {
         fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
+}
+
+#[test]
+fn the_corpus_generates_valid_read_position_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    let spec = &corpus()[fractal_schema::read_positions::KIND];
+    let input = world.claim_of(spec, 0).unwrap();
+    fractal_schema::registry().validate_public_claim(
+        &input.subject, &input.kind, &input.fields, input.actor.as_deref(),
+    ).unwrap();
+    world.nodes[0].store.append_claim(&input).unwrap();
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let expected = world.nodes[0].store.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.nodes[0].store.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    let actual = world.oracle.read_snapshot(|index| {
+        fractal_store::store::read_positions::read_positions_at(
+            &world.oracle.readers.get(), PERSON, index,
+        )
+    }).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 1);
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -989,7 +1023,13 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
-        self.claim_of(spec, index)
+        let input = self.claim_of(spec, index)?;
+        // Every replica admits some kinds, such as an operation authorization, only from a keyed
+        // member's signed envelope and holds an unkeyed writer's as unsigned. These nodes have no
+        // member keys, so such a claim would stay pending on every other node and hold every later
+        // checkpoint back; production writes it only on keyed members. The input is still drawn,
+        // so a seed whose store refused it keeps its schedule.
+        (!keyed_only(&input.kind)).then_some(input)
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
@@ -1017,6 +1057,22 @@ impl World {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(self.fresh("usage")),
+            });
+        }
+        if spec.kind == fractal_schema::read_positions::KIND {
+            let conversation = self.subject_of("agent", index)?;
+            return Some(ClaimInput {
+                subject: fractal_schema::read_positions::subject(PERSON),
+                kind: spec.kind.clone(),
+                actor: Some(PERSON.into()),
+                fields: BTreeMap::from([
+                    ("owner".into(), json!(PERSON)),
+                    ("conversation".into(), json!(conversation)),
+                    ("at_ms".into(), json!(self.now())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("read")),
             });
         }
         let family = self.rng.pick(&spec.subjects).clone();
@@ -1601,9 +1657,12 @@ impl World {
                     None => {}
                 }
             }
-            for id in held.keys() {
+            for (id, claim) in &held {
                 if !oracle_claims.contains_key(id) {
-                    failures.push(format!("{name}: holds {id}, which the oracle never saw"));
+                    failures.push(format!(
+                        "{name}: holds {id} ({} on {}, from {}), which the oracle never saw",
+                        claim.kind, claim.subject, claim.origin
+                    ));
                 }
             }
             if node.old_build {
@@ -1855,13 +1914,17 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v18 adds durable expiry to kind selection, shifting the shared RNG schedule.
-/// Hosted run 42793993503 observed seeds 2 and 34 converge without trimming; the other fixed seeds trim.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Corpus v20 adds the three `source.*` kinds to kind selection, shifting the shared RNG schedule.
+/// The never-trim set is characterized by hosted CI; a lightly loaded runner diverges from it
+/// (#6210).
+const NEVER_TRIMS: &[u64] = &[];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
+    eprintln!("convergence corpus v21 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2090,7 +2153,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v21.json"
         }))
         .unwrap(),
     )

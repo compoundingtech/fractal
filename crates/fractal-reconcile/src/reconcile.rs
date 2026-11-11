@@ -62,6 +62,8 @@ pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
+pub mod program;
+mod program_faults;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
@@ -1421,6 +1423,8 @@ pub struct Reconciler<R = NativeRuntime> {
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
+    program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1471,6 +1475,14 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
+}
+
+/// Where an item's evaluation started: how many writes this thread had recorded and how far the
+/// passes had read the change feed. See [`Reconciler::missed_by_skipping`].
+#[derive(Clone, Copy)]
+struct EvaluationMark {
+    wrote: usize,
+    feed: Option<(u64, i64)>,
 }
 
 struct FileWatch {
@@ -1637,6 +1649,7 @@ impl Reconciler<NativeRuntime> {
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
+            program_engine: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1857,6 +1870,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
+            program_engine: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1901,6 +1915,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn incoming_resumes(&self, desired: &[DesiredSubject]) -> Result<()> {
         let targets = self.store.cross_host_resume_targets(&self.host)?;
         for subject in desired.iter().filter(|subject| targets.contains(&subject.subject)) {
+            if let Some(run) = &subject.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                continue;
+            }
             let Some(member) = &subject.member else {
                 continue;
             };
@@ -2910,7 +2929,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if choosing.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let mut orders = self.store.seat_run_orders()?;
+        let mut orders = self.store.seat_run_orders_for_mutation()?;
         orders.retain(|agent, _| choosing.contains(agent.as_str()));
         Ok(orders)
     }
@@ -3102,6 +3121,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let gate_runners = self.gate_runners()?;
         _runners_span.items(gate_runners.len());
         for runner in &gate_runners {
+            if self.store.run_projection_pending(&runner.owner_run)? {
+                continue;
+            }
             if runner.retired && runner.host == self.host {
                 let _ = self.isolate("gate", &runner.subject, || {
                     let runtime_id = runner.subject.replace('/', ".");
@@ -3134,6 +3156,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        let mut pending_subjects = BTreeSet::new();
+        for declaration in &desired {
+            if let Some(run) = &declaration.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                pending_subjects.insert(declaration.subject.clone());
+            }
+        }
         if crate::otel::export_enabled() {
             tracing::Span::current().record("st.reconcile.items", desired.len() as i64);
         }
@@ -3155,6 +3185,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
@@ -3162,6 +3193,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut task_stops = BTreeSet::new();
         if !stopped_roots.is_empty() {
             for subject in &desired {
+                if pending_subjects.contains(&subject.subject) {
+                    continue;
+                }
                 let Some(member) = subject.member.as_ref().filter(|_| {
                     matches!(subject.kind.as_str(), "exec" | "pty")
                 }) else {
@@ -3244,10 +3278,12 @@ impl<R: RuntimeControl> Reconciler<R> {
 
         let task_stop_subjects = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
         let active = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| !task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
         let eligible = match self.store.owned_desired_subjects(&desired) {
@@ -3638,7 +3674,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let queued_before = work_message_agents.len();
             let cpu_started = crate::incremental::thread_cpu();
-            let wrote_mark = smallclaims::touched::wrote_len();
+            let mark = self.evaluation_mark();
             let ((result, due), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     caught(|| -> Result<()> {
@@ -4051,7 +4087,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
+                let wrote = self.missed_by_skipping(&item, mark, &reads, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -6038,7 +6074,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _clock = smallclaims::store::clock_snapshot();
         let needed = self.needs_item(item, !skip);
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let ((result, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| match guard() {
                 Ok(false) => ReconcileItemOutcome::Rejected,
@@ -6059,7 +6095,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(item, wrote_mark, due);
+            let wrote = self.missed_by_skipping(item, mark, &reads, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6178,7 +6214,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
 
         let run_order = if seat_chooses_between_runs(agent, &work) {
-            self.store.seat_run_order(agent)?
+            self.store.seat_run_order_for_mutation(agent)?
         } else {
             Vec::new()
         };
@@ -6186,7 +6222,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The last durable automatic wake records the head already announced;
         // using its subject in the key also permits returning to an earlier head.
         let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
-        let selection = crate::seat_queue::select(agent, &steps, &run_order);
+        let selection = crate::seat_queue::select_literal(agent, &steps, &run_order);
         let last_wake = messages.iter().filter(|message| {
             !crate::silent::message_tag_values(
                 message.tags.iter().map(String::as_str), "wake-source:",
@@ -6632,7 +6668,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return;
         }
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let ((outcome, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| -> Result<Option<Result<()>>> {
                 // A stop's actual origin is read once here and reused by `reconcile_stop`.
@@ -6665,7 +6701,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(item, wrote_mark, due);
+            let wrote = self.missed_by_skipping(item, mark, &reads, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -10552,9 +10588,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         let full = !self.skip_unneeded || self.incremental.take_full_pass("mission-run", now_ms());
         for id in &ids {
             let subject = format!("mission-run/{id}");
+            let pending = self.store.run_projection_pending(&subject)?;
+            if pending {
+                let mut reads = self.incremental.reads_of(&subject);
+                reads.insert(subject.clone());
+                self.incremental.evaluated(&subject, reads, None);
+            }
             let _clock = smallclaims::store::clock_snapshot();
             let needed = self.needs_item(&subject, full);
-            if !full && !needed {
+            if pending || (!full && !needed) {
                 // Nothing it read changed and nothing is due. It stays active: keep its caches,
                 // faults and file watchers as its last evaluation left them.
                 for key in self.incremental.reads_of(&subject) {
@@ -10604,7 +10646,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "mission-run" | FIRST_READINESS_FAULT_SCOPE | run_report::REPORT_FAULT_SCOPE => {
                     !active.contains(subject)
                 }
-                "step" => !active_steps.contains(subject),
+                "step" | crate::program_journal::STALLED_FAULT_SCOPE | crate::program_journal::HOST_FAULT_SCOPE => {
+                    !active_steps.contains(subject)
+                }
                 _ => false,
             })
             .map(|((subject, scope), _)| (subject.clone(), scope.clone()))
@@ -10637,12 +10681,22 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> bool {
         let subject = format!("mission-run/{id}");
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let mut due = None;
         let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
+                    smallclaims::touched::note_read(|| subject.clone());
                     let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    // Eager cancellation (§6): a program step that left its attempt in this run's
+                    // latest transition stops now, with its child runs and asks, before an
+                    // inactive run returns below. Then what the run's programs wait on is started
+                    // or resolved, with its reads noted so their ends evaluate the run again.
+                    let mut settled = false;
+                    if let Some(engine) = self.program_engine.get() {
+                        engine.release_left(&run)?;
+                        settled = self.settle_program_waits(engine, &run)?;
+                    }
                     if active_only
                         && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
                     {
@@ -10682,7 +10736,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             }
                         }
                     }
-                    let evaluated = self.evaluate_active_mission_run(&run, mission);
+                    let evaluated = self
+                        .evaluate_active_mission_run(&run, mission)
+                        .map(|evaluated| evaluated || settled);
                     // Recovery is diagnostic too: admission and execution writes come first.
                     if (!first_readiness_pending(&run)
                         || now_ms().saturating_sub(first_readiness_since(&run))
@@ -10711,7 +10767,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
+            let wrote = self.missed_by_skipping(&subject, mark, &reads, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10808,6 +10864,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(id) = subject.strip_prefix("mission-run/") else {
                 continue;
             };
+            if self.store.run_projection_pending(subject)? {
+                continue;
+            }
             let _clock = smallclaims::store::clock_snapshot();
             changed |= self.evaluate_one_mission_run(
                 id,
@@ -10862,16 +10921,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// Where an item's evaluation starts, taken after [`Self::needs_item`] read the feed.
+    fn evaluation_mark(&self) -> EvaluationMark {
+        EvaluationMark { wrote: smallclaims::touched::wrote_len(), feed: self.incremental.watermark() }
+    }
+
     /// What an evaluation of `item` that nothing marked and nothing made due did, which an
-    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// incremental pass would have missed: the claims it wrote since `mark`, and a due time
     /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
-    /// limit it found, which no skipping pass would have woken for.
-    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
-        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+    /// limit it found, which no skipping pass would have woken for. Nothing when another writer,
+    /// such as the program engine settling a step, changed something its last evaluation also
+    /// read while it ran: a skipping pass is woken through those reads, so the next pass is
+    /// marked for it anyway. A key read for the first time wakes nothing and excuses nothing.
+    fn missed_by_skipping(
+        &self,
+        item: &str,
+        mark: EvaluationMark,
+        reads: &BTreeSet<String>,
+        due: Option<u128>,
+    ) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(mark.wrote);
+        let wrote = missed.len();
         if let Some(due) = due
             && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
         {
             missed.push(format!("due {item} at {due}"));
+        }
+        // A failed read of the feed keeps the correction.
+        if !missed.is_empty()
+            && mark.feed.is_some_and(|since| {
+                let woken: BTreeSet<String> =
+                    self.incremental.reads_of(item).intersection(reads).cloned().collect();
+                crate::incremental::changed_by_others(&self.store, since, &woken, &missed[..wrote])
+                    .unwrap_or(false)
+            })
+        {
+            missed.clear();
         }
         missed
     }
@@ -11269,6 +11354,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         return Ok(changed);
                     }
+                    // A program waiting on its person asks stays loaded (§6), so a restarted daemon
+                    // replays it to the same wait. Its step's timeout pauses meanwhile (DQ6).
+                    if view.status == "waiting-person"
+                        && let Some(program) = &step.spec.program
+                    {
+                        changed |= self.dispatch_program(run, &step, view, program)?;
+                        return Ok(changed);
+                    }
                     if matches!(
                         view.status.as_str(),
                         "completed" | "cancelled" | "waiting-person"
@@ -11531,6 +11624,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
                     }
+                    if let Some(program) = &step.spec.program {
+                        changed |= self.dispatch_program(run, &step, view, program)?;
+                        return Ok(changed);
+                    }
                     if !view.agentless && !view.worker_reported {
                         return Ok(changed);
                     }
@@ -11632,6 +11729,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     Ok(changed)
                 });
             changed |= step_changed.unwrap_or(false);
+            // After the step's evaluation, so a dispatch whose host could not start is seen now.
+            if let Some(program) = &step.spec.program
+                && let Err(error) = self.reconcile_program_faults(view, program, now_ms())
+            {
+                eprintln!("st3: program faults for {}: {error:#}", view.subject);
+            }
             // Finally work gets its ordinary evaluation first, including starting its gates
             // and declarations. Once it only waits on evidence, cancellation must not hold
             // the mission's active-run slot until the step's execution budget expires.
@@ -14402,6 +14505,243 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(true)
     }
 
+    /// The program engine, started with the first program step this daemon runs.
+    fn program_engine(&self) -> &Arc<program::ProgramEngine> {
+        self.program_engine.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let event_notify = self.event_notify.clone();
+            program::ProgramEngine::new(
+                self.store.clone(),
+                Arc::new(move |step: &str| {
+                    incremental.touch(step);
+                    signal_changed(&notify, &event_notify);
+                }),
+                self.driver_state_dir.join("programs"),
+                program::Liveness::default(),
+            )
+        })
+    }
+
+    /// Hand an active program step to the program engine, which completes or fails it. A step
+    /// whose bundle this member does not hold fails here.
+    fn dispatch_program(
+        &self,
+        run: &MissionRunView,
+        step: &RuntimeStep<'_>,
+        view: &crate::model::StepRunView,
+        program: &crate::model::ProgramSpec,
+    ) -> Result<bool> {
+        let dispatch = program::Dispatch {
+            step: view.subject.clone(),
+            attempt: view.attempt,
+            run: run.subject.clone(),
+            program: program.clone(),
+            payload: run.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+            env: run_variables(run, step, view).into_iter().filter(|(name, _)| name.starts_with("ST_")).collect(),
+            cwd: run.workspace.clone(),
+        };
+        match self.program_engine().dispatch(dispatch)? {
+            // A step that left this attempt already says why in its state.
+            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => Ok(false),
+            // The step keeps its state; `reconcile_program_faults` raises `program/host` from
+            // `ProgramEngine::host_fault` and dispatches it again at a deadline.
+            program::Dispatched::HostDown(_) => Ok(false),
+            program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason)),
+        }
+    }
+
+    /// Start or resolve what the programs of `run` wait on (§6). It runs inside the run's
+    /// evaluation, so each read is noted: a child run's end, an ask's answer, or the end of a run
+    /// that holds a full mission's capacity evaluates this run again. Returns whether it wrote.
+    fn settle_program_waits(&self, engine: &program::ProgramEngine, run: &MissionRunView) -> Result<bool> {
+        let mut changed = false;
+        for request in engine.requests(&run.subject) {
+            changed |= match &request.wait {
+                program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
+                program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
+            };
+        }
+        Ok(changed)
+    }
+
+    /// A linked child run: started once per key and attempt, adopted when the program resumes,
+    /// and resolved with its outcome once it ends. A start that finds the mission at capacity
+    /// waits until a run holding the capacity ends.
+    fn settle_program_child(
+        &self,
+        engine: &program::ProgramEngine,
+        run: &MissionRunView,
+        request: &program::Request,
+        mission: &str,
+        input: &BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let idempotency_key = request.idempotency_key();
+        let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        let Some(status) = self.store.mission_run_status(&child)? else {
+            // The runs holding the mission's capacity are read before the start and again after a
+            // refusal, so the end of any holder, even one that ends in between, evaluates this run.
+            let note_holders = || -> Result<()> {
+                for holder in self.store.active_mission_runs_for_mission(mission)? {
+                    smallclaims::touched::note_read(|| holder.subject.clone());
+                }
+                Ok(())
+            };
+            note_holders()?;
+            return match self.start_program_child(run, &request.step, mission, input, idempotency_key) {
+                Ok(started) => {
+                    engine.waiting(request, &started.subject)?;
+                    Ok(true)
+                }
+                Err(error) if error.code == "mission-run-capacity" => {
+                    note_holders()?;
+                    Ok(false)
+                }
+                // A store failure or contention (a run-mutation fence while projections catch up)
+                // is retried by the next evaluation; only a refused request is the program's defect.
+                Err(error) if error.code == "internal" || error.is_sqlite_contention() => Err(error.into()),
+                Err(error) => {
+                    let reason = format!(
+                        "the program could not start its child run `{}` of mission `{mission}`: {}",
+                        request.key, error.message
+                    );
+                    engine.fail(&request.step, request.attempt, &reason)?;
+                    Ok(true)
+                }
+            };
+        };
+        if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+            return Ok(false);
+        }
+        let exit = self.program_child_exit(&child, &status)?;
+        engine.resolve(request, &child, exit)?;
+        Ok(true)
+    }
+
+    /// The one place a program starts a child run: linked to the program step, for the parent
+    /// run's requester, in its workspace.
+    fn start_program_child(
+        &self,
+        run: &MissionRunView,
+        step: &str,
+        mission: &str,
+        input: &BTreeMap<String, String>,
+        idempotency_key: String,
+    ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
+        self.store.create_program_child_mission_run(
+            &MissionRunRequest {
+                mission: mission.to_owned(),
+                revision: None,
+                workspace: run.workspace.clone(),
+                requester: Some(run.requester.clone()),
+                mode: Some(run.mode.clone()),
+                inputs: input.clone(),
+                idempotency_key,
+            },
+            run,
+            step,
+        )
+    }
+
+    /// A child run's end as its program receives it: `{run, status: 'completed', products?}`
+    /// with each product its steps declare, by full subject, or `ChildFailed {run, status,
+    /// reason}`.
+    fn program_child_exit(&self, child: &str, status: &str) -> Result<Value> {
+        let view = self
+            .store
+            .mission_run_steps(child, false)?
+            .with_context(|| format!("the child run {child} disappeared"))?;
+        if status == "completed" {
+            let mut value = serde_json::json!({"run": child, "status": status});
+            let products = self.program_child_products(&view)?;
+            if !products.is_empty() {
+                value["products"] = Value::Object(products);
+            }
+            return Ok(serde_json::json!({"_tag": "Success", "value": value}));
+        }
+        let reason = self
+            .store
+            .latest_claim(child, Some("mission-run.state"))?
+            .and_then(|claim| claim.body["fields"]["reason"].as_str().map(str::to_owned))
+            .or_else(|| {
+                view.steps.iter().find(|step| step.status == "failed").map(|step| {
+                    format!("step `{}` failed: {}", step.step, step.blocked_reason.as_deref().unwrap_or("no reason recorded"))
+                })
+            })
+            .unwrap_or_else(|| format!("the child run is {status}"));
+        Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason}}))
+    }
+
+    fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
+        let mut products = serde_json::Map::new();
+        let Some(spec) = self.store.mission_spec(&child.mission, Some(child.revision.as_str()))? else {
+            return Ok(products);
+        };
+        for step in flatten_mission_steps(&spec) {
+            let Some(view) = child.steps.iter().find(|view| view.step == step.spec.path) else {
+                continue;
+            };
+            let variables = run_variables(child, &step, view);
+            for product in &step.spec.products {
+                let subject = crate::mission::interpolate(&product.subject, &variables)?;
+                if let Some(value) = self.subject_value(&subject)? {
+                    products.insert(subject, value);
+                }
+            }
+        }
+        Ok(products)
+    }
+
+    /// A person ask on the program step: asked once per key and attempt, and resolved with the
+    /// person's answer, the default at its deadline, or `AskCancelled` when it is withdrawn.
+    fn settle_program_ask(
+        &self,
+        engine: &program::ProgramEngine,
+        request: &program::Request,
+        ask: &crate::model::PersonAskRequest,
+    ) -> Result<bool> {
+        let (subject, asked) = match &request.child {
+            Some(subject) => (subject.clone(), false),
+            None => match self.store.ask_person(ask) {
+                Ok(view) => {
+                    engine.waiting(request, &view.subject)?;
+                    (view.subject, true)
+                }
+                // A store failure or contention is retried by the next evaluation.
+                Err(error) if error.code == "internal" || error.is_sqlite_contention() => return Err(error.into()),
+                Err(error) => {
+                    let reason = format!("the program's ask `{}` was refused: {}", request.key, error.message);
+                    engine.fail(&request.step, request.attempt, &reason)?;
+                    return Ok(true);
+                }
+            },
+        };
+        smallclaims::touched::note_read(|| subject.clone());
+        let exit = if let Some(done) = self.store.latest_claim(&subject, Some("work.person-done"))? {
+            let fields = &done.body["fields"];
+            let resolved_by = fields["resolved_by"].as_str().or(done.actor.as_deref()).unwrap_or_default();
+            let mut value = serde_json::json!({"resolved_by": resolved_by});
+            if let Some(answer) = fields["answer"].as_object() {
+                value["answer"] = Value::Object(
+                    ["type", "outcome", "id", "label", "text"]
+                        .into_iter()
+                        .filter_map(|name| answer.get(name).filter(|part| part.is_string()).map(|part| (name.to_owned(), part.clone())))
+                        .collect(),
+                );
+            }
+            if let Some(summary) = fields["summary"].as_str() {
+                value["summary"] = Value::from(summary);
+            }
+            serde_json::json!({"_tag": "Success", "value": value})
+        } else if self.store.latest_claim(&subject, Some("work.person-cancelled"))?.is_some() {
+            serde_json::json!({"_tag": "Failure", "error": {"_tag": "AskCancelled", "ask": subject}})
+        } else {
+            return Ok(asked);
+        };
+        engine.resolve(request, &subject, exit)?;
+        Ok(true)
+    }
+
     fn materialize_step_declarations(
         &self,
         run: &MissionRunView,
@@ -15439,7 +15779,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         let step = self
             .store
-            .step_run(subject)?
+            .step_run_fenced(subject)?
             .context("the feedback step disappeared")?;
         if step.attempt != attempt {
             return Ok(());
@@ -17583,6 +17923,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let _look = look_lock.clone().lock_owned().await;
                 let look_deadline = tokio::time::Instant::now() + look_limit;
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                // The arm keeps the oldest pending attempt as its name, so a delivery while it
+                // looks does not retire it. Right before the reads, a webhook refresh takes the
+                // newest pending webhook refresh from the same member, whose answer answers them all.
+                let refresh_attempt = refresh_attempt.as_ref().map(|attempt| {
+                    store.coalesced_refresh_attempt(&observer_subject, attempt).unwrap_or_else(|_| attempt.clone())
+                });
                 if let Some(latest) = cursors.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).cloned() {
                     kept_cursor = Some(latest.clone());
                     cursor = latest;
@@ -17613,6 +17959,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     kept_cursor = Some(pending.clone());
                     cursor = pending;
                 }
+                // Refresh claims replicate, so a webhook delivery any member received covers the
+                // repository here, where it is polled. A covered repository's polls are a backstop.
+                let webhook_covered = spec.provider == "github.repository"
+                    && store.github_webhook_covered(&observer_subject, now_ms()).unwrap_or(false);
                 let request = ObservationRequest {
                     provider: spec.provider.clone(),
                     locator: spec.locator.clone(),
@@ -17621,6 +17971,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     previous_facts: previous_facts.clone(),
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
+                    webhook_covered,
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
                 let refreshed = github_plugin.observer_freshness(&observer_subject, now_ms());
@@ -17720,6 +18071,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 if standing {
                                     let interval = match standing_interval {
                                         _ if outcome.baseline || !outcome.changed_fields.is_empty() => 180_000,
+                                        _ if webhook_covered && !continuing => 600_000,
                                         None => 180_000,
                                         Some(interval) if continuing => interval,
                                         Some(180_000) => 360_000,
@@ -19549,6 +19901,7 @@ async fn refill_mirror(
         previous_facts: None,
         every_ms: spec.every_ms,
         refresh: false,
+        webhook_covered: false,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
@@ -20309,11 +20662,6 @@ fn work_wake_deadline(
         })
         .collect::<BTreeSet<_>>();
     work.iter()
-        .filter(|step| {
-            step.assigned_to
-                .as_ref()
-                .is_some_and(|assignee| local_agents.contains(assignee))
-        })
         .filter(|step| wakes.contains(step.subject.as_str()))
         .filter_map(|step| {
             let wake = step.wake.as_ref()?;
@@ -20379,7 +20727,7 @@ fn seat_chooses_between_runs(agent: &str, work: &[StepRunView]) -> bool {
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
-    let selection = crate::seat_queue::select(agent, &steps, &[]);
+    let selection = crate::seat_queue::select_literal(agent, &steps, &[]);
     if !selection.held.is_empty() {
         return false;
     }
@@ -20402,7 +20750,7 @@ fn next_work_wake_for_agent<'a>(
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
-    crate::seat_queue::select(agent, &steps, run_order).wake()
+    crate::seat_queue::select_literal(agent, &steps, run_order).wake()
 }
 
 /// Inherited work is woken only after an early parent submission. A turn that is still working can
@@ -20418,7 +20766,7 @@ fn defers_inherited_work_wake(
 fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
     let nested = crate::seat_queue::SeatStep::from(step);
     work.iter().any(|ancestor| {
-        crate::seat_queue::nests_under(&crate::seat_queue::SeatStep::from(ancestor), &nested)
+        crate::seat_queue::nests_under_literal(&crate::seat_queue::SeatStep::from(ancestor), &nested)
     })
 }
 
@@ -21228,6 +21576,9 @@ pub mod tests {
     mod start_preemption;
     mod seat_admission_queue;
     mod terminal_step_guard;
+    mod program_engine;
+    mod program_faults;
+    mod program_children;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -23270,6 +23621,134 @@ mission "orchid/replay" state="ready" {
     }
 
     #[test]
+    fn pending_run_projection_defers_dispatch_until_drain() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"pending-dispatch\" state=\"ready\" { goal \"Do work.\"; agent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }; step \"work\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\"; goal \"Do work.\" } }",
+            "publish-pending-dispatch",
+        );
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pending-dispatch".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "pending-dispatch".into(),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.evaluate_mission_runs().unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h5a2563345d4d owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+        ).unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(store.run_projection_pending(&run.subject).unwrap());
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert!(crate::store::finish_run_projection_tx(&transaction, &run.subject).unwrap());
+            transaction.commit().unwrap();
+        }
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert!(!runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_run_projection_defers_evaluation_until_drain() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"pending\" state=\"ready\" { goal \"Finish.\"; completion { when \"all-steps-exhausted\" }; step \"work\" { agentless } }",
+            "publish-pending",
+        );
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pending".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "pending-run".into(),
+        }).unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hc927df7b03e5 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+        ).unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let index = store.index().unwrap();
+        reconciler.evaluate_mission_runs().unwrap();
+        assert!(store.run_projection_pending(&run.subject).unwrap());
+        assert_eq!(store.index().unwrap(), index, "a pending run appends no evaluation claims");
+        assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, run.status);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert!(crate::store::finish_run_projection_tx(&transaction, &run.subject).unwrap());
+            transaction.commit().unwrap();
+        }
+        let (evaluated, _) = reconciler.evaluate_changed_mission_runs().unwrap();
+        assert_eq!(evaluated, 1, "the drain wakes the skipped run through its read dependency");
+        for _ in 0..4 {
+            reconciler.evaluate_mission_runs().unwrap();
+        }
+        assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn work_start_drains_pending_projection_before_returning_existing_work() {
+        use crate::AdhocWorkStore as _;
+        let store = Store::open_memory("node").unwrap();
+        apply_source(
+            &store,
+            "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }",
+            "work-start-seat",
+        );
+        let actor = store.desired_subjects().unwrap().into_iter()
+            .find(|declaration| declaration.kind == "agent").unwrap().subject;
+        let request = crate::model::WorkStartRequest {
+            actor,
+            title: "The committed title".into(),
+            idempotency_key: "pending-work-start".into(),
+        };
+        let step = store.start_work(&request).unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(
+            step.run.trim_start_matches("mission-run/").to_owned(),
+        )).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hd5bab3d616a3 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET title='stale projection' WHERE subject=?1",
+                [&step.subject],
+            ).unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he0d8cbf77f9b owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        let started = store.start_work(&request).unwrap();
+        assert_eq!(started.title.as_deref(), Some(request.title.as_str()));
+        assert_eq!(started.subject, step.subject);
+        assert!(!store.run_projection_pending(&step.run).unwrap());
+    }
+
+    #[test]
     fn a_mission_run_executes_parallel_roots_and_an_all_of_join() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let source = r#"
@@ -24119,7 +24598,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "nested-wake" state="ready" {
   goal "Complete nested work."
   step "outer" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     mission "work" {
       goal "Complete the child work."
       step "first" { }
@@ -24853,7 +25332,7 @@ version 2
     goal "Complete mission product."
     completion { when "all-steps-exhausted" }
     step "publish" {
-      assigned-to "agent/worker"
+      assigned-to "agent/node.worker"
         produces {
           resource "mission-run/${ST_MISSION_RUN}/change" {
             kind "custom.st3.product-test"
@@ -24933,7 +25412,7 @@ version 2
             .append_claim(&ClaimInput {
                 subject: format!("resource/mission-run/{}/change", run.id),
                 kind: "resource.observed".into(),
-                actor: Some("agent/worker".into()),
+                actor: Some("agent/node.worker".into()),
                 fields: BTreeMap::from([
                     (
                         "kind".into(),
@@ -24961,6 +25440,80 @@ version 2
     }
 
     #[test]
+    fn stored_mission_declarations_preserve_legacy_invalid_assignee_normalization() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"version 2
+mission "legacy-declarations" state="ready" {
+  goal "Materialize declarations stored before canonical agent IDs."
+  step "wait" { agentless }
+}
+"#;
+        let declarations = r#"version 2
+mission "legacy-child" state="ready" {
+  goal "Preserve historical assignee normalization."
+  step "empty-agent-name" { assigned-to "agent/" }
+  step "whitespace" { assigned-to "example/worker name" }
+}
+"#;
+        // Persist the historical declaration source without admitting it through today's parser.
+        let mut intent = parse_intent(source, "node").unwrap();
+        intent.missions.get_mut("legacy-declarations").unwrap().declarations_kdl =
+            Some(declarations.into());
+        let planned = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply(&intent, &planned.subject_tokens, "publish-legacy-declarations")
+            .unwrap();
+        let mission = store
+            .mission_spec("legacy-declarations", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mission.declarations_kdl.as_deref(), Some(declarations));
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "legacy-declarations".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-legacy-declarations".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        assert!(
+            reconciler
+                .materialize_mission_declarations(&run, &mission, None)
+                .unwrap()
+        );
+        let nested = store.mission_spec("legacy-child", None).unwrap().unwrap();
+        assert_eq!(
+            nested.steps["empty-agent-name"].work_selector,
+            Some(WorkSelector::Assigned {
+                agent: "agent/node.".into(),
+            })
+        );
+        assert_eq!(
+            nested.steps["whitespace"].work_selector,
+            Some(WorkSelector::Assigned {
+                agent: "example/worker name".into(),
+            })
+        );
+    }
+
+    #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let bootstrap = r#"
@@ -24971,11 +25524,11 @@ version 2
     goal "Complete mission bootstrap."
     completion { when "all-steps-exhausted" }
     step "compile" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       produces-mission "project/work"
     }
     step "execute" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       depends-on { step "compile" completed }
       uses-mission output-of="compile"
     }
@@ -25212,7 +25765,7 @@ version 2
 
   mission "assignment" state="ready" {
     goal "Complete mission assignment."
-    step "work" { assigned-to "agent/worker" }
+    step "work" { assigned-to "agent/node.worker" }
   }
 
 "#,
@@ -27340,21 +27893,79 @@ agent "import/omp/fixture" {{
     }
 
     #[test]
-    fn launch_input_measurement_failure_is_unknown_and_subscription_faults_target_daemon() {
+    fn managed_launch_inputs_remain_watched_when_profile_or_wrapper_is_missing() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile.json");
         let desired = crate::graph::parse_test_intent(&format!("version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}", root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
         let store = Arc::new(Store::open_memory("node").unwrap());
         let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
         let mut member = desired.member.clone().unwrap();
         member.environment.insert("PATH".into(), root.path().display().to_string());
+        member.environment.insert("AGENT_PERSONA".into(), "generalist".into());
+        member.environment.insert("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string());
+        crate::contract::install(&store, Box::new(move |_| Ok(member.clone())));
+        assert!(crate::contract::declared(&store, &desired).is_err());
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err());
+        let profile_key = format!("launch-input/{}", profile.display());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&profile_key));
+        assert!(!reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("claude").display())),
+            "a missing managed profile must not fall back to raw claude");
+
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        reconciler.incremental.touch(&profile_key);
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err());
+        let wrapper = bin.join("claude");
+        let wrapper_key = format!("launch-input/{}", wrapper.display());
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&wrapper_key));
+
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        reconciler.incremental.touch(&wrapper_key);
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(crate::contract::declared_ready(&store, &desired).is_err(),
+            "a non-executable wrapper must remain refused and watched");
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&wrapper_key));
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        reconciler.incremental.touch(&wrapper_key);
+        reconciler.watch_launch_inputs(&desired).unwrap();
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&wrapper_key));
+    }
+
+    #[test]
+    fn launch_input_measurement_failure_is_unknown_and_subscription_faults_target_daemon() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("claude");
+        // Managed seats measure the selected wrapper and its interpreter, not raw PATH claude.
+        std::fs::write(&wrapper, "#!/usr/bin/env missing-claude-interpreter\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = root.path().join("profile.json");
+        std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let desired = crate::graph::parse_test_intent(&format!("version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{ model \"model-a\"; }} }}", root.path().to_str().unwrap()), "node").unwrap().subjects.into_values().next().unwrap();
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        let mut member = desired.member.clone().unwrap();
+        member.environment.insert("PATH".into(), root.path().display().to_string());
+        member.environment.insert("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string());
+        member.environment.insert("AGENT_PERSONA".into(), "generalist".into());
         let member = Arc::new(Mutex::new(member));
         let prepared = member.clone();
         crate::contract::install(&store, Box::new(move |_| Ok(prepared.lock().unwrap().clone())));
-        assert!(crate::contract::declared(&store, &desired).is_err()); // Settle the environment, not the missing provider.
+        assert!(crate::contract::declared(&store, &desired).is_err()); // Settle the environment, not the missing interpreter.
         reconciler.watch_launch_inputs(&desired).unwrap();
         assert!(crate::contract::declared_ready(&store, &desired).is_err());
-        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("claude").display())));
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", wrapper.display())));
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", root.path().join("missing-claude-interpreter").display())));
         let scope = format!("stage/launch-inputs/{}", desired.subject);
         let denied = root.path().join("denied");
         std::fs::create_dir(&denied).unwrap();
@@ -27368,7 +27979,7 @@ agent "import/omp/fixture" {{
         }
         std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(reconciler.isolate(&scope, "daemon/node", || reconciler.watch_launch_inputs(&desired)).is_some());
-        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", denied.join("claude").display())));
+        assert!(reconciler.file_watchers.lock().unwrap().contains_key(&format!("launch-input/{}", denied.join("missing-claude-interpreter").display())));
         assert!(store.reconcile_fault("daemon/node", &scope).unwrap().is_none());
     }
 
@@ -29826,7 +30437,7 @@ mission "proof" state="ready" {{
   goal "Land the change."
   completion {{ when "all-steps-exhausted" }}
   step "land" {{
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     goal "Land the change on main."
     gate "the suite passes on main" {{
       exec {gate:?}
@@ -30836,7 +31447,7 @@ mission "publish" state="ready" {
             r#"version 2
 mission "asks" state="ready" {
   goal "Ask a person for a decision while working."
-  step "work" { assigned-to "agent/asker" }
+  step "work" { assigned-to "agent/node.asker" }
 }
 "#,
             "asks-mission",
@@ -35027,7 +35638,7 @@ mission "absent-stop" state="ready" {
               mission "release" state="ready" {
                 goal "Complete mission release."
                 step "publish" {
-                  assigned-to "agent/worker"
+                  assigned-to "agent/node.worker"
                   depends-on {
                     field "decision" "resource/approval" "is" "approve"
                   }
@@ -39757,6 +40368,7 @@ observer "repo" {
             calls: Arc<AtomicUsize>,
             changed: Arc<AtomicUsize>,
             continuation: Arc<AtomicBool>,
+            covered: Arc<AtomicBool>,
         }
         impl ResourceProvider for AdaptiveProvider {
             fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
@@ -39767,6 +40379,7 @@ observer "repo" {
                     assert_eq!(request.cursor.as_deref(), Some("etag-and-pagination-state"));
                 }
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                self.covered.store(request.webhook_covered, Ordering::SeqCst);
                 let change = self.changed.load(Ordering::SeqCst);
                 let continuing = self.continuation.load(Ordering::SeqCst);
                 let mut facts = serde_json::json!({"repository_id": 7});
@@ -39844,10 +40457,11 @@ observer "{subject}" {{
             let calls = Arc::new(AtomicUsize::new(0));
             let changed = Arc::new(AtomicUsize::new(0));
             let continuation = Arc::new(AtomicBool::new(false));
+            let covered = Arc::new(AtomicBool::new(false));
             let reconciler = Reconciler::new(
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
             ).with_resource_provider(Arc::new(AdaptiveProvider {
-                calls: calls.clone(), changed: changed.clone(), continuation: continuation.clone(),
+                calls: calls.clone(), changed: changed.clone(), continuation: continuation.clone(), covered: covered.clone(),
             }));
             // Legacy standing every=30s adapts, while an explicitly faster custom observer
             // stays at 30s through every quiet/change boundary.
@@ -39893,6 +40507,30 @@ observer "{subject}" {{
             apply_source(&store, &source.replace("30s", "31s"), "adaptive-watch-revision");
             poll(&reconciler, &calls, &subject_id, false,
                 if standing { 180_000 } else { 31_000 }).await;
+            assert!(!covered.load(Ordering::SeqCst), "a declared refresh is not webhook coverage");
+
+            // A webhook-requested refresh, from whichever member received the delivery, covers
+            // the repository: quiet polls take the ceiling at once and changes stay active.
+            let revision = store.selected_desired_revision(&subject_id).unwrap().unwrap();
+            store.append_claim(&ClaimInput {
+                subject: subject_id.clone(),
+                kind: "observer.refresh-requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String(crate::github_webhook::attempt("delivery", &subject_id))),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            poll(&reconciler, &calls, &subject_id, false,
+                if standing { 600_000 } else { 31_000 }).await;
+            assert!(covered.load(Ordering::SeqCst));
+            changed.store(0, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 180_000 } else { 31_000 }).await;
+            // The same facts again are quiet: straight to the ceiling, not through 360s.
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 600_000 } else { 31_000 }).await;
         }
     }
 
@@ -49433,6 +50071,23 @@ mission "ios-proof-blocked" state="ready" {
             updated_at_unix_ms: 1,
             person_answers: Vec::new(),
         };
+        let legacy = step("step-run/run-1/legacy", "legacy", "node/worker");
+        assert_eq!(
+            next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&legacy), &[]),
+            None,
+            "main does not wake a canonical seat for a legacy-only assignment"
+        );
+        let canonical = step("step-run/run-1/canonical", "canonical", "agent/node/worker");
+        assert_eq!(
+            next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&canonical), &[]),
+            Some(canonical.subject.as_str()),
+            "a literal assignment still wakes its seat"
+        );
+        assert_eq!(
+            next_work_wake_for_agent("daemon/node/worker", std::slice::from_ref(&legacy), &[]),
+            None,
+            "recognized non-agent kinds remain distinct"
+        );
         let parent = step("step-run/run-1/build", "build", "agent/builder");
         let inherited = step(
             "step-run/run-1/build/work/inspect",
@@ -49598,6 +50253,18 @@ mission "ios-proof-blocked" state="ready" {
             updated_at_unix_ms: 10,
             person_answers: Vec::new(),
         };
+        let mut legacy = first.clone();
+        legacy.assigned_to = Some("node/worker".into());
+        assert_eq!(
+            work_wake_deadline(
+                &[legacy],
+                &BTreeSet::from(["agent/node/worker".into()]),
+                &BTreeMap::new(),
+                2_000,
+            ),
+            None,
+            "main gives no canonical wake deadline to a legacy-only assignment"
+        );
         let mut second = first.clone();
         second.subject = "step-run/newer/work".into();
         second.run = "mission-run/newer".into();
@@ -50458,6 +51125,7 @@ mission "fresh" state="ready" {
     struct SeatQueueFixture {
         store: Arc<Store>,
         reconciler: Reconciler<FakeRuntime>,
+        agent: &'static str,
     }
 
     impl SeatQueueFixture {
@@ -50466,12 +51134,23 @@ mission "fresh" state="ready" {
         }
 
         fn with_store(store: Arc<Store>) -> Self {
-            apply_source(&store, SEAT_QUEUE_SOURCE, "seat-queue-missions");
+            Self::with_store_for_agent(store, SEAT)
+        }
+
+        fn with_store_for_agent(store: Arc<Store>, agent: &'static str) -> Self {
+            let source = if agent == SEAT {
+                SEAT_QUEUE_SOURCE.to_owned()
+            } else {
+                SEAT_QUEUE_SOURCE
+                    .replace("agent \"worker\"", &format!("agent \"{}\"", agent.strip_prefix("agent/").unwrap()))
+                    .replace(SEAT, agent)
+            };
+            apply_source(&store, &source, "seat-queue-missions");
             let desired = store
                 .desired_subjects()
                 .unwrap()
                 .into_iter()
-                .find(|subject| subject.subject == SEAT)
+                .find(|subject| subject.subject == agent)
                 .unwrap();
             let runtime = Arc::new(FakeRuntime::default());
             runtime.ptys.lock().unwrap().push(RuntimeObservation {
@@ -50490,9 +51169,9 @@ mission "fresh" state="ready" {
             reconciler.reconcile_once().unwrap();
             store
                 .append_claim(&ClaimInput {
-                    subject: SEAT.into(),
+                    subject: agent.into(),
                     kind: "harness.observed".into(),
-                    actor: Some(SEAT.into()),
+                    actor: Some(agent.into()),
                     fields: BTreeMap::from([
                         ("state".into(), Value::String("ready".into())),
                         ("driver".into(), Value::String("codex".into())),
@@ -50503,7 +51182,7 @@ mission "fresh" state="ready" {
                     idempotency_key: Some("seat-one-ready".into()),
                 })
                 .unwrap();
-            Self { store, reconciler }
+            Self { store, reconciler, agent }
         }
 
         /// Start a run a little later than the last so join times differ.
@@ -50535,7 +51214,7 @@ mission "fresh" state="ready" {
         }
 
         fn queue(&self) -> crate::model::SeatQueueView {
-            self.store.seat_queue(SEAT).unwrap()
+            self.store.seat_queue(self.agent).unwrap()
         }
 
         fn order(&self) -> Vec<String> {
@@ -50555,7 +51234,7 @@ mission "fresh" state="ready" {
                 .store
                 .agent_work_queues()
                 .unwrap()
-                .remove(SEAT)
+                .remove(self.agent)
                 .and_then(|queue| queue.next_work_id);
             assert_eq!(queue.next_work_id, roster, "the roster disagrees");
             queue.next_work_id
@@ -50563,15 +51242,15 @@ mission "fresh" state="ready" {
 
         /// The step the reconciler wakes now, or none while the seat is held.
         fn wake(&self) -> Option<String> {
-            let work = self.store.work_for_reconcile(SEAT).unwrap();
-            let order = self.store.seat_run_order(SEAT).unwrap();
-            next_work_wake_for_agent(SEAT, &work, &order).map(str::to_owned)
+            let work = self.store.work_for_reconcile(self.agent).unwrap();
+            let order = self.store.seat_run_order_for_mutation(self.agent).unwrap();
+            next_work_wake_for_agent(self.agent, &work, &order).map(str::to_owned)
         }
 
         /// Steps named by open wake messages, oldest first.
         fn woken(&self) -> Vec<String> {
             self.store
-                .messages(Some(SEAT), false)
+                .messages(Some(self.agent), false)
                 .unwrap()
                 .into_iter()
                 .filter_map(|message| {
@@ -50590,7 +51269,7 @@ mission "fresh" state="ready" {
         ) -> Result<crate::model::ClaimRecord, crate::model::FractalError> {
             self.store
                 .move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
-                    agent: SEAT.into(),
+                    agent: self.agent.into(),
                     run: run.into(),
                     placement: placement.into(),
                     anchor: anchor.map(str::to_owned),
@@ -50607,7 +51286,7 @@ mission "fresh" state="ready" {
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
-                        actor: Some(SEAT.into()),
+                        actor: Some(self.agent.into()),
                         incarnation: Some("seat-one".into()),
                         summary: None,
                         reason: None,
@@ -50617,6 +51296,66 @@ mission "fresh" state="ready" {
                 )
                 .map(|_| ())
         }
+    }
+
+    #[test]
+    fn wake_order_ignores_alias_join_times_and_agrees_with_claim_admission() {
+        const SEAT: &str = "agent/node/worker";
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        smallclaims::store::set_thread_clock(Some(1));
+        let _clock = Clock;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.set_write_clock_at(1).unwrap();
+        let seat = SeatQueueFixture::with_store_for_agent(store, SEAT);
+        let canonical_source = SEAT_QUEUE_SOURCE
+            .replace("agent \"worker\"", "agent \"node/worker\"")
+            .replace("agent/node.worker", SEAT);
+        let legacy_source = canonical_source.replace(SEAT, "node/worker");
+        apply_source(&seat.store, &legacy_source, "literal-wake-legacy-definition");
+        let a = seat.start("queued", "literal-wake-a");
+        let legacy = a.steps.iter().find(|step| step.step == "work").unwrap();
+        assert_eq!(legacy.assigned_to.as_deref(), Some("node/worker"));
+        assert_eq!(legacy.created_at_unix_ms, 1);
+        smallclaims::store::set_thread_clock(Some(10));
+        seat.store.set_write_clock_at(10).unwrap();
+        apply_source(&seat.store, &canonical_source, "literal-wake-canonical-definition");
+        let b = seat.start("queued", "literal-wake-b");
+        let b_work = SeatQueueFixture::step(&b, "work");
+        smallclaims::store::set_thread_clock(Some(20));
+        seat.store.set_write_clock_at(20).unwrap();
+        // A new generation joins the literal seat at 20, while its old
+        // generation keeps the alias join at 1 for presentation.
+        let revised_source = canonical_source.replace("step \"work\"", "step \"literal\"");
+        apply_source(&seat.store, &revised_source, "literal-wake-revision");
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        let a = seat.store.adopt_mission_revision(
+            &a.id, &revision, "person/requester", "join the literal seat",
+            "literal-wake-adopt",
+        ).unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let a_work = SeatQueueFixture::step(&a, "literal");
+        assert_eq!(a.steps.iter().find(|step| step.subject == a_work).unwrap().created_at_unix_ms, 20);
+        assert_eq!(b.steps.iter().find(|step| step.subject == b_work).unwrap().created_at_unix_ms, 10);
+        assert_eq!(seat.order(), SeatQueueFixture::runs(&[&a, &b]),
+            "presentation still merges the earlier alias join");
+        let expected = SeatQueueFixture::runs(&[&b, &a]);
+        assert_eq!(seat.store.seat_run_order_for_mutation(SEAT).unwrap(), expected);
+        let work = seat.store.work_for_reconcile_all().unwrap();
+        let orders = seat.reconciler.wake_run_orders(
+            &BTreeSet::from([SEAT.to_owned()]), &work,
+        ).unwrap();
+        assert_eq!(orders.get(SEAT), Some(&expected),
+            "deadline order uses only literal joins too");
+        assert_eq!(seat.wake(), Some(b_work.clone()));
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.woken().last(), Some(&b_work),
+            "the actual wake agrees with the literal admission order");
+        seat.work(&b_work, "claim", "literal-wake-claim-b").unwrap();
     }
 
     /// Step 2b: once every member can ask the seat's host, an unchanged working re-stamp stays in

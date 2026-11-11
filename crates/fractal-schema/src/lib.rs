@@ -15,6 +15,7 @@ pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod read_positions;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
@@ -34,6 +35,49 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 pub const SCHEMA_NAME: &str = "st3.v1";
+
+/// Canonicalize an actor used for agent work without changing an explicit actor kind.
+/// Bare names need a host before admission; legacy slash-qualified names need `agent/`.
+pub fn canonical_agent_actor(id: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (kind, name) = id.split_once('/')?;
+    if kind.is_empty() || name.is_empty() {
+        return None;
+    }
+    if matches!(kind, "agent" | "person" | "daemon" | "host" | "plugin") {
+        Some(std::borrow::Cow::Borrowed(id))
+    } else {
+        Some(std::borrow::Cow::Owned(format!("agent/{id}")))
+    }
+}
+
+#[cfg(test)]
+mod canonical_agent_actor_tests {
+    use super::canonical_agent_actor;
+
+    #[test]
+    fn preserves_actor_kinds_and_prefixes_legacy_agent_ids() {
+        for id in ["agent/example/worker", "person/reviewer", "daemon/scheduler"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+        assert_eq!(
+            canonical_agent_actor("example/worker").as_deref(),
+            Some("agent/example/worker")
+        );
+        for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
+            assert!(canonical_agent_actor(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_host_and_plugin_principals() {
+        for id in ["host/example", "plugin/example"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+    }
+}
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
@@ -640,6 +684,9 @@ impl Registry {
         if spec.family == "arrangement" {
             arrangements::owner(subject)?;
         }
+        if spec.family == read_positions::FAMILY {
+            read_positions::owner(subject)?;
+        }
         Ok(spec)
     }
 
@@ -778,6 +825,15 @@ impl Registry {
                 glasses::body_for_read(fields.get("body").unwrap_or(&Value::Null))?;
             }
         }
+        if subject_spec.family == read_positions::FAMILY {
+            if kind != read_positions::KIND {
+                return Err(error(
+                    "claim-write-forbidden",
+                    "a read position requires read-position.advanced",
+                ));
+            }
+            read_positions::validate_fields(subject, fields)?;
+        }
         Ok(spec)
     }
 
@@ -881,6 +937,7 @@ impl Registry {
         }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
+        read_positions::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
         usage_limits::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
@@ -1120,6 +1177,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "read-position",
+            "read-position/person/NAME",
+            "One person's forward-only read positions across conversations.",
+            false,
+        ),
+        (
             "glass",
             "glass/person/NAME/UUID",
             "A private person workspace.",
@@ -1141,6 +1204,12 @@ fn build_registry() -> Registry {
             "loop-run",
             "loop-run/GENERATION/PATH",
             "One bounded loop execution.",
+            false,
+        ),
+        (
+            "objective",
+            "objective/NAME",
+            "A declared objective: an interval over claims, its targets, window and breach response.",
             false,
         ),
         (
@@ -1562,6 +1631,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
                 "lane",
                 "message",
                 "observer",
+                "objective",
                 "mission",
                 "mission-run",
                 "planning-session",
@@ -1588,6 +1658,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::OrdinaryClient,
             Cardinality::Append,
             Some("ordered-memberships"),
+            false,
+            &[],
+        ),
+        (
+            read_positions::KIND,
+            &[read_positions::FAMILY],
+            WritePolicy::OrdinaryClient,
+            Cardinality::Append,
+            Some(read_positions::COLLECTION),
             false,
             &[],
         ),
@@ -1625,6 +1704,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append,
             Some("owned-sets"),
             true,
+            &[],
+        ),
+        (
+            "source.debt.recorded",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
+            "source.debt.closed",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
+            "source.audited",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
             &[],
         ),
         (
@@ -1777,6 +1883,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("step-runs"),
             true,
             &["step"],
+        ),
+        (
+            "program.step",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &["step", "program"],
         ),
         (
             "work.person-asked",
@@ -3171,6 +3286,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("version", integer()), ("action_id", string()), ("action_digest", string())],
         "ordered-membership.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
+        read_positions::KIND => &[("owner", required_reference_to(&["person"])), ("conversation", required_string()), ("at_ms", required_integer())],
         "glass.upserted" => &[
             ("body", object()),
             ("base_revision", string()),
@@ -3186,6 +3302,34 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "owned-set.revised" => &[
             ("revision", required_string()),
             ("body", required_object()),
+        ],
+        "source.debt.recorded" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("repository", required_string()),
+            ("ref", required_string()),
+            ("sha", required_string()),
+            ("verb", required_string()),
+            ("reason", required_string()),
+            ("claim", string()),
+            ("revision", string()),
+            ("request", string()),
+            ("pointers", array()),
+            ("before", any()),
+            ("after", any()),
+        ],
+        "source.debt.closed" => &[
+            ("debt", required_string()),
+            ("set", required_string()),
+            ("outcome", required_string()),
+            ("set_revision", required_string()),
+            ("publisher", any()),
+        ],
+        "source.audited" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("verb", required_string()),
+            ("refusal", required_string()),
         ],
         "mission.published" => &[
             ("revision", string()),
@@ -3323,6 +3467,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claimant", reference()),
             ("claim_incarnation", string()),
             ("claim_expires_at_unix_ms", integer()),
+        ],
+        "program.step" => &[
+            ("key", required_string()),
+            ("status", required_enum(&["started", "completed", "failed"])),
+            ("attempt", required_integer()),
+            ("program", required_string()),
+            ("value", any()),
+            ("error", any()),
+            ("ms", integer()),
+            ("child", string()),
         ],
         "work.person-asked" => &[
             ("run", reference()),
@@ -4902,7 +5056,15 @@ mod tests {
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove(read_positions::KIND).unwrap();
+        current.subjects.remove(read_positions::FAMILY).unwrap();
+        current.subjects.remove("objective").unwrap();
+        current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
+        current.claims.remove("program.step").unwrap();
+        for kind in ["source.debt.recorded", "source.debt.closed", "source.audited"] {
+            current.claims.remove(kind).unwrap();
+        }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

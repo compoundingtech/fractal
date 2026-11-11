@@ -21,9 +21,82 @@ pub use fractal_delivery::graph::{agent_under, observer_spec, parse_execution_in
 
 /// Empty membership is meaningful only on the owned-set route; apply still requires explicit intent.
 pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, FractalError> {
-    let intent = parse_intent_with_owner(source, default_host, None, true, true)?;
+    let (_, intent) = resolve_mission_revision_tokens(source, default_host)?;
     validate_mission_runtimes(&intent, default_host)?;
     Ok(intent)
+}
+
+/// The token a single-shot publication uses where a schedule or subscription pins a mission of
+/// the same bundle: `MISSION@ST_REVISION[MISSION]`. Its revision exists only once the bundle is
+/// parsed, so the token resolves here, to the revision this publication stores.
+pub const REVISION_TOKEN: &str = "@ST_REVISION[";
+
+/// Resolves every `@ST_REVISION[MISSION]` token against the missions the source itself declares,
+/// returning the resolved source and its intent. A mission whose own revision depends on another
+/// token resolves once that token has; a cycle of tokens never settles and is refused.
+pub fn resolve_mission_revision_tokens(
+    source: &str,
+    default_host: &str,
+) -> Result<(String, NormalizedIntent), FractalError> {
+    fn substitute(source: &str, revisions: &BTreeMap<String, String>) -> Result<String, FractalError> {
+        let mut resolved = String::with_capacity(source.len());
+        let mut rest = source;
+        while let Some(start) = rest.find(REVISION_TOKEN) {
+            let after = &rest[start + REVISION_TOKEN.len()..];
+            let end = after.find(']').ok_or_else(|| {
+                FractalError::new("invalid-revision-token", "an ST_REVISION token needs a closing `]`")
+            })?;
+            let mission = after[..end].strip_prefix("mission/").unwrap_or(&after[..end]);
+            crate::mission::validate_mission_id(mission)?;
+            resolved.push_str(&rest[..start]);
+            resolved.push('@');
+            resolved.push_str(revisions.get(mission).map_or(UNRESOLVED_REVISION, String::as_str));
+            rest = &after[end + 1..];
+        }
+        resolved.push_str(rest);
+        Ok(resolved)
+    }
+    const UNRESOLVED_REVISION: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    if !source.contains(REVISION_TOKEN) {
+        return Ok((source.to_owned(), parse_intent_with_owner(source, default_host, None, true, true)?));
+    }
+    let mut revisions = BTreeMap::<String, String>::new();
+    // Each round settles at least one more token, so a source with N distinct tokens settles
+    // within N + 1 parses; one more round without progress is a cycle.
+    let rounds = source.matches(REVISION_TOKEN).count() + 2;
+    for _ in 0..rounds {
+        let resolved = substitute(source, &revisions)?;
+        let intent = parse_intent_with_owner(&resolved, default_host, None, true, true)?;
+        let declared: BTreeMap<&str, &str> = intent
+            .missions
+            .values()
+            .map(|spec| (spec.id.as_str(), spec.revision.as_str()))
+            .collect();
+        let mut next = BTreeMap::new();
+        let mut rest = source;
+        while let Some(start) = rest.find(REVISION_TOKEN) {
+            let after = &rest[start + REVISION_TOKEN.len()..];
+            let end = after.find(']').expect("substitute checked every token");
+            let mission = after[..end].strip_prefix("mission/").unwrap_or(&after[..end]);
+            let revision = declared.get(mission).ok_or_else(|| {
+                FractalError::new(
+                    "unresolved-revision-token",
+                    format!("ST_REVISION[{mission}] names no mission in this publication"),
+                )
+            })?;
+            next.insert(mission.to_owned(), (*revision).to_owned());
+            rest = &after[end + 1..];
+        }
+        if next == revisions {
+            return Ok((resolved, intent));
+        }
+        revisions = next;
+    }
+    Err(FractalError::new(
+        "cyclic-revision-token",
+        "ST_REVISION tokens pin each other in a cycle; no mission revision can settle",
+    ))
 }
 
 /// Each agent a mission declares, in its own declarations, its steps' declarations, or any nested
@@ -97,7 +170,10 @@ fn resolve_node_documents(node: &mut KdlNode, bindings: &BTreeMap<String, String
     let mission = node.name().value() == "mission";
     if let Some(children) = node.children_mut() {
         for child in children.nodes_mut() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 resolve_node_documents(child, bindings);
             }
         }
@@ -307,6 +383,54 @@ fn render_desired_value(value: &Value) -> Result<KdlValue, FractalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_tokens_resolve_to_the_revision_the_same_bundle_stores() {
+        // `weekly` nests a schedule pinning `cycle`, and `daily` pins `weekly`: the chain settles
+        // in dependency order, so `weekly`'s own revision already contains `cycle`'s.
+        let source = r#"version 2
+mission "garden/cycle" state="ready" { goal "Grow"; step "work" { agentless; gate "done" { field "state" "mission/garden/cycle" "is" "ready" } } }
+mission "garden/weekly" state="ready" {
+  goal "Run the cycle weekly"
+  schedule "garden/weekly-cycle" { every "7d"; anchor "2026-01-05T07:00:00Z"; work { mission "garden/cycle@ST_REVISION[garden/cycle]"; workspace "/tmp"; } }
+  step "retire" { agentless; gate "retired" { field "state" "mission/garden/weekly" "is" "retired" } }
+}
+schedule "garden/daily" { every "1d"; anchor "2026-01-05T07:00:00Z"; work { mission "mission/garden/weekly@ST_REVISION[mission/garden/weekly]"; workspace "/tmp"; } }
+"#;
+        let (resolved, intent) = resolve_mission_revision_tokens(source, "node").unwrap();
+        let revision = |id: &str| {
+            intent.missions.values().find(|m| m.id == id).unwrap().revision.clone()
+        };
+        assert!(!resolved.contains("ST_REVISION"));
+        assert!(resolved.contains(&format!("garden/cycle@{}", revision("garden/cycle"))));
+        assert!(resolved.contains(&format!("garden/weekly@{}", revision("garden/weekly"))));
+        // The resolved source is a fixpoint: parsing it again yields the same revisions.
+        let reparsed = parse_intent_with_owner(&resolved, "node", None, true, true).unwrap();
+        assert_eq!(reparsed.missions, intent.missions);
+        assert_eq!(reparsed.subjects, intent.subjects);
+
+        let foreign = "version 2\nschedule \"garden/daily\" { every \"1d\"; anchor \"2026-01-05T07:00:00Z\"; work { mission \"garden/elsewhere@ST_REVISION[garden/elsewhere]\"; workspace \"/tmp\"; } }\n";
+        assert_eq!(
+            resolve_mission_revision_tokens(foreign, "node").unwrap_err().code,
+            "unresolved-revision-token"
+        );
+        let cycle = r#"version 2
+mission "garden/a" state="ready" {
+  goal "A"
+  schedule "garden/a-pins-b" { every "1d"; anchor "2026-01-05T07:00:00Z"; work { mission "garden/b@ST_REVISION[garden/b]"; workspace "/tmp"; } }
+  step "work" { agentless; gate "done" { field "state" "mission/garden/a" "is" "retired" } }
+}
+mission "garden/b" state="ready" {
+  goal "B"
+  schedule "garden/b-pins-a" { every "1d"; anchor "2026-01-05T07:00:00Z"; work { mission "garden/a@ST_REVISION[garden/a]"; workspace "/tmp"; } }
+  step "work" { agentless; gate "done" { field "state" "mission/garden/b" "is" "retired" } }
+}
+"#;
+        assert_eq!(
+            resolve_mission_revision_tokens(cycle, "node").unwrap_err().code,
+            "cyclic-revision-token"
+        );
+    }
 
     #[test]
     fn normalized_agent_tree_round_trips_through_canonical_kdl() {

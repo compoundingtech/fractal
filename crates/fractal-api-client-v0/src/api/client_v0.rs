@@ -7,6 +7,7 @@ use crate::ConversationReadsStore;
 use crate::CustomStore;
 use crate::GlassesStore;
 use crate::ArrangementsStore;
+use crate::ReadPositionsStore;
 use crate::DeclarationsStore;
 use crate::LanesStore;
 use crate::MissionListStore;
@@ -53,6 +54,8 @@ pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
 pub mod quota;
+mod usage_hub;
+pub mod read_positions;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -75,6 +78,8 @@ mod conversation_follow_tests;
 mod launch_detail_tests;
 #[cfg(test)]
 mod mission_history_tests;
+#[cfg(test)]
+mod run_reach_tests;
 #[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
@@ -107,6 +112,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/arrangements/{person_name}/{uuid}/memberships",
             get(arrangements::memberships),
         )
+        .route("/v1/client/read-positions", get(read_positions::list))
         .route("/v1/client/glasses", get(glasses_list))
         .route(
             "/v1/client/glasses/{id}",
@@ -121,6 +127,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/usage", get(usage_period))
         .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
+        .route("/v1/client/usage/quota", get(usage_hub::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -548,8 +555,8 @@ async fn collection_items_with_windows(
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
-            | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships"
+            | "read-positions" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
@@ -578,13 +585,13 @@ async fn collection_items_with_windows(
     if request.collection == "glasses" && (request.person.is_some() || request.actor.is_some()) {
         return Err(validation("glasses select the session person"));
     }
-    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
-        return Err(validation("arrangements select an explicit person, not an actor"));
+    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions") && request.actor.is_some() {
+        return Err(validation("arrangements and read positions select an explicit person, not an actor"));
     }
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
-    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
+    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions")
         || (windows.is_some() && session.transport != "unix")
     {
         Some(if state.store.readers.has_request_reader() {
@@ -624,6 +631,8 @@ async fn collection_items_with_windows(
             }
         }
         Some(person)
+    } else if request.collection == "read-positions" {
+        Some(read_positions::person(current, request.person.as_deref(), false)?)
     } else if matches!(request.collection.as_str(), "attention" | "summary" | "devices") {
         person_filter(session, request.person.as_deref())?
     } else {
@@ -700,6 +709,7 @@ async fn collection_items_with_windows(
                             request.person.as_deref(),
                             false,
                         )?),
+                        "read-positions" => Some(read_positions::person(&current, request.person.as_deref(), false)?),
                         "attention" | "summary" | "devices" => person_filter(&current, request.person.as_deref())?,
                         _ => person.clone(),
                     };
@@ -878,6 +888,10 @@ async fn collection_items_with_windows(
                 let owner_revision = if collection == "arrangements" && subject.is_none() {
                     Some(CollectionRevision::Owner(store.arrangement_inventory_revision(
                         person.as_deref().expect("explicit arrangement owner"))?))
+                } else if collection == "read-positions" {
+                    // Any change to the person's positions, inside the window's rows or not.
+                    Some(CollectionRevision::Owner(store.read_position_revision(
+                        person.as_deref().expect("explicit read-position owner"))?))
                 } else {
                     None
                 };
@@ -932,6 +946,10 @@ async fn collection_items_with_windows(
                             index,
                             None,
                             limit.saturating_add(1),
+                        )?,
+                        "read-positions" => store.read_positions(
+                            person.as_deref().expect("explicit read-position owner"),
+                            index,
                         )?,
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
@@ -1107,6 +1125,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
         "ordered-memberships" => "stream collection/ordered-memberships",
+        "read-positions" => "stream collection/read-positions",
         "summary" => "stream collection/summary",
         "clients" => "stream collection/clients",
         "usage" => "stream collection/usage",
@@ -2477,10 +2496,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
+                    let read_positions_changed = subscriptions.values().any(|s| s.request.collection == "read-positions") && state.store.read_positions_changed(weighed, index).unwrap_or(true);
                     affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
+                        || (read_positions_changed && s.request.collection == "read-positions")
                         || match &claims {
                             Err(_) => true,
                             Ok(claims) => claims.len() >= 10_000
@@ -3321,8 +3342,8 @@ fn mission_resources_filtered(
                             json!({
                                 "id": step.subject,
                                 "title": step.title,
-                                "assignee": step.assigned_to,
-                                "claimant": step.claimant,
+                                "assignee": step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                                "claimant": step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                                 "state": client_work_state(&step.status),
                                 "since": client_timestamp(step.updated_at_unix_ms),
                                 "progress_at": step.progress_at_unix_ms.map(client_timestamp),
@@ -3377,7 +3398,9 @@ fn mission_resources_filtered(
                         });
                     let blocker = run.scheduler_fault.as_ref().map(|reason| json!({
                         "step": run.steps.first().map(|step| &step.subject), "reason": reason, "scope": crate::reconcile::FIRST_READINESS_FAULT_SCOPE,
-                    })).or_else(||
+                    })).or_else(|| run.programs.iter().find_map(|program| program.fault.as_ref().map(|fault| json!({
+                        "step": program.step_run, "reason": fault.reason, "scope": fault.scope,
+                    })))).or_else(||
                         run.steps.iter().find(|step| step.status == "blocked").map(
                             |step| json!({"step": step.subject, "reason": step.blocked_reason}),
                         ));
@@ -3399,12 +3422,13 @@ fn mission_resources_filtered(
                                 let loop_run = run.loops.iter().find(|loop_run| {
                                     loop_run.step_run == step.subject
                                 });
+                                let program = run.programs.iter().find(|program| program.step_run == step.subject);
                                 let wake = step.wake.as_ref().filter(|_| {
                                     !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
                                 }).map(|wake| {
                                     json!({
-                                        "assignee": wake.assignee,
+                                        "assignee": fractal_schema::canonical_agent_actor(&wake.assignee),
                                         "assignee_state": wake.assignee_state,
                                         "incarnation_id": wake.incarnation_id,
                                         "attempts": wake.attempts,
@@ -3419,8 +3443,8 @@ fn mission_resources_filtered(
                                     "title": step.title,
                                     "state": client_work_state(&step.status),
                                     "attempt": step.attempt,
-                                    "assignee": step.assigned_to,
-                                    "claimant": step.claimant,
+                                    "assignee": step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                                    "claimant": step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                                     "agentless": step.agentless,
                                     "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
@@ -3447,6 +3471,27 @@ fn mission_resources_filtered(
                                     value["waits"] = json!(history.waits);
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
+                                }
+                                // Detail reads that enrich the run (`Store::mission_run`) carry
+                                // its program steps' journals.
+                                if let Some(program) = program {
+                                    let journal = &program.journal;
+                                    value["program"] = json!({
+                                        "open_key": journal.open.first(),
+                                        "entries": journal.entries.iter().map(|entry| json!({
+                                            "key": entry.key,
+                                            "status": entry.status,
+                                            "started_at": entry.started_at_unix_ms.map(client_timestamp),
+                                            "ended_at": entry.ended_at_unix_ms.map(client_timestamp),
+                                            "ms": entry.ms,
+                                            "error": entry.error,
+                                            "child": entry.child,
+                                        })).collect::<Vec<_>>(),
+                                        "truncated": journal.truncated,
+                                        "last_entry_at": journal.last_entry_at_unix_ms.map(client_timestamp),
+                                        "stalled_after_ms": program.stalled_after_ms,
+                                        "fault": program.fault.as_ref().map(|fault| json!({"scope": fault.scope, "reason": fault.reason})),
+                                    });
                                 }
                                 if let Some((low, high, samples)) = step_etas.get(&step.step)
                                     .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
@@ -7686,7 +7731,7 @@ fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<
     let target = client_detail_id("step-run", target);
     let work = state
         .store
-        .step_run(&target)
+        .step_run_fenced(&target)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("work `{target}` does not exist")))?;
     if fence.mission_generation.as_deref() != Some(work.generation.as_str())
@@ -7772,6 +7817,8 @@ async fn apply_runtime_control_intent(
             expected_subjects: preview.subject_tokens,
             idempotency_key: format!("{}:runtime-intent", request.idempotency_key),
             actor: Some(actor.to_owned()),
+            program_bundles: Default::default(),
+            force_reason: None,
         }),
     )
     .await?
@@ -8724,16 +8771,20 @@ async fn dispatch_action(
                 .ok_or_else(|| {
                     ApiError::not_found(format!("mission run `{target}` does not exist"))
                 })?;
-            if request.fence.mission_generation.as_deref() != Some(current.generation.as_str()) {
-                return Err(stale("the mission generation fence is stale"));
-            }
+            let expected_generation = request.fence.mission_generation.as_deref()
+                .ok_or_else(|| stale("the mission generation fence is stale"))?;
             let reason = p
                 .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("the mission was cancelled by its requester");
             state
                 .store
-                .request_mission_run_cancellation(&current.subject, reason)
+                .request_mission_run_cancellation_at_generation(
+                    &current.subject,
+                    reason,
+                    Some(expected_generation),
+                    Some(authority_actor.as_str()),
+                )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![current.subject])
@@ -9021,6 +9072,7 @@ async fn dispatch_action(
                 idempotency_key: request.idempotency_key.clone(),
                 reason,
                 host: if action == "agent.resume" { p.get("host").and_then(Value::as_str).map(str::to_owned) } else { None },
+                force: false,
             };
             let fence = super::SuspensionFence {
                 incarnation,
@@ -9775,6 +9827,11 @@ async fn action_inner(
         "arrangement.membership.edit" => Some(arrangements::edit_memberships(&state, &session, &request).await?),
         _ => None,
     };
+    let read_position = if request.action_type == "read-position.advance" {
+        Some(read_positions::advance(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9787,6 +9844,8 @@ async fn action_inner(
         ]
     } else if let Some(claim) = &arrangement_claim {
         vec![claim.subject.clone()]
+    } else if let Some(advanced) = &read_position {
+        vec![advanced.id.clone()]
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9797,6 +9856,10 @@ async fn action_inner(
     }
     if let Some(claim) = arrangement_claim {
         result[if request.action_type == "arrangement.membership.edit" { "membership_revision" } else { "arrangement_revision" }] = json!(claim.id);
+    }
+    if let Some(advanced) = &read_position {
+        // The stored position after the merge, whether or not this advance appended a claim.
+        result["read_position_at"] = json!(advanced.at);
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -16842,7 +16905,7 @@ mission "example/looped" state="ready" {
             .unwrap();
         state
             .store
-            .retire_mission("example/looped", "person/operator", "retire-looped")
+            .retire_mission("example/looped", "person/operator", "retire-looped", None)
             .unwrap();
         let current =
             mission_resources(&state.store, state.store.index().unwrap(), false, None).unwrap();
@@ -17109,7 +17172,7 @@ mission "example/looped" state="ready" {
             let root = tempfile::tempdir().unwrap();
             let state = test_state_named(root.path(), "live-run-node");
             let steps = (0..24).map(|i| format!(
-                "  step \"step-{i:02}\" {{ assigned-to \"agent/worker-{i:02}\" }}\n"
+                "  step \"step-{i:02}\" {{ assigned-to \"agent/live-run-node.worker-{i:02}\" }}\n"
             )).collect::<String>();
             let source = format!(
                 "version 2\nmission \"example/live\" state=\"ready\" {{\n  goal \"Keep live metadata.\"\n  concurrent-runs max=10\n{steps}}}"
