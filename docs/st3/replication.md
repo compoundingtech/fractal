@@ -585,9 +585,11 @@ keeper before printing the final PASS. To check for leaks after any run, use the
 printed command `find "$DELEGATED_CGROUP" -maxdepth 1 -name 'jobs-proof-*' -print`;
 no output means no proof keeper remains beneath that parent.
 Run the proof directly, not beneath an existing non-keeper
-`fractal_test_process.py` supervisor. It refuses that supervisor's environment
-marker before allocating a keeper: an outer subreaper could otherwise kill the
-nested cleanup guardian before it removes the cgroup.
+`fractal_test_process.py` supervisor. Before allocating a keeper, it checks both
+the environment marker and the actual `/proc` ancestor chain's command lines.
+This also rejects marker-free `--scope` guardians; unreadable ancestry fails
+closed. An outer subreaper could otherwise kill the nested cleanup guardian
+before it removes the cgroup.
 Jobs need explicit `enabled = true`, `allowed_classes =
 ["heavy"]` and a real `keeper_cgroups` namespace. This supplies the production
 accept-time pidfd/cgroup recursion guard, not an activation bypass. Submission

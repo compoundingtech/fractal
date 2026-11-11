@@ -34,6 +34,33 @@ if [[ -n ${FRACTAL_TEST_SUPERVISOR:-} && -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]]; 
   exit 2
 fi
 if [[ -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]] || ! python3 "$supervisor" --is-supervised; then
+  # --scope guardians may export no environment marker. Inspect ancestry before
+  # starting our guardian; our own supervised re-exec never enters this branch.
+  python3 - <<'PY'
+import os
+from pathlib import Path
+import sys
+
+pid, seen = os.getppid(), set()
+try:
+    while pid:
+        if pid in seen:
+            raise ValueError("ancestor cycle")
+        seen.add(pid)
+        process = Path("/proc") / str(pid)
+        argv = (process / "cmdline").read_bytes().split(b"\0")
+        if any(os.path.basename(arg) == b"fractal_test_process.py" for arg in argv):
+            print("Refusing a fractal_test_process.py ancestor; run jobs-rolling-upgrade-proof directly.", file=sys.stderr)
+            raise SystemExit(2)
+        stat = (process / "stat").read_text()
+        parent = int(stat.rsplit(")", 1)[1].split()[1])
+        if pid == 1:
+            break
+        pid = parent
+except (OSError, ValueError, IndexError) as error:
+    print(f"Cannot verify unsupervised ancestry ({error}); refusing keeper allocation. Run the proof directly.", file=sys.stderr)
+    raise SystemExit(2)
+PY
   exec python3 "$supervisor" --keeper-cgroup-parent "$cgroup_parent" -- "$0" "${arguments[@]}"
 fi
 # Require a fresh evidence directory; private fleet credentials must never be published.
