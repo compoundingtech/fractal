@@ -2532,11 +2532,25 @@ async fn a_frozen_member_is_not_reported_up() {
     for index in 0..20 {
         a.note(&format!("unsent-{index}")).await;
     }
-    wait_until("a stops counting the frozen b as up", 120, || async {
-        peer_status(&a, "b")["status"] == "last-seen"
-    })
-    .await;
-    let peer = peer_status(&a, "b");
+    // a's status counts envelopes, and a note becomes one when an exchange seals it
+    // (Store::replication_status_sealed: "A batch written since the last exchange counts once it
+    // is sealed"). The exchange a starts as b freezes seals only the notes written by then, and
+    // then hangs on the frozen b until it times out, so the rest count once the next attempt
+    // seals them. An exchange that b answered just before it froze can still be measured once its
+    // response arrives, counting the first notes as local-only rather than added since: count
+    // both.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let peer = loop {
+        let peer = peer_status(&a, "b");
+        if peer["status"] == "last-seen" && unsent(&peer) >= 20 {
+            break peer;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a did not count the frozen b as last-seen with every unsent note: {peer}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert!(
         peer["last_error"]
             .as_str()
@@ -2545,9 +2559,6 @@ async fn a_frozen_member_is_not_reported_up() {
     );
     assert!(peer["last_failure_at_unix_ms"].is_u64(), "{peer}");
     assert_eq!(peer["sync"]["stale"], true, "{peer}");
-    // An exchange that b answered just before it froze can still be measured once its response
-    // arrives, counting the first notes as local-only rather than added since: count both.
-    assert!(unsent(&peer) >= 20, "{peer}");
     let text = a.st_ok(&["replication", "status"]);
     assert!(text.contains("peer\tb\tlast-seen"), "{text}");
     assert!(text.contains("last attempt failed"), "{text}");
