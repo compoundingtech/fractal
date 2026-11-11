@@ -256,55 +256,98 @@ fn repaired_claim_fences_read_only_queries_until_flush_matches_rebuild() {
     assert_eq!(receipt_for_key(&tx, "person/fixture", "repair").unwrap(), receipt);
 }
 
+/// Receipt-level persistence is the idempotency mechanism. A cannot commit
+/// until B's SQLite busy handler proves B tried to reserve under A's write lock.
 #[test]
-fn racing_connections_reserve_one_job_and_return_the_existing_id_to_the_loser() {
+fn contended_connections_persist_one_idempotency_receipt_and_reuse_its_job_id() {
     use fractal_jobs::identity::{IdempotencyDecision, decide_idempotency};
-    use std::{sync::Barrier, time::Duration};
+    use std::{
+        sync::{Condvar, Mutex, mpsc},
+        time::{Duration, Instant},
+    };
+
+    const WAIT: Duration = Duration::from_secs(30);
+    static CONTENTION: (Mutex<(bool, Option<Instant>)>, Condvar) =
+        (Mutex::new((false, None)), Condvar::new());
+
+    fn observe_busy(_attempt: i32) -> bool {
+        let mut state = CONTENTION.0.lock().unwrap();
+        state.0 = true;
+        CONTENTION.1.notify_one();
+        let retry = state.1.is_some_and(|deadline| Instant::now() < deadline);
+        drop(state);
+        if retry {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        retry
+    }
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("jobs.sqlite");
     let mut setup = Connection::open(&path).unwrap();
-    setup.execute_batch(
-        "CREATE TABLE claims(id TEXT PRIMARY KEY,kind TEXT,subject TEXT);
-         CREATE TABLE replica_records(claim_id TEXT,state TEXT);",
-    ).unwrap();
+    setup
+        .execute_batch(
+            "CREATE TABLE claims(id TEXT PRIMARY KEY,kind TEXT,subject TEXT);
+             CREATE TABLE replica_records(claim_id TEXT,state TEXT);",
+        )
+        .unwrap();
     create_schema(&setup).unwrap();
     let id = job_id("person/fixture", "concurrent");
-    let JobRecord::Submitted { identity, .. } = submission(&id, "concurrent") else { unreachable!() };
-    let barrier = Barrier::new(2);
-    let decisions = std::thread::scope(|scope| {
-        let attempts = (0..2).map(|_| {
-            let (path, barrier, identity, id) = (&path, &barrier, &identity, &id);
-            scope.spawn(move || {
-                let mut connection = Connection::open(path).unwrap();
-                connection.busy_timeout(Duration::from_secs(5)).unwrap();
-                barrier.wait();
-                let tx = connection.transaction_with_behavior(
-                    rusqlite::TransactionBehavior::Immediate,
-                ).unwrap();
-                let existing = receipt_for_key(&tx, &identity.requester, &identity.key).unwrap();
-                let decision = decide_idempotency(identity, existing).unwrap();
-                receipts::reserve_receipt(&tx, identity, id).unwrap();
-                tx.commit().unwrap();
-                decision
-            })
-        }).collect::<Vec<_>>();
-        attempts.into_iter().map(|attempt| attempt.join().unwrap()).collect::<Vec<_>>()
+    let JobRecord::Submitted { identity, .. } = submission(&id, "concurrent") else {
+        unreachable!()
+    };
+    *CONTENTION.0.lock().unwrap() = (false, None);
+    let (reserved, start_loser) = mpsc::channel();
+    let (winner, loser) = std::thread::scope(|scope| {
+        let (path, identity, id) = (&path, &identity, &id);
+        let winner = scope.spawn(move || {
+            let mut connection = Connection::open(path).unwrap();
+            connection.busy_timeout(WAIT).unwrap();
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let existing = receipt_for_key(&tx, &identity.requester, &identity.key).unwrap();
+            let decision = decide_idempotency(identity, existing).unwrap();
+            receipts::reserve_receipt(&tx, identity, id).unwrap();
+            reserved.send(()).unwrap();
+            let (state, _) = CONTENTION
+                .1
+                .wait_timeout_while(CONTENTION.0.lock().unwrap(), WAIT, |state| !state.0)
+                .unwrap();
+            assert!(state.0, "B must contend before A releases its write lock");
+            drop(state);
+            tx.commit().unwrap();
+            decision
+        });
+        let loser = scope.spawn(move || {
+            let mut connection = Connection::open(path).unwrap();
+            connection.busy_handler(Some(observe_busy)).unwrap();
+            start_loser.recv_timeout(WAIT).unwrap();
+            CONTENTION.0.lock().unwrap().1 = Some(Instant::now() + WAIT);
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("B retries SQLITE_BUSY for up to 30 seconds");
+            let existing = receipt_for_key(&tx, &identity.requester, &identity.key).unwrap();
+            let decision = decide_idempotency(identity, existing).unwrap();
+            receipts::reserve_receipt(&tx, identity, id).unwrap();
+            tx.commit().unwrap();
+            decision
+        });
+        (winner.join().unwrap(), loser.join().unwrap())
     });
-    assert_eq!(decisions.iter().filter(|decision| {
-        matches!(decision, IdempotencyDecision::NewJob)
-    }).count(), 1);
-    let existing = decisions.iter().find_map(|decision| match decision {
-        IdempotencyDecision::ExistingJob(id) => Some(id),
-        IdempotencyDecision::NewJob => None,
-    }).unwrap();
-    assert_eq!(existing, &id);
+    assert_eq!(winner, IdempotencyDecision::NewJob);
+    assert_eq!(loser, IdempotencyDecision::ExistingJob(id.clone()));
     let tx = setup.transaction().unwrap();
-    let counts: (u64, u64) = tx.query_row(
-        "SELECT count(*),count(DISTINCT job_id) FROM job_receipts WHERE requester=?1 AND key=?2",
-        params![identity.requester, identity.key], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+    let counts: (u64, u64) = tx
+        .query_row(
+            "SELECT count(*),count(DISTINCT job_id) FROM job_receipts WHERE requester=?1 AND key=?2",
+            params![identity.requester, identity.key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(counts, (1, 1));
-    assert_eq!(receipt_for_key(&tx, &identity.requester, &identity.key).unwrap(),
-        Some((identity.request_digest, id)));
+    assert_eq!(
+        receipt_for_key(&tx, &identity.requester, &identity.key).unwrap(),
+        Some((identity.request_digest, id))
+    );
 }
