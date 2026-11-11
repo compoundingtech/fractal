@@ -176,14 +176,15 @@ describe('client-control lifecycle gate', () => {
 
   it.each(['grant_id', 'run_id', 'device', 'session', 'item_id'] as const)('rechecks current authority and embedded grant %s', field => {
     let current: Wire.ClientControlGrant | undefined = grant
-    const gate = makeGate(() => current)
+    const gate = makeGate(id => id === grant.grant_id ? current : undefined)
     gate.acceptResource(started)
     expect(gate.allows(command())).toBe(true)
     const mismatched = { ...grant, [field]: 'other/binding' }
     expect(gate.allows({ ...command(), control_grant: mismatched })).toBe(false)
     current = mismatched
     expect(gate.allows(command())).toBe(false)
-    expect(gate.acceptResource({ ...started, [field]: 'other/binding', sequence: 2 })).not.toBe('activate')
+    expect(gate.acceptResource({ ...started, [field]: 'other/binding', sequence: 2 }))
+      .toBe(field === 'item_id' ? 'ignore-item-mismatch' : 'refused-binding')
     current = undefined
     expect(gate.allows(command())).toBe(false)
   })

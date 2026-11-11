@@ -102,7 +102,11 @@ describe('web consumption of the repository client-control golden file', () => {
     for (const changed of bindings) {
       // These pass the generated String schemas: refusal must come from the canonicalizer.
       expect(() => decodeBinding(changed)).not.toThrow()
-      const canonicalization = clientResultCanonicalBytes(encodeBinding(decodeBinding(changed)))
+      const encoded = encodeBinding(decodeBinding(changed))
+      const canonicalization = clientResultCanonicalBytes({
+        ...encoded,
+        visible_state: { ...encoded.visible_state, visible_item_ids: [...encoded.visible_state.visible_item_ids] },
+      })
       await expect(canonicalization).rejects.toBeInstanceOf(ClientResultCanonicalizationError)
       await expect(canonicalization).rejects.toMatchObject({ code: 'invalid-unicode' })
       await expect(verifyClientResultBinding(changed, vector.signature_p1363_base64url, key)).resolves.toBe(false)

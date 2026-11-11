@@ -164,6 +164,8 @@ it.each(['decision', 'feedback'] as const)(
       ...alert, alert: true, conversation_id: alert.requester_id, conversation_ids: [alert.requester_id],
       request: { ...alert.request!, type: requestType },
     } as Native.Attention
+    const agentRef = shown.requester_id
+    if (agentRef === undefined) throw new Error('The D-5 fixture must name its requesting agent')
     // Record at the real source answer-port seam used by LiveAgentAlerts (and later useAlertAnswers).
     // No data-hook/module mock: the provider, live controller and answer renderer are real.
     const actionRequests: Parameters<AlertActionPort['act']>[0][] = []
@@ -190,7 +192,7 @@ it.each(['decision', 'feedback'] as const)(
     cleanup = () => { act(() => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals() }
     await act(async () => root.render(
       <DataSourceProvider source={source} registry={registry}>
-        <LiveAgentAlerts agentRef={shown.requester_id} />
+        <LiveAgentAlerts agentRef={agentRef} />
       </DataSourceProvider>,
     ))
     const merge = button(host, 'Merge')!
