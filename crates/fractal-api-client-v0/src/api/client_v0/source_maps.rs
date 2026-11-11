@@ -168,6 +168,6 @@ mod tests {
         // Stored, but named by no map of this revision; and a named file under an unmapped revision.
         assert_eq!(text(&state, &["read.declarations"], OTHER, "r1").await.unwrap_err().status, StatusCode::NOT_FOUND);
         assert_eq!(text(&state, &["read.declarations"], NAMED, "unmapped").await.unwrap_err().status, StatusCode::NOT_FOUND);
-        assert_eq!(text(&state, &["read.declarations"], "NOT-A-HASH", "r1").await.unwrap_err().status, StatusCode::BAD_REQUEST);
+        assert_eq!(text(&state, &["read.declarations"], "NOT-A-HASH", "r1").await.unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
