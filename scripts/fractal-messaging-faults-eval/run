@@ -237,11 +237,18 @@ class Node:
         self.binary.parent.mkdir(parents=True)
         give_bytes(binary, self.binary)
         self.endpoint = self.root / "run/st3.sock"
+        # Managed harness launch resolves the provider through the runtime profile's
+        # wrapper directory; point it at this node's fixture omp, never an installed one.
+        runtime_profile = self.root / "runtime-profile.json"
+        runtime_profile.write_text(json.dumps({
+            "personas": {"launch": {"generalist": {"harnessBin": str(self.root / "bin")}}},
+        }))
         self.env = {**env, "HOME": str(self.root / "home"),
                     "XDG_STATE_HOME": str(self.root / "home/state"),
                     "XDG_CONFIG_HOME": str(self.root / "home/config"),
                     "ST3_ENDPOINT": str(self.endpoint), "ST3_DAEMON_WAIT": "0",
                     "ST3_TEST_ADMITTED_REPORTS": str(self.root / "admitted-reports.jsonl"),
+                    "AGENT_RUNTIME_PROFILE": str(runtime_profile), "AGENT_PERSONA": "generalist",
                     "PATH": f"{self.root / 'bin'}:{env['PATH']}"}
         # Only inherit an actual user manager. A synthetic runtime directory makes
         # systemd-run attempt scopes on runners that have no user bus.

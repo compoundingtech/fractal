@@ -1275,19 +1275,38 @@ const SUN_PATH_BYTES: usize = 104;
 const SUN_PATH_BYTES: usize = 108;
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction.
+/// The legacy name a Fractal socket is also served under, in the same directory.
+fn legacy_socket_name(socket: &Path) -> Option<&'static str> {
+    match socket.file_name().and_then(|name| name.to_str()) {
+        Some("fractal.sock") => Some("st3.sock"),
+        Some("fractal-client.sock") => Some("st3-client.sock"),
+        _ => None,
+    }
+}
+
 /// Preserve existing instances whose socket directory only fits the shorter legacy name.
 pub fn socket_binding_path(socket: &Path) -> std::borrow::Cow<'_, Path> {
-    if socket.as_os_str().as_bytes().len() >= SUN_PATH_BYTES {
-        let legacy = match socket.file_name().and_then(|name| name.to_str()) {
-            Some("fractal.sock") => Some("st3.sock"),
-            Some("fractal-client.sock") => Some("st3-client.sock"),
-            _ => None,
-        };
-        if let Some(name) = legacy {
-            return std::borrow::Cow::Owned(socket.with_file_name(name));
-        }
+    if socket.as_os_str().as_bytes().len() >= SUN_PATH_BYTES
+        && let Some(name) = legacy_socket_name(socket)
+    {
+        return std::borrow::Cow::Owned(socket.with_file_name(name));
     }
     std::borrow::Cow::Borrowed(socket)
+}
+
+/// What serving `socket` under its legacy name leaves beside it: the legacy socket, or the alias
+/// symlink to `socket`, and that name's reservation lock, which no daemon unlinks while another
+/// could hold it. A daemon that did not shut down cleanly leaves the alias too. Uninstall removes
+/// them with `socket`.
+pub fn legacy_socket_files(socket: &Path) -> Vec<PathBuf> {
+    let Some(name) = legacy_socket_name(socket) else {
+        return Vec::new();
+    };
+    // Spelled through the same directory as `socket`, so an instance's paths stay inside its root.
+    let legacy = socket.with_file_name(name);
+    let mut lock = legacy.clone().into_os_string();
+    lock.push(".reservation.lock");
+    vec![legacy, PathBuf::from(lock)]
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
 
@@ -1928,6 +1947,20 @@ sekrets_profile = "nathan/daemon-gh"
         );
         assert!(error.contains("--client-gateway-socket"), "{error}");
         assert!(error.contains("XDG_RUNTIME_DIR"), "{error}");
+    }
+
+    #[test]
+    fn legacy_socket_files_name_the_alias_and_its_reservation_beside_the_socket() {
+        let run = Path::new("/run/user/1000");
+        assert_eq!(
+            legacy_socket_files(&run.join("fractal.sock")),
+            [run.join("st3.sock"), run.join("st3.sock.reservation.lock")]
+        );
+        assert_eq!(
+            legacy_socket_files(&run.join("fractal-client.sock")),
+            [run.join("st3-client.sock"), run.join("st3-client.sock.reservation.lock")]
+        );
+        assert!(legacy_socket_files(&run.join("custom.sock")).is_empty());
     }
 
     #[test]

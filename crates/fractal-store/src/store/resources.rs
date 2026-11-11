@@ -175,6 +175,9 @@ pub fn merge_observation(
                 return;
             }
             let initial = current.is_empty();
+            if initial {
+                current.insert("receipt_only".into(), Value::Bool(true));
+            }
             for name in ["repository", "number", "url", "opened_by", "opened_by_run"] {
                 if (initial || matches!(name, "opened_by" | "opened_by_run")) && let Some(value) = incoming.get(name) {
                     current.entry(name).or_insert_with(|| value.clone());
@@ -234,6 +237,11 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
             Some(fields) => serde_json::from_value(fields)?,
         };
         let mut facts = resource_facts(&fields).map_err(anyhow::Error::new)?;
+        if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener)
+            && fields.get("attribution_only") == Some(&Value::Bool(true))
+        {
+            facts.insert("receipt_only".into(), Value::Bool(true));
+        }
         if fields.get("kind").and_then(Value::as_str).is_some_and(super::carries_opener) {
             let first_opener = transaction.query_row(
                 /* sqlite-large-value: allow-for-now lv-h4c329b1274fe owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &format!("SELECT body FROM claims WHERE subject=?1 AND kind='resource.observed'
@@ -541,10 +549,15 @@ impl Store {
         };
         let upper = prefix_successor(&prefix).unwrap_or_default();
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
+        // Old global operations and new observation operations share the event subject.
+        // Select its canonical first observation before applying the listing limit.
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h05417f7bc8ab owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT subject, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
-             WHERE subject>=?1 AND subject<?2 AND kind='github.event'",
-        )?;
+             WHERE subject>=?1 AND subject<?2 AND kind='github.event'
+               AND id=(SELECT request.id FROM claims request
+                       WHERE request.subject=claims.subject AND request.kind='github.event'
+                       ORDER BY CANONICAL_ASC(request) LIMIT 1)",
+        ))?;
         let mut events = statement
             .query_map(params![prefix, upper], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
@@ -570,7 +583,9 @@ impl Store {
                 })))
             })
             .collect::<Vec<_>>();
-        events.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        events.sort_by(|(left_at, left), (right_at, right)| {
+            right_at.cmp(left_at).then_with(|| left["subject"].as_str().cmp(&right["subject"].as_str()))
+        });
         events.truncate(limit);
         Ok(events.into_iter().map(|(_, event)| event).collect())
     }
