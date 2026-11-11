@@ -81,6 +81,7 @@ impl Daemon {
             notify: Arc::new(Notify::new()),
             event_notify: self.event_notify.clone(),
             node: "restart-node".into(),
+            runtime_dir: self.root.join("daemon"),
             state_dir: self.root.join("daemon"),
             pty_root: self.root.join("pty"),
             pty_binary: PathBuf::from("pty"),

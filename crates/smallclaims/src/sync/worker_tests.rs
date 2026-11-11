@@ -105,6 +105,41 @@ async fn leave_authority_socket_is_private_and_reserves_its_address_until_exit()
     let (_reservation, _listener) = bind_leave_state_socket(root.path()).unwrap();
 }
 
+#[tokio::test]
+async fn leave_state_socket_ignores_long_state_directory() {
+    let runtime = tempfile::tempdir().unwrap();
+    let config = WorkerConfig {
+        node: "node".into(),
+        fleet_id: "fleet".into(),
+        secret_file: PathBuf::from("secret"),
+        state_dir: PathBuf::from(format!("/{}", "s".repeat(120))),
+        runtime_dir: runtime.path().to_path_buf(),
+        peers: Vec::new(),
+        peer_listen: None,
+        fleet: None,
+    };
+    assert!(config.state_dir.as_os_str().len() > 120);
+    assert_eq!(
+        leave_state_socket(&config.runtime_dir),
+        runtime.path().join("leave-state.sock")
+    );
+    let (_reservation, _listener) = bind_leave_state_socket(&config.runtime_dir).unwrap();
+}
+
+#[tokio::test]
+async fn leave_state_socket_bind_error_names_path_length_and_limit() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("s".repeat(120));
+    let path = leave_state_socket(&runtime);
+    let error = bind_leave_state_socket(&runtime).unwrap_err().to_string();
+    assert!(error.contains(&path.display().to_string()), "{error}");
+    assert!(error.contains(&format!("{} bytes", path.as_os_str().len())), "{error}");
+    #[cfg(target_os = "macos")]
+    assert!(error.contains("platform limit 103 bytes"), "{error}");
+    #[cfg(not(target_os = "macos"))]
+    assert!(error.contains("platform limit 107 bytes"), "{error}");
+}
+
 /// A store on the plain runtime.
 fn plain_memory(origin: &str) -> anyhow::Result<Store> {
     Store::open_memory(origin, Arc::new(Plain))

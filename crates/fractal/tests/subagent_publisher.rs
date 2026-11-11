@@ -34,6 +34,7 @@ async fn serve(
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "publisher-test".into(),
+        runtime_dir: root.into(),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),

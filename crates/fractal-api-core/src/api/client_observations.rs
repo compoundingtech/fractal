@@ -641,6 +641,7 @@ mod tests {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0u64).0,
             node: "observations-test".into(),
+            runtime_dir: root.path().into(),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: root.path().join("unused"),
