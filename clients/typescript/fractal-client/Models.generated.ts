@@ -1855,6 +1855,7 @@ export type ErrorCode = (
   | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
+  | "set-managed-subject"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -4509,6 +4510,7 @@ export type Work = ResourceHeader & {
   | "human"
   | "mixed"
   | "run"
+  | "program"
   | null
 ;
   generation_id: Id;
@@ -4520,6 +4522,7 @@ export type Work = ResourceHeader & {
   nudged_at_unix_ms?: number | null;
   path: string;
   person_answers?: Array<PersonAnswerRecord>;
+  program?: (WorkProgram | null);
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
@@ -4539,6 +4542,14 @@ export type WorkLabel = {
   since: Timestamp;
   state: WorkState;
   title?: string | null;
+};
+
+export type WorkProgram = {
+  child?: string | null;
+  last_entry_at_unix_ms?: number | null;
+  open_key?: string | null;
+  open_since_unix_ms?: number | null;
+  stalled_after_ms: number;
 };
 
 export type WorkState = 

@@ -7,8 +7,8 @@
 //! person, agent or daemon starter holds everything in free mode except what the rules restrict,
 //! so each write is also decided by the rules for that starter.
 //!
-//! A write outside the authority is audited (`rule.audited` on `rule/run-authority`) or refused
-//! (`run-authority-denied`), as the daemon's `[programs] authority` says.
+//! A write outside the authority is refused (`run-authority-denied`), or audited (`rule.audited`
+//! on `rule/run-authority`) when the daemon's `[programs] authority` says `audit`.
 use super::*;
 use crate::config::RunAuthorityMode;
 use crate::model::{AuthorityGrant, AuthorityVerb};
@@ -20,7 +20,8 @@ pub const AUDIT_RULE: &str = "run-authority";
 /// Run starters nest at most this deep; a deeper chain grants nothing.
 const MAX_STARTERS: usize = 32;
 
-static ENFORCE: AtomicBool = AtomicBool::new(false);
+/// Enforced until the daemon's config says otherwise, as `[programs] authority` defaults.
+static ENFORCE: AtomicBool = AtomicBool::new(true);
 
 /// Set what a write outside a run's authority does, from the daemon's `[programs] authority`.
 pub fn set_run_authority_mode(mode: RunAuthorityMode) {
