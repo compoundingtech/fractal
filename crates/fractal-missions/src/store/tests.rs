@@ -9505,7 +9505,7 @@ fn mission_retirement_refuses_a_pending_reopened_run() {
     assert_eq!(target.mission_run(&failed.id).unwrap().unwrap().status, "failed");
     let before = target.index().unwrap();
     let refused = target.retire_mission(
-        &failed.mission, "person/operator", "retire-pending-reopen",
+        &failed.mission, "person/operator", "retire-pending-reopen", None,
     ).unwrap_err();
     assert_eq!(refused.code, "mission-has-active-run");
     assert!(refused.message.contains(&failed.subject));
@@ -9518,7 +9518,7 @@ fn mission_retirement_refuses_a_pending_reopened_run() {
     target.project_replication_backlog().unwrap();
     assert_eq!(target.mission_run(&failed.id).unwrap().unwrap().generation, reopened.generation);
     assert_eq!(
-        target.retire_mission(&failed.mission, "person/operator", "retire-after-drain").unwrap_err().code,
+        target.retire_mission(&failed.mission, "person/operator", "retire-after-drain", None).unwrap_err().code,
         "mission-has-active-run",
     );
 }
