@@ -377,9 +377,7 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const reentered = performance.now()
   do {
     await expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull()
-    const frame = Promise.withResolvers<void>()
-    requestAnimationFrame(() => frame.resolve())
-    await frame.promise
+    await new Promise<void>((resolve: () => void) => requestAnimationFrame(() => resolve()))
   } while (performance.now() - reentered < 700)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(queuedDialog()).toBeNull())
