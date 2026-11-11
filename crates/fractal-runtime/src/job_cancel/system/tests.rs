@@ -25,11 +25,22 @@ fn missing_launch_fence_and_wrong_generation_have_no_tree_effects() {
 #[test]
 #[ignore = "native Linux gate/fork test; run explicitly"]
 fn launch_abort_remains_fenced_across_failed_retirement_and_retry() {
+    launch_abort_retry(false);
+}
+
+#[test]
+#[ignore = "native Linux gate/fork test with a fake cgroup tree; run explicitly"]
+fn attached_launch_retires_tree_before_reaping_and_retries_without_signals() {
+    launch_abort_retry(true);
+}
+
+fn launch_abort_retry(attached: bool) {
     let root = tempfile::tempdir().unwrap();
     let marker = root.path().join("executed");
     let mut command = Command::new("touch");
     command.arg(&marker);
     let mut child = GatedChild::spawn(command).unwrap();
+    if attached { child.mark_attached(); }
     let job = LocatedJob { directory: root.path().join("J"), hierarchy: "/fixture".into() };
     fs::create_dir(&job.directory).unwrap();
     fs::write(job.directory.join("cgroup.events"), "populated 1\n").unwrap();
@@ -42,8 +53,10 @@ fn launch_abort_remains_fenced_across_failed_retirement_and_retry() {
         };
         assert_eq!(stop.stop(Duration::ZERO, Duration::ZERO), Err(StopUncertain::EmptyTimeout));
     }
-    assert!(child.is_aborted_before_release());
-    assert!(!child.is_gated());
+    assert_eq!(child.is_aborted_before_release(), !attached);
+    assert_eq!(child.is_gated(), attached);
+    assert_eq!(fs::read_to_string(job.directory.join("cgroup.kill")).unwrap(), "1");
+    if attached { assert!(child.abort().is_err()); }
     assert!(child.release().is_err());
     // Emulate external whole-tree cleanup after the first timed-out attempt.
     // A retry must reach retirement and confirm absence, not reject a lost gate.
@@ -61,6 +74,7 @@ fn launch_abort_remains_fenced_across_failed_retirement_and_retry() {
             RecoveryUsage::CountersUnavailable(fractal_jobs::launch::CountersUnavailable::CgroupVanished)));
     }
     assert!(child.release().is_err());
+    assert!(child.is_aborted_before_release());
     assert!(!marker.exists());
 }
 

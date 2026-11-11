@@ -34,7 +34,9 @@ impl StopEffects for CgroupStop<'_> {
         match &mut self.holder {
             StopHolder::Launching(child) => {
                 let child = child.as_deref_mut().ok_or(StopUncertain::LaunchFenceUnavailable)?;
-                if !child.is_aborted_before_release() {
+                if child.is_attached() {
+                    child.fence_attached_abort().map_err(|_| StopUncertain::LaunchFenceUnavailable)?;
+                } else if !child.is_aborted_before_release() {
                     if !child.is_gated() { return Err(StopUncertain::LaunchFenceUnavailable); }
                     child.abort().map_err(|_| StopUncertain::LaunchFenceUnavailable)?;
                 }
@@ -47,7 +49,13 @@ impl StopEffects for CgroupStop<'_> {
             }
         }
         // Natural holder exit never bypasses whole-tree kill, empty, sample, remove.
-        cgroup::stop_and_sample_timed(&self.job.directory, self.host, escalation)
+        let usage = cgroup::stop_and_sample_timed(&self.job.directory, self.host, escalation)?;
+        if let StopHolder::Launching(Some(child)) = &mut self.holder
+            && child.is_attached()
+        {
+            child.reap_after_retirement().map_err(|_| StopUncertain::LaunchFenceUnavailable)?;
+        }
+        Ok(usage)
     }
 }
 
