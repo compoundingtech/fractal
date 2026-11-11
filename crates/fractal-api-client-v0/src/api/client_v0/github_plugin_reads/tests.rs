@@ -499,7 +499,7 @@ async fn an_unresolvable_relocation_is_unavailable() {
 }
 
 fn pat_auth() -> crate::github_http::GithubAuth {
-    crate::github_http::GithubAuth::Local { token: Arc::new("fixture-pat".into()), cache: None }
+    crate::github_http::GithubAuth::test("fixture-pat")
 }
 
 fn installation(root: &std::path::Path, id: u64) -> crate::github_http::GithubAuth {
