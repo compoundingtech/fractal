@@ -753,24 +753,92 @@ export const sourceMap = ({
     fragmentSteps(top, closure, out)
 
     const traced = readsByFile.get(subject.file) ?? []
+    const rootId = fileId(root)
+    /** The read's outermost call site in the declaration module. */
+    const siteOf = (read: SourceRead) => read.stack.findLast((point) => point.path === subject.file)
+    const within = (span: Span, point: SourcePoint): boolean => {
+      const after = point.line > span.start.line || (point.line === span.start.line && point.column >= span.start.column)
+      const before = point.line < span.end.line || (point.line === span.end.line && point.column < span.end.column)
+      return after === true && before === true
+    }
+    /**
+     * The reads authored at one call site: inside `site` (the node's own span in the declaration
+     * module, else its nearest ancestor's) when any are, else anywhere (a module constant read
+     * before the declaration). Several sites — a helper called twice — are ambiguous.
+     */
+    const bound = (candidates: readonly SourceRead[], site: Span | undefined): readonly SourceRead[] => {
+      const inside = candidates.filter((candidate) => {
+        const point = siteOf(candidate)
+        return site !== undefined && point !== undefined && within(site, point) === true
+      })
+      const groups = new Map<string, SourceRead[]>()
+      for (const candidate of inside.length > 0 ? inside : candidates) {
+        const point = siteOf(candidate)
+        const key = point === undefined ? '' : `${point.line}:${point.column}`
+        groups.set(key, [...(groups.get(key) ?? []), candidate])
+      }
+      return groups.size === 1 ? [...groups.values()][0]! : []
+    }
+    /** The innermost object literal in the declaration module around `point`. */
+    const objectAround = (point: SourcePoint): Span | undefined => {
+      const offset = offsetAt(root.starts, point)
+      let object: AstNode | undefined
+      walk(root.program, (node) => {
+        if (node.type !== 'ObjectExpression' || node.start > offset || offset > node.end) return
+        if (object === undefined || node.start >= object.start) object = node
+      })
+      return object === undefined ? undefined : spanOf(root, object)
+    }
+    /**
+     * A keyed node a helper builds (`reviewStep('code', 'one')`): the one call in the declaration
+     * module that passes its key as a literal argument bounds the reads authored for it.
+     */
+    const keyCall = (node: KdlNode): Span | undefined => {
+      if (keyedNodes[node.name] !== true || node.arg === undefined) return undefined
+      const calls: AstNode[] = []
+      walk(root.program, (candidate) => {
+        if (candidate.type !== 'CallExpression') return
+        if (list(candidate, 'arguments').some((argument) => argument?.type === 'Literal' && argument.value === node.arg)) calls.push(candidate)
+      })
+      return calls.length === 1 ? spanOf(root, calls[0]!) : undefined
+    }
     const nodes: SourceMapNode[] = []
-    const visit = (node: KdlNode, enclosed: boolean, reference: boolean) => {
+    const visit = (node: KdlNode, enclosed: boolean, reference: boolean, outer: Span | undefined) => {
       kdlNodes++
       const declaredStep = node.name === 'step' && reference === false
       if (declaredStep === true) declaredSteps++
       let hit = out.get(node.path)
-      const read =
+      const site = hit !== undefined && hit.span.file === rootId ? hit.span : (keyCall(node) ?? outer)
+      // A keyed node's span is its declaration; a traced read of its key only adds frames.
+      const keyed = keyedNodes[node.name] === true
+      const candidates =
         node.arg === undefined || (hit !== undefined && hit.literal === node.arg)
-          ? undefined
-          : traced.find((candidate) => candidate.value === node.arg)
+          ? []
+          : bound(traced.filter((candidate) => candidate.value === node.arg), site)
+      const distinct = new Set(candidates.map((candidate) => `${candidate.at.path}:${candidate.at.start.line}:${candidate.at.start.column}`))
+      let read = distinct.size === 1 ? candidates[0] : undefined
+      // A value copied out of another traced literal (`{ push: rules.push }`): follow it to its author.
+      for (let depth = 0; read !== undefined && read.at.path === subject.file && depth < traced.length; depth++) {
+        const { at: from, value } = read
+        const copied = traced.find((candidate) => {
+          const point = siteOf(candidate)
+          return candidate !== read && candidate.value === value && point !== undefined &&
+            within({ file: rootId, start: from.start, end: from.end }, point) === true
+        })
+        if (copied === undefined) break
+        read = copied
+      }
       if (read !== undefined) {
         const frames = readFrames(read, subject.file)
         const value = frames.at(-1)
-        if (value !== undefined && value.role === 'value') {
+        const readSite = siteOf(read)
+        // Unlocated by the AST, a keyed node is the object literal that reads its key.
+        const declared = keyed === false ? undefined : (hit?.span ?? (readSite === undefined ? undefined : objectAround(readSite)))
+        if (value !== undefined && value.role === 'value' && (keyed === false || declared !== undefined)) {
           tracedNodes++
           if (frames.some((frame) => frame.role === 'helper') === true) helperFramedNodes++
           hit = {
-            span: { file: value.file, start: value.start, end: value.end },
+            span: declared ?? { file: value.file, start: value.start, end: value.end },
             frames: [...(hit?.frames ?? []).filter((frame) => frame.role !== 'value'), ...frames],
           }
         }
@@ -783,15 +851,18 @@ export const sourceMap = ({
           kid.children.forEach(collect)
         }
         node.children.forEach(collect)
-        const beneath = traced.find(
-          (candidate) => values.has(candidate.value) === true && candidate.stack.some((point) => point.path !== subject.file),
-        )
+        const beneath = bound(
+          traced.filter(
+            (candidate) => values.has(candidate.value) === true && candidate.stack.some((point) => point.path !== subject.file),
+          ),
+          site,
+        )[0]
         const helper = beneath?.stack.find((point) => point.path !== subject.file)
         const helperFile = helper === undefined ? undefined : load(helper.path)
         const call = helper === undefined || helperFile === undefined ? undefined : stepCallAround(helperFile, helper)
-        const site = beneath?.stack.findLast((point) => point.path === subject.file)
-        if (call !== undefined && site !== undefined && helperFile !== undefined) {
-          const declaration = pointFrame(site, 'declaration')!
+        const declarationSite = beneath === undefined ? undefined : siteOf(beneath)
+        if (call !== undefined && declarationSite !== undefined && helperFile !== undefined) {
+          const declaration = pointFrame(declarationSite, 'declaration')!
           hit = {
             span: spanOf(helperFile, call),
             frames: [declaration, { ...spanOf(helperFile, call), role: 'helper', precision: 'exact' }],
@@ -817,10 +888,10 @@ export const sourceMap = ({
       } else if (enclosed === true) enclosedNodes++
       else orphanNodes++
       for (const kid of node.children) {
-        visit(kid, enclosed === true || hit !== undefined, reference === true || node.name === 'depends-on')
+        visit(kid, enclosed === true || hit !== undefined, reference === true || node.name === 'depends-on', site)
       }
     }
-    visit(top, false, false)
+    visit(top, false, false, undefined)
     maps[subject.subject] = {
       declaration: fileId(root),
       inputs: closure.map(fileId).toSorted((a, b) => a - b),

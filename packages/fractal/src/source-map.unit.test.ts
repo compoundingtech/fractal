@@ -185,6 +185,51 @@ describe('sourceMap', () => {
     expect(kdl[goal.kdlLines[0] - 1]!.trim()).toBe('goal "Review the change against the conventions."')
   })
 
+  it('binds each traced read to its own call site and keeps keyed nodes on their declaration', () => {
+    const root = fixture({
+      ...files,
+      'team/twice/mission.ts': [
+        `import { defineMission } from '${treeUrl}'`,
+        `import { step } from '${modUrl}'`,
+        "import owner from '../owner/agent.ts'",
+        "import { reviewStep } from '../steps.ts'",
+        '',
+        "const ids = { first: 'first', second: 'second' }",
+        '',
+        'export default defineMission({',
+        '  meta: import.meta,',
+        '  intent: {',
+        "    state: 'ready',",
+        '    reportTo: owner,',
+        "    goal: 'Review twice.',",
+        '    steps: [',
+        "      reviewStep('code', 'one'),",
+        "      reviewStep('code', 'two'),",
+        "      step({ id: ids.second, assignedTo: { id: 'team/owner' }, goal: 'Second.' }),",
+        '    ],',
+        '  },',
+        '})',
+        '',
+      ].join('\n'),
+    })
+    const { subjects, reads } = render(root, 'trace')
+    const { document } = sourceMap({ parse: parseSync, subjects, reads, locate: locateIn(root) })
+    const mission = 'mission/team/twice'
+    const lines = (path: string) =>
+      node(document, mission, path)!.frames!.map((frame) => `${document.files[frame.file]!.path}:${frame.start.line}`)
+
+    // A helper called twice: each step's goal names its own call, not the first one.
+    expect(lines('mission[team/twice]/step[one]/goal[0]')).toEqual(['team/twice/mission.ts:15', 'team/steps.ts:5', 'team/policy.ts:2'])
+    expect(lines('mission[team/twice]/step[two]/goal[0]')).toEqual(['team/twice/mission.ts:16', 'team/steps.ts:5', 'team/policy.ts:2'])
+    expect(lines('mission[team/twice]/step[one]')[0]).toBe('team/twice/mission.ts:15')
+    expect(lines('mission[team/twice]/step[two]')[0]).toBe('team/twice/mission.ts:16')
+
+    // A step whose id is read from a constant stays spanned by its `step({…})` declaration.
+    const second = node(document, mission, 'mission[team/twice]/step[second]')!
+    expect(at(document, second.span)).toBe('team/twice/mission.ts:17:12')
+    expect(roles(second.frames)).toContain('value')
+  })
+
   it('keys agents, missions, steps and gates by name and other nodes by sibling index', () => {
     const root = fixture({
       'team/ship/mission.ts': [
