@@ -13894,7 +13894,7 @@ mission "differential" state="ready" {
         }).unwrap();
         let grant_id = "claim/private-doctor-grant";
         let origin = "private-doctor-origin";
-        let issuer = "person/private-doctor-issuer";
+        let issuer = "person/owner";
         state.store.connection.write().execute(
             "INSERT INTO assistant_grant_pending
              (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
@@ -14066,18 +14066,18 @@ mission "differential" state="ready" {
     async fn accountable_root_declaration_read_exposes_typed_person() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let source = "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+        let source = "version 2\nagent \"example/root\" { accountable \"person/owner\"; command \"true\"; }";
         let intent = crate::graph::parse_intent(source, "terminal-test").unwrap();
         let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
-        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/avery")).unwrap();
+        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/owner")).unwrap();
         let value = agent_declaration(State(state),
-            Extension(ClientSession::local(Some("person/avery")).unwrap()),
+            Extension(ClientSession::local(Some("person/owner")).unwrap()),
             AxumPath("example/root".into()), Query(AgentDeclarationQuery {
                 revision: None, show_env_values: false,
             })).await.unwrap().0;
-        assert_eq!(value["accountable"], "person/avery");
+        assert_eq!(value["accountable"], "person/owner");
         let decoded: fractal_client::AgentDeclaration = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
+        assert_eq!(decoded.accountable.as_deref(), Some("person/owner"));
     }
 
     #[tokio::test]
