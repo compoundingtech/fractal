@@ -1,6 +1,7 @@
 //! Inactive contract: no runtime consumer, I/O, policy defaults or fleet limits.
 //! Requests declare resources, not authority. Host capability/grant checks are external.
 #![forbid(unsafe_code)]
+pub mod scope;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, num::NonZeroU32};
 
