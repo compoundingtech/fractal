@@ -119,6 +119,18 @@ indexed seeks bound non-prose-history work, not encoded key size. The existing
 numeric accepted-time ordering, local arrival order and snapshot fences during reference
 conversion. The indexes add no new value representation.
 
+### Source map texts and claims
+
+`fractal_store::store::source_maps` owns `lv-hefc9d72adcbd`: a set publication's source map
+stages each newly named file text in `local_blobs` (hash TEXT, bytes BLOB, size INTEGER), the
+same staged representation as `put_blob`, and the `source.mapped` claim that names it promotes
+it into `blobs` in the same transaction. The producer caps a file at 1 MiB and a map at 32 MiB;
+those limits are the producer's own and are not a general bound. It also owns
+`lv-hcd0064dd968e`, the reader that selects the canonical first `source.mapped` claim body of
+one `subject@revision`. Both keep the existing inline blob and claim-body representations; the
+eventual chunked or referenced blob format must keep sha256 identity and claim-referenced
+replication and retention.
+
 ### Client operation admission inventory (PR #5921)
 
 The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,
