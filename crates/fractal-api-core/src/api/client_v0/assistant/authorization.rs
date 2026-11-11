@@ -113,7 +113,7 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
                        AxumPath(id): AxumPath<String>, Json(request): Json<ReadTrustRequest>)
     -> Result<Json<Value>, ApiError> {
     let issuer = trusted_issuer(&state, &session)?;
-    if request.api_version != CLIENT_API_VERSION { return Err(validation("invalid API version")); }
+    if !super::super::super::wire_names::api_version(&request.api_version) { return Err(validation("invalid API version")); }
     let trust = ReadTrust {issuer:request.issuer,key_id:request.key_id,
         attestor_public_key:request.attestor_public_key,shim_public_key:request.shim_public_key,
         default_response_bytes:request.default_response_bytes,max_response_bytes:request.max_response_bytes};

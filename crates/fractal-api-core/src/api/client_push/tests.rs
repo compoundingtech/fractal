@@ -83,7 +83,7 @@ async fn send(
 }
 
 fn assert_local_envelope(response: &Value, status: Value) {
-    assert_eq!(response["api_version"], "st3.client.v0");
+    assert_eq!(response["api_version"], "fractal.client.v0");
     assert!(response["request_id"].is_string());
     assert_eq!(response["value"], status);
     for field in ["snapshot", "claims", "receipt", "token"] {
