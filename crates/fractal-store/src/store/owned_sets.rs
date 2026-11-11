@@ -1651,12 +1651,17 @@ pub fn plan_tx(
                 adoptions.insert(s.clone(), tokens.clone());
             }
         }
-        // Terminal retirement outranks the source: an agent retired ad hoc stays a retired member,
-        // and every publication still declaring it reports that instead of failing.
+        // Terminal retirement outranks the source: an agent retired ad hoc becomes a retired
+        // member through its stopped form, and every publication still declaring it reports that
+        // instead of failing. A member the set already keeps retired keeps its reference.
         if s.starts_with("agent/")
             && let Some(retirement) = retirements::record(transaction, s, None)?
         {
-            intent.subjects.remove(s);
+            if old.as_ref().is_some_and(|v| v.receipt.retired.contains_key(s)) {
+                intent.subjects.remove(s);
+            } else {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+            }
             changes.insert(s.clone(), "retired".into());
             effects.insert(s.clone(), format!(
                 "keep terminally retired by {}: {}; drop it from the source",
@@ -2038,6 +2043,10 @@ pub fn commit_tx(
     let mut members = BTreeMap::new();
     let mut retired = plan.retired.clone();
     for (s, change) in &plan.preview.changes {
+        // A member the set already keeps retired publishes nothing and keeps its reference.
+        if change == "retired" && !plan.intent.subjects.contains_key(s) {
+            continue;
+        }
         let member = if s.starts_with("mission/") {
             transaction
                 .query_row(
