@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve typed SQLite contention when operation-conflict discovery borrows the projection writer.",
+  "replay": {"status": "none", "detail": "Operation conflict replay and bounded graph repair rules are unchanged."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No claim admission or canonical projection rule changes."},
+  "compatibility": {"status": "none", "detail": "No claim or wire format changes."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "changed", "detail": "SQLite BUSY or LOCKED during discovery remains a typed retryable projection failure, preserving committed health and deferred work instead of surfacing an internal peer error."},
+  "downtime": {"status": "unknown", "detail": "No production timing measurement is claimed."}
+}

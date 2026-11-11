@@ -84,6 +84,8 @@ pub mod mailbox_changes;
 pub mod mailbox_lease;
 #[cfg(test)]
 pub mod message_send_tests;
+#[cfg(test)]
+mod operation_conflict_tests;
 // Qualification only: no production caller or Source registration.
 #[cfg(test)]
 pub mod message_point_qualification;
@@ -6899,7 +6901,9 @@ impl Store {
         let connection = self.readers.get();
         connection
             .prepare_cached(
-                "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE(h.unavailable,
+                "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
+                    AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
+                         OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || requested.value, 'operation-conflict-naming-name:' || names.identity)))),h.unavailable,
                     (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=COALESCE(names.identity,requested.value) AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
@@ -8870,7 +8874,9 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
     let row = connection
         .prepare_cached(
             "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
-                 CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE(h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                 CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
+                    AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
+                         OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || ?1, 'operation-conflict-naming-name:' || requested.identity)))),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
              FROM (SELECT COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1) AS identity) requested
@@ -11121,7 +11127,9 @@ pub fn rebuild_planning_tx(transaction: &Transaction<'_>) -> Result<()> {
 
 fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<String>) -> Result<()> {
     holds::rebuilt(claim_ids.len());
-    for id in claim_ids {
+    holds::fold_progress(0, claim_ids.len());
+    let total = claim_ids.len();
+    for (position, id) in claim_ids.into_iter().enumerate() {
         let claim = claim_by_id_tx(transaction, &id)?
             .context("a planning claim disappeared during replay")?;
         // A claim admission accepted but this projection cannot read, such as one from a faulty
@@ -11131,6 +11139,7 @@ fn project_planning_claims_tx(transaction: &Transaction<'_>, claim_ids: Vec<Stri
                 FractalError::new("unprojectable-planning-claim", format!("{error:#}"))
             })
         })?;
+        holds::fold_progress(position + 1, total);
     }
     Ok(())
 }
@@ -11270,7 +11279,9 @@ pub fn rebuild_planning_session_tx(transaction: &Transaction<'_>, session: &str)
     )?;
     let claim_ids = statement
         .query_map([format!("planning-session/{session}")], |row| row.get::<_, String>(0))?
+        .take(if CONFLICT_REFOLD.get() { OPERATION_CONFLICT_REFOLD_CLAIMS + 1 } else { usize::MAX })
         .collect::<Result<Vec<_>, _>>()?;
+    check_conflict_refold_size(claim_ids.len()).map_err(anyhow::Error::new)?;
     drop(statement);
     // Only this session's claims are decided again, so only their quarantine is forgotten.
     for id in &claim_ids {
@@ -17105,6 +17116,7 @@ fn claims_in_replay_order_tx(
     for subject in subjects {
         for claim in by_subject.query_map([subject], row).map_err(internal)? {
             found.push(claim.map_err(internal)?);
+            check_conflict_refold_size(found.len())?;
         }
     }
     let mut by_range = transaction
@@ -17119,6 +17131,7 @@ fn claims_in_replay_order_tx(
             .map_err(internal)?
         {
             found.push(claim.map_err(internal)?);
+            check_conflict_refold_size(found.len())?;
         }
     }
     found.sort_by(|left, right| left.1.cmp(&right.1));
@@ -17238,8 +17251,10 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
         .map_err(internal)?
         .execute(/* sqlite-large-value: allow-for-now lv-h090e8ca62948 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [String::from_utf8(claim_ids).map_err(internal)?])
         .map_err(internal)?;
+    holds::fold_progress(0, claims.len() * 3);
     for pass in 0..3 {
-        for claim in &claims {
+        for (position, claim) in claims.iter().enumerate() {
+            holds::fold_progress(pass * claims.len() + position + 1, claims.len() * 3);
             let included = match pass {
                 0 => claim.kind == "mission-run.created",
                 1 => {
@@ -17337,7 +17352,8 @@ fn rebuild_base_aggregate_tx(
         Some(&[kind]),
     )?;
     holds::rebuilt(claims.len());
-    for claim in &claims {
+    holds::fold_progress(0, claims.len());
+    for (position, claim) in claims.iter().enumerate() {
         project_claim_isolated_tx(transaction, "projection:base", claim, || {
             match claim.kind.as_str() {
                 "intent.desired" => {
@@ -17349,6 +17365,7 @@ fn rebuild_base_aggregate_tx(
                 _ => select_replicated_mission(transaction, claim, claim.store_index),
             }
         })?;
+        holds::fold_progress(position + 1, claims.len());
     }
     if let Aggregate::Desired(subject) = aggregate {
         retirements::project_subject(transaction, subject)?;
@@ -17375,6 +17392,72 @@ fn incremental_claim_error(error: FractalError, claim: &ClaimRecord, stage: &'st
         None => error,
     }
 }
+// A conflict receipt may repair one small subject, never silently borrow the writer for an
+// arbitrarily large history. 4096 covers sixteen normal projection pages; larger histories
+// retain their previous projection and an explicit degraded diagnostic.
+const OPERATION_CONFLICT_REFOLD_CLAIMS: usize = 4096;
+thread_local! {
+    static CONFLICT_REFOLD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn check_conflict_refold_size(claims: usize) -> Result<(), FractalError> {
+    if claims > OPERATION_CONFLICT_REFOLD_CLAIMS && CONFLICT_REFOLD.get() {
+        return Err(FractalError::new("operation-conflict-refold-limit",
+            "affected projection exceeds the bounded operation-conflict refold"));
+    }
+    Ok(())
+}
+
+struct OperationConflictDiagnostic {
+    error: FractalError,
+    // Full operation and subject identities; never derive a durable key from display context.
+    health_key: String,
+}
+
+fn refold_after_operation_conflict(
+    transaction: &Transaction<'_>,
+    diagnostics: &mut [OperationConflictDiagnostic],
+    affected: &[usize],
+    project: impl FnOnce() -> Result<(), FractalError>,
+) -> Result<(), FractalError> {
+    if affected.is_empty() { return project(); }
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h58880ffb5371 owner=fractal_store::store TODO=trace-statement-and-value-representation */ "SAVEPOINT operation_conflict_refold").map_err(internal)?;
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) { CONFLICT_REFOLD.set(self.0); }
+    }
+    let _reset = Reset(CONFLICT_REFOLD.replace(true));
+    match project() {
+        Ok(()) => {
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h53bf80630f0f owner=fractal_store::store TODO=trace-statement-and-value-representation */ "RELEASE operation_conflict_refold").map_err(internal)?;
+            for &index in affected {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-he57da1ef4545 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='indeterminate',error_code='operation-conflict',error_message=?1 WHERE aggregate=?2",
+                    params![serde_json::to_string(&diagnostics[index].error.details).map_err(internal)?,
+                        diagnostics[index].health_key],
+                ).map_err(internal)?;
+            }
+            Ok(())
+        },
+        Err(error) => {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hc33c6f16bf1d owner=fractal_store::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO operation_conflict_refold; RELEASE operation_conflict_refold",
+            ).map_err(internal)?;
+            for &index in affected {
+                let diagnostic = &mut diagnostics[index];
+                diagnostic.error.details.insert("projection_degraded".into(), json!(true));
+                diagnostic.error.details.insert("refold_error_code".into(), json!(error.code));
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h3b9353d94be0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale', error_code=?1, error_message=?2
+                     WHERE aggregate=?3",
+                    params![error.code, json!({"conflict":diagnostic.error.details,"repair_error":error.message}).to_string(),
+                        diagnostic.health_key],
+                ).map_err(internal)?;
+            }
+            Ok(())
+        }
+    }
+}
 
 /// Retain the guard reason for the always-on log at the actual fallback boundary.
 fn replay_needed(reason: &'static str) -> IncrementalProjection {
@@ -17392,7 +17475,31 @@ pub fn try_project_all_simple_replication_tx(
         origin,
         current_index_tx(transaction).map_err(internal)?,
     )
-    .map(|decision| decision == IncrementalProjection::Projected)
+    .map(|decision| matches!(decision, IncrementalProjection::Projected | IncrementalProjection::ProjectedWithContext { .. }))
+}
+
+// A whole-log replay is unsafe while this log contains conflicting operations. Keep the
+// independent replay requirement visible, but let bounded receipt move past it. Repair is
+// explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
+fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, require_discovery: bool, reason: &str) -> Result<bool, FractalError> {
+    let conflict: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
+        [], |row| row.get(0),
+    ).map_err(internal)?;
+    // Receipt requires proof for the entire admitted replay range, not merely this chunk.
+    // An interrupted generation rescan can lie below an already-advanced graph frontier.
+    let unproven = require_discovery && !smallclaims::store::operation_conflict_discovery_valid(
+        tx, current_index_tx(tx).map_err(internal)?,
+    ).map_err(internal)?;
+    if conflict || unproven {
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-ha8b524108446 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES ('projection:deferred-replay','stale','operation-conflict-replay-deferred',?1,?2)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![reason, now_ms().to_string()],
+        ).map_err(internal)?;
+    }
+    Ok(conflict || unproven)
 }
 
 // Pending rebuilds are projection state, committed with the chunk that skips their claims.
@@ -17574,7 +17681,8 @@ pub fn try_project_simple_replication_tx(
     origin: &str,
     through: u64,
 ) -> Result<IncrementalProjection, FractalError> {
-    try_project_simple_replication_inner_tx(transaction, origin, through, false)
+    // Direct callers retain their replay decisions; receipt requires reader discovery.
+    try_project_simple_replication_inner_tx(transaction, origin, through, false, false)
 }
 
 /// A standalone ask is projected atomically by its local writer. Unrelated claims'
@@ -17621,6 +17729,7 @@ fn try_project_simple_replication_inner_tx(
     origin: &str,
     through: u64,
     defer_runs: bool,
+    require_discovery: bool,
 ) -> Result<IncrementalProjection, FractalError> {
     let health: Option<(String, u64, Option<String>)> = transaction
         .query_row(
@@ -17630,13 +17739,15 @@ fn try_project_simple_replication_inner_tx(
         )
         .optional()
         .map_err(internal)?;
-    let Some((status, frontier, error_code)) = health else {
-        return Ok(replay_needed("missing-health"));
+    let (status, frontier, error_code) = match health {
+        Some(health) => health,
+        None if defer_replay_for_operation_conflict(transaction, require_discovery, "missing-health")? => ("healthy".to_owned(), 0, None),
+        None => return Ok(replay_needed("missing-health")),
     };
     if status != "healthy"
         && !(status == "stale" && error_code.as_deref() == Some("pending-projection-work")
             && projection_work_pending_tx(transaction)?)
-    {
+        && !defer_replay_for_operation_conflict(transaction, require_discovery, "unhealthy-projection")? {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17752,6 +17863,7 @@ fn try_project_simple_replication_inner_tx(
             mark_dirty(&mut dirty, part, "local claim");
         }
     }
+    let mut unsupported_conflict_subjects = BTreeSet::new();
     for claim in &claims {
         let local_ask_applied = local_standalone_ask_applied_tx(transaction, claim, origin)
             .map_err(|error| incremental_claim_error(error, claim, "local-ask-projection"))?;
@@ -17816,6 +17928,26 @@ fn try_project_simple_replication_inner_tx(
             } else {
                 "non-incremental-kind"
             };
+            if reason == "non-incremental-kind"
+                && let Some((operation_id, digest)) = operation_parts(&claim.body) {
+                let conflict: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1
+                        AND (request_digest<>?2 OR state='conflict'))
+                     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+                        WHERE json_extract(body,'$._operation.id')=?1
+                          AND json_extract(body,'$._operation.request_digest')<>?2
+                          AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
+                    params![operation_id, digest], |row| row.get(0),
+                ).map_err(internal)?;
+                if conflict {
+                    unsupported_conflict_subjects.insert(claim.subject.clone());
+                    continue;
+                }
+            }
+            if defer_replay_for_operation_conflict(transaction, require_discovery, reason)? {
+                unsupported_conflict_subjects.insert(claim.subject.clone());
+                continue;
+            }
             crate::profile::note(&format!("replay: {reason}"));
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason,
@@ -18001,10 +18133,14 @@ fn try_project_simple_replication_inner_tx(
             }
         }
     }
-    // Event-only claims and message sends reconcile ambiguous receipts from that
-    // operation's indexed history, using the full replay's reducer. Structural
-    // kinds retain the full replay guard for ambiguous IDs.
+    // Registry conflicts use the same keyed reducer as replay. Graph effects still fold all
+    // claims in canonical order, independently of which request the registry names.
+    let mut conflict_diagnostics = Vec::new();
+    let mut aggregate_conflicts = BTreeMap::<Aggregate, Vec<usize>>::new();
+    let mut planning_conflicts = BTreeMap::<String, Vec<usize>>::new();
     let mut reconciled_operations = BTreeSet::new();
+    let mut naming_conflict = None;
+    let mut naming_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -18021,21 +18157,18 @@ fn try_project_simple_replication_inner_tx(
         if repaired {
             continue;
         }
+        let mut current = operation_tx(transaction, operation_id).map_err(|error| {
+            incremental_claim_error(internal(error), claim, "operation-registry")
+        })?;
+        // The graph-neutral inline path precedes bounded graph repair. A mixed operation
+        // still needs its graph effects repaired even when this incoming claim is neutral.
         let graph_neutral = !replay_projects_kind(&claim.kind);
         if graph_neutral && reconciled_operations.contains(operation_id) {
             continue;
         }
-        let stored_operation = operation_tx(transaction, operation_id).map_err(|error| {
-            incremental_claim_error(internal(error), claim, "operation-registry")
-        })?;
-        let conflict = stored_operation.as_ref().is_some_and(|(digest, _, state)| {
-            digest.as_str() != request_digest || state != "active"
-        });
-        // A checkpoint can leave only tombstones, with no operations row. Before
-        // folding either case, inspect only this operation's indexed history:
-        // a structural claim sharing the key needs its projections replayed too.
-        if conflict || (graph_neutral && stored_operation.is_none()) {
-            let neutral_history = graph_neutral && (|| -> rusqlite::Result<bool> {
+        if graph_neutral && current.as_ref().is_none_or(|(digest, _, state)|
+            digest != request_digest || state != "active") {
+            let neutral_history = (|| -> rusqlite::Result<bool> {
                 let mut statement = transaction.prepare_cached(
                     "SELECT kind FROM claims INDEXED BY claims_operation_index
                      WHERE json_extract(body, '$._operation.id')=?1
@@ -18049,14 +18182,10 @@ fn try_project_simple_replication_inner_tx(
                     let kind = kind.as_str().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(0, kind.data_type(), Box::new(error))
                     })?;
-                    if replay_projects_kind(kind) {
-                        return Ok(false);
-                    }
+                    if replay_projects_kind(kind) { return Ok(false); }
                 }
                 Ok(true)
-            })().map_err(|error| {
-                incremental_claim_error(internal(error), claim, "operation-registry")
-            })?;
+            })().map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
             if neutral_history {
                 repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                     incremental_claim_error(internal(error), claim, "operation-registry")
@@ -18064,22 +18193,87 @@ fn try_project_simple_replication_inner_tx(
                 reconciled_operations.insert(operation_id.to_owned());
                 continue;
             }
-            let (stored_digest, state) = stored_operation.as_ref()
-                .map(|(digest, _, state)| (digest.as_str(), state.as_str()))
-                .unwrap_or(("", "missing"));
-            crate::profile::note("replay: operation-conflict");
-            return Ok(IncrementalProjection::ReplayWithContext {
-                reason: "operation-conflict",
-                details: incremental_claim_error(FractalError::new("operation-conflict",
-                    "operation digest differs or registry state is not active"), claim,
-                    "operation-registry").with_detail("projection_error", format!(
-                        "operation registry refuses incoming claim: digest_matches={}; stored state {}", stored_digest == request_digest, state.chars().take(32).collect::<String>()
-                    )).details,
-            });
+        }
+        if current.is_none() {
+            register_operation_tx(transaction, claim).map_err(internal)?;
+            current = operation_tx(transaction, operation_id).map_err(internal)?;
+            if current.as_ref().is_none_or(|(_, _, state)| state == "active") {
+                continue;
+            }
+            // A checkpoint-only receipt supplies the conflicting predecessor, not the
+            // newly retained claim the registry now necessarily names.
+            let previous: String = transaction.query_row(
+                "SELECT id FROM checkpoint_claims WHERE operation_id=?1 AND request_digest<>?2
+                   AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+                 ORDER BY request_digest,id LIMIT 1", params![operation_id, request_digest], |row| row.get(0),
+            ).map_err(internal)?;
+            if let Some((_, canonical, _)) = &mut current { *canonical = previous; }
+        }
+        if let Some((stored_digest, previous_claim_id, state)) = current
+            && (stored_digest != request_digest || state != "active")
+        {
+            holds::stage("operation-conflict", || -> anyhow::Result<()> {
+                let replaced: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
+                    [&previous_claim_id], |row| row.get(0),
+                )?;
+                if replaced {
+                    // Explicit record repair can remove the row's summarized receipt.
+                    repair_operations_tx(transaction, &[operation_id.to_owned()])?;
+                } else {
+                    register_operation_tx(transaction, claim)?;
+                }
+                Ok(())
+            }).map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
+            let canonical_claim_id = operation_tx(transaction, operation_id)
+                .map_err(internal)?.map(|(_, id, _)| id);
+            let mut diagnostic = incremental_claim_error(
+                FractalError::new("operation-conflict", "conflicting operation reconciled canonically without replay"),
+                claim, "operation-registry",
+            ).with_detail("previous_claim_id", previous_claim_id)
+             .with_detail("canonical_claim_id", canonical_claim_id);
+            if unsupported_conflict_subjects.contains(&claim.subject) {
+                diagnostic.details.insert("projection_degraded".into(), json!(true));
+                diagnostic.details.insert("refold_error_code".into(), json!("operation-conflict-no-bounded-refold"));
+            }
+            let health_key = format!("projection:operation-conflict:{}", json!([operation_id, claim.subject]));
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hdacd188e0574 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+                 VALUES (?1,?2,?3,?4,?5)
+                 ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status,error_code=excluded.error_code,
+                    error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms
+                 WHERE projection_health.status<>'stale'",
+                params![health_key,
+                    if unsupported_conflict_subjects.contains(&claim.subject) { "stale" } else { "indeterminate" },
+                    if unsupported_conflict_subjects.contains(&claim.subject) { "operation-conflict-no-bounded-refold" } else { "operation-conflict" },
+                    serde_json::to_string(&diagnostic.details).map_err(internal)?, now_ms().to_string()],
+            ).map_err(internal)?;
+            let index = conflict_diagnostics.len();
+            if identities::operation_touches_naming(transaction, operation_id).map_err(internal)? {
+                naming_conflict = Some(index);
+                naming_operations.insert(operation_id.to_owned());
+            }
+            if let Some(session) = claim.subject.strip_prefix("planning-session/") {
+                planning_conflicts.entry(session.to_owned()).or_default().push(index);
+            } else if replay_projects_kind(&claim.kind)
+                && !unsupported_conflict_subjects.contains(&claim.subject)
+                && let Some(aggregate) = aggregate_of_tx(transaction, claim)? {
+                aggregate_conflicts.entry(aggregate.clone()).or_default().push(index);
+                mark_dirty(&mut dirty, aggregate, "operation conflict canonical refold");
+            }
+            conflict_diagnostics.push(OperationConflictDiagnostic { error: diagnostic, health_key });
+            continue;
         }
         register_operation_tx(transaction, claim).map_err(|error| {
             incremental_claim_error(internal(error), claim, "operation-registry")
         })?;
+    }
+    if let Some(index) = naming_conflict
+        && !identities::refold_operation_conflict(transaction, &conflict_diagnostics[index].error.details, &naming_operations)
+            .map_err(internal)? {
+        let details = &mut conflict_diagnostics[index].error.details;
+        details.insert("projection_degraded".into(), json!(true));
+        details.insert("refold_error_code".into(), json!("operation-conflict-naming-refold-limit"));
     }
     let mut latest_work_by_subject = BTreeMap::new();
     for claim in &work_claims {
@@ -18123,6 +18317,12 @@ fn try_project_simple_replication_inner_tx(
     }
     for part in covered_parts {
         dirty.remove(&part);
+        if let Aggregate::RunPart(top) = &part
+            && let Some(root) = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?
+            && let Some(affected) = aggregate_conflicts.remove(&part)
+        {
+            aggregate_conflicts.entry(Aggregate::RunTree(root)).or_default().extend(affected);
+        }
     }
     for claim in &claims {
         insert_event(
@@ -18145,6 +18345,9 @@ fn try_project_simple_replication_inner_tx(
     // A claim is left to its aggregate's rebuild when that aggregate is dirty, and left waiting
     // when it is about a run tree that nothing has created yet.
     let mut in_dirty = |claim: &ClaimRecord| -> Result<bool, FractalError> {
+        if unsupported_conflict_subjects.contains(&claim.subject) {
+            return Ok(true);
+        }
         if Store::simple_replication_kind(&claim.kind) && !claim.kind.starts_with("work.") {
             return Ok(false);
         }
@@ -18236,7 +18439,10 @@ fn try_project_simple_replication_inner_tx(
         .partition(|aggregate| matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)));
     for aggregate in bases {
         holds::stage("rebuild-base", || {
-            rebuild_base_aggregate_tx(transaction, aggregate)
+            refold_after_operation_conflict(transaction, &mut conflict_diagnostics,
+                aggregate_conflicts.get(aggregate).map_or(&[], Vec::as_slice), || {
+                rebuild_base_aggregate_tx(transaction, aggregate)
+            })
         })
         .map_err(|error| {
             let subject = match aggregate {
@@ -18255,7 +18461,9 @@ fn try_project_simple_replication_inner_tx(
             .map_err(internal)?;
     }
     for aggregate in trees {
-        if defer_runs {
+        // Conflict diagnostics and the savepoint/cap belong to this receipt, not the
+        // generic final-drain queue. Fold those runs bounded here; defer ordinary work.
+        if defer_runs && !aggregate_conflicts.contains_key(aggregate) {
             let value = serde_json::to_string(aggregate).map_err(internal)?;
             transaction.execute(/* sqlite-large-value: allow-for-now lv-h9138a3691eef owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 params![pending_run_rebuild_key(aggregate)?, value]).map_err(internal)?;
@@ -18263,11 +18471,17 @@ fn try_project_simple_replication_inner_tx(
         }
         let (rebuilt, root) = match aggregate {
             Aggregate::RunTree(root) => (
-                holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
+                holds::stage("rebuild-tree", || refold_after_operation_conflict(
+                    transaction, &mut conflict_diagnostics,
+                    aggregate_conflicts.get(aggregate).map_or(&[], Vec::as_slice),
+                    || rebuild_run_tree_tx(transaction, root))),
                 root,
             ),
             Aggregate::RunPart(top) => (
-                holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top)),
+                holds::stage("rebuild-part", || refold_after_operation_conflict(
+                    transaction, &mut conflict_diagnostics,
+                    aggregate_conflicts.get(aggregate).map_or(&[], Vec::as_slice),
+                    || rebuild_run_part_tx(transaction, top))),
                 top,
             ),
             _ => continue,
@@ -18285,8 +18499,16 @@ fn try_project_simple_replication_inner_tx(
     match planning_sessions {
         Some(sessions) => {
             for session in sessions {
+                if unsupported_conflict_subjects.contains(&format!("planning-session/{session}")) {
+                    continue;
+                }
                 holds::stage("rebuild-planning-session", || {
-                    rebuild_planning_session_tx(transaction, session)
+                    refold_after_operation_conflict(transaction, &mut conflict_diagnostics,
+                        planning_conflicts.get(session).map_or(&[], Vec::as_slice), || {
+                        rebuild_planning_session_tx(transaction, session).map_err(|error| {
+                            error.downcast::<FractalError>().unwrap_or_else(internal)
+                        })
+                    })
                 })
                 .map_err(|error| {
                     internal(error)
@@ -18295,12 +18517,37 @@ fn try_project_simple_replication_inner_tx(
                 })?;
             }
         }
+        None if !unsupported_conflict_subjects.is_empty() => {},
         None => holds::stage("rebuild-planning", || rebuild_planning_tx(transaction))
             .map_err(|error| internal(error).with_detail("projection_stage", "planning-rebuild"))?,
     }
-    owned_sets::project_tx(transaction)
+    // A later receipt must not implicitly repair a set excluded by an earlier chunk.
+    let mut excluded = transaction.prepare(
+        "SELECT aggregate FROM projection_health INDEXED BY projection_health_degraded_operation_subject WHERE status='stale'
+         AND error_code='operation-conflict-no-bounded-refold'
+         AND aggregate GLOB 'projection:operation-conflict:*'",
+    ).map_err(internal)?;
+    for key in excluded.query_map([], |row| row.get::<_, String>(0)).map_err(internal)? {
+        let key = key.map_err(internal)?;
+        if let Some(identity) = key.strip_prefix("projection:operation-conflict:")
+            && let Ok((_, subject)) = serde_json::from_str::<(String, String)>(identity) {
+            unsupported_conflict_subjects.insert(subject);
+        }
+    }
+    drop(excluded);
+    owned_sets::project_excluding_tx(transaction, &unsupported_conflict_subjects)
         .map_err(|error| error.with_detail("projection_stage", "owned-set-project"))?;
-    Ok(IncrementalProjection::Projected)
+    // Prefer a degraded subject's identifiers over an unrelated later event-only conflict.
+    let diagnostic = conflict_diagnostics.iter().rposition(|diagnostic|
+        diagnostic.error.details.get("projection_degraded").and_then(Value::as_bool) == Some(true))
+        .or_else(|| conflict_diagnostics.len().checked_sub(1));
+    Ok(match diagnostic {
+        Some(index) => {
+            let diagnostic = conflict_diagnostics.swap_remove(index).error;
+            IncrementalProjection::ProjectedWithContext { code: diagnostic.code, details: diagnostic.details }
+        },
+        None => IncrementalProjection::Projected,
+    })
 }
 
 /// The graph tables a replay derives from claims alone, children before the tables their
@@ -18532,6 +18779,10 @@ pub fn project_claim_isolated_tx(
             transaction
                 .execute_batch(/* sqlite-large-value: allow-for-now lv-h0dbb3a5ec63d owner=fractal_store::store TODO=trace-statement-and-value-representation */ "ROLLBACK TO project_claim; RELEASE project_claim")
                 .map_err(internal)?;
+            // A bounded aggregate refold must be atomic, not a partial replay with holes.
+            if CONFLICT_REFOLD.get() {
+                return Err(error);
+            }
             transaction
                 .execute(
                     /* sqlite-large-value: allow-for-now lv-ha5591425e84e owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, error_code, error_message, updated_at_unix_ms)
