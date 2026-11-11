@@ -89,7 +89,7 @@ impl Store {
         let current = source_maps::current_revision(&connection, subject)?;
         // Claim subjects are `<subject>@<revision>`; `A` follows `@`, so this range is exactly them.
         let mut statement = connection
-            .prepare(&smallclaims::store::canonical_sql(
+            .prepare(/* sqlite-large-value: allow-for-now lv-he9d5580678ac owner=fractal_store::store::source_index TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical_sql(
                 "SELECT subject, body, accepted_at_unix_ms FROM claims
                  WHERE subject>=?1 AND subject<?2 AND kind=?3 ORDER BY CANONICAL_ASC(claims)",
             ))
@@ -127,11 +127,13 @@ impl Store {
     pub fn source_where(&self, path: &str, repository: Option<&str>, line: Option<u32>) -> Result<Where, FractalError> {
         let connection = self.readers.get();
         let mut live: Vec<(String, String)> = Vec::new();
-        for sql in [
-            "SELECT subject, revision FROM desired WHERE kind='agent'",
-            "SELECT 'mission/'||mission_id, revision FROM mission_definitions WHERE state<>'retired'",
-        ] {
-            let mut statement = connection.prepare(sql).map_err(internal)?;
+        let mut agents = connection
+            .prepare("SELECT subject, revision FROM desired WHERE kind='agent'")
+            .map_err(internal)?;
+        let mut missions = connection
+            .prepare("SELECT 'mission/'||mission_id, revision FROM mission_definitions WHERE state<>'retired'")
+            .map_err(internal)?;
+        for statement in [&mut agents, &mut missions] {
             let rows = statement
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(internal)?;
@@ -139,6 +141,7 @@ impl Store {
                 live.push(row.map_err(internal)?);
             }
         }
+        drop((agents, missions));
         let mut claims = Vec::new();
         for (subject, revision) in live {
             if let Some(fields) = read(&connection, &subject, &revision)? {
