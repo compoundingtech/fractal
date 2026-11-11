@@ -200,11 +200,14 @@ fn graph_neutral_operation_conflicts_match_replay_in_both_orders_and_after_check
     let exchanges = sources.iter().map(|source| {
         source.export_replication_exchange(FLEET, &ReplicationInventory::default()).unwrap()
     }).collect::<Vec<_>>();
+    assert!(exchanges.iter().all(|exchange| !exchange.envelopes.is_empty()));
     for checkpointed in [false, true] {
         for order in [[0, 1], [1, 0]] {
             let store = Store::open_memory("target").unwrap();
             store.bind_fleet(FLEET).unwrap();
             store.project_replication_backlog().unwrap();
+            let context = format!("order={order:?} checkpointed={checkpointed}");
+            let mut admitted = [false; 2];
             for (position, index) in order.into_iter().enumerate() {
                 if checkpointed && position == 1 {
                     let previous = &claims[order[0]];
@@ -223,20 +226,38 @@ fn graph_neutral_operation_conflicts_match_replay_in_both_orders_and_after_check
                 }
                 let before = FULL_REPLAYS.with(std::cell::Cell::get);
                 store.receive_replication_exchange(&claims[index].origin, FLEET, &exchanges[index]).unwrap();
+                // Receiving stores envelopes; admission materializes their claims.
+                store.validate_replication_backlog().unwrap();
+                assert!(store.claim_by_id(&claims[index].id).unwrap().is_some(),
+                    "{context} position={position}: incoming claim must be admitted");
+                admitted[index] = true;
+                let prior_state = operation_tx(&store.readers.get(), operation).unwrap()
+                    .map(|(_, _, state)| state);
+                assert_eq!(prior_state.as_deref(),
+                    if position == 0 || checkpointed { None } else { Some("active") },
+                    "{context} position={position}: repair must still be pending");
                 store.project_replication_backlog().unwrap();
                 assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), before,
                     "order={order:?} checkpointed={checkpointed} position={position}");
-                let operations = operation_rows(&store.readers.get());
-                let digests = store.replication_snapshot().unwrap().projection_digests.clone();
-                assert!(digests.contains_key("claim_sources"));
-                assert!(digests.contains_key("custom_registrations"));
-                assert!(digests.contains_key("custom_sources"));
-                assert!(digests.contains_key("custom_dependencies"));
-                store.replay_replication_graph().unwrap();
-                assert_eq!(operation_rows(&store.readers.get()), operations);
-                assert_eq!(store.replication_snapshot().unwrap().projection_digests, digests);
+                // An admitted digest mismatch (or tombstone-only history) must
+                // actually transition to conflict here, without a replay.
+                let state = operation_tx(&store.readers.get(), operation).unwrap()
+                    .unwrap_or_else(|| panic!("{context} position={position}: missing repaired operation")).2;
+                assert_eq!(state, if position == 0 { "active" } else { "conflict" },
+                    "{context} position={position}: indexed operation repair must run");
             }
-            assert_eq!(operation_tx(&store.readers.get(), operation).unwrap().unwrap().2, "conflict");
+            // Never compare two empty projections: both claims were admitted,
+            // and the second incremental projection already produced conflict.
+            assert_eq!(admitted, [true, true], "{context}");
+            let operations = operation_rows(&store.readers.get());
+            let digests = store.replication_snapshot().unwrap().projection_digests.clone();
+            assert!(digests.contains_key("claim_sources"));
+            assert!(digests.contains_key("custom_registrations"));
+            assert!(digests.contains_key("custom_sources"));
+            assert!(digests.contains_key("custom_dependencies"));
+            store.replay_replication_graph().unwrap();
+            assert_eq!(operation_rows(&store.readers.get()), operations, "{context}");
+            assert_eq!(store.replication_snapshot().unwrap().projection_digests, digests, "{context}");
         }
     }
 }
