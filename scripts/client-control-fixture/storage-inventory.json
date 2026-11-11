@@ -1,0 +1,95 @@
+{
+  "schema": "client-control-fixture-storage-inventory/v1",
+  "selector_policy": "Bind named source keys to concrete captured relative-file#JSON-pointer selectors; no guessed paths, globs or whole cache exclusions. Uncapturable keys require declared limitations, not fake selectors.",
+  "web": {
+    "source": "apps/fractal-web #6278 88adf9cfc9; integration ff956ae72b; main d7aa0be1db; owner inventory message/e53fcf79424227e0",
+    "identity": [
+      "IndexedDB/fractal-client-control-identity-v1/identity/p256",
+      "cookie/fractal_device",
+      "cookie/fractal_pair",
+      "localStorage/wf.c/session.person"
+    ],
+    "expected_churn": [
+      "localStorage/wf.boot@1",
+      "localStorage/wf.probe",
+      "localStorage/wf.c/panels.leftSidebar",
+      "localStorage/wf.c/round2.scheme",
+      "localStorage/wf.c/round2.panelRatio",
+      "localStorage/wf.c/gw:<gw>/sidebar.tab",
+      "localStorage/wf.c/gw:<gw>/sidebar.collapsedFolders",
+      "localStorage/wf.c/sidebar.usageSection",
+      "localStorage/wf.c/sidebar.show.machines@2",
+      "localStorage/wf.c/devbar.visible",
+      "localStorage/wf.c/changelog.fractal-web.<deployment>",
+      "localStorage/wf.c/gw:<gw>/sidebar.filters"
+    ],
+    "source_evidence": [
+      "apps/fractal-web/src/client-control/identity.ts:3-5",
+      "apps/fractal-web/server/browserCookie.mts:3-5",
+      "apps/fractal-web/src/state/cells/drafts.ts:25-27",
+      "apps/fractal-web/src/state/window.ts:43-49",
+      "environment.ts:56-59"
+    ],
+    "limitations": [
+      "Pairing id is not stored locally; use authoritative fixture-store record.",
+      "storageState does not by itself include sessionStorage; retain a separate actual read-only export when relevant.",
+      "Identity DB must be read without upgrade in a readonly transaction; never getOrCreate.",
+      "Live native ask UI persists no read/seen state per AlertsTab.tsx:67-88 and AgentAlerts.tsx:64-75; legacy persisted read paths still remain observable, not excluded.",
+      "Expected churn source message/e5ef7faed9606e1e supersedes earlier window-key guess. wf.window-id and wf.clear@1 are NOT churn. Migration keys require actual first-load migration provenance; user-action writes are not blanket-allowed. Expand gateway/deployment descriptors to actual observed concrete selectors only."
+    ]
+  },
+  "ios": {
+    "source": "apps/ios #6287 85d4f44b; owner inventory message/6fbeae974930578f",
+    "identity": [
+      "Keychain/com.compoundingtech.fractal.device-key",
+      "Keychain/com.compoundingtech.fractal.fabric-proof/iroh-secret-v1",
+      "SecureStore/st3.device.profile",
+      "SecureStore/st3.fabric.profile.<node>.<service-hex>",
+      "SecureStore/st3.device.credential",
+      "SecureStore/st3.device.signing",
+      "AsyncStorage/st3.gateway.url",
+      "AsyncStorage/st3.carrier",
+      "AsyncStorage/st3.fabric.target",
+      "AsyncStorage/st3.fabric.members",
+      "AsyncStorage/st3.fabric.fallback"
+    ],
+    "expected_churn": [
+      "AsyncStorage/st3.observations",
+      "AsyncStorage/st3.quality.hours.v1",
+      "AsyncStorage/st3.quality.run.v1",
+      "AsyncStorage/st3.client-diagnostics.v1",
+      "AsyncStorage/st3.projection.v1",
+      "Application Support/st-diagnostics-v1/state.json"
+    ],
+    "source_evidence": [
+      "FractalDeviceKeyModule.swift:21-24",
+      "store.tsx:57-75",
+      "projectionCache.ts:7-37"
+    ],
+    "limitations": [
+      "Keychain and SecureStore are not readable from an ordinary copied app container; retain an explicit actual capture limitation, never fabricate their contents.",
+      "iOS local public-key API is JS-only, not reachable by XCUITest; primary identity proof is daemon-side.",
+      "Pairing id is not persisted locally; use authoritative fixture-store record.",
+      "Fabric identity() can create a key; never use it as a read-only observer.",
+      "st3.fabric.profile suffixes are actual generated member values; expand only from observed keys, never literal placeholder selectors."
+    ]
+  },
+  "tui": {
+    "source": "TUI a4107410; SDK 62adcce8; owner e3-tui-inventory; safe helper export owned by TUI",
+    "identity": ["Profile/devices/signing_key", "Profile/devices/session"],
+    "expected_churn": ["feed cache model snapshot", "drafts", "glasses", "prefs"],
+    "raw_omit": "Exact actual private profile relative path; never read it in Python. Use TUI helper safe export with pkcs8 and credential sentinels plus SHA-256.",
+    "source_evidence": [
+      "device.rs:165-177",
+      "device.rs:380-414",
+      "mod.rs:444-452"
+    ],
+    "limitations": [
+      "Capture the whole isolated config, state and cache roots, not only the profile.",
+      "No packet-side private-key parsing. Use Profile::load public identity helper and sanitized export; never devices complete.",
+      "Pairing and enrollment IDs come only from authoritative fixture-store records.",
+      "Transient in-memory updates_read, acted, pending_answers and closed are a declared limitation, not a blanket claim of no local state.",
+      "Cache, drafts, glasses and preferences are diffed and scanned as named expected churn; concrete filenames come from actual capture, never guessed hashes."
+    ]
+  }
+}

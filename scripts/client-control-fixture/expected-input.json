@@ -1,0 +1,71 @@
+{
+  "schema": "client-control-fixture-input/v1",
+  "instance": "client-control-fixture",
+  "root_derivation": {
+    "home": "absolute operator HOME, never a supplied alternate root",
+    "legacy": "$HOME/.st-instance/client-control-fixture",
+    "migrated": "$HOME/.fractal-instance/client-control-fixture",
+    "migration_receipt": ".fractal-migration-completed",
+    "migration_receipt_exact": "arn:lmig:smalltalk:2026-10-16-state-dirs-fractal\n",
+    "selection": "migrated only when its receipt matches exactly; otherwise legacy",
+    "operator_socket_relative": "run/fractal.sock",
+    "symlinks": "refused"
+  },
+  "fabric": {
+    "policy": "dedicated fixture Fabric node, never ambient or production",
+    "home_relative": "fabric",
+    "control_socket_relative": "fabric/run/control.sock",
+    "execution": "pin FABRIC_HOME and global --home to exact derived fixture Fabric home on every invocation",
+    "scope": "separate authenticated Fabric-mesh start/stop scope required",
+    "source_prerequisite": "dedicated Fabric context source must land before execution"
+  },
+  "actor": "agent/client-control-fixture/producer",
+  "person": "person/client-control-fixture",
+  "title": "Client control fixture check",
+  "body": "client-control fixture 0001",
+  "body_sha256": "c3e53495d6bafca1a5ac1023ec1943ca3eec7c78e0517ddd86f3389827e6636f",
+  "text_policy": "printable ASCII, 1-60 characters, no Markdown *_#[]`>|, no JSON, no leading/trailing/repeated whitespace",
+  "screens": ["NowRoot", "Attention"],
+  "clients": ["ios", "web", "tui"],
+  "unread_bit": "not-supported-for-native-asks",
+  "generated": {
+    "node_id": null,
+    "fabric_node_id": null,
+    "run_id": null,
+    "ask_id": null,
+    "attention_item_id": null,
+    "claim_ids": null,
+    "grant_ids": null,
+    "device_ids": null,
+    "session_ids": null
+  },
+  "generated_schema": {
+    "node_id": "nonempty string",
+    "fabric_node_id": "actual dedicated Fabric NodeID, separate from daemon node_id",
+    "run_id": "nonempty string from actual run issuance",
+    "ask_id": "nonempty native ask subject string from seed receipt",
+    "attention_item_id": "nonempty projection ID from seed receipt, not the navigation target",
+    "claim_ids": "array of actual durable claim IDs",
+    "grant_ids": "array of actual issued grant IDs",
+    "device_ids": "array of actual enrolled device IDs",
+    "session_ids": "array of actual session IDs",
+    "navigation_item_id": "exact ask_id, not attention_item_id"
+  },
+  "checks": ["current-attention-projection", "complete-durable-claims", "no-read-mutation"],
+  "acceptance": {
+    "wording": "initially unseen and unmutated",
+    "e1": "fresh fixture creation provenance, one ask creation timestamp, only seed own person-relevant claim IDs before first journey",
+    "e2": "independent before/after every journey; E2 claim and receipt comparison unchanged",
+    "e3": "fresh profile before enrollment, never reset; baseline immediately after enrollment, same enrolled key/session; E3 diff recorded after every journey",
+    "profile_root_relative": "client-profiles",
+    "exclusions": "named storage-inventory.json keys bound to concrete actual selectors; no globs, normal profiles, broad cache exclusions or secret dumps",
+    "identity": "primary authoritative daemon-verified signed receipts use one enrolled public key, unchanged enrollment row/id; local readback secondary; pairing id only from fixture store",
+    "fingerprint": "lowercase hex SHA-256 of the 65-byte uncompressed P-256 SEC1 point 0x04||X||Y",
+    "state_classes": "identity preserved; named expected_churn diffed and marker-scanned; all unexplained, identity, marker or unscanned changes are FINDING",
+    "markers": "any persisted item read/seen/acted/closed marker is FINDING for Fractal Product Lead, never PASS",
+    "missing_evidence": "OPEN; source publication establishes none of E1-E3",
+    "no_local_state": "declared limitation requires file:line source evidence"
+  },
+  "consent": "standalone authenticated consent bound to exact executable packet_sha256 and input_sha256; source preparation is not authorization",
+  "normal_instance": "excluded: root, store, socket, sessions, grants and enrollments"
+}

@@ -173,3 +173,40 @@ the work root and prints it once. Change it with `work_root = "/absolute/path"` 
 must be absolute and cannot be the home folder or inside Documents, Desktop or Downloads. Existing
 agents keep their folders, and an agent or mission can still name any folder. `fractal uninstall` never
 removes what is in the work root: it prints `kept` with the path (and `--dry-run` prints `keep`).
+
+## Fixture seed tooling
+
+`scripts/client-control-fixture/seed.py` prepares the common native ask fixture.
+Its `seed` subcommand is effectful and requires separately approved setup scope;
+shipping or testing the script does not authorize running it. It never sets up an
+instance or creates the fixture person or producer. The existing fixture actor
+environment must authorize `agent/client-control-fixture/producer`; the tool does
+not bypass the CLI's actor checks.
+
+Both subcommands require `--socket` to name exactly the reserved instance's own
+privileged operator socket, `<instance-root>/run/fractal.sock`, independently
+derived from `HOME` with the completed product-directory migration rule. They
+refuse symlinks, other-instance sockets and the paired client socket, and require
+an existing socket. No default endpoint discovery or fallback is used.
+
+`seed --idempotency-key KEY` requires an empty fixture attention inbox and invokes
+the shipped `fractal work ask` once, for `person/client-control-fixture`, with a
+structured feedback request. The fixed question is `client-control fixture 0001`;
+the default title is `Client control fixture check`. Title and question must be
+printable ASCII, 1–60 characters, one paragraph, without Markdown syntax, JSON,
+or leading, trailing or repeated whitespace.
+
+Save the JSON seed receipt. Before each journey, run `check --ask ASK --baseline
+SEED_RECEIPT` and save its output; afterwards run `check --ask ASK --baseline
+BEFORE_RECEIPT`. The `no-read-mutation` check requires exactly one open
+`person-step` attention item with request presentation, matching title/question
+and a unique source `work.person-asked` claim. It scans all paginated durable
+claims, refuses ask read/acknowledge/answer/close/termination claims and durable
+read-position claims, and compares the evidence and claim IDs before/after.
+The receipt includes the body SHA-256 and source claim IDs.
+
+Native asks expose no stored unread bit or mailbox read-position readback.
+This check covers the current daemon attention projection and durable claims,
+not browser-local storage, and explicitly reports that unread is unsupported
+rather than inventing a value. Unit tests use only temporary paths and socket
+test fixtures: `python3 -m unittest discover -s scripts/client-control-fixture`.
