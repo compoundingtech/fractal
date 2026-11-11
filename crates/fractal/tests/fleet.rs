@@ -3064,7 +3064,8 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain, with the login
+    // shell the fixture executable writes under the test's HOME (fractal-secrets test_support).
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -3076,6 +3077,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.bash_profile",
                 "home/.zprofile",
                 "home/.zshrc",
+                "home/.cache",
+                "home/.cache/fractal-fixture",
                 "config",
                 "config/fish",
                 "config/fish/config.fish",
@@ -3089,6 +3092,8 @@ async fn uninstall_leaves_nothing_behind() {
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
+            || (relative.parent() == Some(Path::new("home/.cache/fractal-fixture"))
+                && relative.to_string_lossy().contains("/login-shell-"))
             || relative.to_string_lossy().ends_with(".log");
         if !expected {
             remaining.push(relative);
