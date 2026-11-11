@@ -1,6 +1,6 @@
 //! INACTIVE: discovery/fencing only. No boot hook, launch, release, re-pin or keeper
 //! creation. Activation must authenticate recovery and own polling kept jobs.
-use crate::job_launch::{ExitUsage, cgroup, keeper::{KeeperManager, populated, validate_path}};
+use crate::job_launch::{ExitUsage, cgroup, keeper::{KeeperManager, populated, slice_name, validate_path}};
 use anyhow::{Context, Result, ensure};
 use fractal_jobs::{host_authority::JobHostBinding, launch::{LaunchIntent, cgroup_name, keeper_name},
     recovery::{ProcessIdentity, Released}};
@@ -41,7 +41,7 @@ pub fn holder_identity(proc_root: &Path, pid: u32) -> Result<ProcessIdentity> {
 
 impl RecoveryEffects for CgroupRecovery<'_> {
     fn locate(&mut self, binding: &JobHostBinding, intent: &LaunchIntent, heavy_slice: &str) -> Result<Option<LocatedJob>> {
-        ensure!(!heavy_slice.is_empty(), "configured heavy slice required");
+        let heavy_slice = slice_name(Some(heavy_slice))?;
         let Some(keeper) = self.manager.describe(&keeper_name(&binding.execution_host))? else { return Ok(None); };
         validate_path(&keeper.directory)?;
         keeper.directory.strip_prefix(self.cgroup_root)?;
@@ -112,12 +112,12 @@ mod tests {
         fs::write(tmp.path().join("42/stat"), format!("42 (reused) S {} 901 0\n", vec!["0"; 18].join(" "))).unwrap();
         assert_ne!(holder_identity(tmp.path(), 42).unwrap(), original);
     }
-    struct ExistingKeeper { directory: PathBuf }
+    struct ExistingKeeper { directory: PathBuf, slice: &'static str }
     impl KeeperManager for ExistingKeeper {
         fn describe(&mut self, name: &str) -> Result<Option<crate::job_launch::keeper::KeeperScope>> {
             assert_eq!(name, keeper_name("fixture-host"));
             Ok(self.directory.is_dir().then(|| crate::job_launch::keeper::KeeperScope {
-                directory: self.directory.clone(), slice: "configured.slice".into(), delegated: true,
+                directory: self.directory.clone(), slice: self.slice.into(), delegated: true,
             }))
         }
         fn start(&mut self, _: &str, _: &str, _: u32) -> Result<()> { panic!("recovery must not create a scope") }
@@ -135,7 +135,7 @@ mod tests {
         let intent = LaunchIntent { generation: fractal_jobs::launch::ExecutionGeneration(std::num::NonZeroU64::new(7).unwrap()), outcome_file: "/receipt".into() };
         let directory = keeper.join(cgroup_name("job", &intent));
         fs::create_dir(&directory).unwrap();
-        let mut manager = ExistingKeeper { directory: keeper.clone() };
+        let mut manager = ExistingKeeper { directory: keeper.clone(), slice: "configured.slice" };
         let mut effects = CgroupRecovery { manager: &mut manager, cgroup_root: tmp.path(), proc_root: tmp.path() };
         let located = effects.locate(&binding, &intent, "configured.slice").unwrap().unwrap();
         assert_eq!(located.directory, directory);
@@ -156,5 +156,37 @@ mod tests {
         fs::remove_dir_all(&keeper).unwrap();
         assert!(effects.locate(&binding, &intent, "configured.slice").unwrap().is_none());
         assert!(!keeper.exists());
+    }
+
+    #[test]
+    fn launch_and_recovery_share_slash_qualified_slice_configuration() {
+        let configured = "app.slice/app-capped.slice/app-capped-heavy.slice";
+        let tmp = tempfile::tempdir().unwrap();
+        let keeper = tmp.path().join("keeper");
+        fs::create_dir_all(keeper.join("idle")).unwrap();
+        fs::write(keeper.join("idle/cgroup.events"), "populated 1\n").unwrap();
+        fs::write(keeper.join("cgroup.procs"), "").unwrap();
+        fs::write(keeper.join("cgroup.controllers"), "memory pids").unwrap();
+        let mut manager = ExistingKeeper {
+            directory: keeper.clone(), slice: "app-capped-heavy.slice",
+        };
+        let launched = crate::job_launch::keeper::ensure_keeper(
+            &mut manager, "fixture-host", Some(configured)).unwrap();
+        assert_eq!(launched.slice, "app-capped-heavy.slice");
+        let binding = JobHostBinding {
+            job_id: "job".into(), execution_host: "fixture-host".into(),
+            authority_declaration: "admission".into(),
+        };
+        let intent = LaunchIntent {
+            generation: fractal_jobs::launch::ExecutionGeneration(std::num::NonZeroU64::new(7).unwrap()),
+            outcome_file: "/receipt".into(),
+        };
+        let directory = launched.directory.join(cgroup_name(&binding.job_id, &intent));
+        fs::create_dir(&directory).unwrap();
+        let mut recovery = CgroupRecovery {
+            manager: &mut manager, cgroup_root: tmp.path(), proc_root: tmp.path(),
+        };
+        assert_eq!(recovery.locate(&binding, &intent, configured).unwrap().unwrap().directory,
+            directory);
     }
 }
