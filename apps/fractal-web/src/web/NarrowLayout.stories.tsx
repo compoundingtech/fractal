@@ -115,7 +115,8 @@ const assertWide = async (canvasElement: HTMLElement) => {
   await expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull()
   await expect(header.queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
   await expect(header.getByRole('button', { name: 'Toggle right panel' })).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Actions for WorkbenchShell' })).toBeVisible()
+  await expect(header.getByRole('button', { name: 'More actions' })).toBeVisible()
+  await expect(header.getByRole('heading', { name: 'WorkbenchShell' })).toBeVisible()
   await expect(header.getByRole('button', { name: 'Show terminal' })).toBeVisible()
   await expect(header.getByText('build-host-a')).toBeVisible()
   await expect(header.queryByRole('button', { name: 'Agent details' })).toBeNull()
@@ -154,7 +155,7 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
 }
 
 /**
- * The phone header's four controls in order (the conversation actions between the chevron and Agent details; Terminal
+ * The phone header's three controls in order (the unified overflow between the chevron and Agent details; Terminal
  * lives in the tab row). Each is a visible 44×44px target inside the window, clear of the breadcrumb and of each other;
  * the breadcrumb keeps at least a quarter of the window, and the header never scrolls sideways.
  */
@@ -162,7 +163,8 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const node = within(canvasElement).getByTestId('thread-header')
   const header = within(node)
   const buttons = header.getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', `Actions for ${agentName}`, 'Conversation menu', 'Agent details'])
+  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', 'More actions', 'Agent details'])
+  await expect(header.getByRole('heading', { name: agentName })).toBeVisible()
   for (const name of ['Resources', 'View KDL', 'Show terminal', 'Show conversation', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
@@ -182,7 +184,7 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const crumb = breadcrumb.getBoundingClientRect()
   await expect(crumb.left).toBeGreaterThanOrEqual(rects[0]!.right)
   await expect(crumb.right).toBeLessThanOrEqual(rects[1]!.left)
-  // With four controls the host / agent breadcrumb keeps a readable share of the row.
+  // With three controls the host / agent breadcrumb keeps a readable share of the row.
   await expect(crumb.width).toBeGreaterThanOrEqual(window.innerWidth / 4)
   return { header, breadcrumb }
 }
@@ -303,7 +305,7 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   await expect(within(sheet).getByRole('button', { name: 'Close agent details' })).toBeVisible()
   await expect(within(sheet).queryByRole('button', { name: 'Close agent inspector' })).toBeNull()
   await expect(within(sheet).queryByRole('toolbar', { name: 'Agent actions' })).toBeNull()
-  for (const name of ['Actions for WorkbenchShell', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
+  for (const name of ['More actions', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
   await expect(canvas.queryByRole('separator', { name: /^Resize / })).toBeNull()
   const tabs = within(views).getAllByRole('tab')
   await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Changes', 'Details'])
@@ -436,8 +438,10 @@ export const SidebarDragUnmountCleanup: Story = {
       await expect(held).toBe(false)
       await expect(removedKeys).toEqual(dragKeys)
       await expect(activeKeys.size).toBe(0)
-      await user.click(canvas.getByRole('button', { name: 'Conversation menu' }))
-      await expect(await canvas.findByRole('menu')).toBeVisible()
+      await user.click(canvas.getByRole('button', { name: 'More actions' }))
+      const menu = await canvas.findByRole('menu', { name: 'More actions' })
+      await expect(menu).toBeVisible()
+      await expect(within(menu).getByRole('menuitem', { name: 'View KDL' })).toBeVisible()
       await user.keyboard('{Escape}')
       await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
       await user.keyboard('{Control>}b{/Control}')
@@ -556,7 +560,7 @@ export const TerminalToggle: Story = { parameters: { scenario: { _tag: 'contract
   if (!narrow) return
   await assertPhoneHeader(canvasElement)
   await assertPhoneTabRow(canvasElement)
-  // A long agent name at 390px: the title truncates inside the breadcrumb, which still keeps its share beside four controls.
+  // A long agent name at 390px: the title truncates inside the breadcrumb, which still keeps its share beside three controls.
   await userEvent.click(header.getByRole('button', { name: 'Expand sidebar' }))
   const agents = await canvas.findByRole('dialog', { name: 'Agents' })
   await userEvent.click(await within(agents).findByRole('row', { name: new RegExp(`^${longName},`) }))
