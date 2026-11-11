@@ -305,18 +305,19 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
 #[test]
 fn a_programs_child_is_started_by_its_parent_run_within_its_authority() {
     let fixture = fixture();
+    // Before any child holds `program-child`'s one slot, so the refusal is the authority's.
+    let denied = fixture.start_mission("program-unauthorized", "denied", "child");
+    fixture.until("the unauthorized program's step fails", || fixture.status(&denied.step) == "failed");
+    assert!(fixture.children(&denied.step).is_empty());
+    let reason = fixture.store.step_run(&denied.step).unwrap().unwrap().blocked_reason.unwrap_or_default();
+    assert!(reason.contains("could not start its child run `publish`"), "{reason}");
+
     let parent = fixture.start("starter", "child");
     fixture.until("the child run starts", || fixture.child(&parent.step, "publish", 1).is_some());
     let child = fixture.child(&parent.step, "publish", 1).unwrap();
     let created = fixture.store.claims_for(&child, Some("mission-run.created")).unwrap();
     assert_eq!(created[0].actor.as_deref(), Some(parent.run.as_str()));
     assert_eq!(fixture.store.mission_run(&child).unwrap().unwrap().requester, "person/owner");
-
-    let denied = fixture.start_mission("program-unauthorized", "denied", "child");
-    fixture.until("the unauthorized program's step fails", || fixture.status(&denied.step) == "failed");
-    assert!(fixture.children(&denied.step).is_empty());
-    let reason = fixture.store.step_run(&denied.step).unwrap().unwrap().blocked_reason.unwrap_or_default();
-    assert!(reason.contains("could not start its child run `publish`"), "{reason}");
 }
 
 #[test]
