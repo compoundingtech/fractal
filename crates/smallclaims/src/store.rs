@@ -2126,12 +2126,34 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn claims_page_query(subject: bool, descending: bool) -> String {
-    let subject_filter = if subject { "subject=?3 AND " } else { "" };
+/// How a claims page selects subjects: all of them, one exact subject (`?3`), or the range
+/// `?3 <= subject < ?6` a subject prefix spans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimsSubject {
+    Any,
+    Exact,
+    Range,
+}
+
+/// A page of claims after store index `?1` and before `?2`, at most `?4` rows, optionally of kind
+/// `?5` and restricted to allowed kinds in the JSON array `?7`. Both kind restrictions intersect.
+/// Each filter reads the index that keeps the page in store-index order where it can: a kind
+/// walks `claims_kind_index` (with a prefix checked on each row), a subject `claims_subject_index`
+/// or `claims_subject_kind_index`, and a prefix alone the `claims_subject_index` range.
+pub fn claims_page_query(subject: ClaimsSubject, kind: bool, descending: bool, allowed_kinds: bool) -> String {
+    let (index, filter) = match (subject, kind) {
+        (ClaimsSubject::Any, false) => ("", ""),
+        (ClaimsSubject::Exact, false) => ("", "subject=?3 AND "),
+        (ClaimsSubject::Exact, true) => (" INDEXED BY claims_subject_kind_index", "subject=?3 AND kind=?5 AND "),
+        (ClaimsSubject::Any, true) => (" INDEXED BY claims_kind_index", "kind=?5 AND "),
+        (ClaimsSubject::Range, false) => (" INDEXED BY claims_subject_index", "subject>=?3 AND subject<?6 AND "),
+        (ClaimsSubject::Range, true) => (" INDEXED BY claims_kind_index", "kind=?5 AND subject>=?3 AND subject<?6 AND "),
+    };
+    let allowed_filter = if allowed_kinds { "kind IN (SELECT value FROM json_each(?7)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims WHERE subject NOT LIKE 'glass/%' AND {subject_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims{index} WHERE subject NOT LIKE 'glass/%' AND {filter}{allowed_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
@@ -6770,6 +6792,7 @@ impl Store {
                 if let Some(writer) = writer {
                     principals::rules_gate_tx(transaction, &self.origin, writer, "doc.bound", name)
                         .map_err(crate::error::typed)?;
+                    self.runtime.admit_writer_tx(transaction, &self.origin, writer, "doc.bound", name)?;
                 }
                 let mut body = json!({ "name": name, "hash": hash, "size": bytes.len() });
                 idempotency::attach(&mut body, idempotency_key).map_err(internal)?;

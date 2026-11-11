@@ -121,6 +121,7 @@
 "loop.state" = { class = "transition", window = "7d" }
 "message.closed" = { class = "durable" }
 "message.delivered" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
+"message.expired" = { class = "durable" }
 "message.read" = { class = "transition", window = "7d", pending = "unread state reads it until the message closes" }
 "message.sent" = { class = "durable" }
 "message.staged" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
@@ -151,6 +152,8 @@
 "planning-session.started" = { class = "durable" }
 "principal.key-granted" = { class = "durable" }
 "principal.key-revoked" = { class = "durable" }
+# A program run's journal: replay reads every completed and failed entry of its step run.
+"program.step" = { class = "durable" }
 "publication.operation" = { class = "durable" }
 "reconcile.fault" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "record.repaired" = { class = "durable" }

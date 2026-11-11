@@ -190,25 +190,42 @@ fn agent(seat: &Seat) -> Actor {
     }
 }
 
+fn canonical_seat(mut seat: Seat) -> Option<Seat> {
+    let id = fractal_schema::canonical_agent_actor(&seat.id)?;
+    if !id.starts_with("agent/") {
+        return None;
+    }
+    if let std::borrow::Cow::Owned(id) = id {
+        seat.id = id;
+    }
+    Some(seat)
+}
+
 /// The step's seat: its claimant, else its assignee; for a ready unclaimed step, the agent
 /// queuing it.
 fn seat_of(step: &MissionStep, fleet: &dyn Fleet, held: Option<&str>) -> Option<Seat> {
     if step.agentless {
         return None;
     }
-    let seat = held.filter(|id| id.starts_with("agent/")).map(|id| {
-        fleet.seat(id).unwrap_or_else(|| Seat {
-            id: id.to_owned(),
-            label: id.trim_start_matches("agent/").to_owned(),
-            state: "unknown".into(),
-            fault: false,
-            busy_with: None,
-        })
+    let held = held
+        .and_then(fractal_schema::canonical_agent_actor)
+        .filter(|id| id.starts_with("agent/"));
+    let seat = held.map(|id| {
+        fleet
+            .seat(&id)
+            .and_then(canonical_seat)
+            .unwrap_or_else(|| Seat {
+                label: id.trim_start_matches("agent/").to_owned(),
+                id: id.into_owned(),
+                state: "unknown".into(),
+                fault: false,
+                busy_with: None,
+            })
     });
     match seat {
         Some(seat) if step.claimant.is_some() || step.state != "ready" => Some(seat),
         // A ready step waits in whichever queue holds it, whoever it was assigned to.
-        held => fleet.queued_for(&step.id).or(held),
+        held => fleet.queued_for(&step.id).and_then(canonical_seat).or(held),
     }
 }
 
@@ -227,6 +244,7 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
     let word = word(mission, &work, !gates.is_empty(), |step| {
         fleet
             .queued_for(step)
+            .and_then(canonical_seat)
             .map(|seat| QueueOwner { down: seat.down() })
     });
     let mut steps = work
@@ -238,7 +256,8 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
             let seat = if person.is_some() { None } else { seat_of(step, fleet, held) };
             let queued = (person.is_none() && step.state == "ready" && step.claimant.is_none())
                 .then(|| fleet.queued_for(&step.id))
-                .flatten();
+                .flatten()
+                .and_then(canonical_seat);
             let note = queued
                 .map(|seat| match &seat.busy_with {
                     Some((mission, path)) if !seat.down() => format!(
@@ -319,6 +338,7 @@ pub fn present(mission: &fractal_client::Mission, gates: &[Gate], fleet: &dyn Fl
                 work.iter()
                     .find(|step| step.state == "ready" && step.claimant.is_none())
                     .and_then(|step| fleet.queued_for(&step.id))
+                    .and_then(canonical_seat)
             })
             .flatten()
             .map(|seat| QueuedBehind {

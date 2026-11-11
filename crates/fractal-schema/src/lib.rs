@@ -35,6 +35,49 @@ use sha2::{Digest as _, Sha256};
 
 pub const SCHEMA_NAME: &str = "st3.v1";
 
+/// Canonicalize an actor used for agent work without changing an explicit actor kind.
+/// Bare names need a host before admission; legacy slash-qualified names need `agent/`.
+pub fn canonical_agent_actor(id: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (kind, name) = id.split_once('/')?;
+    if kind.is_empty() || name.is_empty() {
+        return None;
+    }
+    if matches!(kind, "agent" | "person" | "daemon" | "host" | "plugin") {
+        Some(std::borrow::Cow::Borrowed(id))
+    } else {
+        Some(std::borrow::Cow::Owned(format!("agent/{id}")))
+    }
+}
+
+#[cfg(test)]
+mod canonical_agent_actor_tests {
+    use super::canonical_agent_actor;
+
+    #[test]
+    fn preserves_actor_kinds_and_prefixes_legacy_agent_ids() {
+        for id in ["agent/example/worker", "person/reviewer", "daemon/scheduler"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+        assert_eq!(
+            canonical_agent_actor("example/worker").as_deref(),
+            Some("agent/example/worker")
+        );
+        for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
+            assert!(canonical_agent_actor(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_host_and_plugin_principals() {
+        for id in ["host/example", "plugin/example"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+    }
+}
+
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
 pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h98d3e9599416 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
@@ -1144,6 +1187,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "objective",
+            "objective/NAME",
+            "A declared objective: an interval over claims, its targets, window and breach response.",
+            false,
+        ),
+        (
             "owned-set",
             "owned-set/NAME",
             "A graph-owned set of declarations with source ordering and omission retirement.",
@@ -1562,6 +1611,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
                 "lane",
                 "message",
                 "observer",
+                "objective",
                 "mission",
                 "mission-run",
                 "planning-session",
@@ -1777,6 +1827,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("step-runs"),
             true,
             &["step"],
+        ),
+        (
+            "program.step",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &["step", "program"],
         ),
         (
             "work.person-asked",
@@ -2514,6 +2573,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["message"],
             WritePolicy::AuthorizedParticipant,
             Cardinality::OncePerActor,
+            Some("messages"),
+            true,
+            &[],
+        ),
+        (
+            "message.expired",
+            &["message"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
             Some("messages"),
             true,
             &[],
@@ -3314,6 +3382,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claimant", reference()),
             ("claim_incarnation", string()),
             ("claim_expires_at_unix_ms", integer()),
+        ],
+        "program.step" => &[
+            ("key", required_string()),
+            ("status", required_enum(&["started", "completed", "failed"])),
+            ("attempt", required_integer()),
+            ("program", required_string()),
+            ("value", any()),
+            ("error", any()),
+            ("ms", integer()),
+            ("child", string()),
         ],
         "work.person-asked" => &[
             ("run", reference()),
@@ -4206,6 +4284,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
         "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
+        "message.expired" => &[
+            ("status", required_enum(&["expired"])),
+            ("reason", required_enum(&["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"])),
+        ],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -4885,10 +4967,14 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the registry at the principal transition, before usage observations.
+        // Reconstruct the principal-transition registry, excluding subsequently added kinds.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.subjects.remove("objective").unwrap();
+        current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
+        current.claims.remove("message.expired").unwrap();
+        current.claims.remove("program.step").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

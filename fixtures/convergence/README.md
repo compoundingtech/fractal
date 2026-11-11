@@ -235,3 +235,34 @@ The first characterization run failed only the four stale v14 trim expectations.
 `claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
+
+`claims-v18.json` captures the complete registry with `message.expired`, the durable,
+runtime-authored mail expiry outcome. Versions 1 through 17 stay frozen. Generate it
+from the merged expiry registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v18.json`;
+the example serializes `fractal_schema::registry().claims` with
+`serde_json::to_string_pretty`, followed by a newline. Do not hand-edit the snapshot.
+The simulation selects v18. Expiry draws select an existing sent message in stable
+subject order and use `daemon/runtime`; native admission still rejects mail with a
+terminal receipt. The focused expiry regression generates the outcome through the
+same path as random schedules and checks native admission and replication to the
+oracle, rather than treating corpus membership as write coverage.
+
+`claims-v19.json` captures the complete registry with `program.step`, the system-only, append-only
+journal entry of a program step run (docs/st3/program-engine.md §5). Versions 1 through 18 stay
+frozen. Generate it from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v19.json`;
+do not hand-edit the snapshot. The simulation selects v19. Draws use the existing `step-run`
+subject family and the generic system-only append path.
+
+A drawn `client.operation-authorized` (in the corpus since v17) is not written. Every replica
+admits that kind only from a keyed member's signed envelope and holds an unkeyed writer's as
+unsigned; the simulated nodes have no member keys. Written, it stayed pending on every other node
+and the oracle and held every later checkpoint back, so the run never settled and the writer held
+a claim the oracle never saw. On hosted CI, v19's draws first wrote one, in seeds 1 and 34; off
+CI, schedules diverge and more seeds wrote one (seeds 3, 13, 17, 277 and 1597 in burst run
+42880734602). The input is still drawn, so a seed whose store refused it keeps its schedule.
+With v19 every fixed seed converges and trims (hosted run 42884923668), so the never-trim set is
+empty. The never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a
+lightly loaded burst runner diverge from CI at the same commit (#6210); burst run 42884913070
+leaves seeds 55 and 610 untrimmed.

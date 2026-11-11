@@ -94,6 +94,7 @@ mod pairing_qr;
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
 mod attention_cli;
+mod claims_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -104,11 +105,13 @@ mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod program_bundles;
 mod validate_cli;
 mod work_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
+use claims_cli::{ClaimsCommand, run_claims};
 use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
 use fleet_cli::run_fleet;
@@ -474,6 +477,11 @@ enum Command {
     },
     /// Publish one registered typed observation.
     Claim(ClaimArgs),
+    /// List claims by kind, subject or subject prefix.
+    Claims {
+        #[command(subcommand)]
+        command: ClaimsCommand,
+    },
     /// Report a harness failure as this agent through the authorized diagnostic path.
     Diagnostic(HarnessDiagnosticArgs),
     /// Trace bounded graph history or wait on a graph condition.
@@ -2359,6 +2367,8 @@ enum HarnessQuestionsCommand {
 
 #[derive(Subcommand)]
 enum SubjectCommand {
+    /// Read declarations, selected tokens and cheap actual summaries in one snapshot.
+    Desired(SubjectDesiredArgs),
     /// Reply to a custom source under its current revision and waiting episode.
     Reply {
         subject: String,
@@ -2388,6 +2398,19 @@ enum SubjectCommand {
     Show(SubjectShowArgs),
     /// Show bounded immutable history for one subject.
     History(TraceArgs),
+}
+
+#[derive(Args)]
+struct SubjectDesiredArgs {
+    /// Exact subject IDs; omission selects all declarations.
+    #[arg(value_name = "SUBJECT", conflicts_with = "all")]
+    subjects: Vec<String>,
+    /// Select all declarations (also the default when no subjects are supplied).
+    #[arg(long)]
+    all: bool,
+    /// Restrict the selected declarations to this kind.
+    #[arg(long, value_name = "K")]
+    kind: Option<String>,
 }
 
 #[derive(Args)]
@@ -3482,11 +3505,14 @@ async fn run_owned_set_apply(
         confirm_retire: args.confirm_retire,
         expected_subjects: Default::default(),
     };
+    // Read and check the bundles first, so a dry run refuses a stale bundle too.
+    let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
     let mut request = Request {
         intent,
         options,
         actor: args.actor,
         idempotency_key: uuid::Uuid::now_v7().to_string(),
+        program_bundles: BTreeMap::new(),
     };
     let preview: Preview = client.post("/v1/sets/preview", &request).await?;
     if args.dry_run {
@@ -3512,6 +3538,7 @@ async fn run_owned_set_apply(
         return Ok(());
     }
     request.options.expected_subjects = preview.expected_subjects;
+    request.program_bundles = program_bundles;
     let response: Value = client.post("/v1/sets/apply", &request).await?;
     print_value(&response, json_output)
 }
@@ -4199,9 +4226,12 @@ enum WorkCommand {
     /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
     /// only the time it runs. The clock restarts at `work resume`, or after `--for` at the
     /// latest, so an agent that stops answering cannot hide behind a wait. The lease still
-    /// needs its renewals.
+    /// needs its renewals. A step's own exec, which has no agent, waits as itself without
+    /// `--as`: `fractal work wait "$ST_STEP_RUN" --for 2h --reason "build slot"`.
     Wait(WorkWaitArgs),
     /// Start the execution clock again after `work wait`.
+    ///
+    /// A step's own exec resumes as itself without `--as`.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
     Resume(WorkActionArgs),
     /// Finish claimed work and attach its durable evidence.
@@ -6189,6 +6219,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_harness_questions(&endpoint, command, cli.json).await
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
+        Command::Claims { command } => run_claims(&client, command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -7459,7 +7490,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7545,7 +7576,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
         client_relay: fractal_daemon::peer::ClientRelay::from_config(&config)?
             .map(|relay| relay.with_links(store.clone())),
-        native_session_home: std::env::var_os("HOME").map(PathBuf::from),
+        native_session_home: fractal_daemon::instance::native_session_home()?,
         planner_default: config.planner.clone(),
         harness_question_sink: None,
         assistant_receipts: Default::default(),
@@ -7577,6 +7608,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
+    fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
@@ -7624,6 +7656,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
@@ -8002,6 +8035,8 @@ async fn publish_mission_intent(
     args: MissionPublishArgs,
     json_output: bool,
 ) -> Result<()> {
+    // Read and check the bundles first, so a dry run refuses a stale bundle too.
+    let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
     let mission: MissionResponse = client
         .post(
             "/v1/intent/mission",
@@ -8042,6 +8077,7 @@ async fn publish_mission_intent(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(args.actor),
+                program_bundles,
             },
         )
         .await?;
@@ -8646,6 +8682,7 @@ async fn publish_text_with_expected(
     actor: String,
     expected: Option<(&str, &[String])>,
 ) -> Result<ApplyResponse> {
+    let program_bundles = program_bundles::program_bundles(&kdl)?;
     let intent = IntentInput {
         kdl,
         source_name: Some(source_name),
@@ -8680,6 +8717,7 @@ async fn publish_text_with_expected(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(actor.clone()),
+                program_bundles,
             },
         )
         .await
@@ -10130,6 +10168,8 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
     };
     let client = if actor.starts_with("agent/") {
         Client::unix_agent(socket.as_ref(), actor)?
+    } else if actor.starts_with("mission-run/") {
+        Client::unix_run(socket.as_ref(), actor)?
     } else {
         Client::unix_as(socket.as_ref(), actor)?
     };
@@ -10138,8 +10178,9 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
         .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
-/// The actor of a terminal or client-v0 command: an explicit person or agent, else the harness's
-/// own seat, else the configured person. Free mode lets an agent act, always as itself.
+/// The actor of a terminal or client-v0 command: an explicit person, agent or run, else the
+/// harness's own seat, else the run a program effect acts as, else the configured person. Free
+/// mode lets an agent act, always as itself.
 fn configured_actor(
     explicit: Option<&str>,
     configured: Option<&str>,
@@ -10153,7 +10194,21 @@ fn configured_actor(
     {
         return Ok(own);
     }
+    if let Some(run) = run_actor(
+        fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").as_deref(),
+        fractal_drivers::contracts::env("ST_MISSION_RUN").as_deref(),
+    ) {
+        return Ok(run);
+    }
     configured_human(None, configured, command)
+}
+
+/// A program effect carries its attempt's run credential and acts as its run
+/// (docs/st3/program-engine.md §3); the daemon binds the credential to the same run.
+fn run_actor(credential: Option<&str>, run: Option<&str>) -> Option<String> {
+    credential.filter(|credential| !credential.is_empty())?;
+    let run = run.map(|run| run.trim_start_matches("mission-run/")).filter(|run| !run.is_empty())?;
+    Some(format!("mission-run/{run}"))
 }
 
 fn configured_human(
@@ -10817,7 +10872,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
-                    row["id"].as_str().unwrap_or_default().replace('/', "%2F"),
+                    urlencoding::encode(row["id"].as_str().unwrap_or_default()),
                 ))
                 .await?;
             if json_output {
@@ -11642,8 +11697,52 @@ async fn run_harness_questions(
     }
 }
 
+async fn subject_desired_items(
+    client: &Client,
+    args: &SubjectDesiredArgs,
+) -> Result<Vec<Value>> {
+    // Retained member payloads can come from newer daemons. Only decode the page
+    // envelope here; preserve each extensible item exactly as the server supplied it.
+    #[derive(serde::Deserialize)]
+    struct DesiredPage {
+        items: Vec<Value>,
+        next_cursor: Option<String>,
+        #[serde(rename = "store_index")]
+        _store_index: u64,
+    }
+    let mut selection = String::from("/v1/desired?limit=1000");
+    for subject in &args.subjects {
+        selection.push_str("&subject=");
+        selection.push_str(&urlencoding::encode(subject));
+    }
+    if let Some(kind) = &args.kind {
+        selection.push_str("&kind=");
+        selection.push_str(&urlencoding::encode(kind));
+    }
+    let mut items = Vec::new();
+    let selection_len = selection.len();
+    loop {
+        let DesiredPage { items: page_items, next_cursor, .. } =
+            client.get(&selection).await?;
+        items.extend(page_items);
+        match next_cursor {
+            Some(next) => {
+                selection.truncate(selection_len);
+                selection.push_str("&cursor=");
+                selection.push_str(&urlencoding::encode(&next));
+            }
+            None => return Ok(items),
+        }
+    }
+}
+
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {
     match command {
+        SubjectCommand::Desired(args) => {
+            // Do not emit partial output if any continuation has expired or otherwise fails.
+            let result = subject_desired_items(client, &args).await?;
+            print_value(&result, json_output)
+        }
         SubjectCommand::Reply {
             subject,
             registration,
@@ -15206,7 +15305,8 @@ person an image with the request (up to 4), as `fractal conversations send --att
 
 The person answers with `fractal work done STEP --answer ID [--text TEXT]`; requesting changes,
 feedback and a custom choice need text. The resumed step's `person_answers` carries the answer
-as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
+as {"type", "outcome", "id", "label", "text", "option_notes"}; option_notes contains {id, text}
+notes on options not selected. Read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
 fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
@@ -16158,11 +16258,14 @@ fn planning_session_intent(
     publication_document(session)
 }
 
-/// A complete `person/NAME` or an agent. Free mode lets an agent do what its person may do, and
-/// the daemon still records the agent itself as the actor.
+/// A complete `person/NAME`, an agent, or a `mission-run/RUN` a program effect acts as. Free mode
+/// lets an agent do what its person may do, and the daemon still records the agent itself as the
+/// actor; a run is only what its credential binds.
 fn parse_actor_subject(actor: &str) -> std::result::Result<String, String> {
-    if actor.starts_with("agent/") && actor.len() > "agent/".len() {
-        return Ok(actor.to_owned());
+    for family in ["agent/", "mission-run/"] {
+        if actor.starts_with(family) && actor.len() > family.len() {
+            return Ok(actor.to_owned());
+        }
     }
     parse_person_subject(actor)
 }
@@ -18548,7 +18651,7 @@ fn tolerate_driver_api_outage(
     last_warning: &mut Option<Instant>,
 ) -> Result<()> {
     let outage = fractal_daemon::client::daemon_unreachable(&error).map(|outage| outage.summary());
-    let transient = outage.is_some()
+    let transient = daemon_is_unreachable(&error)
         || error.chain().any(|cause| {
             let message = cause.to_string();
             message.contains("incomplete HTTP response")
@@ -20271,7 +20374,7 @@ async fn forward_projected_messages_reporting(
             None => break,
         }
     }
-    // A message can close between polls. The active page intentionally excludes
+    // A message can close or expire between polls. The active page intentionally excludes
     // history, so inspect only projected files still in the native inbox before
     // deciding whether to archive them. A failed lookup keeps the file in place.
     for file in fractal_drivers::message::list_dir(inbox)? {
@@ -20283,7 +20386,7 @@ async fn forward_projected_messages_reporting(
             }
             if let Ok(message) = read_message(client, reference).await
                 && message.to == subject
-                && matches!(message.status.as_str(), "read" | "closed")
+                && matches!(message.status.as_str(), "read" | "closed" | "expired")
             {
                 consumed_by_recipient.insert(reference.to_owned());
             }
@@ -21847,3 +21950,6 @@ mod tests;
 
 #[cfg(test)]
 mod terminal_ui_tests;
+
+#[cfg(test)]
+mod subject_desired_cli_tests;

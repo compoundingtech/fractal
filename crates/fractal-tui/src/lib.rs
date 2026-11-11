@@ -268,8 +268,39 @@ fn terminal_run_style(run: &fractal_client::TerminalRun) -> Style {
     style
 }
 
+/// The capability a Fractal advertises once it takes notes on answers the person did not choose.
+const OPTION_NOTES_CAPABILITY: &str = "person-answer-option-notes";
+
+/// An answer carries notes on other answers, and this Fractal does not take them. Nothing was
+/// sent: sending the answer without them would drop words the person wrote.
+#[derive(Debug)]
+pub(crate) struct OptionNotesUnsupported;
+
+impl std::fmt::Display for OptionNotesUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "This Fractal does not take notes on other answers yet (no `{OPTION_NOTES_CAPABILITY}`), so nothing was sent. Your answer and every note stay here: send again once Fractal is updated, or clear the other notes to send this answer alone."
+        )
+    }
+}
+
+impl std::error::Error for OptionNotesUnsupported {}
+
+/// Whether a Fractal advertising `capabilities` takes notes on answers not chosen.
+fn takes_option_notes(capabilities: &[fractal_client::Capability]) -> bool {
+    capabilities.iter().any(|capability| {
+        capability.id == OPTION_NOTES_CAPABILITY
+            && capability.version >= 1
+            && capability.state == fractal_client::CapabilityState::Granted
+    })
+}
+
 /// Perform one attention action against fresh fences. Shared by the old and new screens.
 /// `seen` is the card as the person saw it, which names its source if st has since closed it.
+/// `option_notes` (answer id, text) go only to a Fractal that says it takes them; otherwise the
+/// action is refused before anything is sent.
+#[allow(clippy::too_many_arguments)]
 async fn attention_action(
     client: &Client,
     actor: &str,
@@ -278,15 +309,22 @@ async fn attention_action(
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<String> {
+    if !option_notes.is_empty()
+        && !takes_option_notes(&client.capabilities().await?.value.capabilities)
+    {
+        return Err(OptionNotesUnsupported.into());
+    }
     let current = client.attention_get(attention_id).await;
-    act_on_attention(client, actor, current, seen, action, reason, answer).await
+    act_on_attention(client, actor, current, seen, action, reason, answer, option_notes).await
 }
 
 /// Act on `current`, a card as st showed it. A review whose card changed (a stale fence) or
 /// closed (not found) before the action arrived was asked again or answered: the action goes
 /// once more to the card st shows now for the same source, if it still asks, and otherwise
 /// says why not. Only once, so a gate st keeps asking again is reported, not chased.
+#[allow(clippy::too_many_arguments)]
 async fn act_on_attention(
     client: &Client,
     actor: &str,
@@ -295,6 +333,7 @@ async fn act_on_attention(
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<String> {
     let mut source = seen.map(|card| (card.source_id.clone(), card.attention_kind.clone()));
     let first = match current {
@@ -309,6 +348,7 @@ async fn act_on_attention(
                 action,
                 reason.clone(),
                 answer.clone(),
+                option_notes.clone(),
             )
             .await
         }
@@ -332,7 +372,7 @@ async fn act_on_attention(
                 "This review changed since you read it; read it again before you answer"
             ))
         }
-        Some(card) => act_on_card(client, actor, card, action, reason, answer).await,
+        Some(card) => act_on_card(client, actor, card, action, reason, answer, option_notes).await,
         // The person reads why, not the stale fence that found it out.
         None => Err(anyhow::anyhow!(no_longer_asked(client, &source).await)),
     }
@@ -410,18 +450,25 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
     }
 }
 
-/// Named answers carry optional notes. Words alone answer only feedback or a custom choice;
-/// the server validates required text, including the changes on a request-changes answer.
+/// Named answers carry optional notes, and notes on the other named answers go with any answer
+/// as `option_notes`. Words alone answer only feedback or a custom choice; the server validates
+/// required text, including the changes on a request-changes answer, and every option note.
 fn person_answer(
     request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
     words: &str,
+    option_notes: Vec<(String, String)>,
 ) -> Result<Option<fractal_client::PersonAnswerInput>> {
+    let option_notes = option_notes
+        .into_iter()
+        .map(|(id, text)| fractal_client::PersonOptionNote { id, text })
+        .collect();
     if let Some(id) = chosen {
         let text = words.trim();
         return Ok(Some(fractal_client::PersonAnswerInput {
             id: Some(id),
             text: (!text.is_empty()).then(|| text.to_owned()),
+            option_notes,
         }));
     }
     let Some(request) = request else {
@@ -429,8 +476,10 @@ fn person_answer(
     };
     let text = Some(words.trim().to_owned());
     match request.entry_type.as_str() {
-        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
-        "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
+        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text, option_notes })),
+        "choice" if request.custom => {
+            Ok(Some(fractal_client::PersonAnswerInput { id: None, text, option_notes }))
+        }
         _ => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
     }
 }
@@ -440,6 +489,7 @@ fn person_step_response(
     request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
     note: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<(String, Option<fractal_client::PersonAnswerInput>)> {
     let words = note.as_deref().unwrap_or("");
     let summary = if !words.trim().is_empty() {
@@ -451,7 +501,7 @@ fn person_step_response(
             .filter(|label| !label.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?
     };
-    let answer = person_answer(request, chosen, words)?;
+    let answer = person_answer(request, chosen, words, option_notes)?;
     Ok((summary, answer))
 }
 
@@ -463,6 +513,7 @@ async fn act_on_card(
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<String> {
     let Resource::Attention(attention) = &current.value else {
         anyhow::bail!("Attention changed; refresh and choose again");
@@ -519,7 +570,7 @@ async fn act_on_card(
         }
         "work.done" => {
             let (summary, answer) =
-                person_step_response(attention.request.as_ref(), answer, reason)?;
+                person_step_response(attention.request.as_ref(), answer, reason, option_notes)?;
             client
                 .work_done(
                     id,
@@ -1158,7 +1209,7 @@ mod tests {
         for (id, label) in [("land", "Land"), ("hold", "Hold")] {
             for note in [None, Some(String::new()), Some("  ".into())] {
                 let (summary, answer) =
-                    person_step_response(Some(&request), Some(id.into()), note).unwrap();
+                    person_step_response(Some(&request), Some(id.into()), note, Vec::new()).unwrap();
                 let parameters = PersonStepParameters {
                     target_id: "step-run/example".into(),
                     episode: "episode/example".into(),
@@ -1173,18 +1224,29 @@ mod tests {
             }
         }
         let (summary, answer) = person_step_response(
-            Some(&request), Some("land".into()), Some("ship today".into())
+            Some(&request), Some("land".into()), Some("ship today".into()), Vec::new()
         ).unwrap();
         assert_eq!(summary, "ship today");
         assert_eq!(answer.unwrap().text.as_deref(), Some("ship today"));
-        assert!(person_step_response(None, None, None).is_err());
+        let (summary, answer) = person_step_response(
+            Some(&request),
+            Some("land".into()),
+            None,
+            vec![("hold".into(), "Wait until Monday.".into())],
+        ).unwrap();
+        assert_eq!(summary, "Land");
+        let answer = answer.unwrap();
+        assert_eq!(answer.text, None);
+        assert_eq!(answer.option_notes[0].id, "hold");
+        assert_eq!(answer.option_notes[0].text, "Wait until Monday.");
+        assert!(person_step_response(None, None, None, Vec::new()).is_err());
     }
 
     #[test]
     fn named_decision_answers_preserve_notes_for_every_outcome() {
         let request = decision_request();
         for id in ["land", "hold", "change"] {
-            let answer = person_answer(Some(&request), Some(id.into()), "  Keep the scope small.\n ")
+            let answer = person_answer(Some(&request), Some(id.into()), "  Keep the scope small.\n ", Vec::new())
                 .unwrap()
                 .unwrap();
             assert_eq!(answer.id.as_deref(), Some(id));
@@ -1202,7 +1264,7 @@ mod tests {
                     {"id": "works", "label": "Works", "consequence": "Done."}
                 ]),
             );
-            let answer = person_answer(Some(&request), Some("works".into()), " found it, works ")
+            let answer = person_answer(Some(&request), Some("works".into()), " found it, works ", Vec::new())
                 .unwrap()
                 .unwrap();
             assert_eq!(answer.id.as_deref(), Some("works"));
@@ -1213,15 +1275,15 @@ mod tests {
     #[test]
     fn words_alone_do_not_infer_a_request_changes_answer() {
         let request = decision_request();
-        assert!(person_answer(Some(&request), None, "rename it").is_err());
-        assert!(person_answer(Some(&request), None, "").is_err());
+        assert!(person_answer(Some(&request), None, "rename it", Vec::new()).is_err());
+        assert!(person_answer(Some(&request), None, "", Vec::new()).is_err());
     }
 
     #[test]
     fn blank_named_answer_notes_remain_absent_for_server_validation() {
         let request = decision_request();
         for id in ["land", "hold", "change"] {
-            let answer = person_answer(Some(&request), Some(id.into()), " \n\t ")
+            let answer = person_answer(Some(&request), Some(id.into()), " \n\t ", Vec::new())
                 .unwrap()
                 .unwrap();
             assert_eq!(answer.id.as_deref(), Some(id));
@@ -1239,15 +1301,100 @@ mod tests {
             person_request("choice", true, options.clone()),
             person_request("feedback", false, serde_json::json!([])),
         ] {
-            let answer = person_answer(Some(&request), None, " found it, works ")
+            let answer = person_answer(Some(&request), None, " found it, works ", Vec::new())
                 .unwrap()
                 .unwrap();
             assert!(answer.id.is_none());
             assert_eq!(answer.text.as_deref(), Some("found it, works"));
         }
         let fixed = person_request("choice", false, options);
-        assert!(person_answer(Some(&fixed), None, "words").is_err());
-        assert!(person_answer(None, None, "notes").unwrap().is_none());
+        assert!(person_answer(Some(&fixed), None, "words", Vec::new()).is_err());
+        assert!(person_answer(None, None, "notes", Vec::new()).unwrap().is_none());
+    }
+
+    #[test]
+    fn notes_on_other_answers_go_with_the_chosen_or_custom_answer() {
+        let notes = || vec![("hold".to_owned(), "Wait a week.".to_owned())];
+        let answer = person_answer(Some(&decision_request()), Some("land".into()), "Go.", notes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(answer.text.as_deref(), Some("Go."));
+        assert_eq!(
+            answer.option_notes,
+            [fractal_client::PersonOptionNote { id: "hold".into(), text: "Wait a week.".into() }]
+        );
+        // The wire shape: the notes inside the answer; an answer without them keeps its old shape.
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            serde_json::json!({"id":"land","text":"Go.","option_notes":[{"id":"hold","text":"Wait a week."}]})
+        );
+        let plain = person_answer(Some(&decision_request()), Some("land".into()), "Go.", Vec::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(&plain).unwrap(), serde_json::json!({"id":"land","text":"Go."}));
+        let custom = person_request(
+            "choice",
+            true,
+            serde_json::json!([{"id":"hold","label":"Hold","consequence":"Waits."}]),
+        );
+        let answer = person_answer(Some(&custom), None, "my own way", notes()).unwrap().unwrap();
+        assert!(answer.id.is_none());
+        assert_eq!(answer.option_notes.len(), 1);
+    }
+
+    #[test]
+    fn option_notes_need_the_capability_granted() {
+        let capability = |id: &str, state: &str| -> fractal_client::Capability {
+            serde_json::from_value(serde_json::json!({"id": id, "version": 1, "state": state})).unwrap()
+        };
+        assert!(takes_option_notes(&[capability("person-answer-option-notes", "granted")]));
+        assert!(!takes_option_notes(&[]));
+        assert!(!takes_option_notes(&[capability("person-answer-option-notes", "unavailable")]));
+        assert!(!takes_option_notes(&[capability("phone-commands", "granted")]));
+    }
+
+    /// A Fractal from before notes on other answers: the TUI asks what it takes, refuses the
+    /// answer itself, and sends nothing, rather than sending it with the notes left out.
+    #[tokio::test]
+    async fn an_older_fractal_is_sent_nothing_when_an_answer_carries_other_notes() {
+        use axum::routing;
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/capabilities.json"
+        ))
+        .unwrap();
+        let reached = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = reached.clone();
+        let router = axum::Router::new()
+            .route(
+                "/v1/client/capabilities",
+                routing::get(move || std::future::ready(axum::Json(capabilities.clone()))),
+            )
+            .fallback(move |uri: axum::http::Uri| {
+                seen.lock().unwrap().push(uri.to_string());
+                std::future::ready(axum::http::StatusCode::NOT_FOUND)
+            });
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let error = attention_action(
+            &client,
+            "person/avery",
+            "attention/ask",
+            None,
+            "work.done",
+            Some("Go.".into()),
+            Some("land".into()),
+            vec![("hold".into(), "Wait a week.".into())],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<OptionNotesUnsupported>().is_some(), "{error}");
+        assert!(error.to_string().contains("person-answer-option-notes"), "{error}");
+        assert!(reached.lock().unwrap().is_empty(), "{:?}", reached.lock().unwrap());
+        server.abort();
     }
     #[test]
     fn regression_person_falls_back_to_local_config() {
@@ -1683,6 +1830,7 @@ mission "release" state="ready" {
                 action,
                 None,
                 None,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1717,6 +1865,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .expect("the approval did not reach the current card");
@@ -1740,6 +1889,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .expect_err("a changed review was answered unread");
@@ -1771,6 +1921,7 @@ mission "release" state="ready" {
             "review.approve",
             Some("ship it".into()),
             None,
+            Vec::new(),
         )
         .await
         .expect("the approval did not reach the current card");
@@ -1786,6 +1937,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .expect_err("a spent card takes no answer");
@@ -1849,6 +2001,7 @@ mission "release" state="ready" {
             "review.request-changes",
             Some("Add the missing source.".into()),
             None,
+            Vec::new(),
         )
         .await
         .expect("the notes did not go back to the worker");
@@ -1877,6 +2030,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1890,6 +2044,7 @@ mission "release" state="ready" {
             "review.reject",
             Some("no".into()),
             None,
+            Vec::new(),
         )
         .await
         .expect_err("an answered gate takes no second answer");

@@ -872,11 +872,50 @@ pub struct StepSpec {
     /// completes and fails when it fails or is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run: Option<String>,
+    /// The program bundle this agentless step runs (docs/st3/program-engine.md). The daemon's
+    /// program engine owns the step's outcome. Omitted when absent, so other steps hash as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
     pub gates: Vec<GateSpec>,
     pub nested_mission: Option<Box<MissionSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
+/// hash is part of the step's definition, so a mission revision binds exactly one program. The
+/// field is named `bundle_hash` so publishing the declaration promotes the stored blob and every
+/// replica receives it with the declaration; `bundle` is the author's path, kept as provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgramSpec {
+    pub bundle: String,
+    pub bundle_hash: String,
+    /// How long the program may go without a new journal entry before its run reports it stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+}
+
+impl MissionSpec {
+    /// Every program this mission declares, with its step's path, including nested missions and
+    /// loop rounds.
+    pub fn programs(&self) -> Vec<(&str, &ProgramSpec)> {
+        let mut programs = Vec::new();
+        for step in self.steps.values() {
+            if let Some(program) = &step.program {
+                programs.push((step.path.as_str(), program));
+            }
+            if let Some(nested) = &step.nested_mission {
+                programs.extend(nested.programs());
+            }
+            if let Some(loop_spec) = &step.loop_spec {
+                for mission in [Some(&loop_spec.round), loop_spec.on_keep.as_ref(), loop_spec.on_discard.as_ref()].into_iter().flatten() {
+                    programs.extend(mission.programs());
+                }
+            }
+        }
+        programs
+    }
 }
 
 /// How the resource edge was authored. Older stored URI edges predate this discriminator.
@@ -899,6 +938,39 @@ pub struct DeclaredResourceReference {
     pub reason: Option<String>,
 }
 
+/// One rule of a mission's `authority` block: what its runs may do as `mission-run/RUN`
+/// (docs/st3/program-engine.md §3). Mission verbs take a mission ID pattern, `write` a subject
+/// pattern; either is exact or a terminal `/*` namespace.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct AuthorityGrant {
+    pub verb: AuthorityVerb,
+    pub pattern: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorityVerb {
+    Publish,
+    Start,
+    Revise,
+    Cancel,
+    Write,
+}
+
+impl AuthorityVerb {
+    pub const ALL: [Self; 5] = [Self::Publish, Self::Start, Self::Revise, Self::Cancel, Self::Write];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Start => "start",
+            Self::Revise => "revise",
+            Self::Cancel => "cancel",
+            Self::Write => "write",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MissionSpec {
     pub id: String,
@@ -911,6 +983,10 @@ pub struct MissionSpec {
     pub system: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<DeclaredResourceReference>,
+    /// What runs of this mission may do as `mission-run/RUN`, in canonical order; empty grants
+    /// nothing. Omitted when empty, so an undeclared mission hashes as it did before the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority: Vec<AuthorityGrant>,
     #[serde(default)]
     pub inputs: BTreeMap<String, MissionInputSpec>,
     #[serde(default = "default_mission_run_limit")]
@@ -1745,6 +1821,10 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
+    /// The bytes of each program bundle the intent declares, base64 by sha256 (the
+    /// `ProgramSpec::bundle_hash`). The daemon verifies and stores them before it publishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3459,6 +3539,14 @@ pub struct PersonStepResponse {
     pub idempotency_key: String,
 }
 
+/// A person's note about a named option other than their chosen answer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OptionNote {
+    pub id: String,
+    pub text: String,
+}
+
 /// A person's answer as submitted: a named answer `id`, text, or both (`person_request`).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3467,6 +3555,9 @@ pub struct AnswerInput {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Notes on other named options; the chosen answer's note remains `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_notes: Vec<OptionNote>,
 }
 
 /// A response to a person ask, including answers submitted by an authorized assistant.

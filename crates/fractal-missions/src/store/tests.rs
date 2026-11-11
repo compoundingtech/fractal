@@ -937,7 +937,7 @@ mission "clock-parent" state="ready" {
 mission "clock-worker" state="ready" {
   goal "Start the loop clock when work is claimed."
   concurrent-runs max=20
-  step "work" { assigned-to "agent/worker" }
+  step "work" { assigned-to "agent/node.worker" }
   step "automatic" { agentless }
 }
 mission "clock-automatic" state="ready" {
@@ -1026,7 +1026,7 @@ mission "clock-automatic" state="ready" {
             .append_claim(&ClaimInput {
                 subject: step.subject.clone(),
                 kind: "work.claimed".into(),
-                actor: Some("agent/worker".into()),
+                actor: Some("agent/node.worker".into()),
                 fields: BTreeMap::from([("attempt".into(), Value::from(index + 1))]),
                 evidence: Vec::new(),
                 expected_subject: None,
@@ -1470,10 +1470,10 @@ version 2
   mission "held-work" state="ready" {
     goal "Hold some steps."
     concurrent-runs max=2
-    step "active" { assigned-to "agent/worker" }
-    step "expired" { assigned-to "agent/worker" }
-    step "ready" { assigned-to "agent/worker" }
-    step "pending" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/node.worker" }
+    step "expired" { assigned-to "agent/node.worker" }
+    step "ready" { assigned-to "agent/node.worker" }
+    step "pending" { assigned-to "agent/node.worker" }
     step "watch" { agentless }
   }
 
@@ -6061,7 +6061,7 @@ version 2
   mission "execution-timing" state="ready" {
     goal "Measure only active worker execution."
     step "work" timeout="1h" {
-      assigned-to "agent/worker"
+      assigned-to "agent/source.worker"
       retry { attempts 2 }
     }
   }
@@ -6175,7 +6175,7 @@ version 2
 
 mission "external-blocker" state="ready" {
   goal "Wait truthfully for the external host repair."
-  step "automated-proof" { assigned-to "agent/ios-owner" }
+  step "automated-proof" { assigned-to "agent/source.ios-owner" }
 }
 "#;
     let intent = crate::graph::parse_test_intent(source, "source").unwrap();
@@ -6554,11 +6554,11 @@ version 2
 
   mission "terminal-owner" state="ready" {
     goal "Make terminal ownership authoritative."
-    step "active" { assigned-to "agent/worker" }
-    step "expired" { assigned-to "agent/worker" }
-    step "ready" { assigned-to "agent/worker" }
-    step "blocked" { assigned-to "agent/worker" }
-    step "pending" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/source.worker" }
+    step "expired" { assigned-to "agent/source.worker" }
+    step "ready" { assigned-to "agent/source.worker" }
+    step "blocked" { assigned-to "agent/source.worker" }
+    step "pending" { assigned-to "agent/source.worker" }
   }
 
 "#;
@@ -6762,7 +6762,7 @@ fn terminal_roots_reap_nested_orphans_idempotently_across_restart_and_replicatio
         r#"version 2
  mission "tree-child" state="ready" {
    goal "Expose nested work."
-   step "work" { assigned-to "agent/worker" }
+   step "work" { assigned-to "agent/source.worker" }
  }"#,
         "terminal-tree-child",
     );
@@ -7296,7 +7296,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
   mission "bootstrap" state="ready" {
     goal "Complete mission bootstrap."
     step "compile" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       produces-mission "project/work"
       mission "work" { goal "Complete mission work."; step "publish" { } }
     }
@@ -7377,8 +7377,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
     assert_eq!(output.revision, mission.revision);
 }
 
-#[test]
-fn nested_work_renews_the_same_workers_ancestor_lease() {
+fn nested_work_ancestor_expiry_after_child_completion(holder: &str) -> (u128, u128) {
     let store = Store::open_memory("node").unwrap();
     let source = r#"version 2
 
@@ -7387,7 +7386,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "nested-work" state="ready" {
   goal "Complete nested work."
   step "outer" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node/worker"
     mission "work" {
       goal "Complete the child work."
       step "first" { }
@@ -7429,7 +7428,7 @@ mission "nested-work" state="ready" {
         .unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
-        actor: Some("agent/node.worker".into()),
+        actor: Some("agent/node/worker".into()),
         incarnation: Some("current".into()),
         summary: None,
         reason: None,
@@ -7449,13 +7448,14 @@ mission "nested-work" state="ready" {
     store
         .work_action(&child.subject, "claim", &request("claim-child"))
         .unwrap();
+    let anchored_expiry = now_ms() + 60_000;
     store
         .connection
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h96d7cb75d46b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
-            [&parent.subject],
+            /* sqlite-large-value: allow-for-now lv-h1c3e44d7086a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?3, lease_owner=?2 WHERE subject=?1",
+            params![parent.subject, holder, anchored_expiry.to_string()],
         )
         .unwrap();
 
@@ -7465,9 +7465,21 @@ mission "nested-work" state="ready" {
 
     let parent = store.step_run(&parent.subject).unwrap().unwrap();
     assert_eq!(parent.status, "working");
-    assert_eq!(parent.claimant.as_deref(), Some("agent/node.worker"));
+    assert_eq!(parent.claimant.as_deref(), Some(holder));
     assert_eq!(parent.claim_incarnation.as_deref(), Some("current"));
-    assert!(parent.claim_expires_at_unix_ms.unwrap() > now_ms());
+    (anchored_expiry, parent.claim_expires_at_unix_ms.unwrap())
+}
+
+#[test]
+fn nested_work_renews_the_literal_owners_ancestor_lease() {
+    let (before, after) = nested_work_ancestor_expiry_after_child_completion("agent/node/worker");
+    assert!(after > before);
+}
+
+#[test]
+fn nested_work_does_not_renew_an_alias_owned_ancestor_lease() {
+    let (before, after) = nested_work_ancestor_expiry_after_child_completion("node/worker");
+    assert_eq!(after, before);
 }
 
 #[test]
@@ -8075,7 +8087,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "retry" state="ready" {
   goal "Retry failed work."
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     retry { attempts 3 }
     gate "the result is ready" { exists "resource/result" }
   }
@@ -9521,7 +9533,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "summaries" state="ready" {
   goal "Show what the worker reported."
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     retry { attempts 2 }
     gate "the result is ready" { exists "resource/result" }
   }
@@ -9645,7 +9657,7 @@ version 2
   mission "revision" state="ready" {
     goal "Complete mission revision."
     agent "worker" { workspace "."; command "true" }
-    step "owned" { assigned-to "agent/worker"; goal "First goal." }
+    step "owned" { assigned-to "agent/${ST_MISSION_RUN}/worker"; goal "First goal." }
     step "unrelated" { }
     step "join" { depends-on { step "owned" completed; step "unrelated" completed } }
   }
@@ -9678,7 +9690,7 @@ version 2
     goal "Complete mission revision."
     agent "worker" { workspace "."; command "true" }
     step "owned" {
-      assigned-to "agent/worker"
+      assigned-to "agent/${ST_MISSION_RUN}/worker"
       goal "First goal."
       constraint "Do not push."
     }
@@ -10099,7 +10111,7 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
     let store = Store::open_memory("node").unwrap();
     let source = CARRY_SOURCE.replace(
         "step \"other\"",
-        "step \"done\" { assigned-to \"agent/worker\"; goal \"Finish the work.\" }\n    step \"other\"",
+        "step \"done\" { assigned-to \"agent/node.worker\"; goal \"Finish the work.\" }\n    step \"other\"",
     );
     publish_carry(&store, &source, "notes-one");
     let run = store
@@ -10415,7 +10427,7 @@ version 2
   mission "carry" state="ready" {{
     goal "Keep submitted work across a gate revision."
     step "work" {{
-      assigned-to "agent/worker"
+      assigned-to "agent/node.worker"
       goal {goal:?}
       gate "checked" {{ exec {gate:?}; host "node"; workspace "/tmp" }}
     }}
@@ -10615,6 +10627,74 @@ fn a_revision_keeps_the_claim_on_a_carried_step() {
 }
 
 #[test]
+fn carried_claim_successor_requires_literal_ownership() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for holder in ["node/worker", "agent/node/worker"] {
+            let store = Store::open_memory("node").unwrap();
+            publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/requester".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "alias-carry-run".into(),
+            }).unwrap();
+            let old = &run.steps.iter().find(|step| step.step == "work").unwrap().subject;
+            store.set_step_state(old, "ready", None).unwrap();
+            store.work_action(old, "claim", &carry_request("one", "alias-carry-claim")).unwrap();
+            let revised = publish_carry(
+                &store,
+                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+                "alias-carry-two",
+            );
+            let adopted = store.adopt_mission_revision(
+                &run.id, &revised, "person/requester", "revise other work", "alias-carry-revision",
+            ).unwrap();
+            let carried = &adopted.steps.iter().find(|step| step.step == "work").unwrap().subject;
+            assert_ne!(carried, old);
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h76038fa53ef8 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker', lease_owner=?2 WHERE subject=?1",
+                params![carried, holder],
+            ).unwrap();
+            let mut renew = carry_request("one", "alias-carry-renew");
+            renew.actor = Some(actor.into());
+            if !actor.starts_with("agent/") {
+                let error = store.work_action(old, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "invalid-work-actor");
+                assert_eq!(
+                    store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
+                    Some(holder),
+                );
+                continue;
+            }
+            // Literal c72ede13 physical_actor rule, independent of the implementation
+            // under test: normalize_actor(actor, "agent"), then resolve_reference_conn.
+            let main_actor = fractal_store::store::identities::resolve_reference_conn(
+                &store.readers.get(),
+                &smallclaims::store::normalize_actor(actor, "agent"),
+            ).unwrap();
+            if main_actor != holder {
+                let error = store.work_action(old, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "stale-run-generation");
+                assert_eq!(
+                    store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
+                    Some(holder),
+                );
+                continue;
+            }
+            let renewed = store.work_action(old, "renew", &renew).unwrap();
+            assert_eq!(&renewed.subject, carried);
+            // The carried subject has no replicated lease anchor. Main publishes this
+            // renewal and writes the request actor, unlike a quiet in-generation renewal.
+            assert_eq!(renewed.claimant.as_deref(), Some(main_actor.as_str()));
+            let anchors = store.claims_for(carried, Some("work.renewed")).unwrap();
+            assert_eq!(anchors.len(), 1);
+            assert_eq!(anchors[0].actor.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(anchors[0].body["fields"]["claimant"], json!(main_actor));
+            assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
+        }
+    }
+}
+
+#[test]
 fn all_affected_human_reviewers_approve_the_exact_revision_preview() {
     let store = Store::open_memory("node").unwrap();
     let publish = |goal: &str, key: &str| {
@@ -10626,7 +10706,7 @@ version 2
     goal "Test protected revision."
      agent "worker" {{ workspace "."; command "true" }}
     step "work" revisions="human-only" revision-reviewer="person/step-reviewer" {{
-      assigned-to "agent/worker"
+      assigned-to "agent/${{ST_MISSION_RUN}}/worker"
       goal {goal:?}
     }}
   }}
@@ -10759,6 +10839,110 @@ version 2
         retried.mission_run.generation,
         applied.mission_run.generation
     );
+}
+
+#[test]
+fn revision_approval_retries_after_projection_gate_blocks_its_response() {
+    use std::sync::{Arc, mpsc};
+    use super::missions::{REVISION_APPROVAL_AFTER_COMMIT, REVISION_APPROVAL_AFTER_CUTOVER};
+
+    // Exercise draining, a blocked cutover, and an applied cutover whose receipt is blocked.
+    for (cutover, after_cutover) in [("when-idle", false), ("restart-active", false), ("restart-active", true)] {
+        let fixture = || {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let publish = |goal: &str, key: &str| {
+                let source = format!(
+                    "version 2\nmission \"approval-race\" state=\"ready\" revisions=\"human-only\" revision-reviewer=\"person/reviewer\" revision-cutover={cutover:?} {{ goal \"Exercise approval receipts.\"; step \"work\" {{ goal {goal:?}; }} }}"
+                );
+                let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+                let planned = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+                store.apply(&intent, &planned.subject_tokens, key).unwrap();
+                intent.missions["approval-race"].clone()
+            };
+            let first = publish("First goal.", "approval-race-first");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: first.id, revision: None, workspace: "/tmp".into(),
+                requester: Some("person/requester".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "approval-race-run".into(),
+            }).unwrap();
+            let candidate = publish("Second goal.", "approval-race-second");
+            let proposal = store.create_revision_proposal(
+                &run.id, &candidate, "person/requester", "review new goal", "approval-race-proposal",
+            ).unwrap();
+            (store, run, proposal)
+        };
+        let (normal_store, _, normal_proposal) = fixture();
+        let normal = normal_store.approve_revision_proposal(
+            &normal_proposal.id, "person/reviewer", normal_proposal.preview_hash.as_deref().unwrap(), "approval-race-approve",
+        ).unwrap();
+        let (store, run, proposal) = fixture();
+        let preview = proposal.preview_hash.as_deref().unwrap();
+        let (start_tx, start_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder_store = store.clone();
+        let run_id = run.id.clone();
+        let holder = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let _gate = holder_store.graph.projection.lock();
+            // Equivalent to a receive committing a pending part while retaining the gate.
+            let pending = serde_json::to_string(&Aggregate::RunTree(run_id)).unwrap();
+            holder_store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-he6b15544062e owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![format!("projection-run-rebuild:{pending}"), pending],
+            ).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        let hook: Box<dyn FnOnce()> = Box::new(move || {
+            start_tx.send(()).unwrap();
+            ready_rx.recv().unwrap();
+        });
+        if after_cutover {
+            REVISION_APPROVAL_AFTER_CUTOVER.with(|slot| *slot.borrow_mut() = Some(hook));
+        } else {
+            REVISION_APPROVAL_AFTER_COMMIT.with(|slot| *slot.borrow_mut() = Some(hook));
+        }
+        let result = store.approve_revision_proposal(
+            &proposal.id, "person/reviewer", preview, "approval-race-approve",
+        );
+        let committed = store.revision_proposal(&proposal.id).unwrap().unwrap();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "database-busy");
+        assert_eq!(error.details.get("reason").and_then(serde_json::Value::as_str), Some("run-projection-drain"));
+        assert_eq!(committed.approvals, vec!["person/reviewer"]);
+        let retried = store.approve_revision_proposal(
+            &proposal.id, "person/reviewer", preview, "approval-race-approve",
+        ).unwrap();
+        let expected_status = if cutover == "when-idle" { "draining" } else { "applied" };
+        assert_eq!(retried.status, expected_status);
+        assert_eq!(retried.proposal.as_ref().unwrap().status, expected_status);
+        assert_eq!(retried.status, normal.status);
+        let actual_proposal = retried.proposal.as_ref().unwrap();
+        let mut normal_proposal = normal.proposal.unwrap();
+        // Separate executions have separate clocks, but identical operation-derived identities.
+        normal_proposal.created_at_unix_ms = actual_proposal.created_at_unix_ms;
+        normal_proposal.updated_at_unix_ms = actual_proposal.updated_at_unix_ms;
+        assert_eq!(serde_json::to_value(actual_proposal).unwrap(), serde_json::to_value(normal_proposal).unwrap());
+        if cutover == "when-idle" || after_cutover {
+            assert_eq!(serde_json::to_value(&retried.proposal).unwrap(), serde_json::to_value(Some(&committed)).unwrap());
+        }
+        assert_eq!(
+            serde_json::to_value(&retried.proposal).unwrap(),
+            serde_json::to_value(store.revision_proposal(&proposal.id).unwrap()).unwrap(),
+        );
+        let cached = store.approve_revision_proposal(
+            &proposal.id, "person/reviewer", preview, "approval-race-approve",
+        ).unwrap();
+        assert_eq!(serde_json::to_value(&cached).unwrap(), serde_json::to_value(&retried).unwrap());
+        let approvals: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE subject=?1 AND kind='revision-proposal.approved'",
+            [&proposal.subject], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(approvals, 1, "recovery must not approve twice");
+    }
 }
 
 #[test]
@@ -10939,7 +11123,7 @@ version 2
   agent "worker" { workspace "."; command "true" }
   mission "drain-child" state="ready" {
     goal "Keep descendant work in the idle boundary."
-    step "active" { assigned-to "agent/worker" }
+    step "active" { assigned-to "agent/node.worker" }
   }
 
 "#;

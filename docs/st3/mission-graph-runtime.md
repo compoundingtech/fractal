@@ -194,6 +194,7 @@ mission "MISSION_ID"
   assigned-to "agent/${ST_MISSION_RUN}/owner"
   // Or repeat available-to. A mission cannot declare agentless.
   capacity cores=2 memory="4G"   // the lane of each agent here that declares none
+  authority { start "factory/publish"; write "resource/factory/*" }   // top-level only
 
   completion { when "all-steps-exhausted" }
   // Or: completion { depends-on { step "publish" completed } }
@@ -234,6 +235,46 @@ An exact idempotent retry returns its existing run before the capacity check. A 
 `revisions="human-only"` is optional and inherited by child steps. `revision-reviewer` requires that protection.
 
 The reviewer defaults to the mission run requester. `revision-cutover` is `restart-active` by default or `when-idle` when declared. The value in the current generation controls how its successor starts; a candidate cannot select its own cutover.
+
+`authority` is optional and belongs on a top-level mission only. It says what the mission's runs
+may do as the actor `mission-run/RUN` when a program step acts as the run
+([program engine §3](program-engine.md#3-declaration-and-authority)): one `VERB "PATTERN"` rule per
+line, in the shape of an agent's `*-authority` blocks. `publish`, `start`, `revise` and `cancel` take
+a mission ID without `mission/`; `write` takes a subject, or a registered family alone, before
+`/*`. A pattern is exact or ends in `/*`, which covers everything under it. Parsing refuses an empty
+block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
+mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
+is. A mission without the block grants its runs nothing.
+
+Each claim written as `mission-run/RUN`, and each document a run binds, is decided at write
+admission; a run's message send stays on the graph append so the decision applies to it. The run
+holds the `authority` of its current generation's revision, intersected with its starter's: the
+actor of its `mission-run.created`, which is its requester, or `mission-run/PARENT` for a child a
+program starts (whose own effective authority is intersected in turn). A person, agent or daemon
+starter contributes everything free mode gives it, and the rules that restrict it decide each of
+the run's writes as well. The claim names the grant it needs: `mission.published` on `mission/ID`
+needs `publish ID`; a run's creation and a generation without a predecessor need `start ID`; a
+generation with a predecessor needs `revise ID`, as does everything a revision writes on the runs
+it changes, each on that run's mission; any other claim needs `write SUBJECT`. A run always
+journals `program.step` on its own step runs. `cancel` is reserved and grants nothing yet: setting
+another run's outcome, which is how a run is cancelled, takes a person or agent actor. A write
+outside the effective authority is recorded as `rule.audited` on `rule/run-authority` and
+proceeds, or is refused with `run-authority-denied`, as the daemon's `[programs] authority` says
+(`audit` by default).
+
+A request whose caller's ancestry carries a live run credential
+(`ST_RUN_CREDENTIAL`, one per program attempt) is bound to `mission-run/RUN`: like a bound agent, it
+may not call internal routes, send a person header or name another `actor` or `requester`, and its
+writes are attributed to the run. The credential binds only while its attempt is the step run's
+current, live attempt; one that no longer binds leaves the caller unverifiable, and an
+environment that carries both a credential and `ST_AGENT` binds neither. A bound run writes no
+seat's `doc/agents/…` document. The CLI defaults its actor to `mission-run/$ST_MISSION_RUN` when the
+credential is present; the daemon accepts that actor from the trusted Unix client only when the
+request's credential binds the same run. An older member would quarantine a
+revision that declares it (it hashes the mission without the field), so publication holds such a
+revision until every member advertises `mission_authority=1` on its `daemon.started`
+(`mission-authority-unavailable`, also an `apply --dry-run` blocker), as for `capacity`
+([seat lanes](seat-lanes.md)).
 
 A mission can contain direct declarations. Direct agents in the mission can revise the complete mission.
 
@@ -346,11 +387,12 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
   produces-mission "generated-mission"
   uses-mission output-of="producer-step"
   after-run "mission-run/RUN_ID"
+  program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"
   gate "NAME" { GATE_BODY }
 }
 ```
 
-`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
+`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, `after-run` and `program` are single fields.
 
 `fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
 
@@ -363,6 +405,8 @@ A retry repeats one failed step attempt. It handles a bounded transient failure.
 `timeout` is an execution budget for one step attempt. It advances only while a worker holds a live claim in `claimed` or `working`; dependency waits, assignment waits, blocked gates, ready time, verification, and time after lease expiry do not consume it. Release and reclaim resume the same attempt's accumulated budget, while retry starts a new attempt with a fresh budget. Work projections expose the active interval start, accumulated execution milliseconds, and configured timeout so an operator can explain an expiry after restart or replication. A step cannot use a deadline gate because its timeout is its worker-execution budget.
 
 Waiting is not execution. A worker that holds a step while it waits for something outside the seat, such as a host build slot or GitHub's merge queue, declares it with `fractal work wait STEP --as AGENT --for 2h --reason "build slot"`. The wait is a `work.progress` claim with `clock: "paused"` and a `wait_until_unix_ms` deadline: it closes the running interval, and the attempt's execution clock stays stopped through the lease renewals and progress records that follow. `fractal work resume STEP` (a `work.progress` claim with `clock: "running"`) opens a new interval. A wait nobody resumes ends at its deadline, and the clock then runs again, so a seat that stopped answering cannot hide a hung step. Waits draw on one budget of 12 hours per step attempt, counted as time actually spent waiting: a wait that is resumed early gives back what it did not use, a wait that runs to its deadline spends its full length, and declaring again during a wait spends the time so far. A declaration larger than what is left is refused with `wait-budget-exhausted` and says how much remains, so a live seat that never finishes cannot chain waits past the execution timeout. A new claim in the same attempt keeps the spent budget; a retry is a new attempt with a fresh one. The lease still needs its renewals: a lapsed lease ends the interval as it always did, and a new claim ends any earlier holder's wait. `work show` prints the stopped clock with the time its wait ends and the wait budget used and left, and the wait's reason is the step's blocked reason until it resumes. A wait adds no time to the budget, so a step that waits two hours and then reviews for ten minutes has used ten minutes; `work extend` remains the way to give a step more work time.
+
+An agentless step has no worker and no lease, so the exec it declares waits for itself. Inside that exec, `fractal work wait "$ST_STEP_RUN" --for 2h --reason "build slot"` and `fractal work resume "$ST_STEP_RUN"` need no `--as`: the command acts as the exec (`ST3_SUBJECT`) under the launch its runtime gave it (`ST3_START_OPERATION`). The daemon accepts it only while that launch is the exec's live generation on the daemon's host, the exec was declared by that step for its current attempt, and the step is working. The launch is a fence against stale callers, as a seat's incarnation is, not a secret: a request under an earlier launch or attempt, or for a step with a worker, is refused, and an exec can do nothing else with the step. The record is the same `work.progress` claim with the exec as its actor and no claimant or lease, under the same deadline and 12-hour budget, so a hung exec that never resumes still runs into its timeout.
 
 A step with a worker does not fail when its budget runs out. Fractal raises one fault for the step, which arrives as a message to the agent assigned to it, and the step and its mission go on. The owner answers with `fractal work extend STEP --as AGENT --by 2h --reason TEXT`, which adds up to seven days to this attempt's budget and renews the lease, with `work complete` when the goals are met, or with `work fail`. An extension is a `work.extended` claim. The fault ends when the owner extends, completes, fails or releases the step. A step that runs out of the extended budget raises a new fault. Only a step with no worker, such as an agentless step, fails when its budget runs out, because nobody holds it to answer. A step submitted for verification has already used its time and is never timed out.
 
@@ -855,7 +899,7 @@ The command's exit status is its answer:
 | Exit | Answer | What Fractal does |
 |---|---|---|
 | 0 | pass | The boundary passes. |
-| 1 | not yet | The boundary waits. The gate checks again a minute later, then doubles the wait after each further not yet, up to every fifteen minutes. |
+| 1 | not yet | The boundary waits. The gate checks again five seconds later, then doubles the wait after each further not yet, up to every fifteen minutes. Nothing else wakes an exec gate, so a condition the graph observes (a resource, a claim, an exec's exit) belongs in a `field` or `exists` gate, which a change wakes at once. |
 | anything else | broken | The boundary waits for a revision, and the mission's publisher gets one attention item. |
 
 A check is also broken when it cannot start (its workspace is missing, for example), when something
@@ -1137,6 +1181,25 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `fractal work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask keeps no `request` field and takes no named answer.
+
+Typed answer inputs and stored answers may also carry `option_notes: [{id, text}]` for
+named options other than the selected one. Each ID must exist in the request and occur
+once, and each note must contain non-blank text of at most 8,000 characters. Invalid
+notes are refused, never discarded. The chosen option's note remains `text`.
+All option notes survive in `person_answers` and are included in the asker's
+`Answered` message and human-readable answer details.
+The persisted summary also names every other-option note, including when a caller
+supplies an explicit summary, so older readers that ignore the new field still show
+the notes. Strict older schema validators may refuse the extended answer rather
+than render incomplete data.
+
+The terminal UI requires the `person-answer-option-notes` capability (version 1,
+state `granted`) before sending notes on other options. A daemon without that capability
+cannot receive that answer: the UI explains the incompatibility and retains the draft.
+Answers without other-option notes omit `option_notes` and remain compatible with
+older daemons. This prevents an older daemon from ignoring notes while the UI claims
+they were sent.
+
 Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
 `respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
 `assistant_session_actor` expose separate server-owned provenance, not person
@@ -1195,6 +1258,17 @@ step "wait-for-build" {
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
 To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
+
+### Running a program
+
+`program` runs a step as a program the daemon's program engine executes: one ES module pinned by
+its sha256. The step is agentless and the program alone decides its outcome, so it cannot name
+an agent, gates, products, nested or used missions or `after-run`, and it cannot be a `finally`
+step. `fractal apply` sends the bundle's bytes with the publication; see [Program
+engine](program-engine.md). An older member would quarantine a revision with a program step (it
+hashes the mission without the field), so publication holds such a revision until every member
+advertises `mission_program=1` on its `daemon.started` (`mission-program-unavailable`, also an
+`apply --dry-run` blocker), as for `capacity` ([seat lanes](seat-lanes.md)).
 
 ## Run reports
 
@@ -1272,8 +1346,12 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled.
 
-A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+A stall is measured from the run's last sign of life: its last state change and any step's last
+change or progress record. A step that a worker holds counts from the start of its current
+execution interval (its claim, or the end of its last wait), its last progress record, and a
+declared `work wait` until that wait ends. Lease renewals are not a sign of life: a live seat that
+holds a step and records no progress is reported like any other silence, so a worker on a long
+step records progress with `fractal work progress`. Activity in child runs linked from its steps,
 including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a
@@ -1831,6 +1909,8 @@ agentless
 ```
 
 `agentless` means that the reconciler performs the work without an agent claim. Subgraphs and gates can complete an agentless step.
+
+An agentless step hands off without waiting for a reconcile pass. When its exec's `driver exec` wrapper reports the exit, the daemon evaluates the run from that change, and evaluates it again at once while each evaluation writes (at most eight in a row): the step completes, the next step becomes ready, and the evaluation that declares the next step's exec also starts it. An exec that renders files, has run before or is under a rollout still starts in the next pass.
 
 A local selector replaces the inherited selector. It does not add to it.
 
