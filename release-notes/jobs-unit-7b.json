@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive delegated keeper validation and death watcher (unit 7b)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission is not wired. Keeper ensure and watcher have no startup or scheduler caller. Explicit heavy slice and memory/pids controllers required; io enabled when available."},
+  "compatibility": {"status": "changed", "detail": "Agent Policy approved a host/class delegated keeper with its own process in idle, sibling to every J. Empty idle is repaired in the same scope, without job relaunch. Fake-tree fixtures cover reuse, validation, keeper death, job sampling and typed counters-unavailable. B6 path/dedication guards reject extra PIDs, populated children and subtree controllers."},
+  "downtime": {"status": "none", "detail": "No live behavior changes."},
+  "manual": {"status": "none", "detail": "No defaults, activation or deployment changes. J is sampled promptly on exit then removed; no sentinel or per-job transient unit."},
+  "recovery": {"status": "none", "detail": "Unit 8 owns uncertain-launch fencing. Missing counters never become zero or authorize rerun."}
+}
