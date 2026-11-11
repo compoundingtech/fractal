@@ -28,3 +28,4 @@ pub use store::mailbox_changes::MailboxChangesStore;
 pub use store::mailbox_lease::MailboxLeaseStore;
 pub use store::mailbox_wakes::MailboxWakesStore;
 pub use store::projection_divergence::ProjectionDivergenceStore;
+pub use store::read_positions::ReadPositionsStore;

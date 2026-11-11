@@ -26,7 +26,7 @@ pub use fractal_github::changes;
 pub use fractal_evidence::{EvidenceStore, OwnedSetsStore, PublicationFactsStore, PublicationStore, PublishedViewsStore};
 pub use fractal_seats::{AccountsStore, EvidenceSeatsStore, HarnessQuestionsStore, LimitsStore, RetirementsStore, RevisionSeatsStore, RolloutsStore, RosterAdmissionStore, RuntimeStartsStore, SeatStatusStore, SeatsStore, SeatsStoreCore, SekretsDaemonStore, StopDeferralStore, SubagentsStore, TracePrincipalStore};
 pub use fractal_missions::{AdhocWorkStore, ArrangementsStore, CoordinationStore, DeclarationsStore, DelegationStore, LanesStore, MissionEligibilityStore, MissionListStore, MissionsStore, MissionsStoreCore, PersonWorkStore, WorkListStore};
-pub use fractal_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore};
+pub use fractal_delivery::{AgentMessagesStore, ConversationReadsStore, CustomStore, DeliveryStore, DeliveryStoreCore, DirectiveNotesStore, GlassesStore, MailboxChangesStore, MailboxLeaseStore, MailboxWakesStore, ProjectionDivergenceStore, ReadPositionsStore};
 pub use fractal_attention::{AttentionListStore, AttentionSnapshotStore, AttentionStore, ClientSummaryStore, OwnerListsStore, PublishedListStore, PublishedViewsAttentionStore, SummaryListStore};
 pub use fractal_github::{GitChangesStore, GithubStore, IdleHoldsStore, WatchesStore};
 pub use fractal_api_mailbox::claude_channel;

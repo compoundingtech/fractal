@@ -1984,6 +1984,9 @@ pub struct Agent {
     pub activity: Option<String>,
     pub host_id: Option<String>,
     pub last_activity_at: Option<String>,
+    /// When the agent last said something itself; absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prose_at: Option<String>,
     pub silent_since: Option<String>,
     #[serde(default)]
     pub down_since: Option<String>,
@@ -3557,6 +3560,8 @@ pub enum ActionType {
     ArrangementEdit,
     #[serde(rename = "arrangement.membership.edit")]
     ArrangementMembershipEdit,
+    #[serde(rename = "read-position.advance")]
+    ReadPositionAdvance,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -4139,6 +4144,9 @@ pub struct ActionResult {
     pub harness_answer: Option<HarnessAnswerResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
+    /// `read-position.advance`: the stored position after the forward-only merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_position_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -5017,6 +5025,36 @@ pub struct ArrangementPage {
     pub sync: Option<SyncNotice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicated: Option<ReplicatedNotice>,
+}
+
+/// One person's read position in one conversation: the newest prose they have seen there.
+/// Forward-only; the daemon keeps the max of every advance.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReadPosition {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub owner: String,
+    pub conversation: String,
+    pub at: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReadPositionPage {
+    pub kind: String,
+    pub collection: String,
+    #[serde(default)]
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<ReadPosition>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicated: Option<ReplicatedNotice>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ReadPositionAdvanceParameters {
+    pub owner: String,
+    pub conversation: String,
+    pub at: String,
 }
 
 pub type OrderedMembershipOperation = fractal_schema::ordered_membership::Operation;
