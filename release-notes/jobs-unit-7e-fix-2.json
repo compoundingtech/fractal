@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Mark the retired launch-directory binding as intentionally unused.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "The shared stop-and-sample path already owns retirement. Rename only the unused outer binding, retaining directory preparation and attachment behavior unchanged."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
