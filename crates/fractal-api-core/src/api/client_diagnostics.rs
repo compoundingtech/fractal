@@ -175,7 +175,7 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn state(root: &std::path::Path) -> AppState {
-        AppState {
+        AppState {runtime_dir: root.into(),
             browser_pairing_login: None,
             seat_admission: Default::default(),
             store:Arc::new(crate::store::Store::open(&root.join("graph.db"),"diagnostic-test").unwrap()),

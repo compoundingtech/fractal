@@ -58,6 +58,7 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "alder".into(),
+        runtime_dir: root.path().into(),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
