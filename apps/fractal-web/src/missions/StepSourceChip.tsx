@@ -4,13 +4,10 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { basename, chipLabel, frameLocation, frameStrip, githubPermalink, roleWord, shortSha, textLines, type SourceMap, type SourceNode } from '../../../../packages/fractal-ui/src/assistant-ui/declaration/source-map-view.ts'
+import { basename, chipLabel, frameLocation, frameStrip, githubPermalink, roleWord, shortSha, stepNodePath, textLines, type SourceMap, type SourceNode } from '../../../../packages/fractal-ui/src/assistant-ui/declaration/source-map-view.ts'
 import { useDataSource } from '../data/react.tsx'
 import { blobRef, pinnedRef } from '../data/subjectReadPort.ts'
 import type { DeclarationTarget } from '../web/DeclarationDialog.tsx'
-
-/** The KDL node path of a declared step: `mission[<id>]/step[<path>]`. Nested step paths have no top-level node. */
-export const stepNodePath = (mission: string, step: string): string => `mission[${mission.replace(/^mission\//, '')}]/step[${step}]`
 
 /**
  * Where a step is declared, at its run's pinned revision: `mission.ts:30 · via review.ts`. Hover
@@ -28,7 +25,7 @@ export const StepSourceChip = ({ mission, revision, step, run, onOpen }: {
   const lookup = useAtomValue(useDataSource().subjectReads.sourceMap.feed(pinnedRef(mission, revision)))
   if (lookup._tag !== 'Observed' || lookup.value._tag !== 'Mapped') return null
   const map: SourceMap = lookup.value.value.map
-  const path = stepNodePath(mission, step)
+  const path = stepNodePath(mission.replace(/^mission\//, ''), step)
   const node = map.nodes.find(candidate => candidate.kdl === path)
   if (node === undefined) return null
   const label = chipLabel(map, node)

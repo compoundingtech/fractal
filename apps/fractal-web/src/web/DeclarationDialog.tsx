@@ -78,7 +78,7 @@ const SubjectSource = ({ target, close, Inspector, agent }: { readonly target: D
   const { subject } = target
   const reads = useDataSource().subjectReads
   const texts = React.useMemo(() => textsFamily(reads), [reads])
-  const [tab, setTab] = React.useState<InspectorTab>('source')
+  const [pickedTab, setTab] = React.useState<InspectorTab>()
   const [chosen, setChosen] = React.useState(target.revision)
   const [node, setNode] = React.useState(target.node)
   const [compareFrom, setCompareFrom] = React.useState<string>()
@@ -91,6 +91,8 @@ const SubjectSource = ({ target, close, Inspector, agent }: { readonly target: D
   const revision = chosen ?? live
   const pinned = revision === undefined ? undefined : pinnedRef(subject, revision)
   const mapState = sourceMapState(useAtomValue(pinned === undefined ? notRead : reads.sourceMap.feed(pinned)), revision ?? '')
+  // Source leads when a map exists or may still arrive; a subject without one opens on its KDL.
+  const tab = pickedTab ?? (mapState._tag === 'Ready' || (mapState._tag === 'Loading' && current._tag !== 'Unavailable') ? 'source' : 'kdl')
   const pinnedFeed = useAtomValue(pinned === undefined ? notRead : reads.declarationAt.feed(pinned))
   const kdlAtRevision = textState(pinnedFeed, pinnedKdl, 'canonical KDL')
   const map = mapState._tag === 'Ready' ? mapState.map : undefined

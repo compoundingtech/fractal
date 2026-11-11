@@ -164,24 +164,47 @@ export const kdlIndex = (text: string): KdlIndex => {
   return { nodes: done, byPath: new Map(done.map(node => [node.path, node])), lineNode: containing.map((path, at) => starting[at] ?? path) }
 }
 
+/**
+ * `[name, key]` per segment. Keys may contain `/` (`mission[land/code]`), so a key ends at the `]`
+ * that ends the path or precedes the next `/`; mirrors `fractal_schema::source_map::locate::segments`.
+ */
+export const nodeSegments = (path: string): readonly (readonly [string, string])[] => {
+  const segments: (readonly [string, string])[] = []
+  let rest = path
+  while (rest !== '') {
+    const open = rest.indexOf('[')
+    if (open === -1) { segments.push([rest, '']); break }
+    const after = rest.slice(open + 1)
+    let close = after.indexOf(']')
+    while (close !== -1 && close + 1 < after.length && after[close + 1] !== '/') close = after.indexOf(']', close + 1)
+    if (close === -1) close = after.length
+    segments.push([rest.slice(0, open), after.slice(0, close)])
+    rest = after.slice(close + 2)
+  }
+  return segments
+}
+
+const joinSegments = (segments: readonly (readonly [string, string])[]): string => segments.map(([name, key]) => `${name}[${key}]`).join('/')
+
 /** The node itself when the map names it, else its nearest mapped ancestor: nodes without their own site inherit it. */
 export const mappedAncestor = (path: string, mapped: ReadonlyMap<string, SourceNode>): string | undefined => {
-  let at: string | undefined = path
-  while (at !== undefined) {
+  const segments = nodeSegments(path)
+  for (let length = segments.length; length > 0; length -= 1) {
+    const at = joinSegments(segments.slice(0, length))
     if (mapped.has(at)) return at
-    const cut = at.lastIndexOf('/')
-    at = cut === -1 ? undefined : at.slice(0, cut)
   }
   return undefined
 }
 
 /** `mission[x]/step[review]/goal[0]` → `step review › goal`. */
-export const nodeLabel = (path: string): string =>
-  path.split('/').slice(1).map(segment => {
-    const match = /^([^[]+)\[(.*)\]$/.exec(segment)
-    if (match === null) return segment
-    return named(match[1]!) ? `${match[1]} ${match[2]}` : match[1]!
-  }).join(' › ') || path.split('[')[0]!
+export const nodeLabel = (path: string): string => {
+  const segments = nodeSegments(path)
+  return segments.slice(1).map(([name, key]) => named(name) ? `${name} ${key}` : name).join(' › ') || (segments[0]?.[0] ?? path)
+}
+
+/** The node path of step run path `outer/nested-mission/inner` in mission `id`: nested steps alternate step and mission segments. */
+export const stepNodePath = (missionId: string, stepPath: string): string =>
+  [`mission[${missionId}]`, ...stepPath.split('/').map((part, index) => `${index % 2 === 0 ? 'step' : 'mission'}[${part}]`)].join('/')
 
 // ---------- Frames ----------
 
@@ -275,14 +298,15 @@ export interface OutlineEntry { readonly path: string; readonly label: string; r
 export const outline = (map: SourceMap, kdl: KdlIndex | undefined): readonly OutlineEntry[] => {
   const order = (path: string) => kdl?.byPath.get(path)?.start ?? Number.MAX_SAFE_INTEGER
   return map.nodes
-    .map(node => ({ node, depth: node.kdl.split('/').length - 1 }))
-    .filter(({ node, depth }) => depth <= 1 || named(/([^/[]+)\[[^\]]*\]$/.exec(node.kdl)?.[1] ?? ''))
+    .map(node => ({ node, segments: nodeSegments(node.kdl) }))
+    .map(({ node, segments }) => ({ node, depth: segments.length - 1, name: segments.at(-1)?.[0] ?? '' }))
+    .filter(({ depth, name }) => depth <= 1 || named(name))
     .map(({ node, depth }, index) => ({ node, depth, index }))
     .sort((a, b) => order(a.node.kdl) - order(b.node.kdl) || a.index - b.index)
     .map(({ node, depth }) => {
       const strip = frameStrip(node)
       const own = strip.find(frame => frame.file === map.declaration) ?? strip[primaryFrame(node, strip)]!
-      return { path: node.kdl, label: depth === 0 ? node.kdl.split('[')[0]! : nodeLabel(node.kdl).split(' › ').at(-1)!, depth, location: frameLocation(map, own) }
+      return { path: node.kdl, label: depth === 0 ? (nodeSegments(node.kdl)[0]?.[0] ?? node.kdl) : nodeLabel(node.kdl).split(' › ').at(-1)!, depth, location: frameLocation(map, own) }
     })
 }
 
