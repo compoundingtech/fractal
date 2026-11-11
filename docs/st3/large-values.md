@@ -94,16 +94,30 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### GitHub event observation fold inventory
+
+`fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds
+the repository's subject prefix bounds and selects the canonical first observation per event
+subject. It reads existing subject, fields JSON and accepted-time TEXT values, retaining the
+current inline representation rather than adding storage. The eventual reference representation
+must preserve whole canonical fields and subject identity before listing limits are applied.
+`fractal_github::idle_holds` owns `lv-haa1264e7b371`, replacing `lv-h13f5ed40c752`:
+its queue-exit reader binds the thread's exit-subject bounds and reads one canonical accepted-time
+TEXT value per event subject. The canonical selector also reads claim/batch identity and position
+metadata. Both are dynamic SQL readers, not size proofs. Their maintainers retain the
+`trace-statement-and-value-representation` task; representation changes must not count repeated
+observations as new events or move a queue-exit time.
+
 ### Agent prose seek indexes
 
-`fractal_store::store` owns schema site `lv-h1109553f0fdc`, replacing
-`lv-h22c8c670811c`. Its two prose-only partial indexes reuse the existing subject,
+`fractal_store::store` owns the `claims_timeline_prose_time_index` and
+`local_observations_timeline_prose_index` prose-only partial indexes. They reuse the existing subject,
 incarnation and acceptance-time TEXT values, plus integer arrival/snapshot/time columns.
 They add no payload copies or logical input limits, but their variable keys remain inline:
 indexed seeks bound non-prose-history work, not encoded key size. The existing
 `chunk-or-reference-variable-columns` TODO must preserve subject/incarnation equality,
 numeric accepted-time ordering, local arrival order and snapshot fences during reference
-conversion. Other declarations in the schema template are unchanged.
+conversion. The indexes add no new value representation.
 
 ### Client operation admission inventory (PR #5921)
 

@@ -804,6 +804,29 @@ class GovernedTest(unittest.TestCase):
         self.assert_in_place(self.governed_in(self.HEAVY, {'app-capped.slice': ('17179869184', 'max 100000')}),
                              'heavy scope inherits the approved outer slice cap')
 
+    def test_own_cap_accepts_the_gate_slot_namespace_only_in_the_approved_slice_chain(self):
+        manager = 'user.slice/user-1000.slice/user@1000.service'
+        chains = ('app.slice/app-capped.slice', 'app.slice/app-capped.slice/app-capped-heavy.slice')
+        names = ('gate-slot-gate-123-456.scope', 'gate-slot-heavy-123.scope', 'gate-slot-eval-123.scope',
+                 'gate-slot-i-1794299850854100553-312663-22324.scope', 'gate-slot-profile_A.1-123.scope')
+        for chain in chains:
+            for name in names:
+                for memory in ('10737418240', 'max', None):
+                    with self.subTest(chain=chain, name=name, memory=memory), tempfile.TemporaryDirectory() as tmp:
+                        self.tree(tmp, f'{manager}/{chain}/{name}', {name: (memory, None)})
+                        cap = st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys'))
+                        self.assertEqual(cap, f'{name}: memory by {name}' if memory == '10737418240' else None)
+        profile = names[3]
+        rejected = [f'{manager}/{chain}/unrelated.scope' for chain in chains]
+        rejected += [f'{manager}/app.slice/{profile}',
+                     f'{manager}/app.slice/app-capped-heavy.slice/{profile}',
+                     f'{manager}/app.slice/app-capped.slice/other.slice/{profile}',
+                     f'{manager}/app.slice/app-capped.slice/app-capped-heavy.slice/other.slice/{profile}']
+        for leaf in rejected:
+            with self.subTest(leaf=leaf), tempfile.TemporaryDirectory() as tmp:
+                self.tree(tmp, leaf, {leaf.rsplit('/', 1)[1]: ('10737418240', None)})
+                self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
+
     def test_gate_slot_names_and_environment_without_the_right_memory_cap_do_not_count(self):
         self.assert_scoped(self.governed_in(self.HEAVY, {}), 'scope name without a cap')
         markers = {'GATE_SLOT_ADMITTED': '1', 'GATE_SLOT_SCOPE_UNIT': 'gate-slot-heavy-123.scope', 'BUILDS_SLICE_ACTIVE': '1'}
