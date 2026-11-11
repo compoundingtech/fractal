@@ -31,6 +31,38 @@ async fn replay_estimate_refuses_to_mutate_without_confirm_and_rejects_fabric() 
 }
 
 #[tokio::test]
+async fn replay_estimate_names_blocked_owned_sets_and_explains_projection_loss() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    // A valid receipt whose exact member claim has not replicated yet.
+    let receipt: crate::store::owned_sets::Revision = serde_json::from_value(json!({
+        "previous": null,
+        "source": {"repository":"acme/garden","ref":"refs/heads/main","sha":"a".repeat(40),"sequence":10},
+        "bundle_digest":"fixture",
+        "members":{"agent/garden/orchard":{"kind":"agent","claim":"missing-member","revision":"missing-revision"}},
+        "retired":{}, "adoptions":{}
+    })).unwrap();
+    state.store.append_claim(&crate::model::ClaimInput {
+        subject: "owned-set/garden".into(), kind: "owned-set.revised".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "revision": crate::model::canonical_hash(&receipt).unwrap(), "body": receipt
+        })).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert!(!state.store.owned_sets().unwrap()[0].blockers.is_empty());
+    let index = state.store.index().unwrap();
+    let Json(estimate) = replay(State(state.clone()), Extension(ClientTransportBoundary::Unix), Json(ReplayRequest { confirm: false })).await.unwrap();
+    assert_eq!(estimate["blocked_owned_sets"], json!(["owned-set/garden"]));
+    let warning = estimate["warning"].as_str().unwrap();
+    assert!(warning.contains("owned-set/garden"));
+    assert!(warning.contains("physical desired and mission-definition rows"));
+    assert!(warning.contains("authoritative claims and set receipts remain"));
+    assert_eq!(state.store.index().unwrap(), index);
+    assert!(!root.path().join("replication-replay-audit.jsonl").exists());
+}
+
+#[tokio::test]
 async fn replay_clears_unhealthy_graph_and_durably_audits_operator() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
