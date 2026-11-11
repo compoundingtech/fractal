@@ -13,6 +13,8 @@ mod ci_test_paths;
 pub use fractal_kernel::accounts;
 pub mod api;
 pub mod web;
+/// Verified GitHub webhook deliveries ask the observers of their repository to poll now.
+pub mod github_webhook;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;

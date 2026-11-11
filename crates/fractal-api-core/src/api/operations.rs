@@ -135,6 +135,7 @@ pub async fn doctor(
         client_now_ms(),
     ));
     report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
+    report.checks.extend(crate::github_webhook::doctor_line(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
