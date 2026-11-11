@@ -266,15 +266,14 @@ impl SharedFinalization {
     }
 
     pub(crate) fn participant(&mut self, context: Option<&Context>) {
-        if let Some(context) = context {
-            if !self.participants.iter().any(|other|
+        if let Some(context) = context
+            && !self.participants.iter().any(|other|
                 Arc::ptr_eq(&other.metrics.counters, &context.metrics.counters)
                     && other.stage == context.stage)
-            {
-                // run_write_batch accepts no more than WRITE_BATCH_LIMIT callbacks.
-                assert!(self.participants.len() < crate::sqlite::WRITE_BATCH_LIMIT);
-                self.participants.push(context.clone());
-            }
+        {
+            // run_write_batch accepts no more than WRITE_BATCH_LIMIT callbacks.
+            assert!(self.participants.len() < crate::sqlite::WRITE_BATCH_LIMIT);
+            self.participants.push(context.clone());
         }
     }
 
