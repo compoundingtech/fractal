@@ -681,8 +681,9 @@ fn recompute_base(connection: &Connection, base_id: &str) -> Result<()> {
 }
 // Authentication creates constant-sized state; opposite-side history is queued.
 fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
-    if claim.kind==GRANTED && structurally_valid(claim,claim) {
-        if insert_authority(connection,claim,claim)? { recompute_base(connection,&claim.id)?; }
+    if claim.kind==GRANTED && structurally_valid(claim,claim)
+        && insert_authority(connection,claim,claim)? {
+        recompute_base(connection,&claim.id)?;
     }
     let kinds: &[&str] = if claim.kind==GRANTED { &[POLICY,REVOKED] } else { &[GRANTED] };
     for kind in kinds {
@@ -781,6 +782,15 @@ fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bo
     refresh_claim_with_authentication(connection,id,membership_current,None)
 }
 
+#[derive(Default)]
+struct PreviousAuthentication {
+    admitted: bool,
+    key: Option<String>,
+    sequence: Option<u64>,
+    hash: Option<String>,
+    position: Option<i64>,
+}
+
 fn refresh_claim_with_authentication(connection: &Connection, id: &str,
     membership_current: bool, verified: Option<Authentication>) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
@@ -814,13 +824,16 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
             "SELECT EXISTS(SELECT 1 FROM assistant_grant_local_appends WHERE claim_id=?1)",
             [&claim.id], |row| row.get(0),
         )?;
-        let previous: Option<(bool,Option<String>,Option<u64>,Option<String>,Option<i64>)> = connection.query_row(
+        let previous: Option<PreviousAuthentication> = connection.query_row(
             "SELECT authenticated,auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
              FROM assistant_grant_pending WHERE claim_id=?1",
-            [&claim.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+            [&claim.id], |row| Ok(PreviousAuthentication {
+                admitted: row.get(0)?, key: row.get(1)?, sequence: row.get(2)?,
+                hash: row.get(3)?, position: row.get(4)?,
+            }),
         ).optional()?;
-        let (admitted, previous_key, previous_sequence, previous_hash, previous_position) =
-            previous.unwrap_or((false,None,None,None,None));
+        let PreviousAuthentication { admitted, key: previous_key, sequence: previous_sequence,
+            hash: previous_hash, position: previous_position } = previous.unwrap_or_default();
         // Trust depends on precise evidence, never monotonic admission. Retraction
         // tasks target that dependency; local append is a separate durable fact.
         let authentication = if let Some(verified) = verified {
@@ -1083,8 +1096,8 @@ impl MembershipUpdate {
                     None => enqueue(old_start,old_end)?,
                     Some((start,end)) => {
                         if *start>old_start { enqueue(old_start,old_end.min(start-1))?; }
-                        if let Some(end) = end {
-                            if *end<old_end { enqueue(old_start.max(end+1),old_end)?; }
+                        if let Some(end) = end && *end<old_end {
+                            enqueue(old_start.max(end+1),old_end)?;
                         }
                     }
                 }
@@ -1186,11 +1199,21 @@ fn proof_invalidation_one(connection: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+struct RetractionRange<'a> {
+    task: i64,
+    writer: &'a str,
+    key: &'a str,
+    lower: u64,
+    upper: u64,
+    sequence: i64,
+    claim: &'a str,
+}
+
 // Coverage restoration immediately exempts covered dependencies from fencing.
 // Lazily subtract its intersection from one queued range per budget unit, so
 // cancellation itself never expands into an unbounded writer transaction.
-fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, key: &str,
-    lower: u64, upper: u64, sequence: i64, claim: &str) -> Result<bool> {
+fn trim_restored_retraction(connection: &Connection, range: RetractionRange<'_>) -> Result<bool> {
+    let RetractionRange { task, writer, key, lower, upper, sequence, claim } = range;
     let window: Option<MembershipWindow> = connection.query_row(
         "SELECT start,end FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
         params![writer,key], |row| Ok((row.get(0)?,row.get(1)?)),
@@ -1214,16 +1237,34 @@ fn trim_restored_retraction(connection: &Connection, task: i64, writer: &str, ke
     Ok(true)
 }
 
+struct AdditionTask {
+    task: i64,
+    writer: String,
+    key: String,
+    lower: u64,
+    upper: u64,
+    sequence: i64,
+    hash: String,
+    position: i64,
+    after: String,
+    claim: String,
+}
+
 // Each addition seeks only indexed grant work, then that grant's own receipts.
 // A claim selection, receipt verification or completed claim costs one unit.
 fn addition_one(connection: &Connection) -> Result<bool> {
     let Some((owner,_)) = queue_owner(connection,"addition")? else { return Ok(false); };
-    let task: Option<(i64,String,String,u64,u64,i64,String,i64,String,String)> = connection.query_row(
+    let task: Option<AdditionTask> = connection.query_row(
         "SELECT id,writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim
          FROM assistant_grant_additions WHERE id=?1", [&owner],
-        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)),
+        |row| Ok(AdditionTask {
+            task: row.get(0)?, writer: row.get(1)?, key: row.get(2)?,
+            lower: row.get(3)?, upper: row.get(4)?, sequence: row.get(5)?,
+            hash: row.get(6)?, position: row.get(7)?, after: row.get(8)?, claim: row.get(9)?,
+        }),
     ).optional()?;
-    let Some((task,writer,key,lower,upper,sequence,hash,position,after,claim)) = task else { return Ok(false); };
+    let Some(AdditionTask { task, writer, key, lower, upper, sequence, hash, position,
+        after, claim }) = task else { return Ok(false); };
     if claim.is_empty() {
         let next: Option<String> = connection.query_row(
             "SELECT claim_id FROM assistant_grant_auth_work WHERE writer=?1 AND claim_id>?2 ORDER BY claim_id LIMIT 1",
@@ -1333,7 +1374,9 @@ fn retraction_one(connection: &Connection) -> Result<bool> {
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
     ).optional()?;
     let Some((task,writer,key,lower,upper,sequence,id)) = task else { return Ok(false); };
-    if trim_restored_retraction(connection,task,&writer,&key,lower,upper,sequence,&id)? {
+    if trim_restored_retraction(connection, RetractionRange {
+        task, writer: &writer, key: &key, lower, upper, sequence, claim: &id,
+    })? {
         return Ok(true);
     }
     let pending: Option<(u64,String)> = connection.query_row(
