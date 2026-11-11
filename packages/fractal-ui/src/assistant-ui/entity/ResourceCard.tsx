@@ -91,5 +91,5 @@ export function FolderEntityCard({ id, name, host, description, agents = [], nee
 const styles = stylex.create({
   added: { color: tone.diffAddTint },
   removed: { color: tone.diffRemoved },
-  preview: { margin: s.zero, padding: s.sm, borderRadius: r.sm, backgroundColor: surface.rowHover, color: ink.fgSoft, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'pre', overflow: 'hidden' },
+  preview: { margin: s.zero, padding: s.sm, borderRadius: r.sm, backgroundColor: surface.canvas, color: ink.fgSoft, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'pre', overflow: 'hidden' },
 })
