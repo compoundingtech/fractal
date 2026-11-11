@@ -4262,6 +4262,7 @@ mod tests {
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
             node: "ui-hint".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),
@@ -4319,7 +4320,7 @@ mod tests {
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+                node: "sidebar-edit-test".into(), api_socket: root.join("api.sock"), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
                 fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
             };
             let path = socket.to_owned();
@@ -4368,7 +4369,7 @@ mod tests {
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "read-position-test".into(), state_dir: root.path().into(), pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+            node: "read-position-test".into(), api_socket: root.path().join("api.sock"), state_dir: root.path().into(), pty_root: root.path().join("pty"), pty_binary: "pty".into(),
             fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
         };
         let path = socket.clone();
@@ -4420,6 +4421,7 @@ mod tests {
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "ui-actions".into(),
+                api_socket: root.join("api.sock"),
                 state_dir: root.into(),
                 pty_root: root.join("pty"),
                 pty_binary: "pty".into(),
@@ -4850,6 +4852,7 @@ mod tests {
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
             node: "person-read".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: root.path().join("unused-pty"),
