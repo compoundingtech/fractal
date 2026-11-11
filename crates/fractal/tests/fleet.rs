@@ -8201,26 +8201,30 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     let root = tempfile::tempdir().unwrap();
     let mut n = Node::new(root.path(), "n");
     n.start().await;
-    // The reader is a seat on this member, so an agent's mail to it routes to the stream.
+    // The reader is a seat on this member, so an agent's mail to it routes to the stream. A
+    // slash-qualified name keeps its subject; a simple one would take the host as a prefix.
+    let reader = "agent/fleet/reader";
     let declaration = root.path().join("reader.kdl");
     fs::write(&declaration, format!(
-        "version 2\nagent \"fleet-reader\" {{ host \"n\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        "version 2\nagent \"fleet/reader\" {{ host \"n\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
         n.root
     )).unwrap();
     n.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
     let held = "message/0000000000000f01";
     append_stream_item(&n, held).await;
     let key = "fleet-outbox-keyed";
-    assert!(append_keyed_stream_item(&n, "message/0000000000000f00", "agent/fleet-reader", key).await);
+    assert!(append_keyed_stream_item(&n, "message/0000000000000f00", reader, key).await);
     n.stop();
     let eligible = "message/0000000000000f02";
     let personal = "message/0000000000000f03";
     let refused = "message/0000000000000f04";
     // The drain stopped after the shard append, before the delete.
-    leave_in_outbox(&n, held, "agent/fleet-sender", "agent/fleet-reader", 0);
-    leave_in_outbox(&n, eligible, "agent/fleet-sender", "agent/fleet-reader", 0);
-    leave_in_outbox(&n, personal, PERSON, "agent/fleet-reader", 0);
-    leave_claim_in_outbox(&n, &keyed_message(refused, key, "through the outbox"), ATTEMPTS - 1);
+    leave_in_outbox(&n, held, "agent/fleet-sender", reader, 0);
+    leave_in_outbox(&n, eligible, "agent/fleet-sender", reader, 0);
+    leave_in_outbox(&n, personal, PERSON, reader, 0);
+    let mut refused_claim = keyed_message(refused, key, "through the outbox");
+    refused_claim.fields.insert("to".into(), json!(reader));
+    leave_claim_in_outbox(&n, &refused_claim, ATTEMPTS - 1);
 
     n.start().await;
     wait_until("the startup drain empties the outbox but for the refused message", 30, || async {
