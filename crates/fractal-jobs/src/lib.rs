@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, num::NonZeroU32};
 
+pub mod host_authority;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobRequest {
