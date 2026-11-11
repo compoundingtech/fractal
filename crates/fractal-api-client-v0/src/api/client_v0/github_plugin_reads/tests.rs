@@ -569,3 +569,68 @@ async fn cache_principals_isolate_fresh_documents_etags_failures_and_relocations
     }).await.unwrap_err();
     assert!(matches!(failure, Failure::Unavailable { .. }));
 }
+
+#[tokio::test]
+async fn graphql_reads_select_installations_and_bound_uncached_pat_fallback() {
+    use axum::http::{HeaderMap, StatusCode};
+    let root = tempfile::tempdir().unwrap();
+    let auth = installation(root.path(), 42);
+    let cache = std::sync::Mutex::new(Cache::default());
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mode = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route("/graphql", axum::routing::post({
+        let requests = requests.clone();
+        let mode = mode.clone();
+        move |headers: HeaderMap, Json(body): Json<Value>| {
+            let requests = requests.clone();
+            let mode = mode.clone();
+            async move {
+                let bearer = headers["authorization"].to_str().unwrap().to_owned();
+                requests.lock().unwrap().push((bearer.clone(), body));
+                assert!(!headers.contains_key("if-none-match"));
+                let accepted = match mode.load(Ordering::SeqCst) {
+                    0 => bearer == "Bearer fixture-installation",
+                    1 => bearer == "Bearer fixture-pat",
+                    _ => return (StatusCode::BAD_GATEWAY, Json(json!({}))),
+                };
+                if accepted { (StatusCode::OK, Json(json!({"data": {"ok": true}}))) }
+                else { (StatusCode::UNAUTHORIZED, Json(json!({}))) }
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for query in [map::PULL_QUERY, map::CONVERSATION_QUERY, map::CHECKS_QUERY] {
+        let result = graphql_read(&cache, &auth, &base, "acme", query, graphql_variables(&garden(), 7), ROUTE_BUDGET).await.unwrap();
+        assert_eq!(result.value["data"]["ok"], true);
+    }
+    assert_eq!(requests.lock().unwrap().len(), 3, "all three queries must use the installation, never the rejected PAT");
+    // A changed installation must not hit a still-fresh GraphQL document.
+    installation(root.path(), 43);
+    mode.store(2, Ordering::SeqCst);
+    for query in [map::PULL_QUERY, map::CONVERSATION_QUERY, map::CHECKS_QUERY] {
+        assert!(matches!(graphql_read(&cache, &auth, &base, "acme", query, graphql_variables(&garden(), 7), ROUTE_BUDGET).await, Err(Failure::Unavailable { .. })));
+    }
+    assert_eq!(requests.lock().unwrap().len(), 6);
+    mode.store(1, Ordering::SeqCst);
+    cache.lock().unwrap().entries.clear();
+    cache.lock().unwrap().bytes = 0;
+    requests.lock().unwrap().clear();
+    for query in [map::PULL_QUERY, map::CONVERSATION_QUERY, map::CHECKS_QUERY] {
+        for _ in 0..2 {
+            let result = graphql_read(&cache, &auth, &base, "acme", query, graphql_variables(&garden(), 8), ROUTE_BUDGET).await.unwrap();
+            assert_eq!(result.value["data"]["ok"], true);
+            assert_eq!(cache.lock().unwrap().len(), 0, "fallback must not cache PAT data under installation identity");
+        }
+    }
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 18, "each read attempts the installation, one reload, then the PAT exactly once");
+    for attempts in requests.chunks_exact(3) {
+        assert_eq!(attempts[0].0, "Bearer fixture-installation");
+        assert_eq!(attempts[1].0, "Bearer fixture-installation");
+        assert_eq!(attempts[2].0, "Bearer fixture-pat");
+        assert_eq!(attempts[0].1, attempts[2].1, "fallback must retain the fixed query and variables");
+    }
+    server.abort();
+}

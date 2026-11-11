@@ -611,25 +611,35 @@ impl Reads {
     }
 
     /// One fixed GraphQL query, cached by TTL only (GraphQL has no ETag).
-    async fn graphql(&mut self, name: &str, query: &'static str, variables: Value) -> Result<Fetched, Failure> {
-        let auth = credential().await?;
-        let key = format!("POST {} /graphql {name} {variables}", auth.cache_principal());
-        let budget = self.remaining();
-        cached(&CACHE, &key, false, |_| async move {
-            let budget = budget?;
-            let body = serde_json::to_vec(&json!({ "query": query, "variables": variables }))
-                .map_err(|_| Failure::unavailable("GraphQL request could not be encoded"))?;
-            let request = crate::resource::github_api_client()
-                .post(format!("{API_BASE}/graphql"))
-                .timeout(budget)
-                .header("accept", "application/vnd.github+json")
-                .header("content-type", "application/json")
-                .header("x-github-api-version", "2022-11-28")
-                .body(body);
-            exchange(request, &auth, budget).await
-        })
-        .await
+    async fn graphql(&mut self, owner: &str, query: &'static str, variables: Value) -> Result<Fetched, Failure> {
+        graphql_read(&CACHE, &credential().await?, API_BASE, owner, query, variables, self.remaining()?).await
     }
+}
+
+/// Select the owner's installation before consulting the principal-partitioned TTL cache.
+async fn graphql_read(
+    cache: &std::sync::Mutex<Cache>,
+    credential: &crate::github_http::GithubAuth,
+    api_base: &str,
+    owner: &str,
+    query: &str,
+    variables: Value,
+    budget: Duration,
+) -> Result<Fetched, Failure> {
+    let auth = crate::github_http::read_auth(owner, "gh-ci", credential);
+    let key = format!("POST {} /graphql {query} {variables}", auth.cache_principal());
+    cached(cache, &key, false, |_| async move {
+        let body = serde_json::to_vec(&json!({ "query": query, "variables": variables }))
+            .map_err(|_| Failure::unavailable("GraphQL request could not be encoded"))?;
+        let request = crate::resource::github_api_client()
+            .post(format!("{api_base}/graphql"))
+            .timeout(budget)
+            .header("accept", "application/vnd.github+json")
+            .header("content-type", "application/json")
+            .header("x-github-api-version", "2022-11-28")
+            .body(body);
+        exchange(request, &auth, budget).await
+    }).await
 }
 
 async fn exchange(request: reqwest::RequestBuilder, auth: &crate::github_http::GithubAuth, budget: Duration) -> Result<Raw, Failure> {
@@ -698,7 +708,7 @@ impl Reads {
     async fn pull(&mut self, repo: &Repo, number: u64) -> GithubRead<GithubPullRequest> {
         let mut stamp = Stamp::default();
         let rest = part!(stamp, self.rest(&format!("{}/pulls/{number}", repo_path(repo))).await);
-        let graph = part!(stamp, self.graphql("pull", map::PULL_QUERY, graphql_variables(repo, number)).await);
+        let graph = part!(stamp, self.graphql(&repo.owner, map::PULL_QUERY, graphql_variables(repo, number)).await);
         match map::pull(repo, number, &rest.value, &graph.value) {
             Ok(item) => stamp.found(item),
             Err(failure) => failure.into_read(),
@@ -725,7 +735,7 @@ impl Reads {
 
     async fn conversation(&mut self, repo: &Repo, number: u64) -> GithubRead<GithubConversation> {
         let mut stamp = Stamp::default();
-        let graph = part!(stamp, self.graphql("conversation", map::CONVERSATION_QUERY, graphql_variables(repo, number)).await);
+        let graph = part!(stamp, self.graphql(&repo.owner, map::CONVERSATION_QUERY, graphql_variables(repo, number)).await);
         let comments = part!(stamp, self.rest(&format!("{}/issues/{number}/comments?per_page={LIST_BOUND}", repo_path(repo))).await);
         match map::conversation(repo, &graph.value, &comments.value, comments.has_next) {
             Ok(item) => stamp.found(item),
@@ -735,7 +745,7 @@ impl Reads {
 
     async fn checks(&mut self, repo: &Repo, number: u64) -> GithubRead<GithubChecks> {
         let mut stamp = Stamp::default();
-        let graph = part!(stamp, self.graphql("checks", map::CHECKS_QUERY, graphql_variables(repo, number)).await);
+        let graph = part!(stamp, self.graphql(&repo.owner, map::CHECKS_QUERY, graphql_variables(repo, number)).await);
         match map::checks(&graph.value) {
             Ok(item) => stamp.found(item),
             Err(failure) => failure.into_read(),
