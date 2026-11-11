@@ -111,6 +111,7 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
         notify: Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
         node: "message-retry".into(),
+        api_socket: directory.path().join("api.sock"),
         state_dir: directory.path().into(),
         pty_root: directory.path().join("pty"),
         pty_binary: "pty".into(),

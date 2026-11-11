@@ -71,3 +71,5 @@ fn rejects_effective_resume_environment_before_receipt() {
         }
     }
 }
+
+
