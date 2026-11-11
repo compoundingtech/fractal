@@ -567,7 +567,7 @@ On a Linux development runner with Bash, curl, jq, Python 3.11+, pty and a deleg
 writable cgroup-v2 directory, build/fetch the binaries and run:
 
 ```sh
-cargo build --locked -p fractal --bin fractal
+cargo build --locked -p fractal-cli --bin fractal
 released=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/jobs-baseline")
 scripts/jobs-rolling-upgrade-proof \
   --released-bin "$released" --head-bin target/debug/fractal \
