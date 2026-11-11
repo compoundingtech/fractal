@@ -576,8 +576,15 @@ scripts/jobs-rolling-upgrade-proof \
 ```
 
 Use a fresh output directory. The delegated cgroup must be beneath
-`/sys/fs/cgroup/`; the script creates and removes its own empty child without
-moving any process. Jobs need explicit `enabled = true`, `allowed_classes =
+`/sys/fs/cgroup/`; the proof opts into a guardian-owned empty child without
+moving any process. After reaping descendants, the guardian kills any remaining
+cgroup occupants and removes that child even when cancellation kills the Bash
+process before its EXIT trap runs. Other supervisor callers do not opt into this
+behavior. Successful completion also removes and checks absence of its own
+keeper before printing the final PASS. To check for leaks after any run, use the
+printed command `find "$DELEGATED_CGROUP" -maxdepth 1 -name 'jobs-proof-*' -print`;
+no output means no proof keeper remains beneath that parent.
+Jobs need explicit `enabled = true`, `allowed_classes =
 ["heavy"]` and a real `keeper_cgroups` namespace. This supplies the production
 accept-time pidfd/cgroup recursion guard, not an activation bypass. Submission
 only records queued intent: execution admission remains unwired.

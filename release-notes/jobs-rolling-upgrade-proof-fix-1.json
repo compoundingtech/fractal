@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep rolling-upgrade proof cgroup cleanup alive when cancellation kills the proof shell.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "No admission, identity or authorization changes."},
+  "compatibility": {"status": "none", "detail": "The existing process supervisor gains an opt-in --keeper-cgroup-parent option used only by the jobs proof. Callers without that option retain their existing lifecycle behavior."},
+  "downtime": {"status": "none", "detail": "Manual proof tooling only; no daemon or service changes."},
+  "manual": {"status": "changed", "detail": "The proof prints a find command for verifying that no jobs-proof-* child remains in the delegated cgroup parent. Normal completion removes its owned keeper and fails unless that cgroup is absent before final PASS."},
+  "recovery": {"status": "changed", "detail": "The guardian creates and owns the private keeper cgroup outside the killable proof group. After reaping all descendants it writes cgroup.kill and removes any remaining keeper, including when cancellation prevents the Bash EXIT trap from running. Cleanup errors make the supervised run fail."}
+}

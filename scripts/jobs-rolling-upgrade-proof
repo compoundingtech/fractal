@@ -2,12 +2,9 @@
 # Real-release variant of crates/fractal/tests/fleet.rs's Node/anchor/joined fixture.
 # No service installation, production credentials, registry substitutions or job execution.
 set -Eeuo pipefail
-# Reuse the fleet fixture's Linux subreaper: even detached descendants are owned,
-# and a killed runner cannot strand daemons or accidentally leave a test fleet up.
+# The opt-in guardian owns the keeper even when cancellation SIGKILLs this shell.
 supervisor=$(dirname "$0")/fractal_test_process.py
-if ! python3 "$supervisor" --is-supervised; then
-  exec python3 "$supervisor" -- "$0" "$@"
-fi
+arguments=("$@")
 usage() {
   echo 'Usage: scripts/jobs-rolling-upgrade-proof --released-bin FILE --head-bin FILE --output-dir DIR --cgroup-parent /sys/fs/cgroup/DELEGATED'
 }
@@ -28,13 +25,18 @@ for tool in curl jq python3 sha256sum realpath setsid pty; do
 done
 released=$(realpath "$released"); head=$(realpath "$head")
 [[ -x $released && -x $head && $released != "$head" ]] || exit 2
+cgroup_parent=$(realpath "$cgroup_parent")
+[[ $cgroup_parent == /sys/fs/cgroup/* && -f $cgroup_parent/cgroup.events ]]
+if [[ -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]] || ! python3 "$supervisor" --is-supervised; then
+  exec python3 "$supervisor" --keeper-cgroup-parent "$cgroup_parent" -- "$0" "${arguments[@]}"
+fi
 # Require a fresh evidence directory; private fleet credentials must never be published.
 umask 077
 mkdir "$output"
 output=$(realpath "$output")
 exec > >(tee "$output/proof.log") 2>&1
 phase=setup
-root= keeper=
+root= keeper=$FRACTAL_TEST_KEEPER_CGROUP
 declare -A binary pid worker port
 cleanup() {
   local status=$?
@@ -49,7 +51,6 @@ cleanup() {
       [[ -z $process ]] || wait "$process" 2>/dev/null || true
     done
   done
-  [[ -z $keeper ]] || rmdir "$keeper" || true
   if ((status)); then echo "FAIL $phase (exit $status); evidence: $output"; fi
   echo 'Evidence includes private test fleet keys; do not commit or publish the state directories.'
   exit "$status"
@@ -67,10 +68,8 @@ printf 'Released pin: '; jq -c '{tag,commit}' "$pin"
 "$head" --version
 sha256sum "$released" "$head" > "$output/binaries.sha256"
 [[ $(uname -s) == Linux ]]
-cgroup_parent=$(realpath "$cgroup_parent")
-[[ $cgroup_parent == /sys/fs/cgroup/* && -f $cgroup_parent/cgroup.events ]]
-keeper=$cgroup_parent/jobs-proof-$$
-mkdir "$keeper"
+[[ ${keeper%/*} == "$cgroup_parent" && ${keeper##*/} == jobs-proof-* ]]
+printf "Verify no proof cgroup remains: find %q -maxdepth 1 -name 'jobs-proof-*' -print\n" "$cgroup_parent"
 # A real, empty private cgroup is the configured keeper namespace. The caller remains
 # outside it. This exercises the real SO_PEERPIDFD + /proc guard, never a test bypass.
 [[ -f $keeper/cgroup.events ]]
@@ -286,4 +285,9 @@ jq -S '[.[] | {id,subject,kind,body}] | sort_by(.id)' "$output/job-claims.json" 
 cmp "$output/a-history.json" "$output/original-history.json"
 cmp "$output/a-registry-digest.txt" "$output/b-registry-digest.txt"
 echo 'PASS convergence (show/list, immutable histories, registry, wire and projection digests)'
+# Prove normal completion leaves no owned cgroup; the guardian repeats cleanup
+# after reaping on cancellation or failure, when this shell's traps cannot run.
+rmdir "$keeper"
+[[ ! -e $keeper ]] || { echo "FAIL keeper cleanup: $keeper remains"; exit 1; }
+echo 'PASS keeper cleanup (owned cgroup absent)'
 echo "PASS jobs rolling upgrade; evidence: $output"
