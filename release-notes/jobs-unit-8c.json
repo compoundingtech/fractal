@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Discover stable job cgroups and fence reused process identities (unit 8c)",
+  "replay": {"status": "changed", "detail": "Confirmed release facts retain kernel boot ID and process start ticks, not a PID alone. Missing identity cannot prove a running holder."},
+  "schema": {"status": "none", "detail": "No database tables or shared writer changes; release-record content gains process identity."},
+  "rules": {"status": "none", "detail": "INACTIVE: no recovery boot hook or production caller before 4c-2 and activation. Slice comes from configuration with no default."},
+  "compatibility": {"status": "changed", "detail": "CgroupRecovery discovers the stable J under the existing configured delegated keeper, validates ownership and hierarchy, and never creates a keeper, job or process. The seam has no launch or gate-release operation."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Native systemd/cgroup execution and cargo checks not run."},
+  "recovery": {"status": "changed", "detail": "Fixtures cover stable lookup, missing keeper/J, configured-slice refusal, /proc comm parsing, reboot identity and PID reuse. Host membership pin is unchanged by boot identity."}
+}
