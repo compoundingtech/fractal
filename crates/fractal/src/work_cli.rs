@@ -712,9 +712,10 @@ async fn post_work(
     } else {
         if action == "claim" {
             let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
+            let source = crate::source_cli::step_source(client, &response.subject).await;
             print!(
                 "{}",
-                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held)
+                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held, source.as_deref())
             );
             if let Some((node, documents)) = host_facts(client).await {
                 print!(

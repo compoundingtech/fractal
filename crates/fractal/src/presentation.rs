@@ -866,11 +866,14 @@ pub(crate) fn render_claim_lease(
     output
 }
 
+/// `source` is the step's SOURCE row (`source_cli::render_step_source`), printed under its
+/// definition when its run's revision has a source map.
 pub(crate) fn render_step_run(
     step: &StepRunView,
     style: OutputStyle,
     now_unix_ms: u128,
     driver_held: Option<bool>,
+    source: Option<&str>,
 ) -> String {
     let mut output = String::new();
     let title = step.title.as_deref().unwrap_or(&step.step);
@@ -885,6 +888,9 @@ pub(crate) fn render_step_run(
     let _ = writeln!(output, "MISSION RUN {}", step.run);
     let _ = writeln!(output, "GENERATION {}", step.generation);
     let _ = writeln!(output, "DEFINITION {}", step.definition_hash);
+    if let Some(source) = source {
+        output.push_str(source);
+    }
     let _ = writeln!(
         output,
         "UPDATED    {}",
@@ -1722,7 +1728,7 @@ mod tests {
             resolved_by: None,
             evidence: vec![],
         });
-        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
@@ -2248,7 +2254,7 @@ mod tests {
         claimed.execution_elapsed_ms = 1_000;
         claimed.timeout_ms = Some(60_000);
 
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), None);
 
         assert!(rendered.contains("SUBJECT    step-run/demo-generation/build"));
         assert!(rendered.contains("GENERATION run-generation/demo-generation"));
@@ -2256,6 +2262,11 @@ mod tests {
         assert!(!rendered.contains("fractal work renew"));
         assert!(rendered.contains("Execution    1000ms / 60000ms · active 1s ago"));
         assert!(rendered.contains("• Complete the work."));
+        assert!(!rendered.contains("SOURCE"));
+
+        let source = "SOURCE     schickling/factory@2e047be graph/demo/mission.ts:7-11\n  via      graph/demo/steps.ts:6-10\n";
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), Some(source));
+        assert!(rendered.contains(&format!("DEFINITION {}\n{source}UPDATED", claimed.definition_hash)), "{rendered}");
     }
 
     #[test]
@@ -2263,12 +2274,12 @@ mod tests {
         let mut claimed = step("step-run/demo-generation/build", "build", "claimed");
         claimed.claimant = Some("person/operator".into());
         claimed.claim_expires_at_unix_ms = Some(62_001);
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Lease        The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew step-run/demo-generation/build --as person/operator\n"));
         assert!(!rendered.contains("st driver renews"));
 
         claimed.claim_incarnation = Some("incarnation/manual".into());
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("--as person/operator --incarnation incarnation/manual\n"));
     }
 
