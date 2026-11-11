@@ -145,7 +145,7 @@ fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1 });
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new() });
     engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
     let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
     assert_eq!(engine.store.step_run(&step.subject).unwrap().unwrap().status, "failed");
