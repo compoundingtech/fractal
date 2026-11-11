@@ -52,13 +52,29 @@ pub fn kill_and_wait_empty(directory: &Path) -> Result<()> {
 
 /// A vanished J is evidence of unavailable counters, never zero and never a rerun.
 pub fn sample_exit(directory: &Path, host: &str) -> ExitUsage {
-    if !directory.is_dir() {
-        return ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished);
+    if let Err(reason) = sample_presence(directory, fs::symlink_metadata(directory)) {
+        return ExitUsage::CountersUnavailable(reason);
     }
     match job_scope::read_usage(directory, host) {
-        Ok(usage) if directory.is_dir() => ExitUsage::Sample(Box::new(usage)),
-        Ok(_) => ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished),
+        Ok(usage) => match sample_presence(directory, fs::symlink_metadata(directory)) {
+            Ok(()) => ExitUsage::Sample(Box::new(usage)),
+            Err(reason) => ExitUsage::CountersUnavailable(reason),
+        },
         Err(_) => ExitUsage::CountersUnavailable(CountersUnavailable::ReadFailed),
+    }
+}
+
+fn sample_presence(
+    directory: &Path, metadata: std::io::Result<fs::Metadata>,
+) -> Result<(), CountersUnavailable> {
+    match metadata {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            && fs::symlink_metadata(directory)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {
+            Err(CountersUnavailable::CgroupVanished)
+        }
+        _ => Err(CountersUnavailable::ReadFailed),
     }
 }
 
@@ -118,5 +134,22 @@ mod retirement_tests {
         assert!(retirement_step(root.path(), kill_and_wait_empty(root.path())).is_err());
         let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert!(retirement_step(&root.path().join("absent"), Err(error.into())).is_err());
+    }
+
+    #[test]
+    fn sampling_errors_are_not_reported_as_a_vanished_job() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
+            assert_eq!(sample_presence(&missing, Err(std::io::Error::from(kind))),
+                Err(CountersUnavailable::ReadFailed));
+        }
+        assert_eq!(sample_presence(root.path(), Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            Err(CountersUnavailable::ReadFailed));
+        assert!(matches!(sample_exit(&missing, "fixture"),
+            ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished)));
+        fs::write(&missing, "not a cgroup").unwrap();
+        assert!(matches!(sample_exit(&missing, "fixture"),
+            ExitUsage::CountersUnavailable(CountersUnavailable::ReadFailed)));
     }
 }

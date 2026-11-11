@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Name detached keepers and classify sampling errors without fabricated disappearance (unit 7f-1)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema or shared writer changes."},
+  "rules": {"status": "none", "detail": "INACTIVE: no production caller, boot hook or activation before 4c-2 and explicit activation. No policy defaults."},
+  "compatibility": {"status": "changed", "detail": "Keeper post-fork setup uses async-signal-safe operations, names the process fractal-keeper, closes inherited descriptors before readiness, and only pauses. Fresh direct children stay unreaped until placement verification or failed-placement cleanup completes, fencing their numeric PIDs. Only verified placement hands ownership to a reaper; no daemon pipe controls keeper lifetime."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Ignored fork/procfs fixtures check process name, detached session, descriptor closure, survival after adapter drop, and death after readiness remaining unreaped through failed-placement cleanup. Cargo, gate-slot proof and native execution not run."},
+  "recovery": {"status": "changed", "detail": "Sampling reports CgroupVanished only after ENOENT and confirmed absence of J. Permission, IO and non-directory errors remain ReadFailed, never fabricated disappearance or zero counters. Existing whole-J retirement ordering is retained."}
+}
