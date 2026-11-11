@@ -69,7 +69,11 @@ mission "program-test" state="ready" {{
         "program-test-definition",
     );
     let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
-    let engine = ProgramEngine::new(store.clone(), Arc::new(|_: &str| {}), dir.path().join("programs"), liveness);
+    // As the daemon's engine does: a step the engine changes off the reconciler thread is marked
+    // for the next pass.
+    let incremental = reconciler.incremental.clone();
+    let wake = Arc::new(move |step: &str| incremental.touch(step));
+    let engine = ProgramEngine::new(store.clone(), wake, dir.path().join("programs"), liveness);
     assert!(reconciler.program_engine.set(engine.clone()).is_ok());
     Fixture { store, reconciler, engine, dir }
 }
