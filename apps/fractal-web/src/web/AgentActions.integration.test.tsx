@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { within } from '@testing-library/dom'
 import type { FractalClient } from '@fractal/client'
 
@@ -96,6 +96,12 @@ describe('gatewayAgentControls', () => {
 })
 
 describe('ConversationOverflowMenu', () => {
+  let unmount: (() => void) | undefined
+  afterEach(() => {
+    unmount?.()
+    unmount = undefined
+    vi.unstubAllGlobals()
+  })
   const mount = async (state: string) => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
     // React Aria's menu selection escapes keys with CSS.escape, which jsdom does not provide.
@@ -103,6 +109,7 @@ describe('ConversationOverflowMenu', () => {
     const container = document.createElement('div')
     document.body.append(container)
     const root = createRoot(container)
+    unmount = () => { act(() => root.unmount()); container.remove() }
     await act(async () => root.render(<ConversationOverflowMenu agent={{ ref: 'agent/example/atlas', name: 'atlas', state, activity: 'idle' }} onViewDeclaration={() => undefined} />))
     const press = async (label: string) => act(async () => {
       // Icon-only buttons are found by their accessible name; text buttons and menu items by their text.
@@ -110,7 +117,7 @@ describe('ConversationOverflowMenu', () => {
       if (target === undefined) throw new Error(`no ${label}`)
       target.click()
     })
-    return { press, unmount: () => { act(() => root.unmount()); container.remove() } }
+    return { press }
   }
 
   it('asks before restarting, and keeping it sends nothing', async () => {
@@ -127,7 +134,6 @@ describe('ConversationOverflowMenu', () => {
     await act(async () => [...document.querySelectorAll<HTMLElement>('[role="alertdialog"] button')].find((each) => each.textContent === 'Restart')!.click())
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'restart')
     expect(document.querySelector('[role="status"]')?.textContent).toBe('Restart atlas: asked Fractal')
-    view.unmount()
   })
 
   it('keeps View KDL in the same menu, with or without a roster row', async () => {
@@ -139,7 +145,6 @@ describe('ConversationOverflowMenu', () => {
       expect(within(menu).getByRole('menuitem', { name: `${row.label} ${row.what}` })).not.toBeNull()
     }
     expect(within(menu).getByRole('menuitem', { name: 'View KDL read its whole declaration' })).not.toBeNull()
-    view.unmount()
   })
 
   it('starts a stopped seat without asking', async () => {
@@ -149,6 +154,5 @@ describe('ConversationOverflowMenu', () => {
     await view.press('Start')
     expect(data.control).toHaveBeenCalledWith('agent/example/atlas', 'start')
     expect(document.querySelector('[role="alertdialog"]')).toBeNull()
-    view.unmount()
   })
 })
