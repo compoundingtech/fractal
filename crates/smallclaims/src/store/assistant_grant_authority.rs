@@ -1214,6 +1214,34 @@ struct MembershipUpdate {
 }
 
 impl MembershipUpdate {
+    fn prepare(connection: &Connection, generation: i64, fleet_id: Option<String>,
+        membership: &crate::fleet::Membership, limit: usize) -> Result<Self> {
+        let desired: BTreeMap<_,_> = membership.incarnations().map(|incarnation| (
+            (incarnation.name.clone(),incarnation.member_key.clone()),
+            (incarnation.start,incarnation.end),
+        )).collect();
+        let current: BTreeMap<_,_> = connection.prepare(
+            "SELECT writer,member_key,start,end FROM assistant_grant_membership_windows",
+        )?.query_map([], |row| Ok(((row.get::<_,String>(0)?,row.get::<_,String>(1)?),
+                                  (row.get::<_,u64>(2)?,row.get::<_,Option<u64>>(3)?))))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut windows = Vec::with_capacity(limit);
+        let mut complete = true;
+        for (identity,window) in &desired {
+            if current.get(identity)==Some(window) { continue; }
+            if windows.len()==limit { complete=false; break; }
+            windows.push((identity.0.clone(),identity.1.clone(),Some(*window)));
+        }
+        if complete {
+            for identity in current.keys() {
+                if desired.contains_key(identity) { continue; }
+                if windows.len()==limit { complete=false; break; }
+                windows.push((identity.0.clone(),identity.1.clone(),None));
+            }
+        }
+        Ok(Self { generation, fleet_id, windows, complete })
+    }
+
     fn apply(&self, connection: &Connection) -> Result<usize> {
         for (writer,key,window) in &self.windows {
             let old: Option<MembershipWindow> = connection.query_row(
@@ -1300,6 +1328,21 @@ impl MembershipUpdate {
         }
         Ok(self.windows.len())
     }
+}
+
+/// Prepare a real default-store sealed snapshot without opening or upgrading a
+/// Store. Raw-connection fixtures use the same preparation/application as
+/// production maintenance; this never fabricates membership or local signers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn prepare_membership_for_test(connection: &Connection) -> Result<bool> {
+    let transaction = connection.unchecked_transaction()?;
+    let generation = fleet_generation(&transaction)?;
+    let membership = fleet_membership_tx(&transaction)?;
+    let fleet_id = fleet_meta(&transaction,"fleet_id")?;
+    let update = MembershipUpdate::prepare(&transaction,generation,fleet_id,&membership,CLAIMS_PER_SLICE)?;
+    update.apply(&transaction)?;
+    transaction.commit()?;
+    Ok(update.complete)
 }
 /// Resumable, idempotent versioned backfill. Each page uses claims_kind_index;
 /// unrelated claims are never visited. Cursor and projection changes commit
@@ -1674,30 +1717,7 @@ impl Store {
         } else {
             fleet_meta(&connection, "fleet_id")?
         };
-        let desired: BTreeMap<_,_> = membership.incarnations().map(|incarnation| (
-            (incarnation.name.clone(),incarnation.member_key.clone()),
-            (incarnation.start,incarnation.end),
-        )).collect();
-        let current: BTreeMap<_,_> = connection.prepare(
-            "SELECT writer,member_key,start,end FROM assistant_grant_membership_windows",
-        )?.query_map([], |row| Ok(((row.get::<_,String>(0)?,row.get::<_,String>(1)?),
-                                  (row.get::<_,u64>(2)?,row.get::<_,Option<u64>>(3)?))))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut windows = Vec::with_capacity(limit);
-        let mut complete = true;
-        for (identity,window) in &desired {
-            if current.get(identity)==Some(window) { continue; }
-            if windows.len()==limit { complete=false; break; }
-            windows.push((identity.0.clone(),identity.1.clone(),Some(*window)));
-        }
-        if complete {
-            for identity in current.keys() {
-                if desired.contains_key(identity) { continue; }
-                if windows.len()==limit { complete=false; break; }
-                windows.push((identity.0.clone(),identity.1.clone(),None));
-            }
-        }
-        Ok(Some(MembershipUpdate { generation, fleet_id, windows, complete }))
+        Ok(Some(MembershipUpdate::prepare(&connection,generation,fleet_id,&membership,limit)?))
     }
 
     /// Background work only; receipt transactions never fold fleet history.

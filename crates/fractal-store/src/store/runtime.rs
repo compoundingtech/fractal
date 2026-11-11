@@ -896,14 +896,16 @@ mod schema_install_tests {
         use smallclaims::store::assistant_grant_authority as authority;
         use std::time::Duration;
 
-        fn drain_authority(store: &Store, phase: &str) {
+        fn drain_authority(connection: &Connection, phase: &str) {
             const MAX_SLICES: usize = 128;
+            assert!(authority::prepare_membership_for_test(connection).unwrap(),
+                "{phase}: the fixture's empty sealed membership must fit one preparation page");
             for _ in 0..MAX_SLICES {
-                if store.advance_assistant_grant_authority_backfill().unwrap() {
+                if authority::backfill_slice(connection,Duration::from_secs(1)).unwrap() {
                     return;
                 }
             }
-            panic!("{phase}: assistant authority did not complete within {MAX_SLICES} production maintenance slices");
+            panic!("{phase}: assistant authority did not complete within {MAX_SLICES} raw maintenance slices");
         }
 
         const OBSOLETE_INDEXES: [&str; 3] = [
@@ -1024,8 +1026,8 @@ mod schema_install_tests {
                 assert!(authority::ready(&connection).is_err());
                 // The raw slice cannot prepare a sealed membership snapshot.
                 // A fresh constructor leaves its durable applied generation at
-                // -1; only Store maintenance may verify and advance it. Keep
-                // that reachable state and exercise the real upgrade driver.
+                // -1. Prepare the real sealed view without a full Store open,
+                // which would independently upgrade the baseline user_version.
                 let applied: i64 = connection.query_row(
                     "SELECT applied_generation FROM assistant_grant_membership_state WHERE id=1",
                     [], |row| row.get(0),
@@ -1034,12 +1036,11 @@ mod schema_install_tests {
                     "SELECT value FROM fleet_generation WHERE id=1", [], |row| row.get(0),
                 ).unwrap();
                 assert_ne!(applied,generation,"fixture must retain the missing membership-snapshot prerequisite");
-                let store = Store::open(&path,"node").unwrap();
-                drain_authority(&store,"initial historical backfill");
+                drain_authority(&connection,"initial historical backfill");
                 assert_eq!(connection.query_row(
                     "SELECT applied_generation FROM assistant_grant_membership_state WHERE id=1",
                     [], |row| row.get::<_,i64>(0),
-                ).unwrap(),generation,"production maintenance must persist the verified sealed snapshot");
+                ).unwrap(),generation,"shared production preparation must persist the verified sealed snapshot");
                 authority::ready(&connection).unwrap();
                 assert_eq!(snapshot(&connection), before, "version {version}: raw evidence");
                 assert_eq!(claims_indexes(&connection), indexes_before, "projection must not build or drop raw claims indexes");
@@ -1075,14 +1076,13 @@ mod schema_install_tests {
                 assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
                     .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
                 assert!(!authority::contains(&connection, "active").unwrap());
-                drain_authority(&store,"older-build unsigned revoke reconciliation");
+                drain_authority(&connection,"older-build unsigned revoke reconciliation");
                 assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
                     .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
                 assert!(!authority::contains(&connection, "active").unwrap());
                 assert!(!authority::contains(&connection, "late-revoke").unwrap());
                 let after = snapshot(&connection);
                 let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
-                drop(store);
                 drop(connection);
 
                 let connection = Connection::open(&path).unwrap();
