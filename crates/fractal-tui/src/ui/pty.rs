@@ -660,6 +660,7 @@ impl Drop for NativeTerminal {
         if let Some(trace) = &self.trace {
             trace.finish("native-dropped");
         }
+        // The thread sees the input channel close and detaches.
     }
 }
 
@@ -690,11 +691,6 @@ fn cursor_style(shape: CursorShape, blinking: bool) -> SetCursorStyle {
     }
 }
 
-impl Drop for NativeTerminal {
-    fn drop(&mut self) {
-        // The thread sees the channel close and detaches.
-    }
-}
 
 /// Start the attach thread for `stream`; the sender takes what is typed and resizes.
 fn start(
