@@ -10526,8 +10526,12 @@ fn headless_open_receipt_and_observation_deliver_once_in_either_replication_orde
                 })),
             ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
+        let replicate_receipt = || {
+            let exchange = exchange_from(&creator, &observer.replication_inventory().unwrap());
+            receive_and_project(&observer, "creator", &exchange);
+        };
         if receipt_first {
-            replicate_fully(&creator, &observer);
+            replicate_receipt();
         }
         let recorded = || observer.latest_actual_value(&subject).unwrap()
             .map(|value| value["facts"].clone());
@@ -10545,8 +10549,8 @@ fn headless_open_receipt_and_observation_deliver_once_in_either_replication_orde
         }).unwrap();
         // A receipt from another host must not erase an already observed head, even
         // when it arrives after the observation. Re-delivery of either is harmless.
-        replicate_fully(&creator, &observer);
-        replicate_fully(&creator, &observer);
+        replicate_receipt();
+        replicate_receipt();
         let prior = recorded().unwrap();
         assert_eq!(prior["head_sha"], "head-a");
         assert_eq!(prior["opened_by"], "agent/creator.builder");
