@@ -112,6 +112,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "studio".into(),
+        api_socket: dir.join("api.sock"),
         state_dir: dir.clone(),
         pty_root: dir.join("pty"),
         pty_binary: PathBuf::from("pty"),

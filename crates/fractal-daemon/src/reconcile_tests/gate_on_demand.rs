@@ -242,6 +242,7 @@ let state = crate::api::AppState {
     notify: Arc::new(Notify::new()),
     event_notify: tokio::sync::watch::channel(0_u64).0,
     node: "node".into(),
+    api_socket: root.path().join("api.sock"),
     state_dir: root.path().into(),
     pty_root: root.path().join("pty"),
     pty_binary: "pty".into(),

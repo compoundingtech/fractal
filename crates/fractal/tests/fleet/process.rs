@@ -7,7 +7,7 @@ pub(super) struct DaemonProcess {
     child: Child,
     pid: u32,
     #[cfg(target_os = "linux")]
-    _control: std::os::unix::net::UnixStream,
+    control: std::os::unix::net::UnixStream,
 }
 
 impl DaemonProcess {
@@ -60,7 +60,7 @@ impl DaemonProcess {
             let mut daemon = Self {
                 child: scope.spawn()?,
                 pid: 0,
-                _control: control.try_clone()?,
+                control: control.try_clone()?,
             };
             let mut pid = [0; 4];
             control.read_exact(&mut pid)?;
@@ -106,6 +106,29 @@ impl DaemonProcess {
         }
         #[cfg(not(target_os = "linux"))]
         self.child.kill()
+    }
+
+    /// End the daemon's scope like [`Self::kill`], except the process trees rooted at
+    /// `released`: a seat's detached PTY server, adopted by the scope, outlives its daemon the
+    /// way a seat in a systemd work scope outlives the daemon's service. The test's own
+    /// supervisor adopts and reaps it once the scope ends.
+    pub(super) fn kill_releasing(&mut self, released: &[u32]) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write as _;
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            let message: Vec<u8> = released.iter().flat_map(|pid| pid.to_be_bytes()).collect();
+            self.control.write_all(&message)?;
+            self.control.shutdown(std::net::Shutdown::Write)
+        }
+        // Here the scope is the daemon alone: nothing reaps its detached descendants.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = released;
+            self.child.kill()
+        }
     }
 }
 
@@ -172,6 +195,66 @@ ready.recv(1)
         !std::path::Path::new("/proc").join(pid.trim()).exists(),
         "stop must reap the inherited child"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_released_detached_server_outlives_its_daemon_scope_while_the_rest_is_reaped() {
+    use std::io::{BufRead as _, BufReader};
+    use std::os::unix::net::UnixListener;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let ready = UnixListener::bind(root.path().join("ready")).unwrap();
+    let mut command = fractal_daemon::test_support::command("python3");
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap());
+    command
+        .args([
+            "-c",
+            r#"
+import os, socket, sys, time
+read, write = os.pipe()
+if os.fork() == 0:
+    # As `pty run -d` starts a server: in a session of its own, its launcher gone.
+    os.setsid()
+    server = os.fork()
+    if server == 0:
+        while True:
+            time.sleep(1)
+    os.write(write, str(server).encode())
+    os._exit(0)
+os.wait()
+server = os.read(read, 32).decode()
+child = os.fork()
+if child == 0:
+    while True:
+        time.sleep(1)
+ready = socket.socket(socket.AF_UNIX)
+ready.connect(sys.argv[1] + '/ready')
+ready.sendall(f'{server} {child}\n'.encode())
+ready.recv(1)
+"#,
+        ])
+        .arg(root.path());
+    let mut daemon = DaemonProcess::spawn_isolated(
+        command,
+        File::create(root.path().join("out")).unwrap(),
+        File::create(root.path().join("err")).unwrap(),
+    )
+    .unwrap();
+    let (connection, _) = ready.accept().unwrap();
+    let mut line = String::new();
+    BufReader::new(&connection).read_line(&mut line).unwrap();
+    let (server, child) = line.trim().split_once(' ').unwrap();
+    daemon.kill_releasing(&[server.parse().unwrap()]).unwrap();
+    daemon.wait().unwrap();
+    let runs = |pid: &str| std::path::Path::new("/proc").join(pid).exists();
+    assert!(!runs(child), "the scope reaps every descendant it does not release");
+    // The test's supervisor adopts it now, and reaps it when the test ends.
+    assert!(runs(server), "a released server outlives its daemon's scope");
 }
 
 #[cfg(target_os = "linux")]
