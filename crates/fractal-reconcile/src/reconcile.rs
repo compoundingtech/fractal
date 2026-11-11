@@ -14514,9 +14514,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     note_holders()?;
                     Ok(false)
                 }
-                // A store failure is retried by the next evaluation; only a refused request is
-                // the program's defect.
-                Err(error) if error.code == "internal" => Err(error.into()),
+                // A store failure or contention (a run-mutation fence while projections catch up)
+                // is retried by the next evaluation; only a refused request is the program's defect.
+                Err(error) if error.code == "internal" || error.is_sqlite_contention() => Err(error.into()),
                 Err(error) => {
                     let reason = format!(
                         "the program could not start its child run `{}` of mission `{mission}`: {}",
@@ -14624,8 +14624,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     engine.waiting(request, &view.subject)?;
                     (view.subject, true)
                 }
-                // A store failure is retried by the next evaluation.
-                Err(error) if error.code == "internal" => return Err(error.into()),
+                // A store failure or contention is retried by the next evaluation.
+                Err(error) if error.code == "internal" || error.is_sqlite_contention() => return Err(error.into()),
                 Err(error) => {
                     let reason = format!("the program's ask `{}` was refused: {}", request.key, error.message);
                     engine.fail(&request.step, request.attempt, &reason)?;
