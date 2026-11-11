@@ -351,8 +351,9 @@ fn queued_subject_authentication(state: &AppState, history: &rusqlite::Connectio
              JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
              WHERE pending.grant_subject=?1 AND pending.claim_id=?2 ORDER BY work.claim_id",
         ).unwrap();
-        query.query_map(rusqlite::params![subject,claim_id], |row| row.get::<_,String>(0))
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        let ids = query.query_map(rusqlite::params![subject,claim_id], |row| row.get::<_,String>(0))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        ids
     };
     let queue_counts = || connection.query_row(
         "SELECT (SELECT count(*) FROM assistant_grant_proof_rechecks),
