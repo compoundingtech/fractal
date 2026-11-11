@@ -1669,6 +1669,9 @@ pub struct MissionStep {
     pub loop_max_rounds: Option<u64>,
     #[serde(default)]
     pub loop_reason: Option<String>,
+    /// Mission detail only: a program step's current attempt journal. Absent for other steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<MissionStepProgram>,
     /// Earliest work eligibility, not a promise of wake dispatch.
     #[serde(default)]
     pub next_wake_at: Option<String>,
@@ -1696,6 +1699,43 @@ pub struct MissionStep {
     /// Mission detail only: this remaining step's own p25/p75 duration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eta: Option<MissionStepEta>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepProgram {
+    /// The most recently started key without a result.
+    #[serde(default)]
+    pub open_key: Option<String>,
+    /// Each key's latest entry in this attempt, in the order the keys first appear.
+    pub entries: Vec<MissionStepProgramEntry>,
+    /// Older journal entries exist beyond the ones read.
+    pub truncated: bool,
+    #[serde(default)]
+    pub last_entry_at: Option<String>,
+    pub stalled_after_ms: u64,
+    /// The open `program/host` or `program/stalled` fault on the step.
+    #[serde(default)]
+    pub fault: Option<MissionStepProgramFault>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepProgramEntry {
+    pub key: String,
+    /// `started`, `completed` or `failed`; a later word decodes as is.
+    pub status: String,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    #[serde(default)]
+    pub ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub child: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MissionStepProgramFault {
+    pub scope: String,
+    pub reason: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionStepAttempt {

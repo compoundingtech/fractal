@@ -4972,6 +4972,88 @@ mission "timing/run" state="ready" {
 }
 
 #[tokio::test]
+async fn mission_detail_projects_a_program_steps_journal_and_its_fault() {
+    use sha2::Digest as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let bundle = b"export default {}";
+    let hash = hex::encode(sha2::Sha256::digest(bundle));
+    state.store.put_blob(bundle).unwrap();
+    let source = format!(
+        r#"version 2
+mission "program/land" state="ready" {{
+  goal "Land one change by program."
+  step "land" {{ program "/bundles/land.mjs" sha256="{hash}" stalled-after="10m" }}
+}}
+"#
+    );
+    let intent = fractal_daemon::graph::parse_intent(&source, state.store.origin()).unwrap();
+    let planned = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.clone(),
+        source_name: None,
+    }).unwrap();
+    state.store.apply(&intent, &planned.subject_tokens, "program-definition").unwrap();
+    let run = state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "program/land".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/avery".into()),
+        mode: Some("run".into()),
+        inputs: Default::default(),
+        idempotency_key: "program-run".into(),
+    }).unwrap();
+    let land = run.steps.iter().find(|step| step.step == "land").unwrap().subject.clone();
+    state.store.set_step_state(&land, "working", None).unwrap();
+    let append = |kind: &str, fields: Value| {
+        state.store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: land.clone(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    for (key, status, extra) in [
+        ("merge", "started", serde_json::json!({})),
+        ("merge", "failed", serde_json::json!({"ms": 900, "error": {"_tag": "Conflict"}})),
+        ("review", "started", serde_json::json!({"child": "mission-run/program/review"})),
+    ] {
+        let mut fields = serde_json::json!({"key": key, "status": status, "attempt": 1, "program": hash});
+        fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        append("program.step", fields);
+    }
+    append("reconcile.fault", serde_json::json!({
+        "scope": "program/stalled", "status": "faulted", "reason": "no journal entry for 10m; open key `review`",
+    }));
+
+    let app = fractal_daemon::api::router(state.clone());
+    let path = "/v1/client/missions/mission%2Fprogram%2Fland";
+    let (status, response) = client_json(app, path).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_conforms(&contract_validator("Envelope"), path, &response);
+    let envelope: fractal_client::Envelope<fractal_client::Resource> =
+        serde_json::from_value(response.clone()).unwrap();
+    let fractal_client::Resource::Mission(mission) = envelope.value else {
+        panic!("mission detail must be a mission resource");
+    };
+    let detail = &mission.run_details[0];
+    let step = detail.steps.as_ref().unwrap().iter().find(|step| step.path == "land").unwrap();
+    let program = step.program.as_ref().expect("a program step carries its journal");
+    assert_eq!(program.open_key.as_deref(), Some("review"));
+    assert_eq!((program.stalled_after_ms, program.truncated), (600_000, false));
+    let entries = program.entries.iter().map(|entry| (entry.key.as_str(), entry.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(entries, [("merge", "failed"), ("review", "started")]);
+    assert_eq!((program.entries[0].ms, program.entries[0].error.as_deref()), (Some(900), Some(r#"{"_tag":"Conflict"}"#)));
+    assert_eq!(program.entries[1].child.as_deref(), Some("mission-run/program/review"));
+    let fault = program.fault.as_ref().unwrap();
+    assert_eq!(fault.scope, "program/stalled");
+    let blocker = &response["value"]["run_details"][0]["blocker"];
+    assert_eq!((blocker["step"].as_str(), blocker["scope"].as_str()), (Some(land.as_str()), Some("program/stalled")));
+}
+
+#[tokio::test]
 async fn terminal_filters_use_projected_state_and_preserve_history_selection() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
