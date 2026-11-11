@@ -16903,6 +16903,8 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    let root = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.unwrap_or_else(|| top.to_owned());
+    require_healthy_run_refold_tx(transaction, &root)?;
     #[cfg(any(test, feature = "test-support"))]
     let _rebuild = rebuild_observer::note_rebuild("run-part", top, false);
     struct RebuildTiming(std::time::Instant);
@@ -17143,6 +17145,7 @@ fn claims_in_replay_order_tx(
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
 pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
+    require_healthy_run_refold_tx(transaction, root)?;
     #[cfg(any(test, feature = "test-support"))]
     let _rebuild = rebuild_observer::note_rebuild("run-tree", root, false);
     #[cfg(any(test, feature = "test-support"))]
@@ -17457,6 +17460,22 @@ fn refold_after_operation_conflict(
             Ok(())
         }
     }
+}
+
+fn run_conflict_degraded_tx(connection: &Connection, root: &str) -> Result<bool, FractalError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+        [format!("operation-conflict-run:{root}")], |row| row.get(0),
+    ).map_err(internal)
+}
+
+fn require_healthy_run_refold_tx(connection: &Connection, root: &str) -> Result<(), FractalError> {
+    if run_conflict_degraded_tx(connection, root)? {
+        return Err(FractalError::new("operation-conflict-run-degraded",
+            "run projection requires explicit full repair before another rebuild")
+            .with_detail("projection_subject", format!("mission-run/{root}")));
+    }
+    Ok(())
 }
 
 /// Retain the guard reason for the always-on log at the actual fallback boundary.
@@ -18461,6 +18480,13 @@ fn try_project_simple_replication_inner_tx(
             .map_err(internal)?;
     }
     for aggregate in trees {
+        let run_root = match aggregate {
+            Aggregate::RunTree(root) => root.clone(),
+            Aggregate::RunPart(top) => run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.unwrap_or_else(|| top.clone()),
+            _ => unreachable!("run aggregates partitioned above"),
+        };
+        // A later ordinary claim cannot bypass an earlier receipt's failed bounded fold.
+        if run_conflict_degraded_tx(transaction, &run_root)? { continue; }
         // Conflict diagnostics and the savepoint/cap belong to this receipt, not the
         // generic final-drain queue. Fold those runs bounded here; defer ordinary work.
         if defer_runs && !aggregate_conflicts.contains_key(aggregate) {
@@ -18491,6 +18517,13 @@ fn try_project_simple_replication_inner_tx(
                 .with_detail("projection_stage", "run-tree-rebuild")
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
+        if aggregate_conflicts.get(aggregate).is_some_and(|affected| affected.iter().any(|&index|
+            conflict_diagnostics[index].error.details.get("projection_degraded").and_then(Value::as_bool) == Some(true))) {
+            // A tree rebuild covers every part: fence the owning root even when one part
+            // failed, so local drains and later chunks cannot widen around its bound.
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h26d5c1ee3d02 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                params![format!("operation-conflict-run:{run_root}"), "1"]).map_err(internal)?;
+        }
     }
     if !defer_runs {
         transaction.execute(/* sqlite-large-value: allow-for-now lv-hec593db44a4b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
@@ -18586,6 +18619,9 @@ fn replay_graph_from_nothing_with_progress_tx(
         })
     };
     stage("full-replay/clear");
+    // This transaction is an authorized full repair. Rollback restores the markers if
+    // any reducer fails; only its successful commit permits ordinary run rebuilds again.
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf04badb6d7a2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB 'operation-conflict-run:*'", []).map_err(internal)?;
     for table in REPLAYED_GRAPH_TABLES {
         transaction
             .execute(&format!(/* sqlite-large-value: allow-for-now lv-h7a51a72fe942 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), [])

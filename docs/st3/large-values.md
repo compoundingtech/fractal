@@ -715,3 +715,20 @@ row; degraded membership uses primary-key probes, never a JSON-array scan on the
 message-body hot path. Refresh replaces these rows in the same transaction and
 explicit repair clears them. Variable name-key representation remains the scope
 module owner's `bound-or-reference-values-and-reclamation` debt.
+
+Failed bounded run refolds persist a keyed owning-root exclusion (`lv-h26d5c1ee3d02`).
+Later receipt chunks and both public tree/part rebuild entrypoints consult it before
+hydrating history, including local decision drains and pending-work dispatch. A failed
+part conservatively excludes its owning tree because a tree fold also rebuilds that part.
+Only a successful authorized full replay retires this exclusion (`lv-hf04badb6d7a2`);
+transaction rollback restores it on repair failure. These root keys remain variable
+inline metadata owned by `fractal_store::store`, not a byte-size bound.
+
+`smallclaims::store::operation_conflict_fence` owns `lv-h64314192329c` and
+`lv-he4949cef00f3`: successful authorized full repair deletes the accounted
+`projection:operation-conflict-fence:*` rows and publishes the repaired current
+store index/source generation in `projection:operation-conflict-scan`, atomically
+with restored graph health. Canonical operation conflict rows remain intact.
+New admissions may produce fresh fence evidence; the repaired prefix does not
+immediately rediscover itself. `lv-h02c178e28e3f` and `lv-h7772a8dd1107` are
+fixture-only late-claim and stale-health mutations proving these boundaries.

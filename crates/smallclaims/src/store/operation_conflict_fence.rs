@@ -41,6 +41,23 @@ pub(super) fn generation(connection: &Connection) -> Result<String> {
     )?)
 }
 
+/// A successful full fold accounts for this entire prefix, including its conflicts.
+/// Retire only replay-fence evidence, not the canonical operations conflict registry.
+/// Publish its frontier/generation atomically so the next receipt scans only new claims.
+pub(super) fn repaired(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h64314192329c owner=smallclaims::store::operation_conflict_fence TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*'",
+        [],
+    )?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-he4949cef00f3 owner=smallclaims::store::operation_conflict_fence TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,last_good_store_index,updated_at_unix_ms,error_message)
+         VALUES ('projection:operation-conflict-scan','healthy',?1,?2,?3)
+         ON CONFLICT(aggregate) DO UPDATE SET last_good_store_index=excluded.last_good_store_index,error_message=excluded.error_message",
+        params![current_index_tx(transaction)?, now_ms().to_string(), generation(transaction)?],
+    )?;
+    Ok(())
+}
+
 /// Call while holding the projection transaction: a racing checkpoint mutation makes
 /// discovery unproven, never permission to replay. No receipt history is read here.
 pub fn valid(connection: &Connection, through: u64) -> Result<bool> {

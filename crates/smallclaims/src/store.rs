@@ -8799,6 +8799,7 @@ impl Store {
         self.runtime.replay_from_nothing(&transaction)?;
         self.runtime.after_projection(&transaction)?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h362e35c78646 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:deferred-replay'", [])?;
+        operation_conflict_fence::repaired(&transaction)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h9513a9e75a35 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
@@ -9262,6 +9263,7 @@ impl Store {
                     transaction.execute(
                         /* sqlite-large-value: allow-for-now lv-h15d4a1d1ce13 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:deferred-replay'", [],
                     ).map_err(internal)?;
+                    operation_conflict_fence::repaired(&transaction).map_err(internal)?;
                 } else {
                     crate::profile::note("projection: incremental");
                 }

@@ -133,6 +133,17 @@ fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
 
 #[test]
 fn operation_conflict_run_chunk_dispatch_never_defers_an_unbounded_refold() {
+    for same_receive in [false, true] {
+        assert_run_conflict_remains_bounded(same_receive);
+    }
+}
+
+fn assert_run_conflict_remains_bounded(same_receive: bool) {
+    fn ordinary(tx: &Transaction<'_>, subject: &str) {
+        let claim = append_claim_record_tx(tx, "peer", subject, "mission-run.state", None,
+            &json!({"fields":{"status":"failed"}}), &[], None).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h02c178e28e3f owner=fractal_store::store::operation_conflict_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='0' WHERE id=?1", [&claim.id]).unwrap();
+    }
     let store = Store::open_memory("fixture").unwrap();
     super::tests_shared_seats::publish_mission(&store, r#"version 2
 mission "bounded-run" state="ready" {
@@ -164,22 +175,61 @@ mission "bounded-run" state="ready" {
         append_claim_record_tx(&tx, "peer", &run.subject, "mission-run.state", None,
             &json!({"fields":{"state":"running"},"_operation":{"id":operation,"request_digest":"a"}}),
             &[], None).unwrap();
+        if same_receive {
+            for number in 0..smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+                append_claim_record_tx(&tx, "peer", "custom/test/run-conflict-padding", "custom.test.observed",
+                    None, &json!({"fields":{"number":number}}), &[], None).unwrap();
+            }
+            ordinary(&tx, &run.subject);
+        }
         tx.commit().unwrap();
     }
     FULL_REPLAYS.with(|count| count.set(0));
     // The production driver dispatches project_incremental_chunk, then final-drain work.
     // A conflict run must finish its bounded/savepoint attempt before that generic queue.
-    store.project_replication_backlog().unwrap();
+    let observed = std::cell::RefCell::new(None);
+    let between = || {
+        if observed.borrow().is_none() {
+            let health = store.replication_status(false, None, &[]).unwrap();
+            if let Some(row) = health.unhealthy.into_iter().find(|row| row.aggregate.contains(operation)
+                && row.error_code.as_deref() == Some("operation-conflict-refold-limit")) {
+                *observed.borrow_mut() = Some((graph_digest_of(&store), row.error_message));
+                RUN_TREE_REBUILDS.with(|count| count.set(0));
+            }
+        }
+    };
+    store.project_replication_backlog_with_yield(between).unwrap();
+    between();
+    if !same_receive {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        ordinary(&tx, &run.subject);
+        tx.commit().unwrap();
+        drop(connection);
+        store.project_replication_backlog_with_yield(between).unwrap();
+    }
+    between();
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 0,
+        "later ordinary claims must not rebuild an already-degraded run");
+    let (before_graph, before_diagnostic) = observed.into_inner().unwrap();
+    assert_eq!(graph_digest_of(&store), before_graph);
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     let health = store.replication_status(false, None, &[]).unwrap();
     assert!(health.unhealthy.iter().any(|row| row.aggregate.contains(operation)
         && row.error_code.as_deref() == Some("operation-conflict-refold-limit")));
+    assert_eq!(health.unhealthy.iter().find(|row| row.aggregate.contains(operation)).unwrap().error_message,
+        before_diagnostic);
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
     assert!(!projection_work_pending_tx(&tx).unwrap());
     finish_projection_work_tx(&tx).unwrap();
     assert!(!projection_work_pending_tx(&tx).unwrap());
+    assert_eq!(rebuild_run_tree_tx(&tx, &run.id).unwrap_err().code, "operation-conflict-run-degraded");
+    assert_eq!(rebuild_run_part_tx(&tx, &run.id).unwrap_err().code, "operation-conflict-run-degraded");
     tx.rollback().unwrap();
+    drop(connection);
+    store.replay_replication_graph().unwrap();
+    assert!(!run_conflict_degraded_tx(&store.readers.get(), &run.id).unwrap());
 }
 
 #[test]
@@ -235,6 +285,27 @@ fn operation_conflict_refuses_a_guard_requested_full_replay() {
         assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
             .any(|row| row.aggregate == "projection:deferred-replay"));
         assert_eq!(before_repair, (operation_rows(&store.readers.get()), graph_digest_of(&store)));
+        // A repaired historical conflict must not poison a later legitimate fallback.
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            assert!(!tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
+                [], |row| row.get::<_, bool>(0),
+            ).unwrap());
+            append_claim_record_tx(&tx, "peer", "exec/after-full-repair", "intent.desired", None,
+                &json!({"subject":"exec/after-full-repair","kind":"exec","desired":{}}),
+                &[], None).unwrap();
+            require_replay_after_repair(&tx);
+            tx.commit().unwrap();
+        }
+        let mut logs = Vec::new();
+        assert!(store.project_replication_backlog_with_log("after-full-repair", |line| logs.push(line.to_owned())).unwrap());
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 1);
+        assert!(!store.replication_projection_needs_recovery().unwrap());
+        assert!(!logs.iter().any(|line| line.contains("operation-conflict-projection-degraded")));
+        assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+            .any(|row| row.aggregate == "projection:deferred-replay"));
     }
 }
 
@@ -601,4 +672,8 @@ fn operation_conflict_partial_rediscovery_below_graph_frontier_keeps_receipt_mov
     FULL_REPLAYS.with(|count| count.set(0));
     store.project_replication_backlog().unwrap();
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+}
+
+fn require_replay_after_repair(tx: &Transaction<'_>) {
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h7772a8dd1107 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
 }
