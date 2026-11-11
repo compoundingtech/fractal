@@ -211,7 +211,7 @@ describe('sourceMap', () => {
       '      step "build" "completed"',
       '    }',
       '    gate "Ship it" mode="approve" type="human" {',
-      '      reviewer "person/someone"',
+      '      reviewer "person/ada"',
       '    }',
       '  }',
       '}',
