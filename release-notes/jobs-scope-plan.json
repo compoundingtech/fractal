@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive per-job Linux scope plans and configured heavy-ceiling checks (unit 12a)",
+  "replay": {"status": "none", "detail": "No claims or replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No host activation; gate-slot remains the admission path."},
+  "compatibility": {"status": "none", "detail": "Additive pure Rust plan and systemd property builder. Memory high/max, task count and heavy ceilings are required configuration, without policy defaults. Swap is zero. io.weight is not an IO limit and has no effect with NVMe scheduler none."},
+  "downtime": {"status": "none", "detail": "No live behavior changes."},
+  "manual": {"status": "none", "detail": "No deployment or activation steps."},
+  "recovery": {"status": "none", "detail": "No durable state changes."}
+}
