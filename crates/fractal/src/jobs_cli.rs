@@ -1,5 +1,6 @@
 //! Observes daemon-owned jobs; disconnect never cancels or authorizes another execution.
 use super::*;
+use fractal_daemon::cli_println as println;
 use fractal_daemon::client::api_error_code;
 
 #[derive(Subcommand)]
