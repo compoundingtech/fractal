@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Authenticate and audit sampled whole-tree cancellation acknowledgements (unit 9d)",
+  "replay": {"status": "changed", "detail": "Real jobs-projection race fixtures retain usage and uncertain stops across rebuild, including natural ChildExit under cancel-requested."},
+  "schema": {"status": "none", "detail": "No additional persistent schema changes."},
+  "rules": {"status": "changed", "detail": "INACTIVE ExecRuntime cancellation API consumes an already durable cancel-requested intent. Authenticate origin, host pin, generation and writer window; require configured grace and escalation timeout; record audit before effects and sampled acknowledgement only after whole-tree stop and removal."},
+  "compatibility": {"status": "changed", "detail": "No dependency on uncommitted unit 6 code. A future adapter supplies its durable intent and shared generation guard. Repeat cancelled requests do not signal again."},
+  "downtime": {"status": "none", "detail": "No endpoint, scheduler wiring or production activation."},
+  "manual": {"status": "none", "detail": "Added real-projection fixtures for audit ordering, missing configuration, wrong authority/generation, operator scope refusal, launching cancellation, natural exit, vanished J and uncertain stop. Cargo and native execution not run."},
+  "recovery": {"status": "changed", "detail": "Uncertain stop remains cancel-requested; no rerun. Reserved operator-stop requires the exact deployment-pinned PERSON identity and reserved grant with an audit id inside the daemon; no operator endpoint is exposed."}
+}

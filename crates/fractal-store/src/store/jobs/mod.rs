@@ -255,6 +255,8 @@ mod tests;
 mod launch_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod recovery_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod cancel_tests;
 
 // 4c-1 is unreachable in production; 4c-2 separately owns activation of hooks.
 #[cfg(test)]

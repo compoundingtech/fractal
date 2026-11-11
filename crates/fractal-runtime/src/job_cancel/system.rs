@@ -105,10 +105,9 @@ fn send_term(holder: &OwnedFd) -> Result<(), StopUncertain> {
     // SAFETY: the fd is owned and live; null siginfo requests the ordinary signal.
     if unsafe { libc::syscall(libc::SYS_pidfd_send_signal, holder.as_raw_fd(), libc::SIGTERM,
         std::ptr::null::<libc::siginfo_t>(), 0) } < 0
+        && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     {
-        if io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-            return Err(StopUncertain::SignalFailed);
-        }
+        return Err(StopUncertain::SignalFailed);
     }
     Ok(())
 }
