@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Invalidate conflict discovery when checkpoint or restored history changes and index durable exclusions.",
+  "replay": {"status": "changed", "detail": "Conflict discovery records the checkpoint/restored-prefix generation alongside its claims watermark. Checkpoint insert/update/delete and restored-prefix mutations invalidate that proof. A mutation racing discovery or projection fails closed: automatic receipt defers rather than authorizing full replay."},
+  "schema": {"status": "changed", "detail": "Forward-only installation adds local generation triggers and a partial projection_health index for stale operation-conflict exclusions. No claim format changes."},
+  "rules": {"status": "none", "detail": "Canonical operation and graph rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Existing discovery watermarks without a source generation are unproven and rescan on readers. Exclusion lookup uses the partial index, independent of diagnostic history."},
+  "manual": {"status": "none", "detail": "No additional operator steps."},
+  "recovery": {"status": "changed", "detail": "A changed checkpoint generation restarts incremental reader discovery; explicit repair remains required for deferred projections."},
+  "downtime": {"status": "unknown", "detail": "No production timing measurement is claimed."}
+}
