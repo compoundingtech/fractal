@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+# Real-release variant of crates/fractal/tests/fleet.rs's Node/anchor/joined fixture.
+# No service installation, production credentials, registry substitutions or job execution.
+set -Eeuo pipefail
+# The opt-in guardian owns the keeper even when cancellation SIGKILLs this shell.
+supervisor=$(dirname "$0")/fractal_test_process.py
+arguments=("$@")
+usage() {
+  echo 'Usage: scripts/jobs-rolling-upgrade-proof --released-bin FILE --head-bin FILE --output-dir DIR --cgroup-parent /sys/fs/cgroup/DELEGATED'
+}
+released= head= output= cgroup_parent=
+while (($#)); do
+  case "$1" in
+    --released-bin) released=${2:?}; shift 2;;
+    --head-bin) head=${2:?}; shift 2;;
+    --output-dir) output=${2:?}; shift 2;;
+    --cgroup-parent) cgroup_parent=${2:?}; shift 2;;
+    --help|-h) usage; exit 0;;
+    *) usage >&2; exit 2;;
+  esac
+done
+[[ -n $released && -n $head && -n $output && -n $cgroup_parent ]] || { usage >&2; exit 2; }
+for tool in curl jq python3 sha256sum realpath setsid pty; do
+  command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 2; }
+done
+released=$(realpath "$released"); head=$(realpath "$head")
+[[ -x $released && -x $head && $released != "$head" ]] || exit 2
+cgroup_parent=$(realpath "$cgroup_parent")
+[[ $cgroup_parent == /sys/fs/cgroup/* && -f $cgroup_parent/cgroup.events ]]
+# An outer subreaper would own (and SIGKILL) a nested keeper guardian before
+# that guardian could clean up. Reject its marker before allocating any keeper.
+if [[ -n ${FRACTAL_TEST_SUPERVISOR:-} && -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]]; then
+  echo 'Refusing nested supervision without a keeper; run jobs-rolling-upgrade-proof directly, not through fractal_test_process.py.' >&2
+  exit 2
+fi
+if [[ -n ${FRACTAL_TEST_KEEPER_CGROUP:-} ]]; then
+  # guardian() Popen starts this shebang script directly; env and bash exec in
+  # place, so the proof shell's parent must be the keeper-owning guardian.
+  python3 - "$cgroup_parent" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+try:
+    guardian = int(os.environ["FRACTAL_TEST_KEEPER_GUARDIAN_PID"])
+    shell_stat = (Path("/proc") / str(os.getppid()) / "stat").read_text()
+    parent = int(shell_stat.rsplit(")", 1)[1].split()[1])
+    argv = (Path("/proc") / str(guardian) / "cmdline").read_bytes().split(b"\0")
+    option = argv.index(b"--keeper-cgroup-parent")
+    if option >= argv.index(b"--") or argv[option + 1] != os.fsencode(sys.argv[1]):
+        raise ValueError("supervising guardian did not opt into this keeper parent")
+    expected = Path(sys.argv[1]) / f"jobs-proof-{guardian}"
+    keeper = Path(os.environ["FRACTAL_TEST_KEEPER_CGROUP"])
+    if (guardian <= 1 or parent != guardian
+            or os.environ.get("FRACTAL_TEST_SUPERVISOR") != str(guardian)
+            or not any(os.path.basename(arg) == b"fractal_test_process.py" for arg in argv)
+            or keeper != expected or keeper.resolve(strict=True) != expected
+            or not (keeper / "cgroup.events").is_file()):
+        raise ValueError("keeper is not bound to the direct supervising guardian")
+except (KeyError, OSError, ValueError, IndexError) as error:
+    print(f"Refusing unowned keeper ({error}); run the proof directly.", file=sys.stderr)
+    raise SystemExit(2)
+PY
+else
+  # --scope guardians may export no environment marker. Inspect ancestry before
+  # starting our guardian; our own supervised re-exec never enters this branch.
+  python3 - <<'PY'
+import os
+from pathlib import Path
+import sys
+
+pid, seen = os.getppid(), set()
+try:
+    while pid:
+        if pid in seen:
+            raise ValueError("ancestor cycle")
+        seen.add(pid)
+        process = Path("/proc") / str(pid)
+        argv = (process / "cmdline").read_bytes().split(b"\0")
+        if any(os.path.basename(arg) == b"fractal_test_process.py" for arg in argv):
+            print("Refusing a fractal_test_process.py ancestor; run jobs-rolling-upgrade-proof directly.", file=sys.stderr)
+            raise SystemExit(2)
+        stat = (process / "stat").read_text()
+        parent = int(stat.rsplit(")", 1)[1].split()[1])
+        if pid == 1:
+            break
+        pid = parent
+except (OSError, ValueError, IndexError) as error:
+    print(f"Cannot verify unsupervised ancestry ({error}); refusing keeper allocation. Run the proof directly.", file=sys.stderr)
+    raise SystemExit(2)
+PY
+  exec python3 "$supervisor" --keeper-cgroup-parent "$cgroup_parent" -- "$0" "${arguments[@]}"
+fi
+# Require a fresh evidence directory; private fleet credentials must never be published.
+umask 077
+mkdir "$output"
+output=$(realpath "$output")
+exec > >(tee "$output/proof.log") 2>&1
+phase=setup
+root= keeper=$FRACTAL_TEST_KEEPER_CGROUP
+declare -A binary pid worker port
+cleanup() {
+  local status=$?
+  trap - EXIT ERR INT TERM
+  for node in a b; do
+    for process in "${worker[$node]:-}" "${pid[$node]:-}"; do
+      if [[ -n $process ]]; then kill -TERM -- "-$process" 2>/dev/null || true; fi
+    done
+  done
+  for node in a b; do
+    for process in "${worker[$node]:-}" "${pid[$node]:-}"; do
+      [[ -z $process ]] || wait "$process" 2>/dev/null || true
+    done
+  done
+  if ((status)); then echo "FAIL $phase (exit $status); evidence: $output"; fi
+  echo 'Evidence includes private test fleet keys; do not commit or publish the state directories.'
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+repo=$(realpath "$(dirname "$0")/..")
+pin=$repo/.github/fleet-compat-baseline.json
+# A supplied release must be the real pinned archive's executable, not a reduced registry.
+verified=$(python3 "$repo/scripts/compat-baseline" fleet "$output/baseline")
+cmp "$released" "$verified"
+printf 'Released pin: '; jq -c '{tag,commit}' "$pin"
+"$released" --version
+"$head" --version
+sha256sum "$released" "$head" > "$output/binaries.sha256"
+[[ $(uname -s) == Linux ]]
+[[ ${keeper%/*} == "$cgroup_parent" && ${keeper##*/} == jobs-proof-* ]]
+printf "Verify no proof cgroup remains: find %q -maxdepth 1 -name 'jobs-proof-*' -print\n" "$cgroup_parent"
+# A real, empty private cgroup is the configured keeper namespace. The caller remains
+# outside it. This exercises the real SO_PEERPIDFD + /proc guard, never a test bypass.
+[[ -f $keeper/cgroup.events ]]
+root=$(mktemp -d "$output/fleet.XXXXXXXX")
+pty=$(command -v pty)
+for node in a b; do
+  mkdir -p "$root/$node"/{home,config/st3,state,data,run}
+  printf 'node = "%s"\nperson = "person/fleet-tester"\n' "$node" > "$root/$node/config/st3/config.toml"
+  # A release resolves pty through its captured login environment (as in Node).
+  printf 'export PATH=%q\n' "$PATH" > "$root/$node/home/.bash_profile"
+done
+binary[a]=$released; binary[b]=$head
+# Port allocation follows the fixture's loopback-only transport; a concurrent bind
+# race fails setup rather than silently selecting a different endpoint mid-test.
+read -r port_a port_b < <(python3 - <<'PY'
+import socket
+with socket.socket() as a, socket.socket() as b:
+    a.bind(('127.0.0.1', 0)); b.bind(('127.0.0.1', 0))
+    print(a.getsockname()[1], b.getsockname()[1])
+PY
+)
+port[a]=$port_a; port[b]=$port_b
+cli() {
+  local node=$1; shift
+  (cd "$root/$node" && env -i PATH="$PATH" SHELL=/bin/bash \
+    HOME="$root/$node/home" XDG_CONFIG_HOME="$root/$node/config" \
+    XDG_STATE_HOME="$root/$node/state" XDG_DATA_HOME="$root/$node/data" \
+    XDG_RUNTIME_DIR="$root/$node/run" ST3_WORKER_INTERVAL_MS=300 ST3_DAEMON_WAIT=0 \
+    "${binary[$node]}" "$@")
+}
+api() {
+  local node=$1 path=$2; shift 2
+  curl --disable --noproxy '*' --silent --show-error --fail-with-body --max-time 5 \
+    --unix-socket "$root/$node/run/st3.sock" -H 'x-st3-person: person/fleet-tester' \
+    -H 'Content-Type: application/json' "http://localhost$path" "$@"
+}
+await() {
+  local description=$1; shift
+  local deadline=$((SECONDS + 150)) node
+  until "$@"; do
+    for node in a b; do
+      [[ -z ${pid[$node]:-} ]] || kill -0 "${pid[$node]}"
+      [[ -z ${worker[$node]:-} ]] || kill -0 "${worker[$node]}"
+    done
+    ((SECONDS < deadline)) || { echo "Timed out: $description"; return 1; }
+    sleep .3
+  done
+}
+healthy() {
+  api "$1" /v1/health > "$output/$1-health.json" 2>/dev/null || return 1
+  jq -e -s 'length == 1 and (.[0] | type == "object" and length > 0)' \
+    "$output/$1-health.json" >/dev/null || return 1
+}
+listening() {
+  api "$1" /v1/internal/fleet/status > "$output/$1-fleet.json" || return 1
+  jq -e -s --arg node "$1" 'length == 1 and (.[0].view.members |
+    type == "array" and any(.name == $node and (.endpoints | type == "array" and length > 0)))' \
+    "$output/$1-fleet.json" >/dev/null || return 1
+  python3 - "${port[$1]}" <<'PY' || return 1
+import socket, sys
+with socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=1): pass
+PY
+}
+start() {
+  local node=$1 label=$2
+  # exec ensures the tracked process is the session leader, including on restart.
+  (cd "$root/$node"; exec setsid env -i PATH="$PATH" SHELL=/bin/bash HOME="$root/$node/home" \
+    XDG_CONFIG_HOME="$root/$node/config" XDG_STATE_HOME="$root/$node/state" \
+    XDG_DATA_HOME="$root/$node/data" XDG_RUNTIME_DIR="$root/$node/run" \
+    ST3_WORKER_INTERVAL_MS=300 ST3_DAEMON_WAIT=0 \
+    "${binary[$node]}" up --web-listen off) > "$output/$label-daemon.log" 2>&1 &
+  pid[$node]=$!
+  await "$label health" healthy "$node"
+  (cd "$root/$node"; exec setsid env -i PATH="$PATH" SHELL=/bin/bash HOME="$root/$node/home" \
+    XDG_CONFIG_HOME="$root/$node/config" XDG_STATE_HOME="$root/$node/state" \
+    XDG_DATA_HOME="$root/$node/data" XDG_RUNTIME_DIR="$root/$node/run" \
+    ST3_WORKER_INTERVAL_MS=300 ST3_DAEMON_WAIT=0 \
+    "${binary[$node]}" replication-worker) > "$output/$label-worker.log" 2>&1 &
+  worker[$node]=$!
+  await "$label loopback listener" listening "$node"
+}
+enable_jobs() {
+  printf '\n[jobs]\nenabled = true\nallowed_classes = ["heavy"]\nkeeper_cgroups = [%s]\n' \
+    "$(jq -Rn --arg path "${keeper#/sys/fs/cgroup}" '$path')" >> "$root/$1/config/st3/config.toml"
+}
+cli a fleet create --no-service --name a --port "${port[a]}" --transports loopback --advertise-loopback > "$output/create.log"
+start a a-released
+code=$(cli a fleet invite b --code-only --via loopback --as person/fleet-tester)
+cli b fleet join "$code" --no-service --name b --port "${port[b]}" --transports loopback --advertise-loopback > "$output/join.log"
+unset code
+enable_jobs b
+start b b-head
+echo 'PASS setup'
+
+phase=record
+jq -n '{key:"rolling-upgrade",execution_host:"b",request:{source:{kind:"content",sha256:([range(32)|1])},environment:{kind:"exact",value:{}},command:{argv:["true"],cwd:"."},resources:{cpu_millicores:1,memory_bytes:1,io_weight:1,tasks_max:1,expected_duration_ms:1,run_timeout_ms:null,priority:"background",requested_class:"heavy",storage_request:null,delegated_reservations:null}}}' > "$output/submission.json"
+api b /v1/client/jobs -X POST --data-binary "@$output/submission.json" > "$output/submitted.json"
+job=$(jq -er '.job.id' "$output/submitted.json")
+jq -e '.job.state.state == "queued" and .admission == "not wired"' "$output/submitted.json" >/dev/null
+api b "/v1/client/jobs/$job/cancel" -X POST --data '{}' > "$output/cancelled.json"
+jq -e '.job.state.state == "withdrawn"' "$output/cancelled.json" >/dev/null
+api b '/v1/claims?limit=500' > "$output/b-claims-before.json"
+jq --arg job "$job" '[.claims[] | select(.subject == $job and .kind == "job.recorded")]' \
+  "$output/b-claims-before.json" > "$output/job-claims.json"
+jq -e 'length == 2 and (map(.body.fields | has("reason")) | sort == [false,true])' "$output/job-claims.json" >/dev/null
+echo 'PASS record (submission without reason, cancellation with reason)'
+
+phase=waiting-and-control
+waiting() {
+  api a '/v1/replication/records?unresolved=true' > "$output/a-waiting.json" || return 1
+  jq -e -s --slurpfile expected "$output/job-claims.json" '
+    length == 1 and (.[0] | type == "array" and
+    ([.[] | select(.kind == "job.recorded" and .state == "unknown" and .error_code == "unknown-claim-kind") | .claim_id] |
+      sort == ($expected[0] | map(.id) | sort)))' \
+    "$output/a-waiting.json" >/dev/null || return 1
+}
+await 'released A retains both job claims as UnknownKind' waiting
+# This normal document binding is authored AFTER A demonstrably holds the jobs.
+api b /v1/documents -X POST --data '{"name":"doc/jobs-upgrade/control","bytes":[112,114,111,111,102],"idempotency_key":"rolling-upgrade-control"}' > "$output/control.json"
+control_projected() {
+  api a '/v1/documents?name=doc/jobs-upgrade/control' > "$output/a-control.json" || return 1
+  jq -e -s --slurpfile expected "$output/control.json" \
+    'length == 1 and (.[0].items | type == "array" and
+      any(.name == $expected[0].name and .hash == $expected[0].hash))' \
+    "$output/a-control.json" >/dev/null || return 1
+}
+await 'later control document projects on released A' control_projected
+waiting
+api a /v1/replication/status > "$output/a-released-status.json"
+jq -e '.invalid_records == 0 and .unhealthy_projections == 0 and .unknown_records >= 2' "$output/a-released-status.json" >/dev/null
+api a '/v1/claims?limit=500' > "$output/a-released-claims.json"
+jq -e --arg job "$job" '[.claims[] | select(.subject == $job)] | length == 0' "$output/a-released-claims.json" >/dev/null
+echo 'PASS waiting-and-control'
+
+phase=upgrade
+kill -TERM -- "-${worker[a]}"; wait "${worker[a]}" || true; unset 'worker[a]'
+kill -TERM -- "-${pid[a]}"; wait "${pid[a]}" || true; unset 'pid[a]'
+rm -f "$root/a/run/st3.sock"
+binary[a]=$head
+enable_jobs a
+start a a-upgraded
+admitted() {
+  api a '/v1/replication/records?unresolved=true' > "$output/a-after-waiting.json" || return 1
+  jq -e -s 'length == 1 and (.[0] | type == "array" and
+    ([.[] | select(.kind == "job.recorded")] | length == 0))' \
+    "$output/a-after-waiting.json" >/dev/null || return 1
+  api a "/v1/client/jobs/$job" > "$output/a-show.json" || return 1
+  jq -e -s --arg job "$job" 'length == 1 and
+    .[0].job.id == $job and .[0].job.state.state == "withdrawn"' \
+    "$output/a-show.json" >/dev/null || return 1
+}
+await 'startup admission retry projects original job claims' admitted
+echo 'PASS upgrade (same state directory)'
+
+phase=convergence
+converged() {
+  local node
+  for node in a b; do
+    api "$node" "/v1/client/jobs/$job" | jq -S -s --arg job "$job" '
+      if length == 1 and .[0].job.id == $job and .[0].job.state.state == "withdrawn"
+      then .[0] else error("missing or unexpected show response") end' \
+      > "$output/$node-show.json" || return 1
+    api "$node" /v1/client/jobs | jq -S -s --arg job "$job" '
+      if length == 1 and (.[0].jobs | type == "array" and length == 1 and .[0].id == $job)
+      then .[0] | .jobs |= sort_by(.id) else error("missing or unexpected list response") end' \
+      > "$output/$node-list.json" || return 1
+    api "$node" /v1/replication/status | jq -S -s '
+      if length == 1 and (.[0] | type == "object")
+      then .[0] else error("missing or invalid status response") end' \
+      > "$output/$node-final-status.json" || return 1
+  done
+  cmp -s "$output/a-show.json" "$output/b-show.json" || return 1
+  cmp -s "$output/a-list.json" "$output/b-list.json" || return 1
+  jq -e -s '
+    def digest: type == "string" and length > 0;
+    length == 2 and all(.[];
+      type == "object" and
+      .invalid_records == 0 and .unknown_records == 0 and .pending_records == 0 and .unhealthy_projections == 0 and
+      (.authority_digest | digest) and (.graph_digest | digest) and
+      (.projection_digests | type == "object" and length > 0 and all(.[]; digest))) and
+    .[0].authority_digest == .[1].authority_digest and
+    .[0].graph_digest == .[1].graph_digest and
+    .[0].projection_digests == .[1].projection_digests' \
+    "$output/a-final-status.json" "$output/b-final-status.json" >/dev/null || return 1
+}
+await 'show/list and all shared projection digests converge' converged
+# Show/list expose current job rows, not history. Compare immutable history claims
+# too, excluding node-local arrival indexes, and require the exact original claims.
+for node in a b; do
+  api "$node" '/v1/claims?limit=500' | jq -S --arg job "$job" \
+    '[.claims[] | select(.subject == $job) | {id,subject,kind,body}] | sort_by(.id)' > "$output/$node-history.json"
+  api "$node" /v1/backup > "$output/$node-backup.jsonl"
+  jq -s -er '.[0].data.registry_digest | select(length > 0)' "$output/$node-backup.jsonl" > "$output/$node-registry-digest.txt"
+done
+# The show/list contract contains current rows only. Read the actual projection's
+# history table as well, in read-only transactions, never modifying daemon state.
+python3 - "$root" "$job" "$output" <<'PY'
+import json, pathlib, sqlite3, sys
+root, job, output = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+histories = []
+for node in ('a', 'b'):
+    database = root / node / 'state/st3/claims.sqlite3'
+    with sqlite3.connect(database.as_uri() + '?mode=ro', uri=True) as db:
+        rows = db.execute('SELECT claim_id,event,state,refusal,at FROM job_history WHERE job_id=? ORDER BY ordinal', (job,)).fetchall()
+    assert len(rows) == 2 and all(row[3] is None for row in rows), rows
+    history = [[r[0], json.loads(r[1]), json.loads(r[2]), r[3], json.loads(r[4])] for r in rows]
+    (output / f'{node}-projected-history.json').write_text(json.dumps(history, sort_keys=True, indent=2) + '\n')
+    histories.append(history)
+assert histories[0] == histories[1], 'projected histories differ'
+PY
+cmp "$output/a-history.json" "$output/b-history.json"
+jq -S '[.[] | {id,subject,kind,body}] | sort_by(.id)' "$output/job-claims.json" > "$output/original-history.json"
+cmp "$output/a-history.json" "$output/original-history.json"
+cmp "$output/a-registry-digest.txt" "$output/b-registry-digest.txt"
+echo 'PASS convergence (show/list, immutable histories, registry, wire and projection digests)'
+# Prove normal completion leaves no owned cgroup; the guardian repeats cleanup
+# after reaping on cancellation or failure, when this shell's traps cannot run.
+rmdir "$keeper"
+[[ ! -e $keeper ]] || { echo "FAIL keeper cleanup: $keeper remains"; exit 1; }
+echo 'PASS keeper cleanup (owned cgroup absent)'
+echo "PASS jobs rolling upgrade; evidence: $output"

@@ -552,6 +552,71 @@ schema migration or claim rewrite is required. The signed two-member regression
 checks legacy replay, waiting records, continued known-claim exchange, preserved receipt bytes,
 and graph/table convergence after upgrading the older registry.
 
+### Real-release jobs rolling-upgrade proof
+
+`scripts/jobs-rolling-upgrade-proof` drives the same isolated foreground
+create/invite/join, loopback transport and replication-worker lifecycle as the
+`crates/fractal/tests/fleet.rs` compatibility fixture. It does not install services
+or contact an existing fleet. A uses the checksum/BUILD-verified release selected
+by `.github/fleet-compat-baseline.json` (`v0.3.32` when introduced); B uses the
+provided series-head executable. The script byte-compares `--released-bin` with
+`scripts/compat-baseline`'s real archive executable; a reduced registry is not a
+substitute for that release.
+
+On a Linux development runner with Bash, curl, jq, Python 3.11+, pty and a delegated
+writable cgroup-v2 directory, build/fetch the binaries and run:
+
+```sh
+cargo build --locked -p fractal-cli --bin fractal
+released=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/jobs-baseline")
+scripts/jobs-rolling-upgrade-proof \
+  --released-bin "$released" --head-bin target/debug/fractal \
+  --output-dir "$RUNNER_TEMP/jobs-upgrade-evidence" \
+  --cgroup-parent "$DELEGATED_CGROUP"
+```
+
+Use a fresh output directory. The delegated cgroup must be beneath
+`/sys/fs/cgroup/`; the proof opts into a guardian-owned empty child without
+moving any process. After reaping descendants, the guardian writes `cgroup.kill`,
+waits up to ten seconds for `cgroup.events` to report `populated 0`, then removes
+the child. Timeout or cleanup failure fails the run. This handles cancellation
+that kills the Bash process before its EXIT trap runs, provided the guardian
+survives. An external SIGKILL, OOM kill or cgroup kill of the guardian itself
+cannot be cleaned up in-process. Other supervisor callers do not opt into this
+behavior. Successful completion also removes and checks absence of its own
+keeper before printing the final PASS. To check for leaks after any run, use the
+printed command `find "$DELEGATED_CGROUP" -maxdepth 1 -name 'jobs-proof-*' -print`;
+no output means no proof keeper remains beneath that parent.
+Run the proof directly, not beneath an existing non-keeper
+`fractal_test_process.py` supervisor. Before allocating a keeper, it checks both
+the environment marker and the actual `/proc` ancestor chain's command lines.
+This also rejects marker-free `--scope` guardians; unreadable ancestry fails
+closed. An outer subreaper could otherwise kill the nested cleanup guardian
+before it removes the cgroup.
+On supervised re-exec, the proof verifies that the guardian PID exported with the
+keeper is its direct parent, has a `fractal_test_process.py` command line, and
+matches the supervisor marker. The only accepted keeper path is the configured
+parent's exact `jobs-proof-<guardian-pid>` child; stale or supplied paths fail
+closed before any keeper removal.
+Jobs need explicit `enabled = true`, `allowed_classes =
+["heavy"]` and a real `keeper_cgroups` namespace. This supplies the production
+accept-time pidfd/cgroup recursion guard, not an activation bypass. Submission
+only records queued intent: execution admission remains unwired.
+
+The recording phase submits a job without `reason`, then cancels the queued job
+to record `reason` and withdrawal. Before upgrading A in its original state
+directory, the script requires both exact claim IDs to be retained as
+`unknown-claim-kind`, absent from admitted claims, and a later document binding
+to project on A. After startup admission retry, requester-scoped show/list
+responses, immutable job history claims, read-only SQLite `job_history` projection
+rows, registry digests and all shared projection digests must agree. Show/list
+expose current job rows, not full histories. Each phase prints PASS or the failing phase
+prints FAIL. Successful runtime is normally a few minutes, excluding the build
+and release download; individual asynchronous waits are bounded at 150 seconds.
+Daemon/worker logs, requests and API evidence remain in the output directory,
+along with private temporary fleet state. **Do not publish that directory or
+its test keys**; publish only suitably redacted proof logs.
+
 ## Projection digest coverage and cost
 
 [`PROJECTION_DIGEST_TABLES` in `crates/fractal-store/src/store.rs`](../../crates/fractal-store/src/store.rs)

@@ -70,7 +70,7 @@ def set_child_subreaper():
         raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
 
 
-def guardian(command, watched, result, temporary_roots=(), keep=False, control=None):
+def guardian(command, watched, result, temporary_roots=(), keep=False, control=None, keeper_cgroup_parent=None):
     # PR_SET_CHILD_SUBREAPER, before launching any descendants.
     set_child_subreaper()
     interrupted = False
@@ -84,6 +84,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
     task = None
     previous_sigchld = None
     roots = []
+    keeper = None
     evidence_manifest = (tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
                          if control is None else None)
     code = 1
@@ -100,6 +101,21 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
             env[name] = root
             if keep:
                 print(f"isolated test keeping {root}", file=sys.stderr, flush=True)
+        if keeper_cgroup_parent is not None:
+            parent = Path(keeper_cgroup_parent).resolve(strict=True)
+            if not parent.is_relative_to("/sys/fs/cgroup") or parent == Path("/sys/fs/cgroup"):
+                raise ValueError("keeper parent must be below /sys/fs/cgroup")
+            if not (parent / "cgroup.events").is_file():
+                raise ValueError("keeper parent must be a cgroup-v2 directory")
+            owned_keeper = parent / f"jobs-proof-{os.getpid()}"
+            owned_keeper.mkdir(mode=0o700)
+            keeper = owned_keeper  # Own only a directory we successfully created.
+            env["FRACTAL_TEST_KEEPER_CGROUP"] = str(keeper)
+            env["FRACTAL_TEST_KEEPER_GUARDIAN_PID"] = str(os.getpid())
+            import shlex
+            print("Verify no proof cgroup remains: find "
+                  f"{shlex.quote(str(parent))} -maxdepth 1 -name 'jobs-proof-*' -print",
+                  flush=True)
         task = subprocess.Popen(command, env=env, start_new_session=True,
                                 **({"stdin": subprocess.DEVNULL} if control is not None else {}))
         if control is not None:
@@ -127,6 +143,18 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
             kill_group(task.pid)
             code = task.wait()
         reap_descendants()
+        if keeper is not None and keeper.exists():
+            try:
+                (keeper / "cgroup.kill").write_text("1\n")
+                deadline = time.monotonic() + 10
+                while "populated 0" not in (keeper / "cgroup.events").read_text().splitlines():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"keeper still populated after 10 seconds: {keeper}")
+                    time.sleep(0.05)
+                keeper.rmdir()
+            except OSError as error:
+                print(f"isolated test keeper cleanup: {error}", file=sys.stderr)
+                code = code or 1
         if evidence_manifest is not None:
             from fractal_test_evidence import finish
             try:
@@ -145,7 +173,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
     return code
 
 
-def run_supervised(command, owners=None, temporary_roots=(), keep=False):
+def run_supervised(command, owners=None, temporary_roots=(), keep=False, keeper_cgroup_parent=None):
     owners = owners or [os.getppid()]
     if "ST_AGENT" in os.environ or "ST3_SUBJECT" in os.environ:
         # /proc ancestry reads the process's original environment. Removing an
@@ -156,8 +184,10 @@ def run_supervised(command, owners=None, temporary_roots=(), keep=False):
             env.pop(name, None)
         owner_args = [arg for pid in [*owners, os.getpid()] for arg in ("--owner", str(pid))]
         root_args = [arg for root in temporary_roots for arg in ("--temporary-root", *map(str, root))]
+        keeper_args = (["--keeper-cgroup-parent", str(keeper_cgroup_parent)]
+                       if keeper_cgroup_parent is not None else [])
         return subprocess.call([sys.executable, str(Path(__file__).resolve()),
-                                *owner_args, *root_args, *(["--keep"] if keep else []),
+                                *owner_args, *root_args, *keeper_args, *(["--keep"] if keep else []),
                                 "--", *command], env=env)
     # Open both before forking. The launcher waits for the guardian's result;
     # killing either the launcher or its Rust test runner cancels the whole tree.
@@ -170,7 +200,8 @@ def run_supervised(command, owners=None, temporary_roots=(), keep=False):
         if os.fork() != 0:
             os._exit(0)
         try:
-            guardian(command, watched, writer, temporary_roots, keep)
+            guardian(command, watched, writer, temporary_roots, keep,
+                     keeper_cgroup_parent=keeper_cgroup_parent)
         except BaseException as error:
             print(f"isolated test guardian: {error}", file=sys.stderr)
         finally:
@@ -215,6 +246,8 @@ if __name__ == "__main__":
     parser.add_argument("--temporary-root", nargs=3, action="append", default=[],
                         metavar=("ENV", "PREFIX", "PARENT"))
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--keeper-cgroup-parent",
+                        help="opt in to a guardian-owned jobs-proof keeper cgroup, removed after reaping")
     parser.add_argument("--scope", action="store_true",
                         help="foreground descendant scope, with a duplex control socket on stdin")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -224,8 +257,11 @@ if __name__ == "__main__":
         command = command[1:]
     if not command:
         parser.error("a command is required")
+    if args.scope and args.keeper_cgroup_parent:
+        parser.error("--keeper-cgroup-parent is not supported with --scope")
     if args.scope:
         watched = [os.pidfd_open(pid) for pid in args.owner or [os.getppid()]]
         code = guardian(command, watched, 0, control=0)
         raise SystemExit(code if code >= 0 else 128 - code)
-    raise SystemExit(run_supervised(command, args.owner, args.temporary_root, args.keep))
+    raise SystemExit(run_supervised(command, args.owner, args.temporary_root, args.keep,
+                                    args.keeper_cgroup_parent))

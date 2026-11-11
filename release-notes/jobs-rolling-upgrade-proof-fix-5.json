@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correct the rolling-upgrade proof instructions to build the executable-owning fractal-cli package.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "No admission or authorization changes."},
+  "compatibility": {"status": "none", "detail": "No runtime or wire changes."},
+  "downtime": {"status": "none", "detail": "Documentation only."},
+  "manual": {"status": "changed", "detail": "Build the proof's head executable with cargo build --locked -p fractal-cli --bin fractal. The fractal package is the CLI library, not the executable-owning package."},
+  "recovery": {"status": "none", "detail": "No cleanup or recovery changes."}
+}

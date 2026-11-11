@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reject marker-free supervisor ancestors before creating a jobs proof keeper.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "No admission or authorization changes."},
+  "compatibility": {"status": "none", "detail": "The shared supervisor remains unchanged. The proof retains its environment-marker guard and additionally walks /proc ancestor parent IDs and command lines before starting its keeper guardian."},
+  "downtime": {"status": "none", "detail": "Manual proof tooling only."},
+  "manual": {"status": "changed", "detail": "Run the proof directly. A fractal_test_process.py ancestor, including a --scope guardian launched with a cleared environment, refuses keeper allocation with an explicit direct-invocation message. Unreadable or malformed ancestry also fails closed."},
+  "recovery": {"status": "changed", "detail": "Prevents marker-free outer subreapers from owning and killing a nested keeper guardian before cgroup cleanup. Existing guardian-owned cleanup and final keeper absence checks remain unchanged."}
+}
