@@ -74,3 +74,46 @@ async fn replay_concurrent_call_is_rejected_before_waiting_for_writer() {
     drop(writer);
     first.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn replay_torn_audit_record_does_not_block_estimate_or_replay() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let path = root.path().join("replication-replay-audit.jsonl");
+    audit(&path, &json!({"duration_ms":23,"result":"healthy"})).unwrap();
+    OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{\"actor\":").unwrap();
+    let Json(estimate) = replay(State(state.clone()), Extension(ClientTransportBoundary::Unix), Json(ReplayRequest { confirm: false })).await.unwrap();
+    assert_eq!(estimate["last_replay_duration_ms"], 23);
+    let Json(result) = replay(State(state.clone()), Extension(ClientTransportBoundary::Unix), Json(ReplayRequest { confirm: true })).await.unwrap();
+    assert_eq!(result["result"], "healthy");
+    let records = fs::read_to_string(&path).unwrap();
+    let lines: Vec<_> = records.lines().collect();
+    assert_eq!(lines[1], "{\"actor\":", "the torn record is preserved on its own line");
+    assert_eq!(serde_json::from_str::<Value>(lines[2]).unwrap()["result"], "running");
+    assert_eq!(serde_json::from_str::<Value>(lines[3]).unwrap()["result"], "healthy");
+    // The formerly trailing damage is now in the middle. It is diagnostic history,
+    // not replay input, so it must not brick a later maintenance call either.
+    let Json(estimate) = replay(State(state), Extension(ClientTransportBoundary::Unix), Json(ReplayRequest { confirm: false })).await.unwrap();
+    assert_eq!(estimate["last_replay_duration_ms"], result["duration_ms"]);
+}
+
+#[test]
+fn replay_unwind_guard_persists_aborted_terminal_audit() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("replication-replay-audit.jsonl");
+    let record = json!({"actor":"person/operator","started_at_unix_ms":42,"result":"running"});
+    audit(&path, &record).unwrap();
+    let unwound = std::panic::catch_unwind(|| {
+        let _attempt = AuditAttempt { path: path.clone(), record, timer: Instant::now(), completed: false };
+        panic!("replay unwind fixture");
+    });
+    assert!(unwound.is_err());
+    let records = fs::read_to_string(&path).unwrap();
+    let lines: Vec<_> = records.lines().collect();
+    assert_eq!(lines.len(), 2);
+    let terminal: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(terminal["result"], "aborted");
+    assert_eq!(terminal["actor"], "person/operator");
+    assert_eq!(terminal["started_at_unix_ms"], 42);
+    assert!(terminal["duration_ms"].is_u64());
+}
