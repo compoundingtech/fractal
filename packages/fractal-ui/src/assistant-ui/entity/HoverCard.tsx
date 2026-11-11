@@ -89,7 +89,8 @@ export function HoverCardSurface({ triggerRef, isOpen, onOpenChange, placement =
   if (!isOpen) return null
   return <TooltipTriggerStateContext.Provider value={state}>
       <Tooltip isOpen triggerRef={triggerRef as React.RefObject<Element>} placement={placement} offset={offset} containerPadding={8} shouldFlip
-        id={id} aria-label={label} data-hover-card {...stylex.props(styles.frame)}>
+        ref={element => { if (element !== null) { if (id === undefined) element.removeAttribute('id'); else element.id = id } }}
+        aria-label={label} data-hover-card {...stylex.props(styles.frame)}>
         {children}
       </Tooltip>
     </TooltipTriggerStateContext.Provider>
