@@ -630,9 +630,10 @@ impl Client {
             "receive budget propagation requires a local Unix endpoint");
         let bytes = serde_json::to_vec(body)?;
         let socket = self.endpoint.unix_socket().expect("checked Unix endpoint");
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now().into_std());
+        // The peer response deadline must not discard a started daemon commit's result.
+        // Keep the ordinary bounded Unix RPC timeout; the header only gates new writer loans.
         let response = unix_request(&socket, "POST", path, &bytes,
-            self.deadlines.connect, remaining,
+            self.deadlines.connect, request_deadline(path, self.deadlines),
             RequestAuthority::ReceiveUntil(self.person.as_deref(), deadline)).await?;
         decode_api_response(&response)
     }
@@ -1542,6 +1543,8 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     if path.starts_with("/v1/internal/replication/export")
         || path.starts_with("/v1/internal/replication/receive")
         || path.starts_with("/v1/internal/replication/checkpoint")
+        || (path.starts_with("/v1/internal/replication/shard/")
+            && (path.ends_with("/receive") || path.ends_with("/export")))
         || path.starts_with(CLIENT_READ_FORWARD_PATH)
     {
         // A forwarded client read is bounded by the relay's own per-hop timeouts.
@@ -2298,6 +2301,13 @@ mod tests {
             request_deadline("/v1/internal/replication/export", deadlines),
             Duration::from_secs(120)
         );
+        for path in [
+            "/v1/internal/replication/shard/messages/receive",
+            "/v1/internal/replication/shard/messages/export",
+        ] {
+            assert_eq!(request_deadline(path, deadlines), deadlines.bulk);
+            assert_eq!(request_deadline(path, deadlines), Duration::from_secs(120));
+        }
         for path in ["/v1/doctor", "/v1/doctor?verbose=true"] {
             assert_eq!(request_deadline(path, deadlines), deadlines.bulk);
         }
@@ -2305,6 +2315,7 @@ mod tests {
             "/v1/doctors",
             "/v1/doctor/checks",
             "/v1/doctor-extra?verbose=true",
+            "/v1/internal/replication/shard/messages/peers",
         ] {
             assert_eq!(request_deadline(path, deadlines), deadlines.request);
         }

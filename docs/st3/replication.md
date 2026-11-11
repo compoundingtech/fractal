@@ -1705,6 +1705,14 @@ Expiry after a committed receipt prevents a new follow-up commit and logs
 receipt into a failed delivery. The existing post-receive `changed` wake runs the
 normal admission/projection backlog passes. Optional transport observations
 skipped at expiry are logged, not promised a retry.
+The daemon does not independently time out the receive/reply-export handler result:
+deadline checks and deadline-aware writer loans prevent starting another commit.
+It awaits any already-started receipt commit and returns its durable result over
+Unix. The network exchange task remains detached after the peer's deadline answer,
+consumes that result and invokes the existing `changed` wake before checking
+whether reply export may start. The Unix client retains its ordinary bounded
+replication RPC timeout (120 seconds for both graph and shard receive/export),
+not the shorter receive budget.
 
 The network worker still answers at 28 seconds. The exact deadline-503 semantics
 are: **outcome unknown, retry safe; a late commit is kept, and the retry gets the
@@ -1728,7 +1736,9 @@ Ingress uses string codes, not new closed-enum variants:
 The daemon re-emit and authenticated remote allowlist preserve these codes and
 statuses. Existing raw and inflated caps are unchanged. Content-Length or the
 stream cap refuses raw oversize before reading or inflating an oversized body.
-Receive telemetry counts rejections per peer. The receive-only fallible writer
+Receive telemetry counts rejections by authenticated peer only after sender
+verification; all pre-authentication rejections use the fixed `unauthenticated`
+label, never the claimed node header. The receive-only fallible writer
 loan distinguishes expiry, closed admission and disconnected writer; existing
 infallible callers are unchanged. If handoff succeeds while the borrower expires,
 the writer is returned exactly once. Later SQL and commit errors are not loan

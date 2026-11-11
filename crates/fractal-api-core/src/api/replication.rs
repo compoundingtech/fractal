@@ -1136,4 +1136,135 @@ mod ingress_tests {
         shard_replication_wake(State(state), AxumPath("messages".into())).await.unwrap();
         assert_eq!(arrivals(), 1, "repeated existing wakes must not double-record an arrival");
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn unix_main_backend_late_shard_receipt_wakes_and_retry_returns_duplicate_with_full_reply() {
+        use smallclaims::sync::{Backend as _, FleetAuth, FleetContext, PeerState};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let awake = tokio::spawn(async { loop { tokio::task::yield_now().await; } });
+        let target_root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(target_root.path());
+        let fleet = "unix-late-receipt-fixture";
+        state.store.bind_fleet(fleet).unwrap();
+        let target = crate::store::messages_shard::open(&state.store, target_root.path()).unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let source_graph = Arc::new(crate::store::Store::open(
+            &source_root.path().join("claims.sqlite3"), "birch",
+        ).unwrap());
+        source_graph.bind_fleet(fleet).unwrap();
+        let source = crate::store::messages_shard::open(&source_graph, source_root.path()).unwrap();
+        let message = |subject: &str, from: &str, to: &str| smallclaims::claim::ClaimInput {
+            subject: subject.into(), kind: "message.sent".into(), actor: Some(from.into()),
+            fields: serde_json::from_value(json!({
+                "from": from, "to": to, "content": "late Unix receipt", "status": "sent",
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        source.append_claim(&message(
+            "message/0123456789abcdef", "agent/birch", "agent/cedar",
+        )).unwrap();
+        target.append_claim(&message(
+            "message/fedcba9876543210", "agent/cedar", "agent/birch",
+        )).unwrap();
+        let exchange = source.export_replication_exchange(
+            fleet, &smallclaims::replication::ReplicationInventory::default(),
+        ).unwrap();
+        target.export_replication_exchange(
+            fleet, &smallclaims::replication::ReplicationInventory::default(),
+        ).unwrap();
+        target.validate_replication_backlog().unwrap();
+        assert!(!target.fleet_moved_since_admission().unwrap());
+
+        let (entered, committing) = tokio::sync::oneshot::channel();
+        let entered = std::sync::Mutex::new(Some(entered));
+        let (release, gate) = std::sync::mpsc::sync_channel(1);
+        let gate = std::sync::Mutex::new(gate);
+        target.install_transaction_hooks(|_| Ok(()), move |_| {
+            if let Some(entered) = entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                gate.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        }).unwrap();
+        let woke = Arc::new(tokio::sync::Notify::new());
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wake_notice = woke.clone();
+        let wake_count = wakes.clone();
+        let daemon = super::super::router_for_transport(
+            state.clone(), ClientTransportBoundary::Unix, &[],
+        ).layer(axum::middleware::from_fn(move |request: Request<Body>, next: axum::middleware::Next| {
+            let notice = wake_notice.clone();
+            let count = wake_count.clone();
+            async move {
+                let is_wake = request.uri().path() == "/v1/internal/replication/shard/messages/wake";
+                let response = next.run(request).await;
+                if is_wake && response.status().is_success() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    notice.notify_one();
+                }
+                response
+            }
+        }));
+        let socket = target_root.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, daemon).await.unwrap() });
+        let backend = crate::peer::MainBackend::for_shard(socket.clone(), "messages");
+        let auth = FleetAuth::test(fleet, &[7; 32]);
+        let network = smallclaims::sync::peer_router(
+            PeerState::new(
+                crate::peer::MainBackend::new(socket), state.node.clone(), auth.clone(),
+                FleetContext::legacy(std::collections::BTreeSet::from(["birch".into()])),
+            ).with_shards(std::collections::BTreeMap::from([("messages".into(), backend.clone())])),
+            axum::Router::new(),
+        );
+        let bytes = serde_json::to_vec(&exchange).unwrap();
+        let request = || {
+            let mut request = Request::builder().method("POST")
+                .uri(smallclaims::sync::EXCHANGE_PATH).body(Body::from(bytes.clone())).unwrap();
+            *request.headers_mut() = auth.request_headers("birch", &bytes).unwrap();
+            request
+        };
+        let first = tokio::spawn(network.clone().oneshot(request()));
+        committing.await.unwrap();
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        let response = first.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let answer: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(answer["value"]["code"], "replication-ingress/receive-deadline");
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+        assert!(target.claims_for("message/0123456789abcdef", Some("message.sent")).unwrap().is_empty());
+
+        // The peer has its 503, but the real Unix MainBackend still awaits the acquired commit.
+        release.send(()).unwrap();
+        woke.notified().await;
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(target.claims_for("message/0123456789abcdef", Some("message.sent")).unwrap().len(), 1);
+        assert!(!target.replication_projection_deferred());
+        assert!(!target.fleet_moved_since_admission().unwrap());
+        let arrivals = || target.readers.get().query_row(
+            "SELECT COUNT(*) FROM stream_arrivals", [], |row| row.get::<_, usize>(0),
+        ).unwrap();
+        let recorded = arrivals();
+        assert!(recorded > 0);
+        let duplicate = backend.receive("birch", fleet, &exchange, None, Default::default()).await.unwrap();
+        assert_eq!(duplicate.receipt.received, 0);
+        assert!(duplicate.receipt.duplicate > 0);
+        assert!(!duplicate.changed, "same fleet generation must not be needed to rescue a lost wake");
+        // A completed deadline result is retained once; the next exchange recomputes a full reply.
+        let retained = network.clone().oneshot(request()).await.unwrap();
+        assert_eq!(retained.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = network.oneshot(request()).await.unwrap();
+        assert_eq!(retry.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(retry.into_body(), 64 * 1024 * 1024).await.unwrap();
+        let answer: Value = serde_json::from_slice(&body).unwrap();
+        let reply: smallclaims::replication::ReplicationExchange =
+            serde_json::from_value(answer["value"].clone()).unwrap();
+        assert_eq!(reply.peer, state.node);
+        assert!(!reply.envelopes.is_empty(), "retry must perform the normal full reply export");
+        assert_eq!(target.claims_for("message/0123456789abcdef", Some("message.sent")).unwrap().len(), 1);
+        assert_eq!(arrivals(), recorded, "duplicate retry never records stream arrivals twice");
+        server.abort();
+        awake.abort();
+    }
 }

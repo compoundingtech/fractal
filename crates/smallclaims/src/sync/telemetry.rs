@@ -63,6 +63,7 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
     }
 });
 
+/// Use a verified sender name, or the fixed `unauthenticated` label before verification.
 pub(super) fn ingress_rejected(peer: &str, code: &str) {
     if METRICS_ENABLED.load(Ordering::Relaxed) {
         METRICS.ingress_rejections.add(1, &[

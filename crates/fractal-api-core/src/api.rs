@@ -1417,7 +1417,6 @@ async fn response_envelope_unbounded(
             });
             let polled_writer_wait = writer_wait.clone();
             let remote = served_remote.clone();
-            let receive_budget = request.extensions().get::<smallclaims::sync::ReceiveBudget>().copied();
             let result = read_deadline::spawn_mutation_handler(
                 state.store.clone(),
                 request_route.clone(),
@@ -1440,16 +1439,9 @@ async fn response_envelope_unbounded(
                     })
                 },
             );
-            let response = if let Some(budget) = receive_budget {
-                match tokio::time::timeout_at(budget.tokio_deadline(), result).await {
-                    Ok(result) => result.unwrap_or_else(|error| ApiError::internal(error).into_response()),
-                    Err(_) => ApiError::bad(FractalError::new(
-                        "replication-ingress/receive-deadline", "receive exceeded its response budget",
-                    )).into_response(),
-                }
-            } else {
-                result.await.unwrap_or_else(|error| ApiError::internal(error).into_response())
-            };
+            // The network edge owns the response deadline. Keep awaiting an acquired receipt
+            // commit so its durable result reaches the worker and triggers the existing wake.
+            let response = result.await.unwrap_or_else(|error| ApiError::internal(error).into_response());
             diagnostic_handler.finish(if response.status().is_success() {
                 crate::relay_trace::Outcome::Completed
             } else {

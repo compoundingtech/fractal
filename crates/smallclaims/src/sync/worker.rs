@@ -2474,14 +2474,14 @@ async fn observe_exchange_body(
     let timing = Arc::new(timing);
     timing.record("head-received");
     request.extensions_mut().insert(Arc::clone(&timing));
-    let peer = super::signed_fields(request.headers()).ok().and_then(|fields| fields[1])
-        .unwrap_or("unknown").to_owned();
+    // No claimed node label is trustworthy until verify_sender succeeds.
+    let peer = "unauthenticated";
     if request.headers().get("content-length")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .is_some_and(|length| length > MAX_EXCHANGE_BYTES as u64)
     {
-        return ingress_rejection(&peer, "replication-ingress/raw-oversize");
+        return ingress_rejection(peer, "replication-ingress/raw-oversize");
     }
     let (parts, body) = request.into_parts();
     let complete = hyper::body::Body::is_end_stream(&body);
@@ -2504,11 +2504,11 @@ async fn observe_exchange_body(
             if std::error::Error::source(&error)
                 .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
             {
-                return ingress_rejection(&peer, "replication-ingress/raw-oversize");
+                return ingress_rejection(peer, "replication-ingress/raw-oversize");
             }
             return (StatusCode::BAD_REQUEST, "replication request body could not be read").into_response();
         }
-        Err(_) => return ingress_rejection(&peer, "replication-ingress/receive-deadline"),
+        Err(_) => return ingress_rejection(peer, "replication-ingress/receive-deadline"),
     };
     next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(body))).await
 }
@@ -2811,7 +2811,7 @@ async fn receive_exchange_inner_to<B: Backend>(
 ) -> Response {
     let budget = super::ReceiveBudget { accepted: timing.started };
     if budget.expired_at(super::ReceiveBudget::now()) {
-        return ingress_rejection("unknown", "replication-ingress/receive-deadline");
+        return ingress_rejection("unauthenticated", "replication-ingress/receive-deadline");
     }
     let body = if deflated(&headers) {
         let inflated = super::inflate_ingress(&body);
@@ -2824,9 +2824,7 @@ async fn receive_exchange_inner_to<B: Backend>(
         match inflated {
             Ok(body) => Bytes::from(body),
             Err(code) => {
-                let peer = super::signed_fields(&headers).ok().and_then(|fields| fields[1])
-                    .unwrap_or("unknown");
-                return ingress_rejection(peer, code);
+                return ingress_rejection("unauthenticated", code);
             }
         }
     } else {
