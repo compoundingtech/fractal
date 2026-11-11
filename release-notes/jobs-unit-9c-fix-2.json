@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Collapse the pidfd signal error condition while retaining natural-exit handling.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "Read errno only after a failed pidfd signal syscall; ESRCH remains natural exit and all other signal errors remain SignalFailed. This matches the existing later unit 9d form."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
