@@ -691,6 +691,7 @@ fn degraded_run_settles_sibling_pending_work_and_does_not_block_startup_repair()
     super::tests_shared_seats::publish_mission(&store, r#"version 2
 mission "pending-conflict" state="ready" {
   concurrent-runs max=4
+  authority { start "pending-conflict"; }
   goal "Drain independent run work."
   step "program" { agentless }
 }"#, "publish-pending-conflict");
