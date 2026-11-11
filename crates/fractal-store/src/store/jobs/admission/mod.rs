@@ -114,7 +114,10 @@ impl Snapshot {
 
 fn binding(record: &JobRecord) -> &JobHostBinding {
     match record {
-        JobRecord::Submitted { binding, .. } | JobRecord::Transition { binding, .. } => binding,
+        JobRecord::Submitted { binding, .. }
+        | JobRecord::Transition { binding, .. }
+        | JobRecord::LaunchIntent { binding, .. }
+        | JobRecord::LaunchRefused { binding, .. } => binding,
     }
 }
 

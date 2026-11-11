@@ -1,7 +1,17 @@
 use super::*;
 use serde_json::json;
 
-fn database() -> Connection {
+fn intent(binding: &JobHostBinding) -> JobRecord {
+    JobRecord::LaunchIntent {
+        binding: binding.clone(),
+        intent: fractal_jobs::launch::LaunchIntent {
+            generation: fractal_jobs::launch::ExecutionGeneration(std::num::NonZeroU64::new(1).unwrap()),
+            outcome_file: "/fixture/generation-1.json".into(),
+        },
+    }
+}
+
+pub(super) fn database() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch("CREATE TABLE claims(id TEXT PRIMARY KEY, store_index INTEGER,
         batch_id TEXT, subject TEXT, kind TEXT, body TEXT, accepted_at_unix_ms TEXT);
@@ -30,7 +40,7 @@ pub(super) fn submission(id: &str, key: &str) -> JobRecord {
     }
 }
 
-fn insert(tx: &Transaction<'_>, subject: &str, claim: &str, time: u64, record: &JobRecord) {
+pub(super) fn insert(tx: &Transaction<'_>, subject: &str, claim: &str, time: u64, record: &JobRecord) {
     tx.execute("INSERT INTO claims VALUES(?1,?2,'batch',?3,?4,?5,?6)",
         params![claim, time, subject, KIND, json!({"fields":{"record":record}}).to_string(), time.to_string()]).unwrap();
     tx.execute("INSERT INTO claim_positions VALUES(?1,?2)", params![claim, time]).unwrap();
@@ -99,8 +109,7 @@ fn canonical_refold_refuses_illegal_edges_and_conflicting_binding() {
     insert(&tx, id.as_str(), "later", 3, &JobRecord::Transition {
         binding: binding.clone(), event: Event::Started });
     insert(&tx, id.as_str(), "first", 1, &submitted);
-    insert(&tx, id.as_str(), "middle", 2, &JobRecord::Transition {
-        binding: binding.clone(), event: Event::LaunchIntent });
+    insert(&tx, id.as_str(), "middle", 2, &intent(binding));
     flush(&tx).unwrap();
     let state: String = tx.query_row("SELECT state FROM jobs", [], |row| row.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<JobState>(&state).unwrap(), JobState::Running);
@@ -232,8 +241,7 @@ fn direct_and_enveloped_bodies_share_the_same_fold() {
     insert(&tx, &id, "submit", 1, &submitted);
     tx.execute("UPDATE claims SET body=?1 WHERE id='submit'",
         [json!({"record":submitted}).to_string()]).unwrap();
-    insert(&tx, &id, "launch", 2, &JobRecord::Transition {
-        binding: binding.clone(), event: Event::LaunchIntent });
+    insert(&tx, &id, "launch", 2, &intent(binding));
     let started = JobRecord::Transition { binding: binding.clone(), event: Event::Started };
     insert(&tx, &id, "start", 3, &started);
     tx.execute("UPDATE claims SET body=?1 WHERE id='start'",
@@ -251,8 +259,7 @@ fn repaired_claim_fences_read_only_queries_until_flush_matches_rebuild() {
     let submitted = submission(&id, "repair");
     let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
     insert(&tx, &id, "submit", 1, &submitted);
-    insert(&tx, &id, "launch", 2, &JobRecord::Transition {
-        binding: binding.clone(), event: Event::LaunchIntent });
+    insert(&tx, &id, "launch", 2, &intent(binding));
     insert(&tx, &id, "start", 3, &JobRecord::Transition {
         binding: binding.clone(), event: Event::Started });
     flush(&tx).unwrap();
@@ -277,6 +284,65 @@ fn repaired_claim_fences_read_only_queries_until_flush_matches_rebuild() {
     rebuild(&tx).unwrap();
     assert_eq!(serde_json::to_value(history_by_job(&tx, &id).unwrap()).unwrap(), flushed);
     assert_eq!(receipt_for_key(&tx, "person/fixture", "repair").unwrap(), receipt);
+}
+
+#[test]
+fn launch_intent_retains_generation_and_refuses_second_launch() {
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    let id = job_id("person/fixture", "generation");
+    let submitted = submission(&id, "generation");
+    let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
+    insert(&tx, &id, "submit", 1, &submitted);
+    insert(&tx, &id, "unversioned", 2, &JobRecord::Transition {
+        binding: binding.clone(), event: Event::LaunchIntent });
+    insert(&tx, &id, "intent", 3, &intent(binding));
+    insert(&tx, &id, "duplicate", 4, &intent(binding));
+    flush(&tx).unwrap();
+    assert_eq!(job_by_id(&tx, &id).unwrap().unwrap().state, JobState::Launching);
+    let history = history_by_job(&tx, &id).unwrap();
+    assert!(history[1].refusal.as_ref().unwrap().contains("job-launch-generation-required"));
+    assert!(history[2].refusal.is_none());
+    assert!(history[3].refusal.is_some());
+    let record: JobRecord = serde_json::from_value(history[2].record.clone()).unwrap();
+    let JobRecord::LaunchIntent { intent: retained, .. } = record else { unreachable!() };
+    assert_eq!(retained.generation.0.get(), 1);
+    assert_eq!(retained.outcome_file, "/fixture/generation-1.json");
+    rebuild(&tx).unwrap();
+    assert_eq!(history_by_job(&tx, &id).unwrap().len(), 4);
+}
+
+#[test]
+fn launch_refusal_requires_the_recorded_generation() {
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    let id = job_id("person/fixture", "refusal");
+    let submitted = submission(&id, "refusal");
+    let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
+    insert(&tx, &id, "submit", 1, &submitted);
+    let record = intent(binding);
+    let JobRecord::LaunchIntent { intent: recorded, .. } = record.clone() else { unreachable!() };
+    insert(&tx, &id, "orphan", 2, &JobRecord::LaunchRefused {
+        binding: binding.clone(), intent: recorded.clone(),
+        refusal: fractal_jobs::launch::LaunchRefusal::Preparation,
+    });
+    insert(&tx, &id, "intent", 3, &record);
+    let mut wrong = recorded.clone();
+    wrong.generation = fractal_jobs::launch::ExecutionGeneration(std::num::NonZeroU64::new(2).unwrap());
+    insert(&tx, &id, "wrong", 4, &JobRecord::LaunchRefused {
+        binding: binding.clone(), intent: wrong,
+        refusal: fractal_jobs::launch::LaunchRefusal::Preparation,
+    });
+    insert(&tx, &id, "refused", 5, &JobRecord::LaunchRefused {
+        binding: binding.clone(), intent: recorded,
+        refusal: fractal_jobs::launch::LaunchRefusal::CapReadback { index: 2 },
+    });
+    flush(&tx).unwrap();
+    let history = history_by_job(&tx, &id).unwrap();
+    assert!(history[1].refusal.as_ref().unwrap().contains("job-launch-intent-required"));
+    assert!(history[3].refusal.as_ref().unwrap()
+        .contains("job-launch-intent-mismatch"));
+    assert!(matches!(job_by_id(&tx, &id).unwrap().unwrap().state, JobState::Refused { .. }));
 }
 
 /// Receipt-level persistence is the idempotency mechanism. A cannot commit
