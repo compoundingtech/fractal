@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use opentelemetry::{
     KeyValue,
-    metrics::{Counter, Histogram},
+    metrics::{Counter, Gauge, Histogram, Meter},
     trace::Span as _,
 };
 
@@ -31,14 +31,23 @@ pub fn init(export_enabled: bool, metrics_enabled: bool) {
     METRICS_ENABLED.store(metrics_enabled, Ordering::Relaxed);
 }
 
+/// Whether callers should prepare metric-only state, such as configured peer labels.
+pub fn metrics_enabled() -> bool {
+    METRICS_ENABLED.load(Ordering::Relaxed)
+}
+
 struct Instruments {
     rounds: Counter<u64>,
     round_duration: Histogram<f64>,
     batch_size: Histogram<u64>,
     errors: Counter<u64>,
+    pending_envelopes: Gauge<u64>,
+    last_receive_page_ms: Gauge<f64>,
 }
-static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
-    let meter = opentelemetry::global::meter("smallclaims.replication");
+static METRICS: LazyLock<Instruments> =
+    LazyLock::new(|| instruments(&opentelemetry::global::meter("smallclaims.replication")));
+
+fn instruments(meter: &Meter) -> Instruments {
     Instruments {
         rounds: meter
             .u64_counter("st.replication.rounds")
@@ -57,8 +66,16 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
             .u64_counter("st.replication.errors")
             .with_unit("{error}")
             .build(),
+        pending_envelopes: meter
+            .u64_gauge("st.replication.pending.envelopes")
+            .with_unit("{envelope}")
+            .build(),
+        last_receive_page_ms: meter
+            .f64_gauge("st.replication.last.receive.page.ms")
+            .with_unit("ms")
+            .build(),
     }
-});
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ErrorReason {
@@ -141,6 +158,25 @@ pub(super) fn record_error(peer: &str, reason: ErrorReason) {
                 KeyValue::new("reason", reason.as_str()),
             ],
         );
+    }
+}
+
+/// Record the current backlog for a peer in the configured fleet.
+pub fn record_pending_envelopes(peer: &str, count: u64) {
+    if METRICS_ENABLED.load(Ordering::Relaxed) {
+        METRICS
+            .pending_envelopes
+            .record(count, &[KeyValue::new("peer", Arc::<str>::from(peer))]);
+    }
+}
+
+/// Record the latest receive page's total duration in milliseconds.
+/// The caller must restrict peer labels to configured fleet members.
+pub fn record_receive_page(peer: &str, total_ms: f64) {
+    if METRICS_ENABLED.load(Ordering::Relaxed) {
+        METRICS
+            .last_receive_page_ms
+            .record(total_ms, &[KeyValue::new("peer", Arc::<str>::from(peer))]);
     }
 }
 
@@ -285,6 +321,60 @@ impl Drop for Round {
 mod tests {
     use super::*;
     use opentelemetry::trace::{Tracer as _, TracerProvider as _};
+
+    #[test]
+    fn receive_gauges_export_latest_values_with_peer_only_labels() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let instruments = instruments(&provider.meter("replication-gauge-test"));
+        let peer = [KeyValue::new("peer", "cedar")];
+        instruments.pending_envelopes.record(12, &peer);
+        instruments.pending_envelopes.record(3, &peer);
+        instruments.last_receive_page_ms.record(42.5, &peer);
+        instruments.last_receive_page_ms.record(7.25, &peer);
+        provider.force_flush().unwrap();
+
+        let finished = exporter.get_finished_metrics().unwrap();
+        let metrics: Vec<_> = finished
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+        let pending = metrics
+            .iter()
+            .find(|metric| metric.name() == "st.replication.pending.envelopes")
+            .unwrap();
+        assert_eq!(pending.unit(), "{envelope}");
+        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = pending.data() else {
+            panic!("pending envelopes must be a u64 gauge");
+        };
+        let points: Vec<_> = gauge.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), 3);
+        assert_eq!(points[0].attributes().cloned().collect::<Vec<_>>(), peer);
+
+        let duration = metrics
+            .iter()
+            .find(|metric| metric.name() == "st.replication.last.receive.page.ms")
+            .unwrap();
+        assert_eq!(duration.unit(), "ms");
+        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = duration.data() else {
+            panic!("last receive page duration must be an f64 gauge");
+        };
+        let points: Vec<_> = gauge.data_points().collect();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value(), 7.25);
+        assert_eq!(points[0].attributes().cloned().collect::<Vec<_>>(), peer);
+        provider.shutdown().unwrap();
+    }
 
     #[test]
     fn existing_failure_kinds_have_closed_reasons() {

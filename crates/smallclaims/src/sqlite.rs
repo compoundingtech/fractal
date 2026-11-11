@@ -664,9 +664,18 @@ impl WriterConnection {
             WriterJob::BackgroundReady(_) => None,
         };
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
-        let send = || jobs.as_ref()
-            .expect("the writer queue is open while the store is")
-            .send(job);
+        let send = || {
+            if enqueued.is_some() {
+                self.background.foreground_pending.fetch_add(1, Ordering::AcqRel);
+            }
+            let result = jobs.as_ref()
+                .expect("the writer queue is open while the store is")
+                .send(job);
+            if result.is_err() && enqueued.is_some() {
+                self.background.foreground_pending.fetch_sub(1, Ordering::AcqRel);
+            }
+            result
+        };
         match enqueued {
             Some(enqueued) => self.fifo.send_at(enqueued, send),
             None => send(),
@@ -694,6 +703,13 @@ impl WriterConnection {
     #[track_caller]
     pub fn write_background(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Background)
+    }
+
+    /// Whether admitted foreground work has not yet been dispatched. This is independent of
+    /// telemetry and includes a foreground job buffered behind a fairness turn or fence.
+    /// A concurrent enqueue after this observation is seen at the next envelope boundary.
+    pub(crate) fn foreground_waiting(&self) -> bool {
+        self.background.foreground_pending.load(Ordering::Acquire) != 0
     }
 
     #[track_caller]
@@ -737,9 +753,16 @@ impl WriterConnection {
                         origin,
                     }
                 };
-                self.fifo.send_at(enqueued, || jobs.as_ref()
-                    .expect("the writer queue is open while the store is")
-                    .send(job))
+                self.fifo.send_at(enqueued, || {
+                    self.background.foreground_pending.fetch_add(1, Ordering::AcqRel);
+                    let result = jobs.as_ref()
+                        .expect("the writer queue is open while the store is")
+                        .send(job);
+                    if result.is_err() {
+                        self.background.foreground_pending.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    result
+                })
                     .expect("the writer thread runs while the store is open");
             }
         }
@@ -910,7 +933,7 @@ fn write_queue(
     background: Arc<writer_queue::BackgroundAdmission>,
     fifo: &Arc<crate::fifo::Queue>,
 ) {
-    let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background));
+    let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background.clone()));
     while let Some(job) = admission.next() {
         match job {
             WriterJob::Lend { lent, returned, holder, enqueued, origin }
@@ -933,7 +956,7 @@ fn write_queue(
                 let next = run_write_batch(
                     &mut connection,
                     batched,
-                    (&admission.queue, WRITE_BATCH_WINDOW),
+                    (&admission.queue, WRITE_BATCH_WINDOW, Some(&background.foreground_pending)),
                     committed_index,
                     batches,
                     callbacks,
@@ -953,7 +976,7 @@ fn run_write_batch(
     connection: &mut Connection,
     first: WriterJob,
     // Where the batch takes more writes from, and for how long.
-    intake: (&std::sync::mpsc::Receiver<WriterJob>, std::time::Duration),
+    intake: (&std::sync::mpsc::Receiver<WriterJob>, std::time::Duration, Option<&AtomicU64>),
     committed_index: &AtomicU64,
     batches: &(AtomicU64, AtomicU64),
     callbacks: (
@@ -964,7 +987,7 @@ fn run_write_batch(
     ),
     fifo: &crate::fifo::Queue,
 ) -> Option<WriterJob> {
-    let (queue, window) = intake;
+    let (queue, window, foreground_pending) = intake;
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
     let first_origin = match &first {
         WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
@@ -1033,6 +1056,9 @@ fn run_write_batch(
             writer.set_holder(origin.clone());
         }
         if !answers.is_empty() {
+            if let Some(pending) = foreground_pending {
+                pending.fetch_sub(1, Ordering::AcqRel);
+            }
             fifo.dequeued_at(enqueued);
             telemetry::queued(enqueued.elapsed(), origin.as_ref());
         }
@@ -2322,7 +2348,7 @@ mod tests {
         drop(sender);
         let batches = (AtomicU64::new(0), AtomicU64::new(0));
         assert!(run_write_batch(
-            &mut connection, first, (&receiver, std::time::Duration::MAX),
+            &mut connection, first, (&receiver, std::time::Duration::MAX, None),
             &AtomicU64::new(0), &batches,
             (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
             &fifo,
@@ -2631,7 +2657,7 @@ mod tests {
             assert!(run_write_batch(
                 // Both jobs are queued before the batch begins; how long the first one runs
                 // must not decide whether the second shares its batch.
-                &mut connection, first, (&receiver, std::time::Duration::MAX), &AtomicU64::new(0), &batches,
+                &mut connection, first, (&receiver, std::time::Duration::MAX, None), &AtomicU64::new(0), &batches,
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, Some(&writer_for_batch)),
                 &fifo,
             ).is_none());
@@ -2718,11 +2744,13 @@ mod tests {
             answers.push(answer);
         }
         let observed = fifo.clone();
+        let admission = Arc::new(writer_queue::BackgroundAdmission::default());
+        admission.foreground_pending.store(2, Ordering::Release);
         let thread = std::thread::spawn(move || {
             write_queue(writer, receiver, &AtomicU64::new(0),
                 &(AtomicU64::new(0), AtomicU64::new(0)),
                 (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
-                Arc::new(writer_queue::BackgroundAdmission::default()), &observed);
+                admission, &observed);
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while fifo.depth_for_test() == 2 && std::time::Instant::now() < deadline {

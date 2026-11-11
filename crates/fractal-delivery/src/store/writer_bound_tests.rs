@@ -82,7 +82,8 @@ fn a_catch_up_exchange_holds_the_writer_one_page_at_a_time() {
         "the catch-up finished"
     );
     assert_eq!(sent, CLAIMS, "one envelope for each claim's batch");
-    // Each paged hold covers at most one page, and together they cover everything once.
+    // Each paged hold covers at most its hard work cap (admission can yield on time sooner),
+    // and together they cover everything once.
     use smallclaims::store::{prepared_seal::SEAL_CHUNK_BATCHES, ADMISSION_CHUNK_ENVELOPES, PROJECTION_CHUNK_CLAIMS,
         REPLICATION_EXCHANGE_ENVELOPE_LIMIT};
     for (unit, page, all) in [

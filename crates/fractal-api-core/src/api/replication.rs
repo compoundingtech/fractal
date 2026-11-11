@@ -320,9 +320,15 @@ pub async fn replication_receive(
     let correlation = uuid::Uuid::parse_str(correlation_id).ok();
     let peer = request.peer.clone();
     let envelopes_offered = request.exchange.envelopes.len();
+    let metric_peer = smallclaims::sync::telemetry::metrics_enabled()
+        && replication_peer_names(&state).iter().any(|configured| configured == &peer);
     let metrics = smallclaims::receive_metrics::RequestMetrics::default();
     let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
     let counters = metrics.snapshot();
+    let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if metric_peer {
+        smallclaims::sync::telemetry::record_receive_page(&peer, total_ms);
+    }
     let outcome = match &result {
         Err(error) if matches!(error.code.as_str(), "database-busy" | "database-locked") => "contended",
         Err(error) => error.code.as_str(),
@@ -340,7 +346,7 @@ pub async fn replication_receive(
         rebuild_part_count = counters.rebuild_part_count,
         rebuild_part_ms = counters.rebuild_part_time.as_secs_f64() * 1000.0,
         commits = counters.commits,
-        total_ms = started.elapsed().as_secs_f64() * 1000.0,
+        total_ms,
         outcome = %outcome,
         projection_stage = %counters.projection_stage.as_deref().unwrap_or("-"),
         "replication receive summary",
@@ -357,6 +363,7 @@ async fn replication_receive_inner(
     let store = state.store.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let _metrics = metrics.enter();
+        let receive_started = std::time::Instant::now();
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -384,15 +391,16 @@ async fn replication_receive_inner(
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
-        let (admission, repairs) = if new_data {
+        let (admission, repairs) = if new_data || store.replication_admission_pending()
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+        {
             let _admission = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Admission,
             );
             let admission = store
-                .validate_replication_backlog()
+                .validate_replication_backlog_for_receive(receive_started)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
-            let repairs = store
-                .apply_replication_repairs()
+            let repairs = store.apply_replication_repairs()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
             (admission, repairs)
         } else {
@@ -401,7 +409,7 @@ async fn replication_receive_inner(
         // A catching-up node defers projection; the first receive after the deferral window,
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
-        let projection = if new_data || was_deferred {
+        let projection = if new_data || admission.changed || was_deferred || admission.deferred {
             let _projection = smallclaims::receive_metrics::Timer::start(
                 smallclaims::receive_metrics::Stage::Projection,
             );
@@ -413,9 +421,11 @@ async fn replication_receive_inner(
             let mut span = crate::otel::stage_root(
                 "st.replication.projection", "receive", receive,
             );
-            let result = admitted_projection_result(
-                store.project_replication_backlog_unless_catching_up(),
-            );
+            let result = admitted_projection_result(if admission.deferred {
+                store.project_replication_backlog_chunk().map(Some)
+            } else {
+                store.project_replication_backlog_unless_catching_up()
+            });
             if let Some(span) = span.as_mut() {
                 span.set_attribute(opentelemetry::KeyValue::new(
                     "st.replication.peer", request.peer.clone(),
@@ -441,7 +451,7 @@ async fn replication_receive_inner(
         } else {
             Some(true)
         };
-        if projection.is_none() {
+        if admission.deferred || projection.is_none() {
             smallclaims::receive_metrics::deferred();
         }
         let projected = projection.unwrap_or(false);
@@ -663,6 +673,7 @@ pub async fn shard_replication_receive(
     let response = blocking_action(move || {
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         let before_index = store.index().map_err(internal)?;
+        let receive_started = std::time::Instant::now();
         let receipt = store.receive_replication_exchange_via(
             &request.peer,
             &request.fleet_id,
@@ -673,10 +684,16 @@ pub async fn shard_replication_receive(
         // Held envelopes get another pass when the graph's membership moved since the last one.
         if replication_receive_has_new_data(receipt.received + receipt.signatures)
             || store.fleet_moved_since_admission().map_err(internal)?
+            || store.replication_admission_pending().map_err(internal)?
         {
-            store.validate_replication_backlog().map_err(internal)?;
+            let admission = store.validate_replication_backlog_for_receive(receive_started).map_err(internal)?;
             store.apply_replication_repairs().map_err(internal)?;
-            store.project_replication_backlog().map_err(internal)?;
+            if admission.deferred {
+                smallclaims::receive_metrics::deferred();
+                store.project_replication_backlog_chunk().map_err(internal)?;
+            } else {
+                store.project_replication_backlog().map_err(internal)?;
+            }
         }
         let store_index = store.index().map_err(internal)?;
         Ok(ReplicationReceiveResponse {
