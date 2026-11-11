@@ -86,9 +86,10 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
   const descriptionId = React.useId()
   if (variant === 'Marks') {
     const mark = status === 'failed' ? 'failed' : needsYou ? 'needs-you' : status
+    // Every row speaks this inside its name, so it says the state alone; a qualifier only when the observation is not live.
+    const qualified = freshness === 'live' && !frozen ? statusLabel : `${statusLabel}; ${freshness === 'live' ? 'last-observed snapshot' : `${freshness} observation`}`
     return <span aria-hidden={decorative || undefined} data-status={status} data-mark={mark} data-frozen={frozen || undefined} data-status-frozen={frozen || undefined} {...stylex.props(styles.root, markInk[mark], frozen && styles.frozen)}>
-      <svg role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon)}>{mark === 'failed' ? <AttentionDisc knockout={failedKnockout} /> : mark === 'needs-you' ? <AttentionDisc knockout={needsYouKnockout} /> : marks[mark]}</svg>
-      <VisuallyHidden elementType="span"><span id={descriptionId}>{`${statusLabel}. ${boundary}. Observation ${freshness}.${frozen ? ' Last-observed snapshot.' : ''}`}</span></VisuallyHidden>
+      <svg role="img" aria-label={qualified} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon)}>{mark === 'failed' ? <AttentionDisc knockout={failedKnockout} /> : mark === 'needs-you' ? <AttentionDisc knockout={needsYouKnockout} /> : marks[mark]}</svg>
       {elapsed !== '' && !iconOnly && <time dateTime={new Date(statusSince!).toISOString()} aria-label={`Elapsed in ${statusLabel}: ${elapsed}`}>{elapsed}</time>}
     </span>
   }

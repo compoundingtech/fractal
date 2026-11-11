@@ -315,17 +315,18 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
   const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('Idle;')
+  // A live mark says the state alone; the qualifier appears only once the observation is not live.
+  expect(status()).toBe('Idle')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   expect(registry.get(agents)).toBe(retained)
   expect(freshness()).toBe('stale')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · Idle')
-  expect(status()).toContain('Last verified · Idle;')
+  expect(status()).toContain('Last verified · Idle; stale observation')
   expect(status()).toContain('stale observation')
   await act(async () => registry.set(connection, { _tag: 'Live' }))
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('live observation')
+  expect(status()).toBe('Idle')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
