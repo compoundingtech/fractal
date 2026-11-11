@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Inbox sends and persists a note on every named answer option, including notes on options that were not selected. Stored answers and asking agents retain each note exactly once, and a named dismiss option sends its own note as the selected answer text.",
+  "replay": {"status": "none", "detail": "No claim replay changes; existing answers remain readable."},
+  "schema": {"status": "changed", "detail": "Answer inputs and stored typed answers add optional option_notes entries with a named option id and nonblank text. This changes the typed answer record schema, but does not change database tables or the storage schema version."},
+  "rules": {"status": "none", "detail": "No checkpoint-rule or digest changes; no coordinated upgrade required."},
+  "compatibility": {"status": "changed", "detail": "The API and generated Rust, Swift and TypeScript clients accept optional option_notes. The TUI requires person-answer-option-notes version 1 before sending notes on other options, refusing the send and retaining drafts on older daemons. Answers without these notes omit the field. Older strict schema validators may reject extended answers; summaries retain all notes for tolerant readers. Delegated completion claims must include every option note in their summary."},
+  "downtime": {"status": "none", "detail": "No additional startup work or expected service interruption."},
+  "manual": {"status": "none", "detail": "No configuration changes or re-pairing required."},
+  "recovery": {"status": "changed", "detail": "Refused answers retain the selected option and every note. Inbox option notes are saved as drafts across TUI restarts and retained for 30 days, like other drafts."}
+}
