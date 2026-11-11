@@ -523,14 +523,6 @@ export const gatewaySubjectReads = ({
         }
       },
     }),
-    declarationAt: onceFromGetter({
-      decode: Native.decodeUnknownSync(Schema.Union([Native.AgentDeclaration, Native.MissionDeclaration])),
-      getter: ({ client, ref, signal }) => {
-        const { subject, revision } = parsePinnedRef(ref)
-        // Explicitly redacted, as the current-revision reads are.
-        return subject.startsWith('agent/') ? client.agentDeclarationGet(subject, revision, false, { signal }) : client.missionDeclarationGet(subject, revision, { signal })
-      },
-    }),
     sourceMap: onceFromGetter({
       decode: (value): SourceMapLookup => {
         const lookup = value as SourceMapWire
@@ -552,6 +544,7 @@ export const gatewaySubjectReads = ({
       getter: ({ client, ref, signal }) => {
         const { pinned, hash } = parseBlobRef(ref)
         const { subject, revision } = parsePinnedRef(pinned)
+        if (revision === undefined) throw new Error(`Blob reads name the mapped revision: ${ref}`)
         return client.sourceBlobGet(hash, subject, revision, { signal })
       },
     }),
@@ -569,11 +562,11 @@ export type SourceMapLookup =
   /** This Fractal does not serve source maps. */
   | { readonly _tag: 'Unserved' }
 
-/** Pinned reads take `subject@revision`; subjects never contain `@`. */
+/** Pinned reads take `subject@revision`; subjects never contain `@`. A bare subject reads the current revision's map. */
 export const pinnedRef = (subject: string, revision: string): string => `${subject}@${revision}`
-export const parsePinnedRef = (ref: string): { readonly subject: string; readonly revision: string } => {
+export const parsePinnedRef = (ref: string): { readonly subject: string; readonly revision: string | undefined } => {
   const at = ref.indexOf('@')
-  return { subject: ref.slice(0, at), revision: ref.slice(at + 1) }
+  return at === -1 ? { subject: ref, revision: undefined } : { subject: ref.slice(0, at), revision: ref.slice(at + 1) }
 }
 /** Blob reads name the mapped revision that lists the file: `blobRef(pinnedRef(subject, revision), sha256)`. */
 export const blobRef = (pinned: string, hash: string): string => `${pinned}#${hash}`
@@ -612,9 +605,7 @@ export interface SubjectReads {
   readonly agentDeclaration: SubjectReader<Native.AgentDeclaration>
   /** Served canonical mission KDL, or an older daemon's redacted structured definition. */
   readonly missionDefinition: SubjectReader<MissionDeclarationValue>
-  /** Canonical redacted KDL of one exact revision; `pinnedRef(subject, revision)`. Immutable. */
-  readonly declarationAt: SubjectReader<Native.AgentDeclaration | Native.MissionDeclaration>
-  /** The source map of one exact revision; `pinnedRef(subject, revision)`. Immutable. */
+  /** The source map and canonical KDL of one revision; `pinnedRef(subject, revision)` (immutable), or the bare subject for its current revision, read once. */
   readonly sourceMap: SubjectReader<SourceMapLookup>
   /** One source file text, by `blobRef` of a mapped revision and the sha256 its map names. Immutable. */
   readonly sourceBlob: SubjectReader<Native.SourceBlob>
@@ -717,7 +708,6 @@ export const fixtureSubjectReads = ({
     glass: reader({ table: fixtures.glass, pinned: overrides.glass }),
     agentDeclaration: reader({ table: fixtures.agentDeclaration, pinned: overrides.agentDeclaration }),
     missionDefinition: reader({ table: fixtures.missionDefinition, pinned: overrides.missionDefinition }),
-    declarationAt: reader({ table: fixtures.declarationAt, pinned: overrides.declarationAt }),
     sourceMap: reader({ table: fixtures.sourceMap, pinned: overrides.sourceMap }),
     sourceBlob: reader({ table: fixtures.sourceBlob, pinned: overrides.sourceBlob }),
   }
