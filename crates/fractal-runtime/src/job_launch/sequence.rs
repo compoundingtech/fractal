@@ -49,7 +49,7 @@ impl ExecRuntime {
             effects.attach_holder(&directory)?;
             Ok((directory, hierarchy, launch_usage))
         })();
-        let (directory, hierarchy, launch_usage) = match prepared {
+        let (_directory, hierarchy, launch_usage) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 let refusal = error.downcast_ref::<LaunchRefusal>().copied()
