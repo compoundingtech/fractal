@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Remove child-module OptionalExtension imports at the unit that first supplies the trait through the shared jobs parent scope.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "Generation-bearing launch intent imports OptionalExtension in the shared jobs module. Queries and receipts inherit that trait through super; removing their duplicate imports here preserves standalone earlier units and the final source tree."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
