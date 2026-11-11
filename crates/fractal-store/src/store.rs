@@ -17558,11 +17558,10 @@ pub fn try_project_simple_replication_tx(
             }
         }
     }
-    // Event-only claims do not change the structural graph. Their operation
-    // registry can advance with the frontier. Message sends reconcile an ambiguous
-    // receipt from that operation's indexed history, using the full replay's reducer.
-    // Other kinds retain the full replay guard for ambiguous IDs.
-    let mut reconciled_message_operations = BTreeSet::new();
+    // Event-only claims and message sends reconcile ambiguous receipts from that
+    // operation's indexed history, using the full replay's reducer. Structural
+    // kinds retain the full replay guard for ambiguous IDs.
+    let mut reconciled_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -17579,20 +17578,32 @@ pub fn try_project_simple_replication_tx(
         if repaired {
             continue;
         }
-        if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
+        let graph_neutral = !replay_projects_kind(&claim.kind);
+        if (claim.kind == "message.sent" || graph_neutral)
+            && reconciled_operations.contains(operation_id)
+        {
             continue;
         }
-        if let Some((stored_digest, _, state)) =
-            operation_tx(transaction, operation_id).map_err(|error| {
+        let stored_operation = operation_tx(transaction, operation_id).map_err(|error| {
+            incremental_claim_error(internal(error), claim, "operation-registry")
+        })?;
+        // A checkpoint can leave only tombstones, with no operations row. Fold
+        // those too instead of registering just the incoming claim.
+        if graph_neutral && stored_operation.is_none() {
+            repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                 incremental_claim_error(internal(error), claim, "operation-registry")
-            })?
+            })?;
+            reconciled_operations.insert(operation_id.to_owned());
+            continue;
+        }
+        if let Some((stored_digest, _, state)) = stored_operation
             && (stored_digest != request_digest || state != "active")
         {
-            if claim.kind == "message.sent" {
+            if claim.kind == "message.sent" || graph_neutral {
                 repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                     incremental_claim_error(internal(error), claim, "operation-registry")
                 })?;
-                reconciled_message_operations.insert(operation_id.to_owned());
+                reconciled_operations.insert(operation_id.to_owned());
                 continue;
             }
             crate::profile::note("replay: operation-conflict");

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep conflicting GitHub observation receipts incremental instead of replaying the whole graph",
+  "replay": {"status":"changed", "detail":"Graph-neutral claim kinds, including github.event, reconcile conflicting operation receipts through the existing indexed canonical reducer. Missing operation rows also fold checkpoint tombstones. Graph-projecting kinds retain their full-replay guard; message.sent behavior is unchanged. No migration replay is required."},
+  "schema": {"status":"none", "detail":"No schema, index, trigger, claim or signature changes. Uses the existing operations row and reducer."},
+  "rules": {"status":"none", "detail":"Canonical operation selection, conflict outcomes, checkpoint tombstones and repaired-claim exclusions retain the full replay's existing meaning."},
+  "compatibility": {"status":"none", "detail":"No registry, wire or client changes. Signed claims and idempotency keys are unchanged."},
+  "downtime": {"status":"none", "detail":"Normal binary restart only; no coordinated fleet interruption is required."},
+  "manual": {"status":"none", "detail":"No live replay, database edit, heal or reset is requested."},
+  "recovery": {"status":"none", "detail":"Older binaries read the same canonical operation rows and retain their former full-replay guard. No irreversible format change."}
+}
