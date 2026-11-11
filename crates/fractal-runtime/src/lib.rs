@@ -20,6 +20,8 @@ pub mod job_scope;
 pub mod job_launch;
 #[cfg(target_os = "linux")]
 pub mod job_recovery;
+#[cfg(target_os = "linux")]
+pub mod job_cancel;
 mod isolate;
 mod lane;
 mod priority;

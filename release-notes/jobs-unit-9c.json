@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fence holder signals and pre-release cancellation by execution generation (unit 9c)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "changed", "detail": "INACTIVE stop capability requires the same per-job generation serializer used for launch, release and recovery, retained through durable recording. No production caller or timing defaults."},
+  "compatibility": {"status": "changed", "detail": "Running-holder SIGTERM uses a pidfd acquired before identity and cgroup membership rechecks. Natural exit still retires the whole tree. Launching requires a live gate or retained proof of successful pre-release abort; retry repeats retirement without release."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Fake-fence and ignored native pidfd/gate fixtures added, including abort then retirement timeout then successful retry, and retry after retirement without durable recording. Cargo and native execution not run."},
+  "recovery": {"status": "changed", "detail": "A genuinely lost gate or mismatched generation is stop-uncertain. Successful pre-release abort remains a permanent no-release fence across cleanup or journal failures; it never permits relaunch."}
+}

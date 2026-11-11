@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use transferred self-pidfds for unattached gates and retire attached trees before reaping (unit 9c fix 1)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "changed", "detail": "INACTIVE. Non-attached gated abort signals only its owned pidfd and reaps. Attached cancellation fences release, runs the common kill-empty-sample-remove retirement, then reaps; no direct holder signal."},
+  "compatibility": {"status": "changed", "detail": "Command spawn can internally reap before returning Child. The pre_exec child opens its own pidfd and transfers it over a private socket before readiness, using raw async-signal-safe syscalls. Parent never opens a pidfd from the published PID. Transfer failure aborts without exec."},
+  "downtime": {"status": "none", "detail": "No production caller or activation."},
+  "manual": {"status": "none", "detail": "Added descriptor-transfer and failure tests, ignored native attached/unattached and failed-publication fixtures, and fake-tree attached retry coverage. Cargo and native execution not run."},
+  "recovery": {"status": "changed", "detail": "Attached release stays fenced across retirement failure. Retry re-enters the uniform retirement path and cannot release or relaunch the child."}
+}
