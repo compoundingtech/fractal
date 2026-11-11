@@ -189,6 +189,7 @@ pub mod records;
 mod write_principal;
 mod native_delivery;
 pub mod replication;
+mod replication_replay;
 mod runs;
 pub mod sessions;
 pub mod work;
@@ -859,6 +860,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/replication/records", get(replication::replication_records))
         .route("/v1/replication/records/{*record}", get(replication::replication_record))
         .route("/v1/replication/repair", post(replication::repair_replication_record))
+        .route("/v1/replication/replay", post(replication_replay::replay).layer(Extension(transport)))
         .route("/v1/checkpoint/plan", post(replication::checkpoint_plan))
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
@@ -1216,7 +1218,7 @@ async fn response_envelope_unbounded(
         Some(caller.clone()),
     );
     let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
-    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration");
+    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration" | "/v1/replication/replay");
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
     // supplies the envelope snapshot. All other routes keep admission snapshots.
