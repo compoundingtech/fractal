@@ -121,6 +121,7 @@
 "loop.state" = { class = "transition", window = "7d" }
 "message.closed" = { class = "durable" }
 "message.delivered" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
+"message.expired" = { class = "durable" }
 "message.read" = { class = "transition", window = "7d", pending = "unread state reads it until the message closes" }
 "message.sent" = { class = "durable" }
 "message.staged" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }

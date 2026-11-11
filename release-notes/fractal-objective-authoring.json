@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Author objectives in TypeScript: the private `fractal` package adds `Fractal.objective`, `Fractal.indicator.*` and `Fractal.response.fault`, the tree loader reads `objective.ts`/`objective.kdl`, and `slo/objectives.kdl` is generated from `slo/objectives.kdl.genie.ts`",
+  "replay": {"status": "none", "detail": "No receipt, replay or historical interpretation changes; the package only renders KDL."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, migrations, claim kinds or schema registry entries change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "No daemon, client, wire, CLI or KDL contract change. The package is a private workspace member, not published to npm. The generated slo/objectives.kdl parses to the same objectives as the hand-written file the objective reader ships with: the differences are comments, blank lines, property order and `1` for `1.0`."},
+  "downtime": {"status": "none", "detail": "No deployment, restart or migration."},
+  "manual": {"status": "none", "detail": "No manual step. Shipped objectives are edited in slo/objectives.kdl.genie.ts and rendered with genie."},
+  "recovery": {"status": "none", "detail": "No persistent state; reverting the package and the genie source needs no recovery action."}
+}

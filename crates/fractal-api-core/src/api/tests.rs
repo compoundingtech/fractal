@@ -1,3 +1,5 @@
+#[path = "desired_batch_tests.rs"]
+mod desired_batch_tests;
 #[path = "agents_publication_tests.rs"]
 mod agents_publication_tests;
 mod exec_only;

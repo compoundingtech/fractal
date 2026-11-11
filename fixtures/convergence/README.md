@@ -236,14 +236,27 @@ The first characterization run failed only the four stale v14 trim expectations.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
 
-`claims-v19.json` captures the complete merged registry, including operation receipts from main
-and `read-position.advanced` (a person's forward-only read position per conversation).
-Versions 1 through 17 remain frozen. Version 18 is reserved by the independent mail-expiry change
-(#6216); the loader selects one literal filename and does not require contiguous version numbers.
-Generate v19 with
+`claims-v18.json` captures the complete registry with `message.expired`, the durable,
+runtime-authored mail expiry outcome. Versions 1 through 17 stay frozen. Generate it
+from the merged expiry registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v18.json`;
+the example serializes `fractal_schema::registry().claims` with
+`serde_json::to_string_pretty`, followed by a newline. Do not hand-edit the snapshot.
+The simulation selects v18. Expiry draws select an existing sent message in stable
+subject order and use `daemon/runtime`; native admission still rejects mail with a
+terminal receipt. The focused expiry regression generates the outcome through the
+same path as random schedules and checks native admission and replication to the
+oracle, rather than treating corpus membership as write coverage.
+
+`claims-v19.json` captures the merged registry after mail expiry and read-position tracking,
+including `read-position.advanced` (a person's forward-only read position per conversation).
+Versions 1 through 18 remain frozen; the simulation now selects v19. The earlier v19 snapshot
+existed only on this unmerged branch and is regenerated in place before this change ships.
+Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v19.json`;
-do not hand-edit it. As in #6216, the native generator supplies admissible fields and actors, and
-the focused read-position regression checks admission and oracle replication, not just membership.
+do not hand-edit it. The native generators supply admissible fields and actors for expiry and
+read positions; their focused regressions check native admission and oracle replication.
+The loader selects one literal filename and does not require contiguous version numbers.
 Changing the selected kind list and each kind's random draws changes subsequent actions in the
 shared SplitMix64 schedule, including checkpoint work. A previous corpus's trim characterization
 is not evidence for this corpus; never add trim exceptions without observing the generated inputs.

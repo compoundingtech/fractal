@@ -50,6 +50,11 @@ pub fn authenticate(
         .filter(|value| !value.is_empty())
         .ok_or_else(denied)?;
     let digest = hex::encode(Sha256::digest(credential.as_bytes()));
+    if let Some(session) = super::client_v0::external_grants::authenticate(state, &digest, transport)?
+        && super::client_v0::external_grants::is_service(&session) {
+        super::client_v0::external_grants::authorize_route(&session, request)?;
+        return Ok(Authentication::Session(session));
+    }
     let pairings = state.store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(|_| unavailable())?;

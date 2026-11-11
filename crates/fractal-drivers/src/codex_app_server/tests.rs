@@ -6904,7 +6904,7 @@ fn a_controlled_tui_starts_without_the_update_notice() {
         "resume".to_string(),
         "thread-prior".to_string(),
     ];
-    let command = controlled_tui_command("codex", &args);
+    let command = controlled_tui_command("codex", &args).unwrap();
     assert_eq!(command.get_program(), "codex");
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
@@ -6927,7 +6927,7 @@ fn a_controlled_tui_starts_without_the_update_notice() {
             "gpt-test".into(),
         ],
     ] {
-        let command = controlled_tui_command("codex", &args);
+        let command = controlled_tui_command("codex", &args).unwrap();
         assert_eq!(
             command.get_args().take(2).collect::<Vec<_>>(),
             ["-c", "check_for_update_on_startup=false"]
@@ -9356,6 +9356,7 @@ fn managed_launch_argv_carries_access_mode_flags() {
                 prepare_controlled_launch_args("unix:///control.sock", &managed[1..], resume).unwrap();
             let server = prepared.server_args;
             let tui: Vec<String> = controlled_tui_command("codex", &prepared.tui_args)
+                .unwrap()
                 .get_args()
                 .map(|arg| arg.to_str().unwrap().to_owned())
                 .collect();

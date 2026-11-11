@@ -4490,6 +4490,7 @@
       "lane",
       "message",
       "observer",
+      "objective",
       "mission",
       "mission-run",
       "planning-session",
@@ -5011,6 +5012,39 @@
     "source_kdl": [
       "message"
     ]
+  },
+  "message.expired": {
+    "kind": "message.expired",
+    "subjects": [
+      "message"
+    ],
+    "fields": {
+      "reason": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "cutoff-never-offered",
+          "cutoff-uncertain-attempt",
+          "no-live-recipient"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "status": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "expired"
+        ],
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": "messages",
+    "wakes_reconciler": true
   },
   "message.read": {
     "kind": "message.read",

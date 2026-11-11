@@ -2,8 +2,8 @@
 //!
 //! An objective is a target with windows and an error budget: the daemon's latency targets, its
 //! store and CPU targets, the database's size and the paired phone's reported targets, all from
-//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`, and CI's durations
-//! and counts, which `slo/targets.toml` declares and the Workspace CI runs a repository observer
+//! `slo/objectives.kdl` and the same report as `GET /v1/client/request-latency`, and CI's durations
+//! and counts, which `slo/objectives.kdl` ships and the Workspace CI runs a repository observer
 //! read feed, held in memory on the member that observes. A budget is an
 //! allowance that resets: each account's weekly and 5-hour limits, from the readings `st usage`
 //! shows. Nothing here measures anything. It reads those sources and says, for each row, its
@@ -111,11 +111,11 @@ pub fn ms(value: f64) -> String {
     if value >= 10.0 { format!("{} ms", value.round()) } else { format!("{:.1} ms", value) }
 }
 
-fn clamp_percent(value: f64) -> f64 {
+pub(crate) fn clamp_percent(value: f64) -> f64 {
     (value.clamp(0.0, 100.0) * 10.0).round() / 10.0
 }
 
-fn plural(n: u64, word: &str) -> String {
+pub(crate) fn plural(n: u64, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -329,10 +329,15 @@ pub fn divergence(open: u64) -> Value {
     })
 }
 
-/// A duration in minutes once it is a minute or more: CI's targets are minutes, not milliseconds.
-fn duration(target_ms: u64) -> String {
-    if target_ms < 60_000 {
+/// A duration in seconds under a minute and in minutes from a minute on: CI's targets are
+/// minutes, a declared interval's may be seconds.
+pub(crate) fn duration(target_ms: u64) -> String {
+    if target_ms < 1_000 {
         return ms(target_ms as f64);
+    }
+    if target_ms < 60_000 {
+        let seconds = target_ms as f64 / 1_000.0;
+        return if seconds.fract() == 0.0 { format!("{seconds} s") } else { format!("{seconds:.1} s") };
     }
     let minutes = target_ms as f64 / 60_000.0;
     if minutes.fract() == 0.0 { format!("{minutes} min") } else { format!("{minutes:.1} min") }
@@ -340,7 +345,7 @@ fn duration(target_ms: u64) -> String {
 
 /// The value at `percentile` of `samples`, nearest rank: the smallest sample that at least
 /// `percentile` in 100 are at or under.
-fn nearest_rank(samples: &[u64], percentile: u64) -> u64 {
+pub(crate) fn nearest_rank(samples: &[u64], percentile: u64) -> u64 {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let rank = (percentile as usize * sorted.len()).div_ceil(100).max(1);
@@ -1198,10 +1203,12 @@ mod tests {
     }
 
     #[test]
-    fn a_ci_duration_reads_in_minutes() {
+    fn a_duration_reads_in_minutes_from_a_minute_and_seconds_below() {
         assert_eq!(duration(600_000), "10 min");
         assert_eq!(duration(780_000), "13 min");
         assert_eq!(duration(90_000), "1.5 min");
-        assert_eq!(duration(1_500), "1500 ms");
+        assert_eq!(duration(55_000), "55 s");
+        assert_eq!(duration(1_500), "1.5 s");
+        assert_eq!(duration(400), "400 ms");
     }
 }

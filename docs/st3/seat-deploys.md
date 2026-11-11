@@ -163,6 +163,17 @@ An agent can explicitly inspect that retained mail with `fractal conversations l
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
 continues to arrive normally, with the channel's usual handoff deduplication and receipt handling.
 
+The registry also accepts a durable graph `message.expired` outcome, written only by
+`daemon/runtime`, with reason `cutoff-never-offered`, `cutoff-uncertain-attempt`, or
+`no-live-recipient`. This reader contract does not enable automatic expiration or change
+mailbox recovery. Expiry is not a delivered/read receipt; later actual delivery or read evidence
+supersedes the outcome without removing the expiry claim from history. Harness receipts cannot
+write expiry, and the messages shard still replicates only `message.sent`. Outcome readers,
+projections and sender surfaces must be deployed to every pinned host before any expiry writer
+is enabled; older registries retain the new kind as unknown rather than interpreting its outcome.
+The writer must also enforce original-accepting-member authority before activation; replicated
+expiry admission here checks the daemon actor, not that future writer prerequisite.
+
 Claude distinguishes native queue acceptance (`queue-operation/enqueue`, which records
 `delivered`) from consumption (a user transcript entry, including `isMeta`, or an explicit
 `queue-operation/remove` with `reason: absorbed_mid_turn`, which records `read`). Receipt matching

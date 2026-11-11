@@ -3,6 +3,10 @@
 
 pub mod cli_output;
 pub mod accounts;
+/// The values every declaration kind's KDL shares: canonical nodes and durations.
+pub mod declaration_kdl;
+/// An `objective` declaration: an indicator, its targets and the response to a miss.
+pub mod objective;
 pub mod archive;
 pub mod boot;
 pub mod config;

@@ -152,7 +152,7 @@ move observers after acknowledgements.
 
 ## Targets and live windows
 
-[`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
+[`slo/objectives.kdl`](../../slo/objectives.kdl) holds the objectives Fractal ships ([objectives](objectives.md)): reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
 the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
@@ -306,7 +306,7 @@ holds the history. Each point carries `target`, `series` (`owner` or `remote` fo
 the store), `window` (`1m`, `5m`, `1h`) and, on
 latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
 `st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
-figure from `slo/targets.toml`, so one query sets a host's number against its target),
+figure from `slo/objectives.kdl`, so one query sets a host's number against its target),
 `st_slo_cpu_cores` (the member's cores by `window`, sent only once known) and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
 phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
