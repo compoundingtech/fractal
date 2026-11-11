@@ -2,6 +2,8 @@ use super::*;
 use crate::job_launch::{ExitUsage, cgroup::verify_dedicated, sample_exit};
 use fractal_jobs::launch::CountersUnavailable;
 
+const DAEMON: DaemonIdentity = DaemonIdentity::from_member_key_fingerprint([1; 32]);
+
 struct Manager {
     root: PathBuf,
     starts: usize,
@@ -52,22 +54,22 @@ fn manager(root: PathBuf) -> Manager {
 fn ensure_reuses_verified_keeper_and_requires_configured_controllers() {
     let temporary = tempfile::tempdir().unwrap();
     let mut manager = manager(temporary.path().join("keeper.scope"));
-    assert!(ensure_keeper(&mut manager, "host", None).is_err());
+    assert!(ensure_keeper(&mut manager, "host", DAEMON, None).is_err());
     assert_eq!(manager.spawned, 100);
-    let scope = ensure_keeper(&mut manager, "host", Some("app.slice/app-heavy.slice")).unwrap();
+    let scope = ensure_keeper(&mut manager, "host", DAEMON, Some("app.slice/app-heavy.slice")).unwrap();
     assert!(populated(&scope.directory.join("idle")).unwrap());
     assert_eq!(fs::read_to_string(scope.directory.join("cgroup.procs")).unwrap(), "");
     let controllers = fs::read_to_string(scope.directory.join("cgroup.subtree_control")).unwrap();
     assert_eq!(controllers, "+memory +pids +io");
-    ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+    ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).unwrap();
     assert_eq!(manager.starts, 1);
     assert_eq!(manager.spawned, 101);
-    assert!(ensure_keeper(&mut manager, "host", Some("other.slice")).is_err());
+    assert!(ensure_keeper(&mut manager, "host", DAEMON, Some("other.slice")).is_err());
     manager.delegated = false;
-    assert!(ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).is_err());
+    assert!(ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).is_err());
     manager.delegated = true;
     fs::write(scope.directory.join("cgroup.controllers"), "memory").unwrap();
-    assert!(ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).is_err());
+    assert!(ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).is_err());
     assert_eq!(manager.starts, 1);
 }
 
@@ -76,7 +78,7 @@ fn keeper_death_during_job_is_repaired_without_relaunch_and_counters_are_never_z
     for vanished in [false, true] {
         let temporary = tempfile::tempdir().unwrap();
         let mut manager = manager(temporary.path().join("keeper.scope"));
-        let scope = ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+        let scope = ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).unwrap();
         let job = scope.directory.join("job-generation-1");
         group(&job);
         fs::write(job.join("cgroup.procs"), "42").unwrap();
@@ -101,10 +103,10 @@ fn keeper_death_during_job_is_repaired_without_relaunch_and_counters_are_never_z
             }
         }
         if !vanished { fs::remove_dir_all(&job).unwrap(); }
-        ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+        ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).unwrap();
         assert_eq!(manager.starts, 1); // next job reuses the repaired keeper
         fs::remove_dir_all(&scope.directory).unwrap();
-        ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+        ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).unwrap();
         assert_eq!(manager.starts, 2); // lost keeper can also be recreated
     }
 }
@@ -137,7 +139,7 @@ fn holder_is_sole_member_with_empty_subtree_and_no_populated_children() {
 fn concurrent_ensure_and_watch_repair_spawn_only_one_replacement() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("keeper.scope");
-    let scope = ensure_keeper(&mut manager(root.clone()), "host", Some("app-heavy.slice")).unwrap();
+    let scope = ensure_keeper(&mut manager(root.clone()), "host", DAEMON, Some("app-heavy.slice")).unwrap();
     fs::write(root.join("idle/cgroup.events"), "populated 0\n").unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
     let threads = (0..8).map(|index| {
@@ -147,7 +149,7 @@ fn concurrent_ensure_and_watch_repair_spawn_only_one_replacement() {
             manager.slice = "app-heavy.slice".into();
             barrier.wait();
             if index % 2 == 0 {
-                ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+                ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).unwrap();
             } else {
                 replenish_keeper(&mut manager, &scope).unwrap();
             }
@@ -162,7 +164,7 @@ fn concurrent_ensure_and_watch_repair_spawn_only_one_replacement() {
 fn failed_replacement_verification_kills_the_unpublished_process() {
     let temporary = tempfile::tempdir().unwrap();
     let mut manager = manager(temporary.path().join("keeper.scope"));
-    let scope = ensure_keeper(&mut manager, "host", Some("app-heavy.slice")).unwrap();
+    let scope = ensure_keeper(&mut manager, "host", DAEMON, Some("app-heavy.slice")).unwrap();
     fs::write(scope.directory.join("idle/cgroup.events"), "populated 0\n").unwrap();
     manager.fail_population = true;
     assert!(replenish_keeper(&mut manager, &scope).is_err());

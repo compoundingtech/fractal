@@ -2,7 +2,7 @@
 //! creation. Activation must authenticate recovery and own polling kept jobs.
 use crate::job_launch::{ExitUsage, cgroup, keeper::{KeeperManager, populated, slice_name, validate_path}};
 use anyhow::{Context, Result, ensure};
-use fractal_jobs::{host_authority::JobHostBinding, launch::{LaunchIntent, cgroup_name, keeper_name},
+use fractal_jobs::{host_authority::JobHostBinding, launch::{DaemonIdentity, LaunchIntent, cgroup_name, keeper_name},
     recovery::{ProcessIdentity, Released}};
 use std::{fs, io::ErrorKind, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
 mod sequence;
@@ -24,6 +24,8 @@ pub trait RecoveryEffects {
 
 pub struct CgroupRecovery<'a> {
     pub manager: &'a mut dyn KeeperManager,
+    /// Same pinned member-key fingerprint supplied to the launch adapter.
+    pub daemon_identity: DaemonIdentity,
     pub cgroup_root: &'a Path,
     /// /proc in production; explicit root permits fixture process identities.
     pub proc_root: &'a Path,
@@ -44,7 +46,10 @@ pub fn holder_identity(proc_root: &Path, pid: u32) -> Result<ProcessIdentity> {
 impl RecoveryEffects for CgroupRecovery<'_> {
     fn locate(&mut self, binding: &JobHostBinding, intent: &LaunchIntent, heavy_slice: &str) -> Result<Option<LocatedJob>> {
         let heavy_slice = slice_name(Some(heavy_slice))?;
-        let Some(keeper) = self.manager.describe(&keeper_name(&binding.execution_host))? else { return Ok(None); };
+        let name = keeper_name(&binding.execution_host, self.daemon_identity);
+        let Some(keeper) = self.manager.describe(&name)? else { return Ok(None); };
+        ensure!(keeper.directory.file_name() == Some(std::ffi::OsStr::new(&name)),
+            "keeper belongs to another daemon");
         validate_path(&keeper.directory)?;
         keeper.directory.strip_prefix(self.cgroup_root)?;
         match fs::symlink_metadata(&keeper.directory) {
@@ -91,6 +96,11 @@ impl RecoveryEffects for CgroupRecovery<'_> {
         }
     }
     fn finish(&mut self, job: &LocatedJob, host: &str) -> Result<ExitUsage> {
+        validate_path(&job.directory)?;
+        job.directory.strip_prefix(self.cgroup_root)?;
+        let name = keeper_name(host, self.daemon_identity);
+        ensure!(job.directory.parent().and_then(Path::file_name)
+            == Some(std::ffi::OsStr::new(&name)), "cannot retire another daemon's J");
         cgroup::stop_and_sample(&job.directory, host)
     }
 }
@@ -98,6 +108,7 @@ impl RecoveryEffects for CgroupRecovery<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const DAEMON: DaemonIdentity = DaemonIdentity::from_member_key_fingerprint([1; 32]);
     #[test]
     fn process_identity_handles_comm_delimiters_and_fences_pid_reuse() {
         let tmp = tempfile::tempdir().unwrap();
@@ -117,7 +128,7 @@ mod tests {
     struct ExistingKeeper { directory: PathBuf, slice: &'static str }
     impl KeeperManager for ExistingKeeper {
         fn describe(&mut self, name: &str) -> Result<Option<crate::job_launch::keeper::KeeperScope>> {
-            assert_eq!(name, keeper_name("fixture-host"));
+            assert_eq!(name, keeper_name("fixture-host", DAEMON));
             Ok(self.directory.is_dir().then(|| crate::job_launch::keeper::KeeperScope {
                 directory: self.directory.clone(), slice: self.slice.into(), delegated: true,
             }))
@@ -129,7 +140,7 @@ mod tests {
     #[test]
     fn discovers_only_stable_j_and_never_recreates_missing_keeper_or_job() {
         let tmp = tempfile::tempdir().unwrap();
-        let keeper = tmp.path().join("keeper");
+        let keeper = tmp.path().join(keeper_name("fixture-host", DAEMON));
         fs::create_dir_all(keeper.join("idle")).unwrap();
         fs::write(keeper.join("cgroup.procs"), "").unwrap();
         fs::write(keeper.join("cgroup.controllers"), "memory pids").unwrap();
@@ -138,10 +149,14 @@ mod tests {
         let directory = keeper.join(cgroup_name("job", &intent));
         fs::create_dir(&directory).unwrap();
         let mut manager = ExistingKeeper { directory: keeper.clone(), slice: "configured.slice" };
-        let mut effects = CgroupRecovery { manager: &mut manager, cgroup_root: tmp.path(), proc_root: tmp.path() };
+        let mut effects = CgroupRecovery {
+            manager: &mut manager, daemon_identity: DAEMON,
+            cgroup_root: tmp.path(), proc_root: tmp.path(),
+        };
         let located = effects.locate(&binding, &intent, "configured.slice").unwrap().unwrap();
         assert_eq!(located.directory, directory);
-        assert_eq!(located.hierarchy, format!("/keeper/{}", cgroup_name("job", &intent)));
+        assert_eq!(located.hierarchy,
+            format!("/{}/{}", keeper_name("fixture-host", DAEMON), cgroup_name("job", &intent)));
         assert!(effects.locate(&binding, &intent, "").is_err());
         assert!(effects.locate(&binding, &intent, "other.slice").is_err());
         fs::remove_dir(&directory).unwrap();
@@ -164,7 +179,7 @@ mod tests {
     fn launch_and_recovery_share_slash_qualified_slice_configuration() {
         let configured = "app.slice/app-capped.slice/app-capped-heavy.slice";
         let tmp = tempfile::tempdir().unwrap();
-        let keeper = tmp.path().join("keeper");
+        let keeper = tmp.path().join(keeper_name("fixture-host", DAEMON));
         fs::create_dir_all(keeper.join("idle")).unwrap();
         fs::write(keeper.join("idle/cgroup.events"), "populated 1\n").unwrap();
         fs::write(keeper.join("cgroup.procs"), "").unwrap();
@@ -173,7 +188,7 @@ mod tests {
             directory: keeper.clone(), slice: "app-capped-heavy.slice",
         };
         let launched = crate::job_launch::keeper::ensure_keeper(
-            &mut manager, "fixture-host", Some(configured)).unwrap();
+            &mut manager, "fixture-host", DAEMON, Some(configured)).unwrap();
         assert_eq!(launched.slice, "app-capped-heavy.slice");
         let binding = JobHostBinding {
             job_id: "job".into(), execution_host: "fixture-host".into(),
@@ -186,9 +201,76 @@ mod tests {
         let directory = launched.directory.join(cgroup_name(&binding.job_id, &intent));
         fs::create_dir(&directory).unwrap();
         let mut recovery = CgroupRecovery {
-            manager: &mut manager, cgroup_root: tmp.path(), proc_root: tmp.path(),
+            manager: &mut manager, daemon_identity: DAEMON,
+            cgroup_root: tmp.path(), proc_root: tmp.path(),
         };
         assert_eq!(recovery.locate(&binding, &intent, configured).unwrap().unwrap().directory,
             directory);
+    }
+
+    #[test]
+    fn same_host_daemons_have_disjoint_keepers_and_cannot_recover_or_retire_each_other() {
+        use crate::job_launch::keeper::{KeeperScope, ensure_keeper};
+        struct NamespacedManager { root: PathBuf }
+        impl KeeperManager for NamespacedManager {
+            fn describe(&mut self, name: &str) -> Result<Option<KeeperScope>> {
+                let directory = self.root.join(name);
+                Ok(directory.is_dir().then_some(KeeperScope {
+                    directory, slice: "heavy.slice".into(), delegated: true,
+                }))
+            }
+            fn start(&mut self, _: &str, _: &str, _: u32) -> Result<()> {
+                panic!("existing keepers must be reused");
+            }
+            fn spawn_idle(&mut self) -> Result<u32> { panic!("idle already populated"); }
+            fn kill_idle(&mut self, _: u32) -> Result<()> { panic!("never kill another keeper"); }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let host = "fixture-host";
+        let production = DAEMON;
+        let pilot = DaemonIdentity::from_member_key_fingerprint([2; 32]);
+        for identity in [production, pilot] {
+            let keeper = tmp.path().join(keeper_name(host, identity));
+            fs::create_dir_all(keeper.join("idle")).unwrap();
+            fs::write(keeper.join("idle/cgroup.events"), "populated 1\n").unwrap();
+            fs::write(keeper.join("cgroup.procs"), "").unwrap();
+            fs::write(keeper.join("cgroup.controllers"), "memory pids").unwrap();
+        }
+        let mut manager = NamespacedManager { root: tmp.path().into() };
+        let a = ensure_keeper(&mut manager, host, production, Some("heavy.slice")).unwrap();
+        let b = ensure_keeper(&mut manager, host, pilot, Some("heavy.slice")).unwrap();
+        assert_ne!(a.directory, b.directory);
+        let binding = JobHostBinding {
+            job_id: "same-job".into(), execution_host: host.into(),
+            authority_declaration: "admission".into(),
+        };
+        let intent = LaunchIntent {
+            generation: fractal_jobs::launch::ExecutionGeneration(std::num::NonZeroU64::new(7).unwrap()),
+            outcome_file: "/receipt".into(),
+        };
+        let job = b.directory.join(cgroup_name(&binding.job_id, &intent));
+        fs::create_dir(&job).unwrap();
+        fs::write(job.join("cgroup.kill"), "0").unwrap();
+        fs::write(job.join("cgroup.events"), "populated 1\n").unwrap();
+        fs::write(job.join("cpu.stat"), "usage_usec 29\n").unwrap();
+        let foreign = LocatedJob { directory: job.clone(), hierarchy: "/foreign".into() };
+        let mut recovery = CgroupRecovery {
+            manager: &mut manager, daemon_identity: production,
+            cgroup_root: tmp.path(), proc_root: tmp.path(),
+        };
+        assert!(recovery.locate(&binding, &intent, "heavy.slice").unwrap().is_none());
+        // Even a supplied LocatedJob from another identity cannot bypass fencing.
+        assert!(recovery.finish(&foreign, host).is_err());
+        assert_eq!(fs::read_to_string(job.join("cgroup.kill")).unwrap(), "0");
+        assert_eq!(fs::read_to_string(job.join("cpu.stat")).unwrap(), "usage_usec 29\n");
+        assert!(job.is_dir());
+        // A new adapter with the same Q1 pin still discovers its own existing J.
+        let mut restarted_manager = NamespacedManager { root: tmp.path().into() };
+        let mut restarted = CgroupRecovery {
+            manager: &mut restarted_manager,
+            daemon_identity: DaemonIdentity::from_member_key_fingerprint([2; 32]),
+            cgroup_root: tmp.path(), proc_root: tmp.path(),
+        };
+        assert_eq!(restarted.locate(&binding, &intent, "heavy.slice").unwrap().unwrap().directory, job);
     }
 }

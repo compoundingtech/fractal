@@ -1,7 +1,7 @@
 //! Inactive host/class keeper. Only the explicitly constructed launch adapter watches it.
 //! The keeper lives in idle/, a sibling of every J; it has no daemon FD or lifetime tie.
 use anyhow::{Context, Result, ensure};
-use fractal_jobs::launch::{LaunchRefusal, keeper_name};
+use fractal_jobs::launch::{DaemonIdentity, LaunchRefusal, keeper_name};
 use std::{fs, path::{Path, PathBuf}, sync::Mutex};
 
 // All adapters in this daemon share mutation ownership, including watcher repair
@@ -68,11 +68,12 @@ pub fn slice_name(configured: Option<&str>) -> Result<&str> {
 pub fn ensure_keeper(
     manager: &mut dyn KeeperManager,
     host: &str,
+    daemon_identity: DaemonIdentity,
     configured_slice: Option<&str>,
 ) -> Result<KeeperScope> {
     let _guard = KEEPER_MUTATION.lock().map_err(|_| anyhow::anyhow!("keeper mutation poisoned"))?;
     let slice = slice_name(configured_slice)?;
-    let name = keeper_name(host);
+    let name = keeper_name(host, daemon_identity);
     let mut fresh_pid = None;
     let scope = if let Some(scope) = manager.describe(&name)? {
         scope

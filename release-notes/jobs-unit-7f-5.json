@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Namespace heavy-job keepers by explicit pinned daemon identity (unit 7f-5)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes; the existing Q1 member-key pin supplies identity."},
+  "rules": {"status": "none", "detail": "Jobs remain inactive. No scheduler, admission, ensure, repair or recovery startup hook is added. Limits and capabilities remain explicit configuration inputs."},
+  "compatibility": {"status": "changed", "detail": "Keeper names hash host plus a fixed-width pinned member-key fingerprint. Launch adapters and recovery require this explicit DaemonIdentity, without a host-only fallback or default. J names remain generation-local children of the keeper. Production and pilot identities on the same host therefore use disjoint scopes. The native fixture requires an explicitly configured fingerprint."},
+  "downtime": {"status": "none", "detail": "No deployment or activation changes."},
+  "manual": {"status": "changed", "detail": "Before explicit activation, supply the same stable pinned member-key fingerprint to launch and recovery. The native fixture reads FRACTAL_KEEPER_TEST_MEMBER_FINGERPRINT as a JSON array of 32 bytes; no fingerprint is generated or defaulted."},
+  "recovery": {"status": "changed", "detail": "Same-node restart finds the same keeper using the retained Q1 pin. Discovery rejects a mismatched keeper directory, and retirement rejects another identity's J before any kill/sample/removal. Legacy host-only keeper names are not adopted; no relaunch or retry is introduced."}
+}

@@ -10,9 +10,10 @@
 //! FRACTAL_KEEPER_TEST_PLAN="${APPROVED_PLAN_JSON:?}" \
 //! FRACTAL_KEEPER_TEST_TIMEOUT_MS="${APPROVED_TIMEOUT_MS:?}" \
 //! FRACTAL_KEEPER_TEST_MAX_HOLD_SECONDS="${APPROVED_MAX_HOLD_SECONDS:?}" \
+//! FRACTAL_KEEPER_TEST_MEMBER_FINGERPRINT="${APPROVED_PINNED_FINGERPRINT_JSON:?}" \
 //! cargo test -p fractal-runtime job_launch::driver::kernel_tests::real_kernel_keeper_replacement_preserves_running_job -- --ignored --exact --test-threads=1
 use super::*;
-use fractal_jobs::launch::{ExecutionGeneration, keeper_name};
+use fractal_jobs::launch::{DaemonIdentity, ExecutionGeneration, keeper_name};
 use std::{io::{Read, Seek}, os::{fd::AsRawFd, unix::fs::MetadataExt}, time::{Duration, Instant}};
 
 #[test]
@@ -40,6 +41,8 @@ fn real_kernel_keeper_replacement_preserves_running_job() {
     let root = PathBuf::from(configured("FRACTAL_KEEPER_TEST_ROOT"));
     let slice = configured("FRACTAL_KEEPER_TEST_SLICE");
     let configured_host = configured("FRACTAL_KEEPER_TEST_HOST");
+    let daemon_identity = DaemonIdentity::from_member_key_fingerprint(
+        serde_json::from_str(&configured("FRACTAL_KEEPER_TEST_MEMBER_FINGERPRINT")).unwrap());
     let launcher: Vec<String> = serde_json::from_str(&configured("FRACTAL_KEEPER_TEST_LAUNCHER")).unwrap();
     let [high, max, tasks, heavy_high, heavy_max, page]: [u64; 6] =
         serde_json::from_str(&configured("FRACTAL_KEEPER_TEST_PLAN")).unwrap();
@@ -60,14 +63,14 @@ fn real_kernel_keeper_replacement_preserves_running_job() {
         max_hold_ceiling_seconds: Some(hold),
     };
     let mut manager = SystemdKeeper::new(root.clone());
-    let name = keeper_name(&host);
+    let name = keeper_name(&host, daemon_identity);
     assert!(manager.describe(&name).unwrap().is_none(), "fixture scope already exists");
-    let mut retirement = Retire(CgroupJobLaunch::new(root), host.clone(), Some(name));
+    let mut retirement = Retire(CgroupJobLaunch::new(root, daemon_identity), host.clone(), Some(name));
     let adapter = &mut retirement.0;
     let job = adapter.create_group(&request).unwrap();
     let readback = adapter.apply(&job, &plan).unwrap();
     fractal_jobs::launch::require_caps(&readback.matches(&plan)).unwrap();
-    let scope = adapter.manager.describe(&keeper_name(&host)).unwrap().unwrap();
+    let scope = adapter.manager.describe(&keeper_name(&host, daemon_identity)).unwrap().unwrap();
     let scope_inode = fs::metadata(&scope.directory).unwrap().ino();
     let job_inode = fs::metadata(&job).unwrap().ino();
     let idle = scope.directory.join("idle");
@@ -94,7 +97,7 @@ fn real_kernel_keeper_replacement_preserves_running_job() {
     };
     assert_eq!(fs::read_to_string(format!("/proc/{replacement}/comm")).unwrap(), "fractal-keeper\n");
     assert_eq!(fs::metadata(&scope.directory).unwrap().ino(), scope_inode);
-    assert_eq!(adapter.manager.describe(&keeper_name(&host)).unwrap().unwrap().directory, scope.directory);
+    assert_eq!(adapter.manager.describe(&keeper_name(&host, daemon_identity)).unwrap().unwrap().directory, scope.directory);
     assert_eq!(fs::metadata(&job).unwrap().ino(), job_inode);
     assert_eq!(fs::read_to_string(job.join("cgroup.procs")).unwrap().trim(), holder.to_string());
     assert!(adapter.holder.as_mut().unwrap().try_wait().unwrap().is_none());
@@ -102,7 +105,7 @@ fn real_kernel_keeper_replacement_preserves_running_job() {
     assert!(matches!(adapter.stop_and_sample(&host).unwrap(), ExitUsage::Sample(_)));
     assert!(!job.exists());
     assert!(populated(&idle).unwrap());
-    let same = ensure_keeper(&mut adapter.manager, &host, Some(&slice)).unwrap();
+    let same = ensure_keeper(&mut adapter.manager, &host, daemon_identity, Some(&slice)).unwrap();
     assert_eq!(same.directory, scope.directory);
     assert_eq!(fs::read_to_string(idle.join("cgroup.procs")).unwrap().trim(), replacement.to_string());
     adapter.directory = None; // Already positively retired and sampled above.

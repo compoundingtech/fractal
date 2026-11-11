@@ -22,8 +22,24 @@ pub fn cgroup_name(job_id: &str, intent: &LaunchIntent) -> String {
     format!("job-{:x}-{}", Sha256::digest(job_id.as_bytes()), intent.generation.0)
 }
 
-pub fn keeper_name(host: &str) -> String {
-    format!("fractal-keeper-heavy-{:x}.scope", Sha256::digest(host.as_bytes()))
+/// Stable namespace supplied from the daemon's pinned member-key fingerprint.
+/// Q1 retains this pin across same-node restarts. Neither host nor --instance
+/// alone identifies a daemon sharing a user manager. There is no default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DaemonIdentity {
+    member_key_fingerprint: [u8; 32],
+}
+impl DaemonIdentity {
+    pub const fn from_member_key_fingerprint(member_key_fingerprint: [u8; 32]) -> Self {
+        Self { member_key_fingerprint }
+    }
+}
+
+pub fn keeper_name(host: &str, identity: DaemonIdentity) -> String {
+    // The fingerprint has a fixed width, so concatenation is unambiguous.
+    let digest = Sha256::new().chain_update(host.as_bytes())
+        .chain_update(identity.member_key_fingerprint).finalize();
+    format!("fractal-keeper-heavy-{digest:x}.scope")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +138,12 @@ mod tests {
         assert_eq!(cgroup_name("job/1", &intent), cgroup_name("job/1", &intent));
         assert_ne!(cgroup_name("job/1", &intent), cgroup_name("job/1", &next));
         assert_ne!(cgroup_name("job/1", &intent), cgroup_name("job/2", &intent));
-        assert_ne!(keeper_name("host-1"), keeper_name("host-2"));
+        let production = DaemonIdentity::from_member_key_fingerprint([1; 32]);
+        let pilot = DaemonIdentity::from_member_key_fingerprint([2; 32]);
+        assert_ne!(keeper_name("host-1", production), keeper_name("host-2", production));
+        assert_ne!(keeper_name("host-1", production), keeper_name("host-1", pilot));
+        assert_eq!(keeper_name("host-1", production),
+            keeper_name("host-1", DaemonIdentity::from_member_key_fingerprint([1; 32])));
     }
 
     #[test]
