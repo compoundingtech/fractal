@@ -291,3 +291,5 @@ do not hand-edit it. The simulation selects v22. A draw stages one text on the w
 it under `blob_hash` on `agent/<id>@<revision>`, as a set publication does, so the claim's append
 promotes the text into the shared blobs that replicate with it. The focused regression checks
 admission and that the oracle receives the claim with its text.
+With v22 every fixed seed converges; seeds 34 and 74 are the exact never-trim set, observed
+by hosted linux-tests (run 43045279669) and full nextest run 43048372176.
