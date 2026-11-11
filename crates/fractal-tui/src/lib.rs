@@ -977,6 +977,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return Ok(());
     }
     let open_timing = ui::open_timing::Trace::from_env(process_started);
+    let _freshness = ui::freshness::install()?;
     fractal_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
     if let Some(path) = std::env::var_os("FRACTAL_TUI_TIMING_LOG") {
@@ -2176,6 +2177,11 @@ fn install_timing_log(path: PathBuf) {
                 "at_ms": at_ms, "type": "request", "method": method, "route": route,
                 "outcome": format!("{outcome:?}"), "status": status,
                 "took_ms": took.as_secs_f64() * 1000.0,
+            }),
+            fractal_client::Observation::Mutation { method, route, attempts, took, retry_wait } => serde_json::json!({
+                "at_ms": at_ms, "type": "mutation", "method": method, "route": route,
+                "attempts": attempts, "took_ms": took.as_secs_f64() * 1000.0,
+                "retry_wait_ms": retry_wait.as_secs_f64() * 1000.0,
             }),
             fractal_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
                 "at_ms": at_ms, "type": "frame", "id": id, "kind": kind, "bytes": bytes,
