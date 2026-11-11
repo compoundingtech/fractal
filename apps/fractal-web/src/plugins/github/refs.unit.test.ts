@@ -34,7 +34,10 @@ describe('GitHub links', () => {
   })
 
   it('refuses other hosts, credentials, ports and non-item pages', () => {
-    for (const href of ['https://gitlab.com/acme/garden/pull/7', 'https://evil.com/github.com/acme/garden/pull/7', 'https://u:p@github.com/acme/garden/pull/7', 'https://github.com:8443/acme/garden/pull/7', 'https://github.com/acme/garden', 'https://github.com/acme/garden/tree/main', 'https://github.com/acme/garden/pull/abc', 'javascript:alert(1)', 'not a url', 'https://github.com/acme/garden/pull/7/merge']) {
+    const credentialedUrl = new URL('https://github.com/acme/garden/pull/7')
+    credentialedUrl.username = 'fixture-user'
+    credentialedUrl.password = 'fixture-password'
+    for (const href of ['https://gitlab.com/acme/garden/pull/7', 'https://evil.com/github.com/acme/garden/pull/7', credentialedUrl.href, 'https://github.com:8443/acme/garden/pull/7', 'https://github.com/acme/garden', 'https://github.com/acme/garden/tree/main', 'https://github.com/acme/garden/pull/abc', 'javascript:alert(1)', 'not a url', 'https://github.com/acme/garden/pull/7/merge']) {
       expect(parseGithubUrl(href), href).toBeUndefined()
     }
   })
