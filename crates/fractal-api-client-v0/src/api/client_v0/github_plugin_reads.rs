@@ -37,8 +37,6 @@ pub(crate) const LIST_BOUND: usize = 100;
 /// GitHub lists at most 3,000 files for a pull request, 100 per page.
 const MAX_FILES: usize = 3_000;
 const FILES_PAGE: usize = 100;
-/// Patch text past this many bytes is not returned; the answer is marked truncated.
-pub(crate) const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 /// GitHub's own words in an `unavailable` reason are cut to this many characters.
 const MAX_REASON_CHARS: usize = 200;
 

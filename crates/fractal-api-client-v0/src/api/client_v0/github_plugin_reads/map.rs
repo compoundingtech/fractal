@@ -1,6 +1,7 @@
 //! GitHub's REST and GraphQL documents as the plugin's wire shapes. Pure: no I/O, no clock.
 use super::wire::*;
-use super::{Failure, LIST_BOUND, MAX_PATCH_BYTES, Repo};
+use super::{Failure, LIST_BOUND, Repo};
+use fractal_api_core::api::client_v0::assistant::reads::encoded_len;
 use serde_json::Value;
 
 pub(crate) const PULL_QUERY: &str = r#"query FractalPluginPull($owner: String!, $name: String!, $number: Int!) {
@@ -338,36 +339,60 @@ pub(crate) fn checks(graph: &Value) -> Result<GithubChecks, Failure> {
 }
 
 pub(crate) fn files(total: u64, pages: &[std::sync::Arc<Value>], cut_short: bool) -> Result<GithubFiles, Failure> {
-    let mut patch_bytes = 0_usize;
-    let mut truncated = cut_short;
-    let files = pages
-        .iter()
-        .flat_map(|page| items(page).iter())
-        .take(super::MAX_FILES)
-        .map(|file| {
-            let patch = maybe(file, "patch").filter(|patch| {
-                patch_bytes += patch.len();
-                let within = patch_bytes <= MAX_PATCH_BYTES;
-                truncated |= !within;
-                within
-            });
-            GithubFile {
-                path: text(file, "filename"),
-                previous_path: maybe(file, "previous_filename"),
-                status: known(
-                    file.get("status").and_then(Value::as_str),
-                    &["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"],
-                )
-                .unwrap_or("changed"),
-                additions: count(file, "additions"),
-                deletions: count(file, "deletions"),
-                patch,
+    // Match the existing bounded client reads: reserve 128 KiB for the read wrapper and Envelope.
+    let budget = super::CLIENT_MAX_RESPONSE_BYTES - 128_000;
+    let available = pages.iter().map(|page| items(page).len()).sum::<usize>();
+    let total = total.max(available as u64);
+    let mut result = GithubFiles { total, files: Vec::new(), truncated: cut_short };
+    let mut bytes = json_bytes(&result)?;
+    for source in pages.iter().flat_map(|page| items(page).iter()).take(super::MAX_FILES) {
+        let mut file = GithubFile {
+            path: text(source, "filename"),
+            previous_path: maybe(source, "previous_filename"),
+            status: known(
+                source.get("status").and_then(Value::as_str),
+                &["added", "removed", "modified", "renamed", "copied", "changed", "unchanged"],
+            ).unwrap_or("changed"),
+            additions: count(source, "additions"),
+            deletions: count(source, "deletions"),
+            patch: None,
+        };
+        let metadata = json_bytes(&file)?;
+        let comma = usize::from(!result.files.is_empty());
+        if bytes + metadata + comma > budget {
+            result.truncated = true;
+            break;
+        }
+        let mut size = metadata;
+        if let Some(patch) = source.get("patch").and_then(Value::as_str) {
+            // Replace the serialized null with the escaped string, not its raw UTF-8 length.
+            let with_patch = metadata - 4 + encoded_len(patch) + 2;
+            if bytes + with_patch + comma <= budget {
+                file.patch = Some(patch.to_owned());
+                size = with_patch;
+            } else {
+                result.truncated = true;
             }
-        })
-        .collect::<Vec<_>>();
-    let total = total.max(files.len() as u64);
-    truncated |= (files.len() as u64) < total;
-    Ok(GithubFiles { total, files, truncated })
+        }
+        bytes += size + comma;
+        result.files.push(file);
+    }
+    result.truncated |= (result.files.len() as u64) < total;
+    Ok(result)
+}
+
+fn json_bytes(value: &impl serde::Serialize) -> Result<usize, Failure> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).map_err(|_| Failure::unavailable("GitHub files could not be encoded"))?;
+    Ok(counter.0)
 }
 
 pub(crate) fn run(repo: &Repo, run: &Value, jobs: &Value) -> Result<GithubRun, Failure> {

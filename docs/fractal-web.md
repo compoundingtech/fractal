@@ -68,6 +68,12 @@ hop and follows no redirect: a 301 is reported as `moved` only when its `Locatio
 on `api.github.com` and parses back to a typed item. Every upstream body is bounded.
 The answer is JSON (`apps/fractal-web/src/plugins/github/schema.ts`). Avatars and
 body images are never fetched; they stay links.
+REST and GraphQL reads select the owner's installation credential before looking up
+the cache; documents, ETags and repository relocations are partitioned by the selected
+principal. Bounded PAT fallback responses do not populate installation document caches.
+File lists count encoded JSON bytes (including escaping and metadata), reserving
+128 KiB below the advertised client response ceiling for the read wrapper and envelope.
+Excess patches are omitted, or the file list is cut short, with `truncated: true`.
 
 Sent and received image attachments use a separate consent boundary: **Show image**
 reads the attachment through `AttachmentPort.chunk`, retaining the native message

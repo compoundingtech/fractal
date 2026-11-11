@@ -202,15 +202,15 @@ fn files_serialize_to_the_fixture() {
     // Fewer listed than GitHub counts, or a page that could not be read, is truncated.
     assert!(map::files(4, &[Arc::new(page.clone())], false).unwrap().truncated);
     assert!(map::files(3, &[Arc::new(page)], true).unwrap().truncated);
-    // Patch text past the byte bound is dropped and marked.
-    let big = "x".repeat(MAX_PATCH_BYTES);
+    // A patch that exceeds the encoded response budget is omitted, without dropping later small patches.
+    let big = "x".repeat(CLIENT_MAX_RESPONSE_BYTES);
     let page = json!([
         { "filename": "a", "status": "modified", "additions": 1, "deletions": 0, "patch": big },
         { "filename": "b", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@" }
     ]);
     let bounded = map::files(2, &[Arc::new(page)], false).unwrap();
     assert!(bounded.truncated);
-    assert!(bounded.files[0].patch.is_some() && bounded.files[1].patch.is_none());
+    assert!(bounded.files[0].patch.is_none() && bounded.files[1].patch.is_some());
 }
 
 #[test]
@@ -632,5 +632,47 @@ async fn graphql_reads_select_installations_and_bound_uncached_pat_fallback() {
         assert_eq!(attempts[2].0, "Bearer fixture-pat");
         assert_eq!(attempts[0].1, attempts[2].1, "fallback must retain the fixed query and variables");
     }
+    server.abort();
+}
+
+#[tokio::test]
+async fn files_negotiate_the_client_limit_and_bound_multipage_escaped_patches_and_metadata() {
+    let patch = "\"\\\0".repeat(2048);
+    let pages = (0..2).map(|page| Arc::new(Value::Array((0..FILES_PAGE).map(|index| json!({
+        "filename": format!("page-{page}/file-{index}"), "status": "modified",
+        "additions": 1, "deletions": 0, "patch": patch
+    })).collect()))).chain([Arc::new(json!([
+        {"filename": "x".repeat(CLIENT_MAX_RESPONSE_BYTES), "status": "added", "additions": 1, "deletions": 0}
+    ]))]).collect::<Vec<_>>();
+    let raw_patch_bytes = patch.len() * 2 * FILES_PAGE;
+    assert!(raw_patch_bytes > CLIENT_MAX_RESPONSE_BYTES && raw_patch_bytes < 4 * 1024 * 1024);
+    let files = map::files(201, &pages, false).unwrap();
+    assert!(files.truncated);
+    assert!(files.files.iter().any(|file| file.patch.is_none()));
+    assert!(files.files.iter().any(|file| file.patch.is_some()));
+    assert!(files.files.len() < 201, "metadata must also fit, not only patches");
+    let mut capabilities: Value = serde_json::from_str(include_str!("../../../../../../docs/st3/client-v0/fixtures/capabilities.json")).unwrap();
+    capabilities["value"]["limits"]["max_response_bytes"] = json!(CLIENT_MAX_RESPONSE_BYTES);
+    let mut envelope = capabilities.clone();
+    envelope["value"] = found(files, false);
+    let encoded = serde_json::to_vec(&envelope).unwrap();
+    assert!(encoded.len() <= CLIENT_MAX_RESPONSE_BYTES);
+    let app = Router::new()
+        .route("/v1/client/capabilities", get(move || {
+            let capabilities = capabilities.clone();
+            async move { Json(capabilities) }
+        }))
+        .route("/v1/client/plugins/github/acme/garden/pulls/7/files", get(move || {
+            let envelope = envelope.clone();
+            async move { Json(envelope) }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = fractal_client::Client::fabric_loopback(format!("http://{}", listener.local_addr().unwrap()), "fixture-credential");
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let negotiated = client.capabilities().await.unwrap();
+    assert_eq!(negotiated.value.limits.max_response_bytes, CLIENT_MAX_RESPONSE_BYTES);
+    let response = client.github_plugin_files("acme", "garden", 7).await.unwrap();
+    assert_eq!(response.value["item"]["truncated"], true);
+    assert!(serde_json::to_vec(&response).unwrap().len() <= CLIENT_MAX_RESPONSE_BYTES);
     server.abort();
 }
