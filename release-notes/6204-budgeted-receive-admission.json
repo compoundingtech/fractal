@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Receive admission lends the writer in budgeted loans (128 envelopes or 250 ms, yielding to queued foreground writes) and defers a receive after 10 s with a durable resume cursor; adds pending-envelope and last-receive-page gauges.",
+  "replay": {"status": "none", "detail": "Stored envelopes and receipts are unchanged; a deferred receive resumes from a local cursor and never re-admits an envelope."},
+  "schema": {"status": "none", "detail": "The resume cursor and receipt epoch are local meta values; no table or index changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination version change."},
+  "compatibility": {"status": "none", "detail": "No request or response fields change; a deferred receive uses the existing deferred outcome. Old senders may re-offer a deferred page, and receipt deduplication keeps that idempotent."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Rolling back leaves an unused local cursor; the previous release admits any remaining pending envelopes as before."}
+}

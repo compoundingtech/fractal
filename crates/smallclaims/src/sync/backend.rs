@@ -236,6 +236,7 @@ where
         let exchange = exchange.clone();
         self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
             let store = backend.store();
+            let receive_started = std::time::Instant::now();
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
             }
@@ -249,9 +250,13 @@ where
                 )
                 .map_err(anyhow::Error::msg)?;
             store.record_transport_observation(&peer, "up", None, None)?;
-            let admission = store.validate_replication_backlog()?;
-            let repairs = store.apply_replication_repairs()?;
-            let projected = store.project_replication_backlog()?;
+            let admission = store.validate_replication_backlog_for_receive(receive_started)?;
+            let (repairs, projected) = if admission.deferred {
+                crate::receive_metrics::deferred();
+                (0, false)
+            } else {
+                (store.apply_replication_repairs()?, store.project_replication_backlog()?)
+            };
             Ok(ReplicationReceiveResponse {
                 receipt,
                 changed: projected && (admission.changed || repairs != 0),

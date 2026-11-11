@@ -468,12 +468,50 @@ fn admit_with_the_old_function(store: &Store) {
     transaction.commit().unwrap();
 }
 
+/// Cheap work fills the hard cap rather than committing every eight envelopes. Use supplied
+/// elapsed work to keep this policy proof independent of host load and fsync latency.
+#[test]
+fn admission_budget_coalesces_cheap_envelopes_but_always_caps_a_loan() {
+    let page = 4096_usize;
+    let mut loans = Vec::new();
+    let mut remaining = page;
+    while remaining > 0 {
+        let mut count = 0;
+        while count < remaining && !admission_chunk_finished(count, Duration::ZERO, false) {
+            count += 1;
+        }
+        loans.push(count);
+        remaining -= count;
+    }
+    assert_eq!(loans.iter().sum::<usize>(), page);
+    assert!(loans.len() <= page.div_ceil(8) / 8, "{loans:?}");
+    assert!(loans.iter().all(|count| *count <= ADMISSION_CHUNK_ENVELOPES));
+    assert!(!admission_chunk_finished(0, ADMISSION_WRITER_BUDGET, false));
+    assert!(admission_chunk_finished(1, ADMISSION_WRITER_BUDGET, false));
+    assert!(!admission_chunk_finished(
+        ADMISSION_CHUNK_ENVELOPES - 1, Duration::ZERO, false,
+    ));
+    assert!(admission_chunk_finished(ADMISSION_CHUNK_ENVELOPES, Duration::ZERO, false));
+}
+
+#[test]
+fn admission_yields_to_foreground_before_its_time_budget_but_makes_progress() {
+    assert_eq!(ADMISSION_WRITER_BUDGET, Duration::from_millis(250));
+    assert_eq!(ADMISSION_CHUNK_ENVELOPES, 128);
+    assert!(!admission_chunk_finished(0, Duration::ZERO, true));
+    assert!(!admission_chunk_finished(0, ADMISSION_WRITER_BUDGET, true));
+    assert!(!admission_chunk_finished(1, Duration::ZERO, false));
+    assert!(admission_chunk_finished(1, Duration::ZERO, true));
+    assert!(!admission_chunk_finished(1, Duration::from_millis(249), false));
+    assert!(admission_chunk_finished(1, Duration::from_millis(250), false));
+}
+
 #[test]
 fn prepared_admission_stores_exactly_what_the_old_function_stores() {
     let source = node("birch");
     let prepared = node("cedar");
     let single = node("larch");
-    let mut exchange = populated(&source, &prepared, 24);
+    let mut exchange = populated(&source, &prepared, ADMISSION_CHUNK_ENVELOPES + 1);
     assert!(exchange.envelopes.len() > ADMISSION_CHUNK_ENVELOPES, "spans several loans");
     // Bad bytes take every failure path: an envelope whose bytes do not match its hash, and a
     // valid envelope carrying a claim whose id is not its content.
@@ -1090,6 +1128,33 @@ fn classified(source: &Store, target: &Store) -> ReplicationExchange {
     source
         .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
         .unwrap()
+}
+
+#[test]
+fn a_budgeted_resume_skips_an_already_classified_unknown_prefix() {
+    let source = node("birch");
+    let target = node_with("cedar", ByKind::new(true));
+    let unknown = ADMISSION_CHUNK_ENVELOPES + 1;
+    for index in 0..unknown {
+        claim_of(&source, &format!("unknown/{index}"), "example.unknown", BTreeMap::new());
+    }
+    note(&source, "after/unknown-prefix", BTreeMap::new());
+    receive_everything(&source, &target);
+    let mut classified = 0;
+    let mut valid = 0;
+    for _ in 0..=unknown + 1 {
+        let outcome = target.admit_replication_backlog(
+            AdmissionAuthority::Membership, Some(&mut || true),
+        ).unwrap();
+        classified += outcome.unknown;
+        valid += outcome.valid;
+        if !outcome.deferred {
+            break;
+        }
+    }
+    assert_eq!(classified, unknown, "resumes must not reclassify the retry prefix");
+    assert_eq!(valid, 1, "the valid suffix must not starve");
+    assert!(!target.replication_admission_pending().unwrap());
 }
 
 /// A runtime that classifies without the store gets the same stored rows as the old function,

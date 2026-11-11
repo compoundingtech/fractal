@@ -1296,8 +1296,11 @@ impl Telemetry {
             Ordering::Relaxed,
         );
         smallclaims::sqlite::telemetry::init(export_enabled());
-        if matches!(unit, Unit::ReplicationWorker) {
-            smallclaims::sync::telemetry::init(export_enabled(), crate::otel::metrics_enabled());
+        if matches!(unit, Unit::Daemon | Unit::ReplicationWorker) {
+            smallclaims::sync::telemetry::init(
+                matches!(unit, Unit::ReplicationWorker) && export_enabled(),
+                crate::otel::metrics_enabled(),
+            );
         }
         telemetry
     }

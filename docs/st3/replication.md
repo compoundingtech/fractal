@@ -507,11 +507,39 @@ not dropped by a checkpoint, membership and signatures still admit it, earlier r
 so a preparation always describes the row's content. Admission also compares the row's rowid and
 receipt time with those it prepared from; an envelope whose row is seen to differ (deleted and
 received again) is left `pending` for the admission pass that its new receipt runs, and is never
-re-prepared under the writer. Admission prepares at most 8 envelopes and 16 MiB of payload ahead of the
-writer, one larger envelope alone. That is a payload budget, not a bound on resident memory:
+re-prepared under the writer. Admission prepares at most 128 envelopes and 16 MiB of payload ahead of the
+writer, one larger envelope alone. Each background loan stops at the envelope cap, at the
+250 ms `ADMISSION_WRITER_BUDGET`, or when a foreground writer queues, checking between
+envelopes and always processing at least one. It commits and releases the writer before the
+next loan; queued foreground writes retain priority. Cheap envelopes share a commit instead
+of flushing every eight. Durability remains `synchronous=FULL`.
+One envelope and the durable commit are indivisible, so this is not a wall-clock hold bound.
+The preparation byte limit is a payload budget, not a bound on resident memory:
 decoded, the set takes roughly twice its payload, plus its structures. The comparison can miss a reused rowid received in the same
 millisecond; only the pure content is reused then, and the hash binds it. This is a partial move of admission's cost, not a bound on its hold: the
 stored-state reads and writes still grow with the envelope's claims and bytes.
+
+Receive admission has a 10-second `RECEIVE_ADMISSION_BUDGET`, reserving response time toward
+the M2 goal of a whole receive page below 15 seconds. Even an already-expired receive commits
+one chunk before it can defer. A deferred receive skips repairs and projection and uses the
+existing `deferred` receive outcome; this is telemetry, not a new wire response variant.
+Its local `(writer, sequence, hash)` retry cursor commits with each chunk and the existing
+admitted-index watermark. A later receive, including an empty or duplicate page, continues
+after that cursor. Completed unknown or held prefixes therefore cannot consume every retry's
+allowance. The cursor survives restart; schema retry completion markers wait for the full sweep.
+New envelopes or signatures advance a receipt epoch atomically, invalidating any cursor that
+could skip newly received data or an unlocked hold. A resumed sweep that changes membership
+also restarts the sweep for earlier holds. Receipt inventory already includes every durably
+stored envelope, so a sender can stop re-offering it before admission finishes. Old senders
+may instead re-offer the unchanged page: receipt deduplication is idempotent and never rewinds
+the cursor. No request or response fields change.
+
+With metrics enabled, replication status samples `st.replication.pending.envelopes` by the
+configured peer that relayed each pending receipt, reusing its existing pending-envelope scan.
+Each configured peer gets a zero sample when drained. The receive summary also records
+`st.replication.last.receive.page.ms` with exactly its logged `total_ms`, only for peers in the
+configured/current fleet peer set. Both are last-value gauges labelled only by `peer`; arbitrary
+receive peer names cannot create series, and neither gauge adds a receive-path database scan.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each

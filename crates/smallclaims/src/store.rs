@@ -2094,6 +2094,8 @@ pub struct ReplicationAdmission {
     /// Envelopes held as `unsigned` or `fenced` by the fleet membership rules.
     pub held: usize,
     pub changed: bool,
+    /// This receive committed progress but left admission work for a later receive.
+    pub deferred: bool,
     /// Time spent decoding envelopes, checking their hashes and claim schemas, and looking up
     /// their stored signatures. Most of it is spent preparing envelopes before admission takes
     /// the writer; the writer's own holds are recorded by `windows::holds`.
@@ -4829,9 +4831,9 @@ fn load_compact_replication_inventory(
 /// the most identities one divergent exchange lists beyond its first differing range.
 pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 
-/// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
-/// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
-pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
+/// Hard cap on envelopes admitted per writer transaction, matching projection's work cap.
+/// Cheap envelopes share a commit; the time budget yields sooner on a populated store.
+pub const ADMISSION_CHUNK_ENVELOPES: usize = 128;
 /// Maximum repairs applied per writer transaction. On a populated store each repair costs a few
 /// milliseconds even when it is already applied, so a page stays near 50 ms.
 pub const REPAIR_CHUNK_CLAIMS: usize = 16;
@@ -4841,9 +4843,23 @@ pub const REPAIR_CHUNK_CLAIMS: usize = 16;
 /// prepared alone.
 pub const ADMISSION_PREPARED_BYTES: usize = 16 * 1024 * 1024;
 
-/// Stop a chunk before starting another envelope once its writer work reaches this budget.
-/// An envelope and the commit are indivisible; this does not preempt either one.
-const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
+/// Stop before another envelope after 250 ms of admission work, or as soon as foreground
+/// work queues. Always process at least one envelope so background admission still progresses.
+/// An envelope and commit are indivisible; this is not a hard wall-clock hold bound.
+const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// M2 requires a whole receive page below 15 seconds. Stop admission after 10 seconds,
+/// reserving time for receipt and response work; always commit at least one chunk.
+pub const RECEIVE_ADMISSION_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn admission_chunk_finished(
+    envelopes: usize,
+    elapsed: std::time::Duration,
+    foreground_waiting: bool,
+) -> bool {
+    envelopes >= ADMISSION_CHUNK_ENVELOPES
+        || (envelopes > 0 && (foreground_waiting || elapsed >= ADMISSION_WRITER_BUDGET))
+}
 
 /// Newly admitted claims projected per writer transaction. A catch-up page must not keep
 /// queued lease renewals and messages behind its entire incremental projection.
@@ -8006,6 +8022,15 @@ impl Store {
                     }
                     signatures += signature.store(transaction, &now).map_err(internal)?;
                 }
+                if received != 0 || signatures != 0 {
+                    // A new receipt can sort before a paused sweep, or unlock an earlier hold.
+                    // Advance its epoch in the same transaction so a stale cursor cannot skip it.
+                    transaction.execute(
+                        /* sqlite-large-value: allow-for-now lv-hdd00e2876970 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO meta(key,value) VALUES('replication_admission_epoch','1')
+                         ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
+                        [],
+                    ).map_err(internal)?;
+                }
                 transaction
                     .execute(
                         /* sqlite-large-value: allow-for-now lv-h216d1f61d8bc owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replication_peers(peer, status, last_success_at_unix_ms, schema_digest,
@@ -8285,7 +8310,32 @@ impl Store {
     }
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
-        self.admit_replication_backlog(AdmissionAuthority::Membership)
+        self.admit_replication_backlog(AdmissionAuthority::Membership, None)
+    }
+
+    /// A receive resumes the durable retry cursor, even when its offered page is a duplicate.
+    pub fn validate_replication_backlog_for_receive(
+        &self,
+        started: std::time::Instant,
+    ) -> Result<ReplicationAdmission> {
+        self.admit_replication_backlog(
+            AdmissionAuthority::Membership,
+            Some(&mut || started.elapsed() >= RECEIVE_ADMISSION_BUDGET),
+        )
+    }
+
+    /// Pending receipts and an unfinished retry sweep survive process restarts. Held envelopes
+    /// alone need a signature or authority change, not repeated empty receive passes.
+    pub fn replication_admission_pending(&self) -> Result<bool> {
+        Ok(self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='replication_admission_cursor')
+                 OR EXISTS(SELECT 1 FROM replica_envelopes AS envelopes
+                     WHERE receipt_state='pending' AND NOT EXISTS(
+                         SELECT 1 FROM replica_envelope_holds AS holds
+                         WHERE holds.writer=envelopes.writer AND holds.sequence=envelopes.sequence
+                           AND holds.envelope_hash=envelopes.envelope_hash))",
+            [], |row| row.get(0),
+        )?)
     }
 
     /// Admit the envelopes of a backup being restored. A backup holds only envelopes its source
@@ -8297,7 +8347,7 @@ impl Store {
     /// signatures that never come. Hashes and claims are checked as in normal admission, and
     /// restore verified every archived signature as it received it.
     pub fn admit_restored_backlog(&self) -> Result<ReplicationAdmission> {
-        self.admit_replication_backlog(AdmissionAuthority::Source)
+        self.admit_replication_backlog(AdmissionAuthority::Source, None)
     }
 
     /// Whether a shard's fleet authority changed its membership since the shard last admitted
@@ -8315,11 +8365,12 @@ impl Store {
     fn admit_replication_backlog(
         &self,
         authority: AdmissionAuthority,
+        budget_expired: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<ReplicationAdmission> {
         // Read before the pass, so membership that changes during it is judged by the next one.
         let generation = self.fleet_authority.get().map(|fleet| fleet.fleet_generation()).transpose()?;
-        let admission = self.admit_replication_backlog_now(authority)?;
-        if let Some(generation) = generation {
+        let admission = self.admit_replication_backlog_now(authority, budget_expired)?;
+        if let Some(generation) = generation.filter(|_| !admission.deferred) {
             self.admitted_fleet_generation.store(generation, Ordering::Release);
         }
         Ok(admission)
@@ -8328,6 +8379,7 @@ impl Store {
     fn admit_replication_backlog_now(
         &self,
         authority: AdmissionAuthority,
+        mut budget_expired: Option<&mut dyn FnMut() -> bool>,
     ) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
@@ -8342,13 +8394,23 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let _timing = time_stage(&self.replication_timers.admission);
+        let cursor: Option<(i64, ReplicaEnvelopeId)> = self.readers.get().query_row(
+            "SELECT value FROM meta WHERE key='replication_admission_cursor'",
+            [], |row| row.get::<_, String>(0),
+        ).optional()?.map(|value| serde_json::from_str(&value)).transpose()?;
         let schema_digest = self
             .admission_schema_digest
             .get_or_init(|| self.runtime.schema_digest());
-        let (retry_hash_mismatches, retry_subject_references, envelopes) = {
+        let (epoch, retry_hash_mismatches, retry_subject_references, mut envelopes) = {
             // This query does not mutate source or authority. Fetch the pending payloads on a
             // reader and release its lease before queueing any admission writer transaction.
             let connection = self.readers.get();
+            let connection = connection.unchecked_transaction()?;
+            let epoch: i64 = connection.query_row(
+                "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                    WHERE key='replication_admission_epoch'),0)",
+                [], |row| row.get(0),
+            )?;
             // Builds before the insertion-order hash fallback rejected genuine claims from
             // 2026-09-16 as hash mismatches. Check those records once more, once.
             let retry_hash_mismatches = connection
@@ -8395,8 +8457,16 @@ impl Store {
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            (retry_hash_mismatches, retry_subject_references, envelopes)
+            (epoch, retry_hash_mismatches, retry_subject_references, envelopes)
         };
+        if budget_expired.is_some() {
+            if let Some((_, cursor)) = cursor.as_ref().filter(|(saved, _)| *saved == epoch) {
+                envelopes.retain(|(envelope, _)| {
+                    (envelope.writer.as_str(), envelope.sequence, envelope.hash.as_str())
+                        > (cursor.writer.as_str(), cursor.sequence, cursor.hash.as_str())
+                });
+            }
+        }
         let mut outcome = ReplicationAdmission::default();
         // A shard that takes its fleet from another store judges its envelopes by their bounds
         // in that shard.
@@ -8410,7 +8480,7 @@ impl Store {
         let mut pending = envelopes;
         // Admitting one envelope can admit a membership claim that decides another envelope,
         // so held envelopes get another pass whenever membership changes.
-        loop {
+        'passes: loop {
             let mut held = Vec::new();
             let mut membership_changed = false;
             // One managed transaction per bounded chunk. Foreground requests can overtake
@@ -8466,11 +8536,12 @@ impl Store {
                     continue;
                 }
                 let started = std::time::Instant::now();
-                let end = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
                 let first = next;
                 let mut admitted_envelopes = 0;
-                while next < end {
-                    if next != first && started.elapsed() >= ADMISSION_WRITER_BUDGET {
+                while next < pending.len() {
+                    if admission_chunk_finished(
+                        next - first, started.elapsed(), self.connection.foreground_waiting(),
+                    ) {
                         break;
                     }
                     let (envelope, _) = &pending[next];
@@ -8577,11 +8648,40 @@ impl Store {
                         /* sqlite-large-value: allow-for-now lv-h38513c1f92a4 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO meta(key,value) VALUES('replication_admitted_index',?1)",
                         [current_index_tx(&pass)?.to_string()])?;
                 }
+                if budget_expired.is_some() {
+                    let envelope = &pending[next - 1].0;
+                    let last = ReplicaEnvelopeId {
+                        writer: envelope.writer.clone(), sequence: envelope.sequence,
+                        hash: envelope.hash.clone(),
+                    };
+                    // Cursor and admission watermark commit together. Unknown/held envelopes
+                    // behind it must not consume every resumed receive's allowance.
+                    pass.execute(
+                        /* sqlite-large-value: allow-for-now lv-h8f14e97bb719 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR REPLACE INTO meta(key,value) VALUES('replication_admission_cursor',?1)",
+                        [serde_json::to_string(&(epoch, last))?],
+                    )?;
+                    if membership_changed && cursor.is_some() {
+                        // A resumed suffix changed authority for a held prefix. Start another
+                        // sweep, rather than forgetting that prefix when this suffix finishes.
+                        pass.execute(
+                            /* sqlite-large-value: allow-for-now lv-hcc51eaabe396 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO meta(key,value) VALUES('replication_admission_epoch','1')
+                             ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
+                            [],
+                        )?;
+                    }
+                }
                 pass.commit()?;
                 crate::receive_metrics::envelopes_admitted(admitted_envelopes);
                 crate::windows::holds::covered("admitted envelopes", next - first);
                 #[cfg(any(test, feature = "test-support"))]
                 ADMISSION_TRANSACTIONS.with(|count| count.set(count.get() + 1));
+                if (budget_expired.as_mut().is_some_and(|expired| expired())
+                    && (next < pending.len() || (membership_changed && !held.is_empty())))
+                    || (budget_expired.is_some() && membership_changed && cursor.is_some())
+                {
+                    outcome.deferred = true;
+                    break 'passes;
+                }
             }
             if !membership_changed || held.is_empty() {
                 outcome.held = held.len();
@@ -8593,9 +8693,12 @@ impl Store {
         self.replication_timers
             .verify
             .fetch_add(outcome.verify.as_nanos() as u64, Ordering::Relaxed);
-        if retry_hash_mismatches || retry_subject_references {
+        if !outcome.deferred && (retry_hash_mismatches || retry_subject_references
+            || cursor.is_some() || budget_expired.is_some())
+        {
             let mut connection = self.connection.write_background();
             let transaction = connection.transaction()?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h3f7af8ea4144 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM meta WHERE key='replication_admission_cursor'", [])?;
             if retry_hash_mismatches {
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h61f70922c425 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
@@ -10270,6 +10373,28 @@ impl Store {
 
             peers.push(status);
         }
+        // Reuse status's pending-envelope scan, grouping by the receiving relay only when
+        // metrics are enabled. Never issue this status-sized query on the receive hot path.
+        let pending_envelopes = if crate::sync::telemetry::metrics_enabled() {
+            let mut statement = connection.prepare(
+                "SELECT relay, COUNT(*) FROM replica_envelopes
+                 WHERE receipt_state='pending' GROUP BY relay",
+            )?;
+            let pending = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?.collect::<Result<BTreeMap<_, _>, _>>()?;
+            for peer in configured_peers {
+                crate::sync::telemetry::record_pending_envelopes(
+                    peer, pending.get(peer).copied().unwrap_or(0),
+                );
+            }
+            pending.values().sum()
+        } else {
+            connection.query_row(
+                "SELECT COUNT(*) FROM replica_envelopes WHERE receipt_state='pending'",
+                [], |row| row.get(0),
+            )?
+        };
         Ok(ReplicationStatus {
             configured,
             fleet_id: fleet_id.map(str::to_owned),
@@ -10283,11 +10408,7 @@ impl Store {
             waiting_claims,
             invalid_records: count("invalid")?,
             repaired_records: count("repaired")?,
-            pending_envelopes: connection.query_row(
-                "SELECT COUNT(*) FROM replica_envelopes WHERE receipt_state='pending'",
-                [],
-                |row| row.get(0),
-            )?,
+            pending_envelopes,
             unsigned_envelopes: connection.query_row(
                 "SELECT COUNT(*) FROM replica_envelope_holds WHERE reason='unsigned'",
                 [],

@@ -15805,11 +15805,20 @@ pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
         .receive_replication_exchange("source", FLEET, &response)
         .unwrap();
     smallclaims::store::ADMISSION_TRANSACTIONS.with(|count| count.set(0));
-    let admission = target.validate_replication_backlog().unwrap();
-    assert!(
-        smallclaims::store::ADMISSION_TRANSACTIONS.with(std::cell::Cell::get)
-            >= envelopes.div_ceil(smallclaims::store::ADMISSION_CHUNK_ENVELOPES)
-    );
+    let (admission, holds) = smallclaims::windows::holds::holds_during(|| {
+        target.validate_replication_backlog().unwrap()
+    });
+    let covered: Vec<_> = holds.pages.into_iter()
+        .filter_map(|(unit, count)| (unit == "admitted envelopes").then_some(count))
+        .collect();
+    assert!(covered.iter().all(|count| *count <= smallclaims::store::ADMISSION_CHUNK_ENVELOPES),
+        "a loan exceeded the envelope cap: {covered:?}");
+    assert_eq!(covered.iter().sum::<usize>(), response.envelopes.len());
+    let loans = smallclaims::store::ADMISSION_TRANSACTIONS.with(std::cell::Cell::get);
+    assert_eq!(loans, covered.len());
+    assert!(loans >= envelopes.div_ceil(smallclaims::store::ADMISSION_CHUNK_ENVELOPES));
+    assert!(loans < envelopes.div_ceil(8) / 2,
+        "cheap uncontended admission still commits near every eight envelopes: {covered:?}");
     assert!(admission.changed);
     target.project_replication_backlog().unwrap();
     assert!(
