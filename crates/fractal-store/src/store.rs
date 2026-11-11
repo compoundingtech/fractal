@@ -17340,11 +17340,17 @@ pub fn try_project_all_simple_replication_tx(
 // explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
 fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, through: u64, reason: &str) -> Result<bool, FractalError> {
     let conflict: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM operations INDEXED BY operations_conflict_index WHERE state='conflict')
-         OR EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
         [], |row| row.get(0),
     ).map_err(internal)?;
-    let unproven = !smallclaims::store::operation_conflict_discovery_valid(tx, through).map_err(internal)?;
+    // A direct low-level call may inspect an uncommitted, not-yet-scanned range. Keep its
+    // replay decision; the driver fences every unproven replay. Defer invalidated scans here.
+    let unproven: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:operation-conflict-scan'
+         AND last_good_store_index>=?1 AND error_message IS NOT
+           (SELECT value FROM meta WHERE key='operation_conflict_source_generation'))",
+        [through], |row| row.get(0),
+    ).map_err(internal)?;
     if conflict || unproven {
         tx.execute(
             /* sqlite-large-value: allow-for-now lv-ha8b524108446 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)

@@ -616,7 +616,7 @@ with no payload binds; their conservative sink classification is retained.
 `smallclaims::store` owns `lv-h60fdf4c7a583`, updating one operation's existing
 digest/canonical-claim/state columns from the canonical reducer. Its next storage
 step is the same bounded-identifier representation as the other operation sites.
-Fixture-only `lv-hc0649a7fe6c7` and `lv-hf161f602d783` retain synthetic checkpoint
+Fixture-only `lv-hed1452e59184` and `lv-hf161f602d783` retain synthetic checkpoint
 metadata and stale-health setup to prove the no-replay fence. Their owners are
 `fractal_store::store::operation_conflict_tests`; no production population is added.
 
@@ -638,6 +638,8 @@ readers; writer metadata pages are capped at the projection chunk size.
 `lv-h12783970e005`, installing checkpoint/restored-prefix invalidation triggers
 and the partial stale-exclusion index. They mutate integer generation metadata;
 the index retains existing operation/subject keys, with the same bounded-identity
-debt rather than a new body population. `lv-hd5cb81fd9252` and `lv-h69417713b2cb`
+debt rather than a new body population. `lv-h386f61abc319` and `lv-h69417713b2cb`
 are synthetic checkpoint-adoption/stale-health regression sites owned by
 `fractal_store::store::operation_conflict_tests`.
+`lv-h0cfeef50b49a` is the same owner's stale-health fixture proving that neutral
+operation conflicts do not suppress an unrelated legitimate replay.

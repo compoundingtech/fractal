@@ -38,17 +38,21 @@ fn operation_conflict_receipts_match_full_replay_in_opposite_orders() {
             let incremental = (operation_rows(&target.readers.get()), graph_digest_of(&target));
             target.replay_replication_graph().unwrap();
             assert_eq!(incremental, (operation_rows(&target.readers.get()), graph_digest_of(&target)));
-            let health = target.replication_status(false, None, &[]).unwrap();
-            let conflict = health.unhealthy.iter().find(|row| row.error_code.as_deref() == Some("operation-conflict")).unwrap();
-            let detail: Value = serde_json::from_str(conflict.error_message.as_ref().unwrap()).unwrap();
             assert_eq!(target.idempotency_conflicts(1).unwrap().0, 1);
-            assert_eq!(detail["projection_operation_id"], "op/conflict-parity");
-            assert!(ids.iter().any(|id| detail["projection_claim_id"] == *id));
-            let log = logs.iter().find_map(|line| line.strip_prefix("fractal: projection failure detail ")).unwrap();
-            let log: Value = serde_json::from_str(log).unwrap();
-            assert_eq!(log["code"], "operation-conflict");
-            assert_eq!(log["operation_id"], "op/conflict-parity");
-            assert!(ids.iter().any(|id| log["previous_claim_id"] == *id));
+            if kind == "intent.desired" {
+                let health = target.replication_status(false, None, &[]).unwrap();
+                let conflict = health.unhealthy.iter().find(|row| row.error_code.as_deref() == Some("operation-conflict")).unwrap();
+                let detail: Value = serde_json::from_str(conflict.error_message.as_ref().unwrap()).unwrap();
+                assert_eq!(detail["projection_operation_id"], "op/conflict-parity");
+                assert!(ids.iter().any(|id| detail["projection_claim_id"] == *id));
+                let log = logs.iter().find_map(|line| line.strip_prefix("fractal: projection failure detail ")).unwrap();
+                let log: Value = serde_json::from_str(log).unwrap();
+                assert_eq!(log["code"], "operation-conflict");
+                assert_eq!(log["operation_id"], "op/conflict-parity");
+                assert!(ids.iter().any(|id| log["previous_claim_id"] == *id));
+            } else {
+                assert!(logs.iter().all(|line| !line.contains("projection failure detail")));
+            }
             answers.push(incremental);
         }
         assert_eq!(answers[0], answers[1], "{kind}: arrival order changed the projection");
@@ -99,8 +103,8 @@ fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
     assert!(health.unhealthy.iter().any(|row| row.status == "stale"
         && row.error_code.as_deref() == Some("operation-conflict-refold-limit")
         && row.aggregate.contains(&operation_id)));
-    assert!(health.unhealthy.iter().any(|row| row.aggregate.contains("op/later-event")
-        && row.status == "indeterminate" && row.error_code.as_deref() == Some("operation-conflict")));
+    assert_eq!(store.idempotency_conflicts(2).unwrap().0, 2);
+    assert!(health.unhealthy.iter().all(|row| !row.aggregate.contains("op/later-event")));
     let detail = logs.iter().find_map(|line| line.strip_prefix("fractal: projection failure detail ")).unwrap();
     let detail: Value = serde_json::from_str(detail).unwrap();
     assert_eq!(detail["projection_degraded"], true);
@@ -134,17 +138,17 @@ fn operation_conflict_refuses_a_guard_requested_full_replay() {
             let mut connection = store.connection.write();
             let tx = connection.transaction().unwrap();
             if checkpoint_only {
-                tx.execute(/* sqlite-large-value: allow-for-now lv-hc0649a7fe6c7 owner=fractal_store::store::operation_conflict_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+                tx.execute(/* sqlite-large-value: allow-for-now lv-hed1452e59184 owner=fractal_store::store::operation_conflict_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
                     actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
-                    VALUES ('tombstone','peer',1,'envelope','custom/conflict','custom.test.observed',NULL,'[]',
+                    VALUES ('tombstone','peer',1,'envelope','exec/conflict','intent.desired',NULL,'[]',
                     'op/guard-conflict','a',0,'checkpoint/2026-10-01')", []).unwrap();
             } else {
-                append_claim_record_tx(&tx, "peer", "custom/conflict", "custom.test.observed",
-                    None, &json!({"fields":{},"_operation":{"id":"op/guard-conflict","request_digest":"a"}}),
+                append_claim_record_tx(&tx, "peer", "exec/conflict", "intent.desired",
+                    None, &json!({"subject":"exec/conflict","kind":"exec","desired":{},"_operation":{"id":"op/guard-conflict","request_digest":"a"}}),
                     &[], None).unwrap();
             }
-            append_claim_record_tx(&tx, "peer", "custom/conflict", "custom.test.observed",
-                None, &json!({"fields":{},"_operation":{"id":"op/guard-conflict","request_digest":"b"}}),
+            append_claim_record_tx(&tx, "peer", "exec/conflict", "intent.desired",
+                None, &json!({"subject":"exec/conflict","kind":"exec","desired":{},"_operation":{"id":"op/guard-conflict","request_digest":"b"}}),
                 &[], None).unwrap();
             tx.execute(/* sqlite-large-value: allow-for-now lv-hf161f602d783 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
             tx.commit().unwrap();
@@ -236,8 +240,8 @@ fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
                 None, &json!({"fields":{"number":number}}), &[], None).unwrap();
         }
         for digest in ["a", "b"] {
-            append_claim_record_tx(&tx, "source", "custom/multi-chunk-conflict", "custom.test.observed",
-                None, &json!({"fields":{},"_operation":{"id":"op/second-chunk","request_digest":digest}}),
+            append_claim_record_tx(&tx, "source", "exec/multi-chunk-conflict", "intent.desired",
+                None, &json!({"subject":"exec/multi-chunk-conflict","kind":"exec","desired":{},"_operation":{"id":"op/second-chunk","request_digest":digest}}),
                 &[], None).unwrap();
         }
         tx.commit().unwrap();
@@ -259,8 +263,8 @@ fn operation_conflict_in_second_receipt_chunk_fences_first_chunk_fallback() {
         let mut connection = target.connection.write();
         let tx = connection.transaction().unwrap();
         for digest in ["a", "b"] {
-            append_claim_record_tx(&tx, "peer", "custom/after-target", "custom.test.observed", None,
-                &json!({"fields":{},"_operation":{"id":"op/after-target","request_digest":digest}}),
+            append_claim_record_tx(&tx, "peer", "exec/after-target", "intent.desired", None,
+                &json!({"subject":"exec/after-target","kind":"exec","desired":{},"_operation":{"id":"op/after-target","request_digest":digest}}),
                 &[], None).unwrap();
         }
         tx.commit().unwrap();
@@ -355,7 +359,7 @@ fn operation_conflict_owned_set_exclusion_survives_later_receipt_chunk() {
         let member = append_claim_record_tx(&tx, "peer", "exec/excluded-member", "intent.desired",
             None, &body, &[], None).unwrap();
         let revision = owned_sets::Revision {
-            rollout: None, previous: None,
+            rollout: None, previous: None, policy: None,
             source: owned_sets::Source { repository:"acme/garden".into(), r#ref:"main".into(), sha:"abc".into(), sequence:1 },
             bundle_digest:"bundle".into(),
             members:BTreeMap::from([("exec/excluded-member".into(), owned_sets::Member {
@@ -402,8 +406,8 @@ fn operation_conflict_checkpoint_adoption_invalidates_discovery_during_projectio
     {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
-        append_claim_record_tx(&tx, "peer", "custom/late-checkpoint", "custom.test.observed", None,
-            &json!({"fields":{},"_operation":{"id":"op/late-checkpoint","request_digest":"b"}}),
+        append_claim_record_tx(&tx, "peer", "exec/late-checkpoint", "intent.desired", None,
+            &json!({"subject":"exec/late-checkpoint","kind":"exec","desired":{},"_operation":{"id":"op/late-checkpoint","request_digest":"b"}}),
             &[], None).unwrap();
         tx.commit().unwrap();
     }
@@ -424,9 +428,9 @@ fn operation_conflict_checkpoint_adoption_invalidates_discovery_during_projectio
         if adopted.replace(true) { return; }
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
-        tx.execute(/* sqlite-large-value: allow-for-now lv-hd5cb81fd9252 owner=fractal_store::store::operation_conflict_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h386f61abc319 owner=fractal_store::store::operation_conflict_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
             actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
-            VALUES ('late-tombstone','peer',1,'envelope','custom/late-checkpoint','custom.test.observed',
+            VALUES ('late-tombstone','peer',1,'envelope','exec/late-checkpoint','intent.desired',
                 NULL,'[]','op/late-checkpoint','a',0,'checkpoint/2026-10-01')", []).unwrap();
         tx.execute(/* sqlite-large-value: allow-for-now lv-h69417713b2cb owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
         tx.commit().unwrap();
@@ -440,4 +444,36 @@ fn operation_conflict_checkpoint_adoption_invalidates_discovery_during_projectio
     store.project_replication_backlog().unwrap();
     assert!(smallclaims::store::operation_conflict_discovery_valid(&store.readers.get(), target).unwrap());
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn operation_conflict_neutral_history_does_not_fence_unrelated_replay() {
+    let store = Store::open_memory("fixture").unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for digest in ["a", "b"] {
+            append_claim_record_tx(&tx, "peer", "agent/example", "harness.observed", None,
+                &json!({"fields":{"state":"ready"},"_operation":{"id":"op/neutral-replay","request_digest":digest}}),
+                &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    store.project_replication_backlog().unwrap();
+    assert_eq!(store.idempotency_conflicts(1).unwrap().0, 1);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "exec/needs-replay", "intent.desired", None,
+            &json!({"subject":"exec/needs-replay","kind":"exec","desired":{}}), &[], None).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h0cfeef50b49a owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    assert!(store.project_replication_backlog().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 1);
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    let projected = (operation_rows(&store.readers.get()), graph_digest_of(&store));
+    store.replay_replication_graph().unwrap();
+    assert_eq!(projected, (operation_rows(&store.readers.get()), graph_digest_of(&store)));
 }

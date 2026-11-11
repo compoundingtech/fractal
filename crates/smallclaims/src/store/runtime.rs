@@ -177,6 +177,12 @@ pub trait Runtime: Send + Sync {
         forced_batch: Option<&str>,
     ) -> Result<ClaimRecord>;
 
+    /// Whether a claim kind has no graph effect. Discovery fences only operations whose
+    /// retained or checkpoint history contains a graph-projecting kind.
+    fn operation_claim_is_graph_neutral(&self, _kind: &str) -> bool {
+        false
+    }
+
     /// Project newly admitted replicated claims from a healthy frontier through `through`.
     /// The store commits that frontier before lending the writer to the next chunk. Aggregates
     /// may rebuild from their complete history. `Replay(reason)` asks for a replay from nothing.

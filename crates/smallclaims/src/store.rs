@@ -8849,6 +8849,20 @@ impl Store {
                         params![operation_id,digest,target,claim_id], |row| row.get(0),
                     ).optional()?;
                     if let Some(previous) = previous {
+                        let mut history = tx.prepare(
+                            "SELECT kind FROM claims INDEXED BY claims_operation_index
+                             WHERE json_extract(body,'$._operation.id')=?1 AND store_index<=?2
+                             UNION ALL SELECT kind FROM checkpoint_claims WHERE operation_id=?1",
+                        )?;
+                        let mut kinds = history.query(params![operation_id,target])?;
+                        let mut graph_projecting = false;
+                        while let Some(row) = kinds.next()? {
+                            if !self.runtime.operation_claim_is_graph_neutral(row.get_ref(0)?.as_str()?) {
+                                graph_projecting = true;
+                                break;
+                            }
+                        }
+                        if !graph_projecting { continue; }
                         conflicts.insert(operation_id.clone(), (claim_id,operation_id,Some(previous)));
                     }
                 }
@@ -9040,9 +9054,7 @@ impl Store {
                     // because another guard (or a projector error) requested fallback first.
                     let conflict: Option<(String, String, Option<String>)> = transaction.query_row(
                         "SELECT error_message FROM projection_health
-                         WHERE aggregate GLOB 'projection:operation-conflict-fence:*'
-                         UNION ALL SELECT json_array(canonical_claim_id,id,canonical_claim_id)
-                         FROM operations INDEXED BY operations_conflict_index WHERE state='conflict' LIMIT 1",
+                         WHERE aggregate GLOB 'projection:operation-conflict-fence:*' LIMIT 1",
                         [], |row| row.get::<_,String>(0),
                     ).optional().map_err(internal)?
                         .map(|message| serde_json::from_str(&message)).transpose().map_err(internal)?;

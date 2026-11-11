@@ -2566,10 +2566,10 @@ fn simple_replication_registers_unambiguous_event_operations() {
 }
 
 #[test]
-fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
+fn simple_replication_bounds_structural_operation_conflicts_without_full_replay() {
     let store = Store::open_memory("node").unwrap();
     store.project_replication_backlog().unwrap();
-    for (index, digest) in ["digest-one", "digest-two"].into_iter().enumerate() {
+    for digest in ["digest-one", "digest-two"] {
         let mut connection = store.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         append_claim_tx(
@@ -2586,17 +2586,14 @@ fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
             None,
         )
         .unwrap();
-        assert_eq!(
-            try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap(),
-            index == 0
-        );
+        assert!(try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap());
         transaction.commit().unwrap();
         drop(connection);
         let replays = FULL_REPLAYS.with(std::cell::Cell::get);
         store.project_replication_backlog().unwrap();
         assert_eq!(
             FULL_REPLAYS.with(std::cell::Cell::get),
-            replays + usize::from(index == 1)
+            replays
         );
     }
     assert_eq!(

@@ -536,6 +536,10 @@ impl Runtime for FractalRuntime {
         )
     }
 
+    fn operation_claim_is_graph_neutral(&self, kind: &str) -> bool {
+        !replay_projects_kind(kind)
+    }
+
     fn project_incremental(
         &self,
         transaction: &Transaction<'_>,
