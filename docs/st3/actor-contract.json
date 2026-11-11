@@ -2226,7 +2226,25 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st source diff": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st source status": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st source where": {
         "actor": "none",
         "accepts_person": false,
         "can_carry_person": false,
