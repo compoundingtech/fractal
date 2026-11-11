@@ -427,13 +427,22 @@ fn request_resource(path: &str) -> &'static str {
     }
 }
 
-/// Select from the supplied root only. Token files are reopened for each read batch.
-pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
-    let root = match pat {
+fn token_root(pat: &GithubAuth) -> Option<&std::path::Path> {
+    match pat {
         GithubAuth::Read { source, .. } => Some(source.root.as_path()),
         _ => SOURCE.get().and_then(|config| config.github.app_token_root.as_deref()),
-    };
-    app_read::select(root, owner, app, pat.pat())
+    }
+}
+
+/// Select from the supplied root only. Token files are reopened for each read batch.
+pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
+    app_read::select(token_root(pat), owner, app, pat.pat())
+}
+
+/// The installation that may read `owner`'s commit statuses, if its token grants them.
+pub fn statuses_auth(owner: &str, pat: &GithubAuth) -> Option<GithubAuth> {
+    let source = app_read::statuses_source(token_root(pat)?, owner)?;
+    Some(GithubAuth::Read { source, pat: Box::new(pat.pat().clone()) })
 }
 
 impl GithubAuth {
@@ -481,6 +490,9 @@ pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
         return auth.pat().clone();
     };
     if statuses {
+        if let Some(selected) = statuses_auth(owner, auth) {
+            return selected;
+        }
         if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
             app_read::fallback(owner, app, "statuses");
         }
