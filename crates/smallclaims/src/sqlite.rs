@@ -788,6 +788,8 @@ impl WriterConnection {
     /// queued with it, and answer once that transaction commits. An `Err` from `job` rolls back
     /// only its own savepoint. The outer `Err` is a commit that failed, which undid every write in
     /// the batch.
+    /// Each callback inherits its caller's raw clock overrides and restores the writer's
+    /// context before shared transaction finalizers run; an unset clock stays execution-time.
     #[track_caller]
     pub fn batched<'job, T: Send + 'job, E: Send + 'job>(
         &self,
@@ -800,6 +802,7 @@ impl WriterConnection {
         let changed = &changed_rows;
         // The job runs on the writer thread; what it wrote is handed back to this one.
         let capture = crate::touched::recording_wrote();
+        let clock = crate::store::ClockContext::capture();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
         // Counts this caller until its write begins, or the writer drops it unrun.
@@ -807,13 +810,17 @@ impl WriterConnection {
         let run: Box<dyn FnOnce(&Transaction<'_>) -> bool + Send + '_> = Box::new(move |tx| {
             drop(waiting);
             let before = tx.total_changes();
+            let job = || {
+                let _clock = clock.enter();
+                job(tx)
+            };
             let (result, written) = if capture {
                 crate::touched::record_wrote(|| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(tx)))
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
                 })
             } else {
                 (
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(tx))),
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)),
                     Vec::new(),
                 )
             };
@@ -2270,6 +2277,63 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_batch_keeps_each_jobs_clock_and_restores_the_enclosing_context() {
+        use crate::store::{ClockContext, clock_snapshot, now_ms, set_thread_clock};
+
+        let original = ClockContext::capture();
+        let _restore = original.enter();
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE claims(store_index INTEGER PRIMARY KEY)").unwrap();
+        let fifo = crate::fifo::Queue::enabled_for_test();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut answers = Vec::new();
+        for at in [100, 200] {
+            let clock = {
+                let _restore = original.enter();
+                set_thread_clock(Some(at));
+                let _snapshot = clock_snapshot();
+                set_thread_clock(Some(at + 1));
+                ClockContext::capture()
+            };
+            let (done, answer) = std::sync::mpsc::sync_channel(1);
+            let enqueued = std::time::Instant::now();
+            fifo.send_at(enqueued, || sender.send(WriterJob::Batched {
+                run: Box::new(move |_| {
+                    assert_eq!(ClockContext::capture(), original);
+                    {
+                        let _clock = clock.enter();
+                        assert_eq!(ClockContext::capture(), clock);
+                        assert_eq!(now_ms(), at);
+                    }
+                    assert_eq!(ClockContext::capture(), original);
+                    true
+                }),
+                profile: None,
+                wait: None,
+                holder: crate::windows::holds::Holder::current(),
+                enqueued,
+                done,
+            })).unwrap();
+            answers.push(answer);
+        }
+        let first = receiver.recv().unwrap();
+        drop(sender);
+        let batches = (AtomicU64::new(0), AtomicU64::new(0));
+        assert!(run_write_batch(
+            &mut connection, first, (&receiver, std::time::Duration::MAX),
+            &AtomicU64::new(0), &batches,
+            (&CommitObservers::default(), &TransactionFinalizers::default(), None, None),
+            &fifo,
+        ).is_none());
+        for answer in answers {
+            answer.recv().unwrap().unwrap();
+        }
+        assert_eq!(batches.0.load(Ordering::Relaxed), 1);
+        assert_eq!(batches.1.load(Ordering::Relaxed), 2);
+        assert_eq!(ClockContext::capture(), original);
+    }
 
     #[test]
     fn roster_reader_timing_is_scoped_and_restored_on_unwind() {
