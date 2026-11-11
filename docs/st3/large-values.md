@@ -568,7 +568,7 @@ overlays. The authenticated authority projection in PR #5993 preserves those
 requirements without treating raw claim rows as authority.
 
 `smallclaims::store::assistant_grant_authority` owns schema site
-`lv-hecb38ff7561b`. Its authority transition index includes the exact base claim
+`lv-h01e62b989d49`. Its authority transition index includes the exact base claim
 and canonical store order; its effective-grant active index keys principal,
 owner, revocation, expiry and profile. Authenticated records, grant subjects,
 principal/actor keys and proof identities remain inline variable-size values.
@@ -642,10 +642,29 @@ in an in-memory store; they add no production writer. The maintainer retains the
 listed body/predecessor and exact-wire representation TODOs for these fixture
 copies; this exception is not a byte-size or execution-cost proof.
 
+### Indexed owner-management transition inventory
+
+`smallclaims::store::assistant_grant_authority` owns management read sinks
+`lv-h0acc69f486f8` and `lv-ha81fbb31a83b`, and schema `lv-h01e62b989d49`.
+The revoke/policy expression indexes retain subject, kind, origin, actor,
+principal, profile and JSON-derived grant ID/issuer keys; the policy index also
+retains stored profile and session-actor keys before descending store order.
+The queries bind those exact immutable identities and return one authenticated
+record independently of reverse attachment, so unrelated history is not a
+scanned prefix. These inline TEXT/JSON values and index keys remain variable-size.
+Reference/chunk conversion must preserve identity applicability, canonical latest
+selection and null-versus-missing semantics; indexed LIMIT 1 is not a byte bound.
+
+`smallclaims::store::assistant_grant_attachment_tests` owns `lv-hd01abd6d9fce`,
+`lv-h556a1cd4fce4` and `lv-h763f36835f8e`: conservative prepare/bind sinks for
+the same production query constants. Their dynamic-source TODO must preserve the
+identity bindings and no-fullscan/no-sort cost regressions through representation
+changes; the fixture adds no production writer or value-size exemption.
+
 ## Attachment work and queue-owner inventory (PR #6306)
 
 `smallclaims::store::assistant_grant_authority` owns attachment schema
-`lv-hecb38ff7561b`, replacing `lv-hbfff283c1bdb`, and queue-owner schema
+`lv-h01e62b989d49`, replacing `lv-hecb38ff7561b`, and queue-owner schema
 `lv-h8523b0e4eedf`. Attachment work stores candidate/base claim IDs, subject,
 origin, actor and lower/upper claim-ID cursors; conservative witnesses copy the
 effective grant's principal, owner, profile, expiry, revocation and record JSON.
