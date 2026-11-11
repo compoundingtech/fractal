@@ -181,3 +181,7 @@ pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_b
 
 #[cfg(test)]
 mod tests;
+
+// 4c-1 is unreachable in production; 4c-2 separately owns activation of hooks.
+#[cfg(test)]
+mod admission;
