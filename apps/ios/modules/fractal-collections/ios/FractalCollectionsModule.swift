@@ -26,7 +26,8 @@ private final class CollectionSocket: NSObject, SRWebSocketDelegate {
   @objc(webSocket:didReceivePingWithData:)
   func webSocket(_ webSocket: SRWebSocket, didReceivePingWith data: Data?) { event("ping") }
   func webSocket(_ webSocket: SRWebSocket, didFailWithError error: Error) {
-    event("error"); ended()
+    let failure = error as NSError
+    event("error", ["domain": failure.domain, "code": failure.code]); ended()
   }
   func webSocket(_ webSocket: SRWebSocket, didCloseWithCode code: Int, reason: String?, wasClean: Bool) {
     event("close", ["code": code, "reason": reason ?? ""]); ended()

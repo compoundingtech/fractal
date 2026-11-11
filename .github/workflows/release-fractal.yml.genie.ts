@@ -60,6 +60,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release_tag.py",
         "scripts/release-publish-embed*",
         "scripts/release-fractal-embed.mjs",
+        "scripts/release_gh.py",
         "apps/fractal-web/**",
         "scripts/release_notes*",
         "scripts/compat-baseline-release*",

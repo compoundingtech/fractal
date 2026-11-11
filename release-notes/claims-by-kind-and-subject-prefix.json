@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "List claims by kind or subject prefix through GET /v1/claims and fractal claims ls",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes; the reads use the existing claims kind, subject and subject-kind indexes."},
+  "rules": {"status": "none", "detail": "No authority or policy rule changes; the listing keeps hiding reserved subjects and kinds."},
+  "compatibility": {"status": "changed", "detail": "GET /v1/claims accepts optional kind and subject_prefix parameters; subject with subject_prefix is refused with invalid-claims-query. Requests without them and the response shape are unchanged. Adds the read-only fractal claims ls command, which accepts optional --as read attribution like other operational reads."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "No state changes."}
+}

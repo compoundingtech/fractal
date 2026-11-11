@@ -125,6 +125,11 @@ fn a_message_goes_to_the_stream_only_where_its_recipients_host_reads_it() {
     personal.actor = Some("person/ada".into());
     personal.fields.insert("from".into(), json!("person/ada"));
     assert_eq!(reason(&personal), Some("ineligible"));
+    // A mission run's send stays on the graph append, where its run authority decides it.
+    let mut from_run = message("message/route-run", &here);
+    from_run.actor = Some("mission-run/0123abcd".into());
+    from_run.fields.insert("from".into(), json!("mission-run/0123abcd"));
+    assert_eq!(reason(&from_run), Some("run-sender"));
     let mut attached = message("message/route-attached", &here);
     attached.fields.insert("attachments".into(), json!([{"name": "body.txt"}]));
     assert_eq!(reason(&attached), Some("attached"));

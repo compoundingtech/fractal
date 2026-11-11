@@ -689,6 +689,46 @@ mod tests {
     }
 
     #[test]
+    fn backup_rebuilds_local_desired_witness_and_rejects_source_cursors() {
+        use crate::store::desired_batch::DesiredBatchRequest;
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"backup/a\" { command \"true\"; workspace \".\"; restart \"never\"; }\n\
+             agent \"backup/b\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+            source.origin(),
+        ).unwrap();
+        crate::store::publication_tests_shared::publish(&source, &intent, "desired-backup");
+        // A node-local generation deliberately unrelated to the authoritative log.
+        source.connection.write().execute(
+            "UPDATE local_desired_write_witness SET generation=1000000 WHERE id=1", [],
+        ).unwrap();
+        let request = DesiredBatchRequest { limit: Some(1), ..Default::default() };
+        let cursor = source.desired_batch(&request).unwrap().next_cursor.unwrap();
+        let path = root.path().join("desired.jsonl");
+        let header = archive(&source, &path);
+        assert!(!header.tables.contains_key("local_desired_write_witness"));
+        assert!(!header.ledgers.contains_key("local_desired_write_witness"));
+        let exported = fs::read_to_string(&path).unwrap();
+        assert!(!exported.contains("local_desired_write_witness"));
+        let restored_path = root.path().join("restored.db");
+        let report = backup::restore(&path, &restored_path, root.path()).unwrap();
+        let restored = Store::open(&restored_path, &report.writer).unwrap();
+        let generation: u64 = restored.readers.get().query_row(
+            "SELECT generation FROM local_desired_write_witness WHERE id=1",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(generation < 1000000, "restore must not inherit a local write counter");
+        assert_eq!(restored.desired_batch(&request).unwrap().items.len(), 1);
+        let error = restored.desired_batch(&DesiredBatchRequest {
+            cursor: Some(cursor), ..request
+        }).unwrap_err();
+        let error = error.downcast_ref::<FractalError>().unwrap();
+        assert_eq!(error.code, "invalid-desired-cursor",
+            "a new restore writer must reject old cursors regardless of generation");
+    }
+
+    #[test]
     fn pairing_operation_archive_round_trip_preserves_recoverable_history() {
         for keyed in [false, true] {
             let root = tempfile::tempdir().unwrap();

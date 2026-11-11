@@ -106,6 +106,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_fold_batches",
         "local_client_message_publications",
         "local_client_message_cut_epoch",
+        // Like message cut epochs, desired write generations invalidate local cursors.
+        "local_desired_write_witness",
         "local_idle_messages",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
@@ -181,6 +183,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
+        // Person read positions: an order-free max register refolded from replicated claims on
+        // open, repair and replay; the claims carry the shared digest coverage.
+        "read_positions",
         "local_custom_dirty",
         "identity_dirty",
         "graph_generation",

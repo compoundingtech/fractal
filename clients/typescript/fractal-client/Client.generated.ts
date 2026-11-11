@@ -7,9 +7,9 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
-    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
+    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
     MissionDeclaration,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
@@ -26,6 +26,17 @@ const acceptsApiVersion = (value: unknown): boolean => value === API_VERSION || 
 export type PageOptions = { cursor?: string; limit?: number };
 /** Transport options, never serialized into a query or action body. */
 export type RequestOptions = { signal?: AbortSignal };
+
+// React Native's AbortSignal polyfill has aborted, but no throwIfAborted or reason.
+const checkAborted = (signal?: Pick<AbortSignal, 'aborted' | 'reason'>): void => {
+    if (!signal?.aborted) return;
+    if (signal.reason != null) throw signal.reason;
+    if (typeof DOMException !== 'undefined') throw new DOMException('This operation was aborted', 'AbortError');
+    const error = new Error('This operation was aborted');
+    error.name = 'AbortError';
+    throw error;
+};
+
 /** Validate framing only, leaving resource rows and timeline entries raw for tolerant consumers.
  * Unknown kinds and additive fields retain the existing forward-compatible behavior. */
 function validateCollectionFrame(frame: unknown): void {
@@ -134,7 +145,9 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
-    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
+    /** Follow the person's read positions; frames are invalidations, so re-list `readPositionsList`. */
+    subscribeReadPositions(id: string, person: string, limit?: number): void;
+    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'read-positions'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
@@ -268,7 +281,7 @@ export class FractalClient {
     }
 
     async discover(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         return this.discoveryCache.value ?? this.capabilities(options);
     }
 
@@ -321,9 +334,9 @@ export class FractalClient {
     }
 
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }, options: RequestOptions = {}, readAuthorization?: { header: string; budget: number }): Promise<EnvelopeOf<T>> {
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         const credential = await this.credential?.();
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         const headers: Record<string, string> = { Accept: 'application/json', 'x-st3-features': this.features() };
         if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
@@ -347,15 +360,15 @@ export class FractalClient {
         try {
             if (readAuthorization) {
                 const bytes = new Uint8Array(await response.arrayBuffer());
-                options.signal?.throwIfAborted();
+                checkAborted(options.signal);
                 if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
                 payload = JSON.parse(new TextDecoder().decode(bytes));
             } else {
                 payload = await response.json();
-                options.signal?.throwIfAborted();
+                checkAborted(options.signal);
             }
         } catch (error) {
-            options.signal?.throwIfAborted();
+            checkAborted(options.signal);
             // HTTP middleware can reject a request before the client API writes a JSON envelope.
             if (response.ok || !(error instanceof SyntaxError)) throw error;
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
@@ -384,7 +397,7 @@ export class FractalClient {
             if (typeof value === 'number' && !(Number.isSafeInteger(value) && value >= 0)) throw new AssistantReadRejected('assistant parameters must be scalar strings or unsigned integers');
             parameters[name] = String(value);
         }
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         if (proof.payload.projection !== projection) throw new AssistantReadRejected('assistant proof names a different projection');
         const signed = Object.entries(proof.payload.parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
         const sent = Object.entries(parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -399,7 +412,7 @@ export class FractalClient {
 
     private async get<T>(path: string, kind?: 'events', options: RequestOptions = {}): Promise<EnvelopeOf<T>> {
         const capabilities = await this.discover(options);
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         const url = new URL(path, this.baseUrl + '/');
         const limit = url.searchParams.get('limit');
         if (limit !== null) bounded(Number(limit), kind === 'events' ? capabilities.value.limits.max_event_items : capabilities.value.limits.max_page_items, 'limit');
@@ -632,12 +645,21 @@ export class FractalClient {
             } catch (error) { end(error instanceof Error ? error : new Error(String(error))); socket.close(1000); }
         };
         socket.onclose = event => end(event.code === 1000 ? undefined : new Error(`The collections socket closed (${event.code}${event.reason ? ` ${event.reason}` : ''})`));
-        socket.onerror = () => end(new Error('The collections socket failed'));
+        socket.onerror = event => {
+            // Native carriers expose only NSError identity. Browser events remain generic;
+            // never copy message, localizedDescription, userInfo, or arbitrary event text.
+            const identity = typeof event === 'object' && event !== null
+                && 'domain' in event && typeof event.domain === 'string'
+                && 'code' in event && typeof event.code === 'number' && Number.isSafeInteger(event.code)
+                ? ` (${event.domain} ${event.code})` : '';
+            end(new Error(`The collections socket failed${identity}`));
+        };
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
             subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
+            subscribeReadPositions: (id, person, limit = 100) => send({kind: 'subscribe', id, collection: 'read-positions', person, limit}),
             subscribe: (id, collection, limit, filters = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.
                 if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
@@ -694,6 +716,7 @@ export class FractalClient {
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }
     async sloHistory(id: string, options: { since_ms?: number; until_ms?: number; steps?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloHistory>> { return this.get('/v1/client/slo/history' + query({ id, ...options }), undefined, requestOptions); }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
+    async usageHubQuota(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsageHubQuota>> { return this.get('/v1/client/usage/quota', undefined, requestOptions) }
     async clientsList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ClientConnections>> { return this.get('/v1/client/clients', undefined, requestOptions); }
     async nowList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/now' + query(options), undefined, requestOptions); }
     async machinesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/machines' + query(options), undefined, requestOptions); }
@@ -750,6 +773,7 @@ export class FractalClient {
     async arrangementsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ArrangementPage>> { return this.get('/v1/client/arrangements' + query({ person, ...options }), undefined, requestOptions); }
     async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Arrangement>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}`, undefined, requestOptions); }
     async arrangementsMemberships(personName: string, uuid: string, person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<OrderedMembershipPage>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}/memberships` + query({ person, ...options }), undefined, requestOptions); }
+    async readPositionsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ReadPositionPage>> { return this.get('/v1/client/read-positions' + query({ person, ...options }), undefined, requestOptions); }
     async glassesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/glasses' + query(options), undefined, requestOptions); }
     async glassesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async assistantSummary(params: AssistantSummaryRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantSummary>> { return this.assistantRead<AssistantSummary>('summary', params, proof, requestOptions); }
@@ -795,6 +819,7 @@ export class FractalClient {
     async pairingRevoke(input: Omit<ActionOf<'pairing.revoke'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'pairing.revoke' } as ActionOf<'pairing.revoke'>, requestOptions); }
     async privateNotesWrite(input: Omit<ActionOf<'private-notes.write'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'private-notes.write' } as ActionOf<'private-notes.write'>, requestOptions); }
     async promptRespond(input: Omit<ActionOf<'prompt.respond'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'prompt.respond' } as ActionOf<'prompt.respond'>, requestOptions); }
+    async readPositionAdvance(input: Omit<ActionOf<'read-position.advance'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'read-position.advance' } as ActionOf<'read-position.advance'>, requestOptions); }
     async reviewApprove(input: Omit<ActionOf<'review.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.approve' } as ActionOf<'review.approve'>, requestOptions); }
     async reviewReject(input: Omit<ActionOf<'review.reject'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.reject' } as ActionOf<'review.reject'>, requestOptions); }
     async reviewRequestChanges(input: Omit<ActionOf<'review.request-changes'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.request-changes' } as ActionOf<'review.request-changes'>, requestOptions); }

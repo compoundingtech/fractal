@@ -111,10 +111,12 @@ const agentFromRow = (row: DecodedAgent): Agent => {
       ? Option.getOrUndefined(suspension.suspended_at)
       : undefined
   const lastActivityAt = Option.getOrUndefined(row.last_activity_at)
+  const lastProseAt = Option.getOrUndefined(row.last_prose_at)
   return {
     ref: row.id,
     terminal: terminalSubjectForAgent(row.id),
     ...(row.runtime_ids.length === 0 ? { terminalDisabledReason: 'This agent has no terminal.' } : {}),
+    runtimeKey: row.runtime_ids.join(' '),
     name: row.name,
     lifecycle: lifecycleOf(row),
     host: hostName(row),
@@ -131,6 +133,8 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     startedAt: unknown,
     endedAt: unknown,
     lastActivityAt: lastActivityAt === undefined ? unknown : { _tag: 'Known', value: DateTime.toEpochMillis(lastActivityAt) },
+    // Absent from older daemons; then unread falls back to last activity.
+    ...(lastProseAt === undefined ? {} : { lastProseAt: { _tag: 'Known', value: DateTime.toEpochMillis(lastProseAt) } as const }),
     blockedOn: fromOption(row.blocked_on),
     ask: fromOption(row.ask),
     ...(suspendedAt === undefined ? {} : { statusSince: DateTime.toEpochMillis(suspendedAt) }),
@@ -288,6 +292,7 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   a.ref === b.ref &&
   a.terminal === b.terminal &&
   a.terminalDisabledReason === b.terminalDisabledReason &&
+  a.runtimeKey === b.runtimeKey &&
   a.name === b.name &&
   a.lifecycle._tag === b.lifecycle._tag &&
   a.host === b.host &&
@@ -299,6 +304,7 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   a.state === b.state &&
   a.description === b.description &&
   sameKnown(a.lastActivityAt, b.lastActivityAt) &&
+  sameKnown(a.lastProseAt ?? unknown, b.lastProseAt ?? unknown) &&
   sameKnown(a.startedAt, b.startedAt) &&
   sameKnown(a.endedAt, b.endedAt) &&
   sameKnown(a.usage, b.usage, decodedUsageEquivalence) &&

@@ -223,6 +223,15 @@ pub enum Observation<'a> {
         status: Option<u16>,
         took: Duration,
     },
+    /// One logical mutation, including retries of a refused projection drain. The request
+    /// observations above still describe each physical attempt.
+    Mutation {
+        method: &'a str,
+        route: &'a str,
+        attempts: u32,
+        took: Duration,
+        retry_wait: Duration,
+    },
     /// A collections-stream frame: the subscription, the frame kind, its size, and for the
     /// first frame of a subscription how long after the subscribe command it arrived.
     Frame {
@@ -531,6 +540,15 @@ impl CollectionStream {
             command["subject"] = serde_json::json!(subject);
         }
         self.send(&command).await
+    }
+    /// Follow the person's read positions; frames are invalidations, so re-list `read_positions_list`.
+    pub async fn subscribe_read_positions(
+        &mut self,
+        id: &str,
+        person: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"read-positions", "person":person, "limit":limit})).await
     }
 
     pub async fn subscribe_ordered_memberships(
@@ -1318,7 +1336,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::RetireIncarnationMismatch
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
+        | ErrorCode::SetManagedSubject
         | ErrorCode::MessageSelectorsNotReady
+        | ErrorCode::DatabaseBusy
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
@@ -2381,6 +2401,11 @@ impl Client {
         };
         self.get(&format!("/v1/client/usage{query}")).await
     }
+    pub async fn usage_hub_quota(
+        &self,
+    ) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {
+        self.get("/v1/client/usage/quota").await
+    }
     pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {
         self.get("/v1/client/clients").await
     }
@@ -2896,6 +2921,24 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn read_positions_list(
+        &self,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<ReadPositionPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/read-positions?person={}",
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
     pub async fn glasses_list(
         &self,
         cursor: Option<&str>,
@@ -3354,6 +3397,17 @@ impl Client {
         parameters: PromptRespondParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::prompt_respond(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn read_position_advance(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ReadPositionAdvanceParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::read_position_advance(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -4478,18 +4532,50 @@ impl Client {
         content_type: &str,
     ) -> Result<T, ClientError> {
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
-            match self
-                .request_once(method.clone(), path, body.clone(), key, content_type, None)
-                .await
-            {
+        let result = loop {
+            attempts += 1;
+            let request =
+                self.request_once(method.clone(), path, body.clone(), key, content_type, None);
+            let outcome = request.await;
+            match outcome {
+                Err(error @ ClientError::Api(..))
+                    if mutation
+                        && matches!(&error,
+                    ClientError::Api(_, _, envelope)
+                        if envelope.retryable
+                            && envelope.details.get("reason").and_then(serde_json::Value::as_str)
+                                == Some("run-projection-drain")) =>
+                {
+                    let remaining =
+                        drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    // Never cancel an in-flight mutation and then report the earlier refusal.
+                    // Reserve the complete ordinary request deadline before sending again.
+                    if remaining < request_deadline(&method, path) + pause {
+                        break Err(error);
+                    }
+                    draining = true;
+                    let waited = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += waited.elapsed();
+                    if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                        < request_deadline(&method, path)
+                    {
+                        break Err(error);
+                    }
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
                 Err(ClientError::Unreachable(mut outage)) if !self.outage_wait.is_zero() => {
                     let waited = started.elapsed();
                     if waited >= self.outage_wait {
                         outage.waited = Some(waited);
-                        return Err(ClientError::Unreachable(outage));
+                        break Err(ClientError::Unreachable(outage));
                     }
                     if self.announce_outage_wait && !announced {
                         eprintln!(
@@ -4499,12 +4585,37 @@ impl Client {
                         );
                         announced = true;
                     }
-                    tokio::time::sleep(pause.min(self.outage_wait - waited)).await;
+                    let remaining = if draining {
+                        (self.outage_wait - waited).min(
+                            drain_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
+                    } else {
+                        self.outage_wait - waited
+                    };
+                    let slept = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += slept.elapsed();
+                    if draining
+                        && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                            < request_deadline(&method, path)
+                    {
+                        break Err(ClientError::Unreachable(outage));
+                    }
                     pause = (pause * 2).min(Duration::from_secs(1));
                 }
-                outcome => return outcome,
+                outcome => break outcome,
             }
+        };
+        if mutation && OBSERVER.get().is_some() {
+            observe(Observation::Mutation {
+                method: method.as_str(),
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
     async fn request_once<T: DeserializeOwned>(
         &self,

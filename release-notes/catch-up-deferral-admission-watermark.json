@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The catch-up projection deferral clears once its pass covers every admitted replication claim, so local inline-projected writes no longer keep it set",
+  "replay": {"status": "none", "detail": "No graph replay. The projection pass and its frontier commits are unchanged."},
+  "schema": {"status": "none", "detail": "No database or claim schema change. The clear now compares the pass frontier with the existing replication_admitted_index metadata, read under the writer exclusion next to the generation snapshot."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. The generation compare-and-swap that guards the clear is kept."},
+  "compatibility": {"status": "changed", "detail": "Readiness changes on every daemon. Before, the deferral cleared only when the pass reached the store index, and local inline-projected writes advance that index, so a daemon taking local writes during catch-up could stay deferred and keep re-running settle passes after all received claims were projected. Now the deferral clears when the pass reaches the last admitted replication claim, and catch-up reports ready earlier under local write load. No wire, stored format or claim kind change."},
+  "downtime": {"status": "none", "detail": "None; takes effect on process restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing stored changes. Reverting restores the old deferral clear against the store index, including its extra settle passes under local writes."}
+}

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use super::{AgentDesiredState, RawTask, Task, TaskKind, TaskLifecycle};
 use super::{
-    AGENT_ADDRESS_MAX_BYTES, AGENT_ADDRESS_SEGMENT_MAX_BYTES, AGENT_DESIRED_STATE_REASON_MAX_BYTES,
-    AGENT_ID_MAX_BYTES,
+    AGENT_ADDRESS_MAX_BYTES, AGENT_ADDRESS_SEGMENT_MAX_BYTES, AGENT_DESCRIPTION_MAX_BYTES,
+    AGENT_DESIRED_STATE_REASON_MAX_BYTES, AGENT_ID_MAX_BYTES,
 };
 
 pub(crate) fn lower_desired_state(
@@ -142,6 +142,29 @@ pub fn validate_presentation(
     let Some(value) = value else {
         return Ok(());
     };
+    validate_presentation_shape(field, value)?;
+    anyhow::ensure!(
+        value.chars().count() <= max_chars,
+        "agent presentation `{field}` exceeds the {max_chars}-character limit"
+    );
+    Ok(())
+}
+
+/// Validate an optional agent description, its charter: a presentation field bounded by
+/// [`AGENT_DESCRIPTION_MAX_BYTES`] UTF-8 bytes rather than by characters.
+pub fn validate_description(value: Option<&str>) -> anyhow::Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    validate_presentation_shape("description", value)?;
+    anyhow::ensure!(
+        value.len() <= AGENT_DESCRIPTION_MAX_BYTES,
+        "agent presentation `description` exceeds the {AGENT_DESCRIPTION_MAX_BYTES}-byte limit"
+    );
+    Ok(())
+}
+
+fn validate_presentation_shape(field: &str, value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !value.is_empty(),
         "agent presentation `{field}` cannot be empty; omit it to clear it"
@@ -155,10 +178,6 @@ pub fn validate_presentation(
             character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
         }),
         "agent presentation `{field}` must be one printable line without control characters or Unicode line separators"
-    );
-    anyhow::ensure!(
-        value.chars().count() <= max_chars,
-        "agent presentation `{field}` exceeds the {max_chars}-character limit"
     );
     Ok(())
 }

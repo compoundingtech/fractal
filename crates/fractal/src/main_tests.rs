@@ -1800,6 +1800,74 @@ fn a_harness_cannot_act_as_another_agent() {
 }
 
 #[test]
+fn a_program_effect_acts_as_its_run() {
+    assert_eq!(run_actor(Some("secret"), Some("abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(Some("secret"), Some("mission-run/abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(None, Some("abc")), None);
+    assert_eq!(run_actor(Some(""), Some("abc")), None);
+    assert_eq!(run_actor(Some("secret"), Some("")), None);
+    assert_eq!(parse_actor_subject("mission-run/abc").as_deref(), Ok("mission-run/abc"));
+    assert!(parse_actor_subject("mission-run/").is_err());
+}
+
+/// A run publishes missions as itself: `apply` and `missions publish` take `--as mission-run/RUN`,
+/// and `apply` defaults to it when it holds a run credential. The commands a run's authority cannot
+/// grant still take only a person or an agent.
+#[test]
+fn a_run_is_a_mission_publication_actor() {
+    for actor in ["person/operator", "agent/example/worker", "mission-run/abc"] {
+        assert_eq!(parse_mission_publication_actor(actor).as_deref(), Ok(actor));
+    }
+    for actor in ["mission-run/", "mission-run/abc/", "mission/abc", "person/", "abc"] {
+        assert!(parse_mission_publication_actor(actor).is_err(), "{actor}");
+    }
+    assert!(parse_publication_actor("mission-run/abc").is_err());
+    for command in [
+        vec!["st", "apply", "notes.kdl", "--as", "mission-run/abc"],
+        vec!["st", "missions", "publish", "notes.kdl", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_ok(), "{command:?}");
+    }
+    for command in [
+        vec!["st", "missions", "retire", "x/notes", "--as", "mission-run/abc"],
+        vec!["st", "agents", "rollout", "fleet/worker", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_err(), "{command:?}");
+    }
+    let Command::Apply(args) = Cli::try_parse_from(["st", "apply", "notes.kdl", "--as", "mission-run/abc"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected apply")
+    };
+    assert_eq!(own_publication_actor(args.actor, "apply").unwrap(), "mission-run/abc");
+    // Without `--as`, apply resolves its actor from its environment when it runs.
+    assert!(Cli::try_parse_from(["st", "apply", "notes.kdl"]).is_ok());
+}
+
+/// A run's authority grants mission publication, never an owned set: `apply --set` as a run is
+/// refused before anything is read or written, while a person still publishes the set.
+#[test]
+fn a_run_cannot_publish_an_owned_set() {
+    let apply = |actor: &str| {
+        let Command::Apply(args) = Cli::try_parse_from([
+            "st", "apply", "missing.kdl", "--set", "garden", "--repository", "fixture/garden",
+            "--ref", "main", "--sha", "abc", "--source-sequence", "1", "--expect-set", "absent",
+            "--as", actor,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected apply")
+        };
+        apply_actor(&args)
+    };
+    let refusal = apply("mission-run/abc").unwrap_err().to_string();
+    assert!(refusal.contains("fractal apply --set cannot publish as `mission-run/abc`"), "{refusal}");
+    assert_eq!(apply("person/operator").unwrap(), "person/operator");
+}
+
+#[test]
 fn execution_actor_options_parse_and_fail_closed() {
     for (path, tail) in [
         (["changes", "sync"], vec!["--repository", "fixture/garden"]),
@@ -2589,6 +2657,14 @@ fn declared_admission_human_output_is_explicitly_not_enforced() {
     for field in ["priority: normal", "lane: check", "cpu_seconds: 300", "memory_max: 8G", "disk_max: 20G", "token_budget: 100000"] {
         assert!(rendered.contains(field), "{rendered}");
     }
+}
+
+#[test]
+fn agent_charter_prints_every_line_without_terminal_controls() {
+    assert_eq!(
+        render_agent_charter("Keep main green.\n\nOwn \u{1b}[31mreleases\u{1b}[0m and notes."),
+        "Charter\n  Keep main green.\n\n  Own releases and notes.\n"
+    );
 }
 
 #[test]
@@ -3509,12 +3585,15 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
     #[cfg(test)]
     const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
+    #[cfg(test)]
+    const CLAIMS_SOURCE: &str = include_str!("claims_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
         ("agents", /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("claims", CLAIMS_SOURCE),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
@@ -7860,6 +7939,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
         reason: "adopted hold".into(),
         idempotency_key: "adopt-test".into(),
         legacy_adoption: true,
+        force: false,
     };
     let deadline = request.until_unix_ms;
     let mut paths = NativePaths {
@@ -8025,6 +8105,52 @@ async fn a_closed_message_missing_from_the_active_page_archives_its_projected_fi
     .await
     .unwrap();
     assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(filename).is_file());
+    server.abort();
+}
+
+#[tokio::test]
+async fn expired_staged_native_mail_is_archived_without_receipts_and_delivery_supersedes_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("expiry").unwrap());
+    let seat = "agent/eval.worker";
+    let append = |status: &str, fields: BTreeMap<String, Value>| {
+        store.append_claim(&ClaimInput {
+            subject: "message/expiry".into(), kind: format!("message.{status}"),
+            actor: Some(if status == "expired" { "daemon/runtime" } else { seat }.into()), fields, evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("sent", BTreeMap::from([
+        ("from".into(), json!("person/eval")), ("to".into(), json!(seat)),
+        ("content".into(), json!("Brief")), ("status".into(), json!("sent")),
+    ]));
+    let (client, server) = serve_test_store(store.clone(), root.path(), "expiry").await;
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    let reconcile = || forward_projected_messages(
+        &client, seat, &inbox, &archive, "app-server",
+        NativeDeliveryReceipts::Codex {
+            state_dir: root.path(), identity: "eval.worker", runtime_id: "worker",
+        },
+    );
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.message("message/expiry").unwrap().unwrap().status, "staged");
+    let filename = fractal_drivers::message::list_dir(&inbox).unwrap()[0].filename.clone();
+    append("expired", BTreeMap::from([
+        ("status".into(), json!("expired")), ("reason".into(), json!("cutoff-uncertain-attempt")),
+    ]));
+    assert!(reconcile().await.unwrap().is_empty());
+    assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(&filename).is_file());
+    for kind in ["message.delivered", "message.read"] {
+        assert!(store.claims_for_subject_kind_at("message/expiry", kind, None, false, 1).unwrap().claims.is_empty());
+    }
+    append("delivered", BTreeMap::from([("status".into(), json!("delivered"))]));
+    assert_eq!(message_page(&client, Some(seat), false, None).await.unwrap().items[0].status, "delivered");
+    let index = store.index().unwrap();
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.index().unwrap(), index, "delivered-unread replay writes no receipt");
     assert!(archive.join(filename).is_file());
     server.abort();
 }
@@ -8585,9 +8711,16 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             adopt: vec![],
             allow_empty: false,
             confirm_retire: None,
+            source_policy: None,
+            enforce: None,
+            publisher: vec![],
+            namespace: vec![],
+            unmanaged_allow: vec![],
+            force: false,
+            reason: None,
             dry_run: false,
             at_index: None,
-            actor: "person/test".into(),
+            actor: Some("person/test".into()),
             workspace: root.to_owned(),
             no_gate_check: false,
             check: false,

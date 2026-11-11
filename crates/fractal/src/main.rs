@@ -94,6 +94,7 @@ mod pairing_qr;
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
 mod attention_cli;
+mod claims_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -104,11 +105,13 @@ mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod program_bundles;
 mod validate_cli;
 mod work_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
+use claims_cli::{ClaimsCommand, run_claims};
 use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
 use fleet_cli::run_fleet;
@@ -315,6 +318,11 @@ enum Command {
         #[command(subcommand)]
         command: OwnedSetsCommand,
     },
+    /// Inspect source enforcement: each owned set's policy and open ad hoc source debt.
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
     /// Start the HTTP API, readers, peers, and reconciler.
     Up(UpArgs),
     /// Understand what needs action now.
@@ -474,6 +482,11 @@ enum Command {
     },
     /// Publish one registered typed observation.
     Claim(ClaimArgs),
+    /// List claims by kind, subject or subject prefix.
+    Claims {
+        #[command(subcommand)]
+        command: ClaimsCommand,
+    },
     /// Report a harness failure as this agent through the authorized diagnostic path.
     Diagnostic(HarnessDiagnosticArgs),
     /// Trace bounded graph history or wait on a graph condition.
@@ -1391,9 +1404,9 @@ struct MissionPublishArgs {
     /// Preview against this exact store index.
     #[arg(long, visible_alias = "at")]
     at_index: Option<u64>,
-    /// Complete person or agent subject authoring the publication.
+    /// Complete person, agent or run subject authoring the publication.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", value_parser = parse_publication_actor)]
+    #[arg(long = "as", value_parser = parse_mission_publication_actor)]
     actor: String,
     /// The workspace a run would use, where publish checks mission and step exec gates.
     #[arg(long, default_value = ".")]
@@ -1407,6 +1420,9 @@ struct MissionPublishArgs {
     /// Mission input values for exec gate checks.
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
+    /// Set by `fractal apply --force --reason`; `missions publish` never forces.
+    #[arg(skip)]
+    force_reason: Option<String>,
 }
 
 #[derive(Args)]
@@ -1596,6 +1612,12 @@ struct MissionRetireArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Why the mission is retired ad hoc; needed with --force.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Retire a member of an `enforce` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "reason")]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -2359,6 +2381,8 @@ enum HarnessQuestionsCommand {
 
 #[derive(Subcommand)]
 enum SubjectCommand {
+    /// Read declarations, selected tokens and cheap actual summaries in one snapshot.
+    Desired(SubjectDesiredArgs),
     /// Reply to a custom source under its current revision and waiting episode.
     Reply {
         subject: String,
@@ -2388,6 +2412,19 @@ enum SubjectCommand {
     Show(SubjectShowArgs),
     /// Show bounded immutable history for one subject.
     History(TraceArgs),
+}
+
+#[derive(Args)]
+struct SubjectDesiredArgs {
+    /// Exact subject IDs; omission selects all declarations.
+    #[arg(value_name = "SUBJECT", conflicts_with = "all")]
+    subjects: Vec<String>,
+    /// Select all declarations (also the default when no subjects are supplied).
+    #[arg(long)]
+    all: bool,
+    /// Restrict the selected declarations to this kind.
+    #[arg(long, value_name = "K")]
+    kind: Option<String>,
 }
 
 #[derive(Args)]
@@ -2590,6 +2627,11 @@ enum BackupCommand {
 enum ReplicationCommand {
     /// Show fleet receipt, validation, projection, and peer health.
     Status,
+    /// Estimate a local graph replay; --confirm runs it while holding the daemon writer.
+    Replay {
+        #[arg(long)]
+        confirm: bool,
+    },
     /// List invalid and unknown replicated records.
     Invalid {
         #[arg(long)]
@@ -3124,6 +3166,9 @@ struct AgentHoldArgs {
     release: bool,
     #[arg(long)]
     reason: Option<String>,
+    /// Hold a member of an `enforce` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "duration")]
+    force: bool,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
@@ -3366,10 +3411,38 @@ struct ApplyArgs {
     allow_empty: bool,
     #[arg(long, requires = "set")]
     confirm_retire: Option<String>,
-    /// Complete person or agent subject authoring the publication.
+    /// Replace the set's source policy with this JSON file
+    /// (`{"enforce","publisher","namespaces","unmanaged_allow"}`; an omitted field keeps the
+    /// selected policy's). Explicit flags below override its fields.
+    #[arg(long = "source-policy", requires = "set")]
+    source_policy: Option<PathBuf>,
+    /// The set's source enforcement: `off` (plain declarations of members are refused, nothing
+    /// else), `audit` (also record every write `enforce` would refuse) or `enforce` (refuse ad hoc
+    /// writes to members unless forced as source debt). Omitted keeps the selected policy.
+    #[arg(long, value_parser = ["off", "audit", "enforce"], requires = "set")]
+    enforce: Option<String>,
+    /// The only actor allowed to publish this set. Repeatable; omitted keeps the selected list.
+    #[arg(long = "publisher", requires = "set")]
+    publisher: Vec<String>,
+    /// Claim new top-level subjects matching this glob (`*` any run) for the set; plain apply
+    /// creating one is refused. Repeatable; omitted keeps the selected policy's namespaces.
+    #[arg(long = "namespace", requires = "set")]
+    namespace: Vec<String>,
+    /// Exempt subjects matching this glob from the set's namespaces. Repeatable.
+    #[arg(long = "unmanaged-allow", requires = "set")]
+    unmanaged_allow: Vec<String>,
+    /// Accept an ad hoc change to an owned-set member and record it as source debt; the next
+    /// set publication reverts it. Needs --reason.
+    #[arg(long, requires = "reason", conflicts_with = "set")]
+    force: bool,
+    /// Why this ad hoc change is forced; recorded with its actor in `fractal source status`.
+    #[arg(long, requires = "force", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: Option<String>,
+    /// Complete person, agent or run subject authoring the publication; defaults to the
+    /// harness's own agent, else to the run a program effect acts as.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
-    actor: String,
+    #[arg(long = "as", env = "ST_AGENT", value_parser = parse_mission_publication_actor)]
+    actor: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3385,6 +3458,17 @@ enum OwnedSetsCommand {
         name: String,
         #[arg(long)]
         sha: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SourceCommand {
+    /// List each owned set's source policy, open source debt, and the debt each set's current
+    /// revision closed.
+    Status {
+        /// Also list the newest writes `audit` sets recorded instead of refusing.
+        #[arg(long)]
+        audit: bool,
     },
 }
 
@@ -3429,9 +3513,10 @@ fn read_apply_files(files: &[PathBuf], allow_empty: bool) -> Result<IntentInput>
 }
 
 async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Result<()> {
+    let actor = apply_actor(&args)?;
     let intent = read_apply_files(&args.files, args.allow_empty)?;
     if args.set.is_some() {
-        return run_owned_set_apply(client, intent, args, json_output).await;
+        return run_owned_set_apply(client, intent, args, actor, json_output).await;
     }
     publish_mission_intent(
         client,
@@ -3440,24 +3525,67 @@ async fn run_apply(client: &Client, args: ApplyArgs, json_output: bool) -> Resul
             file: PathBuf::new(),
             dry_run: args.dry_run,
             at_index: args.at_index,
-            actor: args.actor,
+            actor,
             workspace: args.workspace,
             no_gate_check: args.no_gate_check,
             check: args.check,
             inputs: args.inputs,
+            force_reason: args.force.then_some(args.reason).flatten(),
         },
         json_output,
     )
     .await
 }
 
+/// The actor `fractal apply` publishes as. A run publishes only the missions its authority
+/// grants; an owned set publication is source ownership, which no run authority grants, so it is
+/// refused here before anything is read or written.
+fn apply_actor(args: &ApplyArgs) -> Result<String> {
+    let actor = own_publication_actor(args.actor.clone(), "apply")?;
+    if args.set.is_some() && actor.starts_with("mission-run/") {
+        anyhow::bail!(
+            "fractal apply --set cannot publish as `{actor}`: a run publishes only missions its authority grants, not owned sets; publish the set as a person or agent"
+        );
+    }
+    Ok(actor)
+}
+
 async fn run_owned_set_apply(
     client: &Client,
     intent: IntentInput,
     args: ApplyArgs,
+    actor: String,
     json_output: bool,
 ) -> Result<()> {
-    use fractal_daemon::store::owned_sets::{Options, Preview, Request, Source};
+    use fractal_daemon::store::owned_sets::{Enforce, Options, PolicyRequest, Preview, Request, Source};
+    let mut policy: Option<PolicyRequest> = args
+        .source_policy
+        .as_ref()
+        .map(|path| -> Result<PolicyRequest> {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading source policy {}", path.display()))?;
+            serde_json::from_str(&text).with_context(|| format!("parsing source policy {}", path.display()))
+        })
+        .transpose()?;
+    if args.enforce.is_some() || !args.publisher.is_empty() || !args.namespace.is_empty() || !args.unmanaged_allow.is_empty() {
+        let request = policy.get_or_insert_with(PolicyRequest::default);
+        if let Some(enforce) = &args.enforce {
+            request.enforce = Some(match enforce.as_str() {
+                "audit" => Enforce::Audit,
+                "enforce" => Enforce::Enforce,
+                _ => Enforce::Off,
+            });
+        }
+        for (flag, field) in [
+            (args.publisher, &mut request.publisher),
+            (args.namespace, &mut request.namespaces),
+            (args.unmanaged_allow, &mut request.unmanaged_allow),
+        ] {
+            if !flag.is_empty() {
+                *field = Some(flag);
+            }
+        }
+    }
     let options = Options {
         set: args.set.context("owned publication needs --set")?,
         source: Source {
@@ -3480,13 +3608,17 @@ async fn run_owned_set_apply(
         adopt: args.adopt.into_iter().collect(),
         allow_empty: args.allow_empty,
         confirm_retire: args.confirm_retire,
+        policy,
         expected_subjects: Default::default(),
     };
+    // Read and check the bundles first, so a dry run refuses a stale bundle too.
+    let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
     let mut request = Request {
         intent,
         options,
-        actor: args.actor,
+        actor,
         idempotency_key: uuid::Uuid::now_v7().to_string(),
+        program_bundles: BTreeMap::new(),
     };
     let preview: Preview = client.post("/v1/sets/preview", &request).await?;
     if args.dry_run {
@@ -3512,6 +3644,7 @@ async fn run_owned_set_apply(
         return Ok(());
     }
     request.options.expected_subjects = preview.expected_subjects;
+    request.program_bundles = program_bundles;
     let response: Value = client.post("/v1/sets/apply", &request).await?;
     print_value(&response, json_output)
 }
@@ -3582,6 +3715,12 @@ struct AgentStartArgs {
     /// Read the daemon's declaration and print the effective agent KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
+    /// Start a member of an `enforce` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "reason", conflicts_with = "print_kdl")]
+    force: bool,
+    /// Why this ad hoc start is forced; recorded with its actor in `fractal source status`.
+    #[arg(long, requires = "force", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: Option<String>,
 }
 
 #[derive(Args)]
@@ -3671,6 +3810,9 @@ struct AgentStopArgs {
     /// when.
     #[arg(long)]
     reason: Option<String>,
+    /// Stop a member of an `enforce` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "reason", conflicts_with = "print_kdl")]
+    force: bool,
     /// Print the exact stop KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
@@ -3700,6 +3842,9 @@ struct AgentSuspendArgs {
     /// Why the agent is suspended, recorded with the request.
     #[arg(long)]
     reason: Option<String>,
+    /// Suspend a member of an `enforce` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "reason")]
+    force: bool,
     /// How long to wait for the agent to suspend.
     #[arg(long, default_value = "5m")]
     timeout: String,
@@ -3717,6 +3862,12 @@ struct AgentResumeArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Why the agent is resumed; needed with --force.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Resume a member of an `enforce` owned set ad hoc, recording source debt with --reason.
+    #[arg(long, requires = "reason")]
+    force: bool,
     /// How long to wait for the agent to resume its native session.
     #[arg(long, default_value = "10m")]
     timeout: String,
@@ -4199,9 +4350,12 @@ enum WorkCommand {
     /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
     /// only the time it runs. The clock restarts at `work resume`, or after `--for` at the
     /// latest, so an agent that stops answering cannot hide behind a wait. The lease still
-    /// needs its renewals.
+    /// needs its renewals. A step's own exec, which has no agent, waits as itself without
+    /// `--as`: `fractal work wait "$ST_STEP_RUN" --for 2h --reason "build slot"`.
     Wait(WorkWaitArgs),
     /// Start the execution clock again after `work wait`.
+    ///
+    /// A step's own exec resumes as itself without `--as`.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
     Resume(WorkActionArgs),
     /// Finish claimed work and attach its durable evidence.
@@ -5144,7 +5298,7 @@ pub fn main(cli_build_stamp: Option<&'static str>, local_build_stamp: Option<&'s
         std::env::args_os().next().as_deref(),
         std::env::var_os("FRACTAL_SUPPRESS_DEPRECATION").as_deref(),
     ) {
-        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed on 2026-11-16.");
+        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed once every host and caller uses 'fractal'.");
     }
     fractal_drivers::version::set_build_stamps(cli_build_stamp, local_build_stamp);
     fractal_tui::set_build_stamps(cli_build_stamp, local_build_stamp);
@@ -5982,6 +6136,12 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
+        Command::Source { command: SourceCommand::Status { audit } } => {
+            let status: Value = client
+                .get(if audit { "/v1/source/status?audit=true" } else { "/v1/source/status" })
+                .await?;
+            print_value(&status, cli.json)
+        }
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
         Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
@@ -6189,6 +6349,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_harness_questions(&endpoint, command, cli.json).await
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
+        Command::Claims { command } => run_claims(&client, command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6294,7 +6455,7 @@ fn guard_mutating_cli_actor(
         anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
-        Command::Apply(args) => Some(args.actor.as_str()),
+        Command::Apply(args) => args.actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
@@ -7459,7 +7620,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"agent_charter":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,"mission_authority":1,"mission_program":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7545,7 +7706,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
         client_relay: fractal_daemon::peer::ClientRelay::from_config(&config)?
             .map(|relay| relay.with_links(store.clone())),
-        native_session_home: std::env::var_os("HOME").map(PathBuf::from),
+        native_session_home: fractal_daemon::instance::native_session_home()?,
         planner_default: config.planner.clone(),
         harness_question_sink: None,
         assistant_receipts: Default::default(),
@@ -7577,6 +7738,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
+    fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
@@ -7624,6 +7786,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
@@ -7829,6 +7992,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         &args.web_listen, web_dist, &state.state_dir, config.person.clone(),
     ).await?;
     let web_status = axum::Extension(web.status.clone());
+    let github_webhook = fractal_daemon::github_webhook::bind(
+        &config.github, store.clone(), notify.clone(), event_notify.clone(),
+    ).await?;
     let web_state = state.clone();
     let receipts = state.assistant_receipts.clone();
     // A stop signal first commits the assistant read receipts of reads that already returned,
@@ -7859,6 +8025,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     stop_agents_request_slo();
                 }
                 result
+            },
+            async {
+                match github_webhook {
+                    Some(receiver) => receiver.serve().await,
+                    None => std::future::pending().await,
+                }
             },
         );
         Err(served)
@@ -8002,6 +8174,8 @@ async fn publish_mission_intent(
     args: MissionPublishArgs,
     json_output: bool,
 ) -> Result<()> {
+    // Read and check the bundles first, so a dry run refuses a stale bundle too.
+    let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
     let mission: MissionResponse = client
         .post(
             "/v1/intent/mission",
@@ -8042,6 +8216,8 @@ async fn publish_mission_intent(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(args.actor),
+                program_bundles,
+                force_reason: args.force_reason,
             },
         )
         .await?;
@@ -8636,7 +8812,7 @@ async fn publish_text(
     source_name: String,
     actor: String,
 ) -> Result<ApplyResponse> {
-    publish_text_with_expected(client, kdl, source_name, actor, None).await
+    publish_text_with_expected(client, kdl, source_name, actor, None, None).await
 }
 
 async fn publish_text_with_expected(
@@ -8645,7 +8821,9 @@ async fn publish_text_with_expected(
     source_name: String,
     actor: String,
     expected: Option<(&str, &[String])>,
+    force_reason: Option<String>,
 ) -> Result<ApplyResponse> {
+    let program_bundles = program_bundles::program_bundles(&kdl)?;
     let intent = IntentInput {
         kdl,
         source_name: Some(source_name),
@@ -8680,6 +8858,8 @@ async fn publish_text_with_expected(
                 intent: resolved,
                 expected_subjects: mission.subject_tokens,
                 actor: Some(actor.clone()),
+                program_bundles,
+                force_reason,
             },
         )
         .await
@@ -10130,6 +10310,8 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
     };
     let client = if actor.starts_with("agent/") {
         Client::unix_agent(socket.as_ref(), actor)?
+    } else if actor.starts_with("mission-run/") {
+        Client::unix_run(socket.as_ref(), actor)?
     } else {
         Client::unix_as(socket.as_ref(), actor)?
     };
@@ -10138,8 +10320,9 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
         .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
-/// The actor of a terminal or client-v0 command: an explicit person or agent, else the harness's
-/// own seat, else the configured person. Free mode lets an agent act, always as itself.
+/// The actor of a terminal or client-v0 command: an explicit person, agent or run, else the
+/// harness's own seat, else the run a program effect acts as, else the configured person. Free
+/// mode lets an agent act, always as itself.
 fn configured_actor(
     explicit: Option<&str>,
     configured: Option<&str>,
@@ -10153,7 +10336,36 @@ fn configured_actor(
     {
         return Ok(own);
     }
+    if let Some(run) = run_actor(
+        fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").as_deref(),
+        fractal_drivers::contracts::env("ST_MISSION_RUN").as_deref(),
+    ) {
+        return Ok(run);
+    }
     configured_human(None, configured, command)
+}
+
+/// The actor of a publication whose `--as` defaults to the caller's own identity: the explicit or
+/// `ST_AGENT` subject, else the run a program effect acts as (docs/st3/program-engine.md §3).
+fn own_publication_actor(explicit: Option<String>, command: &str) -> Result<String> {
+    explicit
+        .or_else(|| {
+            run_actor(
+                fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").as_deref(),
+                fractal_drivers::contracts::env("ST_MISSION_RUN").as_deref(),
+            )
+        })
+        .with_context(|| {
+            format!("fractal {command} needs `--as person/NAME`, `--as agent/PATH` or `--as mission-run/RUN`")
+        })
+}
+
+/// A program effect carries its attempt's run credential and acts as its run
+/// (docs/st3/program-engine.md §3); the daemon binds the credential to the same run.
+fn run_actor(credential: Option<&str>, run: Option<&str>) -> Option<String> {
+    credential.filter(|credential| !credential.is_empty())?;
+    let run = run.map(|run| run.trim_start_matches("mission-run/")).filter(|run| !run.is_empty())?;
+    Some(format!("mission-run/{run}"))
 }
 
 fn configured_human(
@@ -10817,7 +11029,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
-                    row["id"].as_str().unwrap_or_default().replace('/', "%2F"),
+                    urlencoding::encode(row["id"].as_str().unwrap_or_default()),
                 ))
                 .await?;
             if json_output {
@@ -11642,8 +11854,52 @@ async fn run_harness_questions(
     }
 }
 
+async fn subject_desired_items(
+    client: &Client,
+    args: &SubjectDesiredArgs,
+) -> Result<Vec<Value>> {
+    // Retained member payloads can come from newer daemons. Only decode the page
+    // envelope here; preserve each extensible item exactly as the server supplied it.
+    #[derive(serde::Deserialize)]
+    struct DesiredPage {
+        items: Vec<Value>,
+        next_cursor: Option<String>,
+        #[serde(rename = "store_index")]
+        _store_index: u64,
+    }
+    let mut selection = String::from("/v1/desired?limit=1000");
+    for subject in &args.subjects {
+        selection.push_str("&subject=");
+        selection.push_str(&urlencoding::encode(subject));
+    }
+    if let Some(kind) = &args.kind {
+        selection.push_str("&kind=");
+        selection.push_str(&urlencoding::encode(kind));
+    }
+    let mut items = Vec::new();
+    let selection_len = selection.len();
+    loop {
+        let DesiredPage { items: page_items, next_cursor, .. } =
+            client.get(&selection).await?;
+        items.extend(page_items);
+        match next_cursor {
+            Some(next) => {
+                selection.truncate(selection_len);
+                selection.push_str("&cursor=");
+                selection.push_str(&urlencoding::encode(&next));
+            }
+            None => return Ok(items),
+        }
+    }
+}
+
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {
     match command {
+        SubjectCommand::Desired(args) => {
+            // Do not emit partial output if any continuation has expired or otherwise fails.
+            let result = subject_desired_items(client, &args).await?;
+            print_value(&result, json_output)
+        }
         SubjectCommand::Reply {
             subject,
             registration,
@@ -14748,6 +15004,20 @@ fn render_declared_admission(output: &mut String, admission: &fractal_client::De
     }
 }
 
+/// The charter section of an agent card: the `description` of the agent's current declaration,
+/// line by line, with terminal control sequences removed.
+fn render_agent_charter(charter: &str) -> String {
+    let mut output = String::from("Charter\n");
+    for line in charter.lines() {
+        if !line.trim().is_empty() {
+            output.push_str("  ");
+            push_todo_terminal_text(&mut output, line);
+        }
+        output.push('\n');
+    }
+    output
+}
+
 /// One line naming a running subagent: what it does, its type, and, given the time, when it
 /// started.
 fn subagent_line(subagent: &fractal_client::AgentSubagent, now_unix_ms: Option<u128>) -> String {
@@ -16145,11 +16415,14 @@ fn planning_session_intent(
     publication_document(session)
 }
 
-/// A complete `person/NAME` or an agent. Free mode lets an agent do what its person may do, and
-/// the daemon still records the agent itself as the actor.
+/// A complete `person/NAME`, an agent, or a `mission-run/RUN` a program effect acts as. Free mode
+/// lets an agent do what its person may do, and the daemon still records the agent itself as the
+/// actor; a run is only what its credential binds.
 fn parse_actor_subject(actor: &str) -> std::result::Result<String, String> {
-    if actor.starts_with("agent/") && actor.len() > "agent/".len() {
-        return Ok(actor.to_owned());
+    for family in ["agent/", "mission-run/"] {
+        if actor.starts_with(family) && actor.len() > family.len() {
+            return Ok(actor.to_owned());
+        }
     }
     parse_person_subject(actor)
 }
@@ -16203,6 +16476,22 @@ fn parse_publication_actor(actor: &str) -> std::result::Result<String, String> {
         );
     }
     Ok(actor.to_owned())
+}
+
+/// The author of a mission publication: a person, an agent, or a run, which publishes what its
+/// `authority` block's `publish` rules grant (docs/st3/program-engine.md §3). Starting, revising
+/// and cancelling runs stay with the program API and the person or agent commands.
+fn parse_mission_publication_actor(actor: &str) -> std::result::Result<String, String> {
+    if actor
+        .strip_prefix("mission-run/")
+        .is_some_and(|run| !run.is_empty() && !run.ends_with('/'))
+    {
+        return Ok(actor.to_owned());
+    }
+    parse_publication_actor(actor).map_err(|_| {
+        "mission publication authority must be an explicit `person/NAME`, `agent/PATH` or `mission-run/RUN` subject"
+            .into()
+    })
 }
 
 #[cfg(test)]
@@ -18535,7 +18824,7 @@ fn tolerate_driver_api_outage(
     last_warning: &mut Option<Instant>,
 ) -> Result<()> {
     let outage = fractal_daemon::client::daemon_unreachable(&error).map(|outage| outage.summary());
-    let transient = outage.is_some()
+    let transient = daemon_is_unreachable(&error)
         || error.chain().any(|cause| {
             let message = cause.to_string();
             message.contains("incomplete HTTP response")
@@ -20258,7 +20547,7 @@ async fn forward_projected_messages_reporting(
             None => break,
         }
     }
-    // A message can close between polls. The active page intentionally excludes
+    // A message can close or expire between polls. The active page intentionally excludes
     // history, so inspect only projected files still in the native inbox before
     // deciding whether to archive them. A failed lookup keeps the file in place.
     for file in fractal_drivers::message::list_dir(inbox)? {
@@ -20270,7 +20559,7 @@ async fn forward_projected_messages_reporting(
             }
             if let Ok(message) = read_message(client, reference).await
                 && message.to == subject
-                && matches!(message.status.as_str(), "read" | "closed")
+                && matches!(message.status.as_str(), "read" | "closed" | "expired")
             {
                 consumed_by_recipient.insert(reference.to_owned());
             }
@@ -21834,3 +22123,6 @@ mod tests;
 
 #[cfg(test)]
 mod terminal_ui_tests;
+
+#[cfg(test)]
+mod subject_desired_cli_tests;

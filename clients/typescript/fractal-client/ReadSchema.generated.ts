@@ -159,6 +159,16 @@ export const PrivateNotesUri = /*#__PURE__*/ (() => Schema.String.check(Schema.i
 export type PrivateNotesUri = typeof PrivateNotesUri.Type
 export type PrivateNotesUriEncoded = typeof PrivateNotesUri.Encoded
 
+/** The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes. */
+export const ReadPositionConversation = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/[^\\s]+$", "u"))).check(Schema.isMaxCodePoints(512)).annotate({ identifier: "ReadPositionConversation", description: "The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes." }))()
+export type ReadPositionConversation = typeof ReadPositionConversation.Type
+export type ReadPositionConversationEncoded = typeof ReadPositionConversation.Encoded
+
+/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
+export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
+export type Timestamp = typeof Timestamp.Type
+export type TimestampEncoded = typeof Timestamp.Encoded
+
 export const HarnessResolvedAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "positions": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(63))).check(Schema.isMaxLength(64)).check(Schema.isUnique()),
   "timed_out": Schema.Boolean
@@ -174,11 +184,6 @@ export const HarnessQuestionResolution = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "HarnessQuestionResolution" }))()
 export type HarnessQuestionResolution = typeof HarnessQuestionResolution.Type
 export type HarnessQuestionResolutionEncoded = typeof HarnessQuestionResolution.Encoded
-
-/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
-export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
-export type Timestamp = typeof Timestamp.Type
-export type TimestampEncoded = typeof Timestamp.Encoded
 
 export const ActorRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|daemon|person)/[^\\s]+$", "u"), "agent", "daemon", "person").annotate({ identifier: "ActorRef" }))()
 export type ActorRef = typeof ActorRef.Type
@@ -618,6 +623,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "incarnation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "kind": Schema.Literal("agent"),
   "last_activity_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** When the agent last said something: assistant message or content in its current incarnation's timeline, or mail it sent. Tool calls and words to the agent do not count. Clients compare it with a reader's position for "new since you last looked". Absent on older daemons. */
+  "last_prose_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the agent last said something: assistant message or content in its current incarnation's timeline, or mail it sent. Tool calls and words to the agent do not count. Clients compare it with a reader's position for \"new since you last looked\". Absent on older daemons." }),
   /** Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. While an executable's identity is still measured off the request, declared and drift are null and pending is true. Omitted on roster rows and non-owning hosts. */
   "launch_contract": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE).annotate({ description: "Live owner-local launch-contract diagnostic on agent detail reads. declared and running contain version, digest, prompt and binary digests; drift contains independent prompt/binary booleans, or null when launch evidence is missing. Publication never updates the running contract. While an executable's identity is still measured off the request, declared and drift are null and pending is true. Omitted on roster rows and non-owning hosts." }),
   /** The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row. */
@@ -1716,6 +1723,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "retire-incarnation-mismatch",
   "invalid-custody-successor",
   "custody-pending",
+  "set-managed-subject",
   "attention-migrated",
   "arrangement-exists",
   "arrangement-folder-exists",
@@ -1758,6 +1766,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "agent-roster-not-ready",
   "agent-roster-cut-not-ready",
   "message-selectors-not-ready",
+  "database-busy",
   "rate-limited",
   "runtime-not-local",
   "runtime-authority-indeterminate",
@@ -2284,7 +2293,7 @@ export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "sent_at": Timestamp,
   "session_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
-  "state": Schema.Literals(["sent","delivered","read","closed"]),
+  "state": Schema.Literals(["sent","delivered","read","closed","expired"]),
   /** Present when the recipient's seat runs on another host that keeps its receipts: whether that host answered. Absent when this host's own records are the whole answer. */
   "status_from": optionalKey(MessageStatusFrom),
   "tags": optionalKey(Schema.Array(Schema.String).check(Schema.isUnique())),
@@ -2446,6 +2455,37 @@ export const MissionStepEta = /*#__PURE__*/ (() => Schema.Struct({
 export type MissionStepEta = typeof MissionStepEta.Type
 export type MissionStepEtaEncoded = typeof MissionStepEta.Encoded
 
+export const MissionStepProgramEntry = /*#__PURE__*/ (() => Schema.Struct({
+  /** The child mission run or ask subject the key waits on. */
+  "child": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The child mission run or ask subject the key waits on." }),
+  "ended_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** The typed failure with its `_tag` and fields, cut to 300 characters. */
+  "error": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The typed failure with its `_tag` and fields, cut to 300 characters." }),
+  "key": Schema.String,
+  /** The effect's duration. */
+  "ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "The effect's duration." }),
+  "started_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "status": openEnum(["started","completed","failed"])
+}).annotate({ identifier: "MissionStepProgramEntry" }))()
+export type MissionStepProgramEntry = typeof MissionStepProgramEntry.Type
+export type MissionStepProgramEntryEncoded = typeof MissionStepProgramEntry.Encoded
+
+export const MissionStepProgram = /*#__PURE__*/ (() => Schema.Struct({
+  /** Each key's latest entry in this attempt, in the order the keys first appear; the newest 200 entries are read. */
+  "entries": Schema.Array(MissionStepProgramEntry).annotate({ description: "Each key's latest entry in this attempt, in the order the keys first appear; the newest 200 entries are read." }),
+  /** The open `program/host` or `program/stalled` fault on the step. */
+  "fault": Schema.OptionFromOptionalNullOr(Schema.Struct({ "reason": Schema.String, "scope": Schema.String }), NULL_NONE).annotate({ description: "The open `program/host` or `program/stalled` fault on the step." }),
+  "last_entry_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** The innermost open key: the most recently started key without a result. */
+  "open_key": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The innermost open key: the most recently started key without a result." }),
+  /** How long the journal may go without a new entry before the step raises `program/stalled`. */
+  "stalled_after_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({ description: "How long the journal may go without a new entry before the step raises `program/stalled`." }),
+  /** Older journal entries exist beyond the ones read. */
+  "truncated": Schema.Boolean.annotate({ description: "Older journal entries exist beyond the ones read." })
+}).annotate({ identifier: "MissionStepProgram" }))()
+export type MissionStepProgram = typeof MissionStepProgram.Type
+export type MissionStepProgramEncoded = typeof MissionStepProgram.Encoded
+
 export const MissionStepTransition = /*#__PURE__*/ (() => Schema.Struct({
   /** Unix milliseconds. */
   "at": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Unix milliseconds." }),
@@ -2538,6 +2578,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   /** When st last nudged this held step's holder for idling with nothing set to wake it. */
   "nudged_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When st last nudged this held step's holder for idling with nothing set to wake it." }),
   "path": Schema.String,
+  /** Mission detail only, on the runs it enriches: a program step's current attempt journal. Absent for other steps and on older daemons. */
+  "program": optionalKey(MissionStepProgram),
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "since": Timestamp,
@@ -2983,6 +3025,19 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonAnswerRecord = typeof PersonAnswerRecord.Type
 export type PersonAnswerRecordEncoded = typeof PersonAnswerRecord.Encoded
 
+export const WorkProgram = /*#__PURE__*/ (() => Schema.Struct({
+  /** The child mission run or ask subject the open key waits on. */
+  "child": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The child mission run or ask subject the open key waits on." }),
+  "last_entry_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
+  /** The most recently started journal key without a result: the innermost open key. */
+  "open_key": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The most recently started journal key without a result: the innermost open key." }),
+  "open_since_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
+  /** How long the journal may go without a new entry before the step has made no progress. */
+  "stalled_after_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1))).annotate({ description: "How long the journal may go without a new entry before the step has made no progress." })
+}).annotate({ identifier: "WorkProgram" }))()
+export type WorkProgram = typeof WorkProgram.Type
+export type WorkProgramEncoded = typeof WorkProgram.Encoded
+
 export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
   "assigned_to": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -2998,7 +3053,16 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "execution_started_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
   /** Accumulated execution wait against this attempt's wait budget. */
   "execution_waited_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))).annotate({ description: "Accumulated execution wait against this attempt's wait budget." }),
-  "gate_kind": Schema.OptionFromOptionalNullOr(Schema.Literals(["watch","predicate","command","llm","human","mixed","run"]), NULL_NONE),
+  "gate_kind": Schema.OptionFromOptionalNullOr(Schema.Literals([
+  "watch",
+  "predicate",
+  "command",
+  "llm",
+  "human",
+  "mixed",
+  "run",
+  "program"
+]), NULL_NONE),
   "generation_id": Id,
   "goals": Schema.Array(Schema.String),
   "id": Id,
@@ -3013,6 +3077,8 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "path": Schema.String,
   /** Responses to the asks this attempt made, or a person ask's own response. */
   "person_answers": optionalKey(Schema.Array(PersonAnswerRecord)).annotate({ description: "Responses to the asks this attempt made, or a person ask's own response." }),
+  /** A program step's innermost open journal key and journal timing; null for other work. */
+  "program": Schema.OptionFromOptionalNullOr(WorkProgram, NULL_NONE).annotate({ description: "A program step's innermost open journal key and journal timing; null for other work." }),
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -3068,6 +3134,7 @@ export const ResourceCollectionName = /*#__PURE__*/ (() => Schema.Literals([
   "work",
   "glasses",
   "arrangements",
+  "read-positions",
   "summary",
   "clients",
   "usage",
@@ -3700,6 +3767,7 @@ export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
   "glasses",
   "arrangements",
   "ordered-memberships",
+  "read-positions",
   "summary",
   "clients",
   "usage",
@@ -4145,6 +4213,15 @@ export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelinePage = typeof TimelinePage.Type
 export type TimelinePageEncoded = typeof TimelinePage.Encoded
 
+/** The operator's usage hub quota. snapshot is the hub's own schema version 3 document, relayed unchanged. */
+export const UsageHubQuota = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "state": Schema.Literal("disabled") }),
+  Schema.Struct({ "reason": Schema.Literals(["transport","invalid_snapshot"]), "refresh_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(3600)), "state": Schema.Literal("unavailable") }),
+  Schema.Struct({ "refresh_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(3600)), "snapshot": Schema.Struct({ "accounts": Schema.Array(Schema.Unknown), "generatedAt": Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })), "schemaVersion": Schema.Literal(3) }), "state": Schema.Literal("available") })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "UsageHubQuota", description: "The operator's usage hub quota. snapshot is the hub's own schema version 3 document, relayed unchanged." }))()
+export type UsageHubQuota = typeof UsageHubQuota.Type
+export type UsageHubQuotaEncoded = typeof UsageHubQuota.Encoded
+
 export const HarnessInventoryItem = /*#__PURE__*/ (() => Schema.Struct({
   "kind": Schema.Literals(["file","directory","skill-command","slash-command"]),
   "name": Schema.String,
@@ -4207,6 +4284,8 @@ export const ReadCollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": Schema.Literal("ordered-memberships"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, "subject": ArrangementId, "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "trace": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("read-positions"), "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), /** The session's own person; requires the read-positions capability. */
+"person": ArrangementPerson, "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)), "kind": Schema.Literal("unsubscribe"), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "collection": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "trace": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ReadCollectionCommand" }))()
@@ -4232,6 +4311,32 @@ export const ReadCollectionFrame = /*#__PURE__*/ (() => Schema.Union([
 ], { mode: "oneOf" }).annotate({ identifier: "ReadCollectionFrame" }))()
 export type ReadCollectionFrame = typeof ReadCollectionFrame.Type
 export type ReadCollectionFrameEncoded = typeof ReadCollectionFrame.Encoded
+
+/** One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim. */
+export const ReadPosition = /*#__PURE__*/ (() => Schema.Struct({
+  "at": Timestamp,
+  "conversation": ReadPositionConversation,
+  "id": Id,
+  "kind": Schema.Literal("read-position"),
+  "operational": optionalKey(Operational),
+  "owner": ArrangementPerson,
+  "revision": Revision,
+  "updated_at": Timestamp
+}).annotate({ identifier: "ReadPosition", description: "One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim." }))()
+export type ReadPosition = typeof ReadPosition.Type
+export type ReadPositionEncoded = typeof ReadPosition.Encoded
+
+export const ReadPositionPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("read-positions"),
+  "filters": Schema.Record(Schema.String, Schema.String),
+  "items": Schema.Array(ReadPosition),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo,
+  "replicated": optionalKey(ReplicatedNotice),
+  "sync": optionalKey(SyncNotice)
+}).annotate({ identifier: "ReadPositionPage" }))()
+export type ReadPositionPage = typeof ReadPositionPage.Type
+export type ReadPositionPageEncoded = typeof ReadPositionPage.Encoded
 
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,

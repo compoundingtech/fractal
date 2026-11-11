@@ -2,6 +2,7 @@
   "contract": "st3.client.v0",
   "schema": "../schemas/client-v0.schema.json",
   "fixtures": [
+    {"file": "usage-hub-quota.json", "definition": "Envelope"},
     { "file": "harness-question.json", "definition": "Envelope" },
     { "file": "harness-questions-page.json", "definition": "Envelope" },
     { "file": "harness-answer.json", "definition": "ActionRequest" },
@@ -20,6 +21,7 @@
     { "file": "mission-detail-step-history.json", "definition": "Mission" },
     { "file": "mission-declaration-provenance.json", "definition": "MissionDeclaration" },
     { "file": "conversation-search.json", "definition": "Envelope" },
+    { "file": "message-sender-outcomes.json", "definition": "Page" },
     { "file": "timeline.json", "definition": "Envelope" },
     { "file": "timeline-views.json", "definition": "Envelope" },
     { "file": "timeline-conformance.json", "definition": "TimelinePage" },

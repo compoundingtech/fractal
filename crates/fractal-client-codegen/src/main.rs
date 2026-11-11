@@ -256,6 +256,10 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
         }
+        if id == "read-positions.list" {
+            writeln!(out, "    pub async fn read_positions_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ReadPositionPage>, ClientError> {{ let mut path = format!(\"/v1/client/read-positions?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
         if id == "arrangements.get" {
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
             continue;
@@ -310,6 +314,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    pub async fn usage_hub_quota(&self) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {{ self.get(\"/v1/client/usage/quota\").await }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -471,6 +477,10 @@ fn swift_operation_methods(
             writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
             continue;
         }
+        if id == "read-positions.list" {
+            writeln!(out, "    public func readPositionsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ReadPositionPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/read-positions\", query: query) }}")?;
+            continue;
+        }
         if id == "arrangements.get" {
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
             continue;
@@ -530,6 +540,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    public func usageHubQuota() async throws -> Envelope<UsageHubQuota> {{ try await get(\"v1/client/usage/quota\") }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -975,6 +987,9 @@ fn validate_surfaces(
         "OrderedMembership",
         "OrderedMembershipPage",
         "OrderedMembershipState",
+        "ReadPosition",
+        "ReadPositionPage",
+        "ReadPositionAdvanceParameters",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
@@ -1677,6 +1692,10 @@ fn typescript_operation_methods(
             writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
         }
+        if id == "read-positions.list" {
+            writeln!(out, "    async readPositionsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ReadPositionPage>> {{ return this.get('/v1/client/read-positions' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "arrangements.get" {
             writeln!(out, "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}")?;
             continue;
@@ -1715,6 +1734,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    async usageHubQuota(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<UsageHubQuota>> {{ return this.get('/v1/client/usage/quota', undefined, requestOptions) }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,

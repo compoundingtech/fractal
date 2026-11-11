@@ -15,7 +15,10 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/277dc6d9f7b226da58e526398ee450d877b6a4a1";
+      "github:overengineeringstudio/effect-utils/15ff7fa8968469c2c99a647888a999f9d62ffde5";
+    mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
+    mergemaster.inputs.nixpkgs.follows = "nixpkgs";
+    mergemaster.inputs.effect-utils.follows = "effect-utils";
   };
 
   outputs =
@@ -27,6 +30,7 @@
       pty,
       fabric,
       effect-utils,
+      mergemaster,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -400,6 +404,11 @@
           inherit effect-utils system version buildStamp;
           source = self;
         };
+        fractalWebPublisher = import ./nix/fractal-web-publisher.nix {
+          inherit effect-utils system version;
+          source = self;
+          installation = fractalWeb.installation;
+        };
 
         st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
           assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
@@ -588,6 +597,8 @@
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             ptyPackage
             effect-utils.packages.${system}.otelite
             messagingCompat
@@ -891,6 +902,12 @@
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.fractal-web = fractalWeb;
+        packages.fractal-web-publisher = fractalWebPublisher;
+        apps.fractal-web-publisher = {
+          type = "app";
+          program = "${fractalWebPublisher}/bin/fractal-web-publisher";
+        };
+        checks.fractal-web-publisher = fractalWebPublisher;
         packages.fractal = fractal;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
@@ -2185,6 +2202,8 @@
             # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             # st3's completion tests drive the installed stub in each supported shell.
             pkgs.fish
             pkgs.zsh

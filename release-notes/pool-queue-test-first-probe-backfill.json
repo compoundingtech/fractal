@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "summary": "Synchronize the pool-queue test after the waiter's first probe instead of sleeping, so its free-tree assertion cannot race the next temporary lock; backfill the release classification for PR #6140.",
+  "commits": ["65a77094e84c75227d740a826410d2552c24316e"],
+  "replay": {"status": "none", "detail": "Only test synchronization and release classification metadata change; no stored data is read or written by shipped code."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet coordination change."},
+  "compatibility": {"status": "none", "detail": "The test runner implementation and shipped clients, protocols and harness contracts are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption; no runtime code changes."},
+  "manual": {"status": "none", "detail": "No operator steps or runtime activation required."},
+  "recovery": {"status": "none", "detail": "No runtime rollback or roll-forward requirement; reverting the test-only change or this metadata does not alter stored state."}
+}

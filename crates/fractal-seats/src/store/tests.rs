@@ -1605,8 +1605,8 @@ version 2
 
   mission "lease" state="ready" {
     goal "Complete mission lease."
-    step "work" { assigned-to "agent/worker" }
-    step "other" { assigned-to "agent/worker" }
+    step "work" { assigned-to "agent/node.worker" }
+    step "other" { assigned-to "agent/node.worker" }
   }
 
 "#,

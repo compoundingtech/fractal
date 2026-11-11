@@ -142,6 +142,23 @@ not a claim about every external declaration.
 This per-feature gate does not establish the general adjacent-release guarantee
 described above. See [declared admission](priority.md#declared-admission).
 
+### Agent charter publication
+
+An agent's `description`, its charter, holds up to 8,192 UTF-8 bytes. A member that
+does not advertise `features.agent_charter=1` bounds it at 1,000 bytes whenever it
+parses declaration KDL: when it publishes or previews, and when it materializes the
+agents a mission declares for a run it evaluates. It admits replicated desired claims
+and reconciles a top-level agent from its stored declaration without that check.
+Publishing an agent declaration, directly or inside a mission, whose charter exceeds
+1,000 bytes therefore requires every active fleet incarnation to advertise
+`features.agent_charter=1`, under the membership and evidence policy of declared
+admission publication. Like declared admission, the gate fails closed without signed,
+anchored fleet membership: a standalone member with no anchored fleet cannot publish a
+charter over 1,000 bytes. A refusal fails with `agent-charter-feature-barrier` before
+anything is written. A charter of at most 1,000 bytes needs no advertisement. The
+gate checks support only at write time: keep every member on a supporting binary
+while a longer charter exists.
+
 ### Checkpoints in a mixed fleet
 
 The current [checkpoint contract](checkpoints.md) requires exactly equal rules
@@ -204,6 +221,45 @@ fresh writer; it is not a downgrade or permission to overwrite a running member.
 | Claim registry and replication | Admitted history, known claim vocabulary, projection digests and signature verification are separate checks. Equal replication digests alone do not establish claim-signature validity. An exchange's optional `build` names the sender's build for divergence faults; older peers omit it and ignore it. See [replication](replication.md). |
 | Client API | `st3.client.v0`, projection versions and capability versions are distinct from release tags and database schema. Discover capabilities first; unknown required capability versions stop the client, while unknown optional capabilities may be ignored. See the [client contract](client-v0/README.md#discovery-lists-and-details). |
 | Native harness and driver resume | Provider APIs, managed extensions and saved resume state have their own contracts. See [seats across deploys](seat-deploys.md); rolling back across the push-delivery boundary can require coordinated seat restarts. |
+
+### Additive assistant admission index
+
+Store initialization installs `claims_assistant_v1_principal_index` on
+`claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'))`
+with `CREATE INDEX IF NOT EXISTS`, including supported existing stores. This
+matches the parameterized kind/principal admission lookup; a missing principal
+continues to mean `assistant/chatgpt`. Existing claim rows and signed bodies are
+not rewritten, and no projection replay or manual SQL is required.
+
+This derived access path does not change `STORAGE_VERSION` (20),
+`RULES_VERSION` (26), the claim registry, or their storage, checkpoint and
+replication digests: row formats, vocabulary, shared projections and retention
+semantics are unchanged. It follows the schema-on-open index installation used
+for the assistant mission-run collection indexes. The first open builds the
+index synchronously over retained claims. On a 16-core x86_64 benchmark host
+(32 threads, Linux), exact index creation on a synthetic
+1,000,000-claim real Store schema took 1.525 seconds and grew the main database
+by 59,518,976 bytes. This measures index-build work, not complete daemon startup
+or cold-disk restart time; local history and hardware determine first-open delay.
+Subsequent opens reuse the index without changing the schema cookie. Older
+binaries can ignore the additional index; SQLite continues maintaining it on writes.
+
+Admission excludes revoked and effectively expired history in SQL while
+preserving the latest-policy and malformed-fields validation semantics. SQL work
+still scales with matching principal history, but inactive records no longer
+hydrate into Rust. With 10,000 expired grants per principal and concurrent pairing
+completions, real authenticated summary GET p95 on that benchmark host was 54.154 ms
+(approval-once) and 46.173 ms (caller-bound-allow), compared with 965.184 ms and
+933.049 ms on baseline `98e550cb75` (200 samples per mode). Both indexed modes
+meet q39's 100 ms budget. The opt-in `daemon_cost::assistant_admission` tests use
+production daemon routers over bound Unix/TCP sockets, real bearer middleware,
+and distinct build directories for the baseline and indexed worktrees.
+
+Subscription deferral counts keep their request-history index explicitly selected,
+following the existing plan-sensitive history-query convention. Without `ANALYZE`,
+SQLite's default estimates can select a subject/kind history scan after an unrelated
+kind-leading index is added; request filtering must remain an index seek rather
+than decoding every deferral for that subscription.
 
 Use CLI and the terminal UI from the same release source. Current client version scope is:
 

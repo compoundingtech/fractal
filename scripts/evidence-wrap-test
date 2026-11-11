@@ -682,6 +682,70 @@ os.execv({real_git!r}, ['git', *args])
         assert refused.returncode == 1 and b'did not verify locally' in refused.stderr, refused.stderr
         print('passed: a per-crate record is verified as that crate\'s: a failed record of another crate does not decide it, its own unverified record still blocks a push')
 
+        # A local upload-pack disables lazy fetching. HEAD's checkout is not enough:
+        # the scratch fetch also needs blobs reachable only through old commits.
+        source = tmp / 'partial-source'
+        git(tmp, 'init', '-q', str(source))
+        (source / 'flake.lock').write_text('{"nodes":{}}\n')
+        (source / 'historical').write_text('only in history\n')
+        git(source, 'add', '.')
+        git(source, 'commit', '-q', '-m', 'historical blob')
+        git(source, 'rm', 'historical')
+        (source / '.st').mkdir()
+        (source / '.st/evidence-keys').write_text(signers.read_text())
+        git(source, 'add', '.')
+        git(source, 'commit', '-q', '-m', 'remove historical blob')
+        origin = tmp / 'partial-origin.git'
+        git(tmp, 'clone', '-q', '--bare', str(source), str(origin))
+        git(origin, 'config', 'uploadpack.allowFilter', 'true')
+
+        def partial_clone(name):
+            checkout = tmp / name
+            git(tmp, 'clone', '-q', '--filter=blob:none', origin.as_uri(), str(checkout))
+            assert git(checkout, 'config', '--get', 'remote.origin.promisor') == 'true'
+            git(checkout, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+            assert any(line.startswith('?') for line in
+                       git(checkout, 'rev-list', '--objects', '--missing=print', 'HEAD').splitlines())
+            return checkout
+
+        partial = partial_clone('partial-checkout')
+        unavailable = partial_clone('unavailable-checkout')
+        partial_home = tmp / 'partial-home'
+        (partial_home / '.config/st').mkdir(parents=True)
+        (partial_home / '.config/st/evidence-sign.json').write_text(json.dumps(
+            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'partial-scratch.git'),
+             'test_clock': True, 'path': tool_path()}))
+
+        def partial_wrap(checkout):
+            return run([sys.executable, str(WRAP), '--check', 'linux-gate',
+                        '--toolchain-sha256', toolchain, '--signer', signer,
+                        '--change-id', 'github:example/repo#5', '--', 'true'],
+                       checkout, partial_home)
+
+        caller = runpy.run_path(str(ROOT / 'scripts/st-test'))
+        caller['hydrate_commit'](partial, git(partial, 'rev-parse', 'HEAD'))
+        signed = partial_wrap(partial)
+        assert signed.returncode == 0, signed.stderr.decode()
+        assert not any(line.startswith('?') for line in
+                       git(partial, 'rev-list', '--objects', '--missing=print', 'HEAD').splitlines())
+        signed_result = json.loads(signed.stderr.decode()[signed.stderr.decode().index('{'):])
+        git(partial, '-c', 'gpg.format=ssh', '-c', f'gpg.ssh.allowedSignersFile={signers}',
+            'verify-commit', signed_result['record'])
+        print('passed: caller hydrates blob:none historical blobs before signing with a verified signature')
+
+        marker = tmp / 'transport-ran'
+        git(unavailable, 'remote', 'set-url', 'origin', 'ssh://invalid.example/repository')
+        git(unavailable, 'config', 'core.sshCommand', f'touch {marker}')
+        request = dict(good, commit=git(unavailable, 'rev-parse', 'HEAD'))
+        refused = subprocess.run([sys.executable, str(SIGN)], cwd=unavailable,
+                                 input=json.dumps(request).encode(), capture_output=True,
+                                 env=dict(ENV, HOME=str(partial_home), EVIDENCE_SIGN_NOW=DATE))
+        assert refused.returncode != 0, refused.stderr.decode()
+        assert b'missing objects before signing; hydrate the source repository in the caller first' in refused.stderr, refused.stderr.decode()
+        assert not marker.exists(), 'the signer must not run a transport'
+        assert not git(unavailable, 'for-each-ref', 'refs/tags/evidence', 'refs/notes/evidence')
+        print('passed: signer refuses missing partial-clone objects without running a transport or publishing evidence')
+
         if write_fixture:
             write_fixture.mkdir(parents=True, exist_ok=True)
             fixture_home = tmp / 'fixture-home'

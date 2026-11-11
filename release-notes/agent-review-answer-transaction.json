@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepare atomic internal agent review answer writes",
+  "replay": {"status": "none", "detail": "No existing answer fold or production ingress calls the dormant writer."},
+  "schema": {"status": "none", "detail": "No accepted wire changes; public parsers and generic append remain closed to agent-review."},
+  "rules": {"status": "none", "detail": "One writer transaction reloads the stored request, canonical assignment, agent retirement and the real missions responsibility snapshot before the shared answer predicate. Existing owner revision, definition, attempt and ancestor liveness checks are reused. Result fields and request evidence append together; the caller rolls back on any error."},
+  "compatibility": {"status": "none", "detail": "No human answer or delegation policy changes. Retired reviewers report reviewer-retired; stale owner bindings report agent-review-stale. No completion route or authentication claim is enabled."},
+  "downtime": {"status": "none", "detail": "No runtime cutover."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "No data migration or recovery is required."}
+}

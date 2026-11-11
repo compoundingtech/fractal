@@ -177,12 +177,17 @@ pub fn message_view(graph: &super::Store, subject: &str) -> anyhow::Result<Optio
         return Ok(None);
     }
     let mut actual = sent.body.get("fields").cloned().unwrap_or_else(|| json!({}));
-    for (_, fields) in lifecycle_records(&shard, subject)? {
+    let mut consumed = false;
+    for (kind, fields) in lifecycle_records(&shard, subject)? {
+        consumed |= matches!(kind.as_str(), "message.delivered" | "message.read");
         if let (Some(actual), Value::Object(fields)) = (actual.as_object_mut(), fields) {
             actual.extend(fields);
         }
     }
     let connection = graph.graph.readers.get();
+    if !consumed && let Some(status) = super::message_expiry::status(&connection, subject)? {
+        actual["status"] = json!(status);
+    }
     super::message_view_from(&connection, subject, STREAM_INDEX_BASE + index, actual, None).map(Some)
 }
 
@@ -263,7 +268,9 @@ pub fn any_after(graph: &super::Store, filter: Filter<'_>, mut after: u64) -> an
     loop {
         let rows = page(graph, filter, after, ANY_AFTER_BATCH)?;
         for (subject, index) in &rows {
-            if !graph_sent(graph, subject)? {
+            if !graph_sent(graph, subject)?
+                && (!filter.open_only || graph.message_expiry(subject)?.is_none_or(|expiry| expiry.superseded))
+            {
                 return Ok(true);
             }
             after = *index;
@@ -369,6 +376,8 @@ fn record_lifecycle_checked(
     let Some((sent, _)) = stream_item(&shard, subject).map_err(internal)? else {
         return Err(FractalError::new("missing-message", format!("no stream item `{subject}`")));
     };
+    let gate = graph.extension::<super::message_expiry::ReceiptGate>();
+    let _held = gate.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // The step is decided and recorded under the shard's writer, in one transaction, so two
     // steps at once can't both pass a check made before either was recorded.
     let mut writer = shard.connection.write();
@@ -383,10 +392,12 @@ fn record_lifecycle_checked(
         .unwrap_or(0);
     // A successor records its own custody read of mail its predecessor already read, once.
     let custody_reread = checked && rank == 3 && current == 3 && fields.contains_key("acting_for");
+    let late_consumption = checked && matches!(rank, 2 | 3)
+        && super::message_expiry::exists(&graph.readers.get(), subject).map_err(internal)?;
     // A replayed or earlier step settles to what is recorded, as a graph receipt does. An
     // admitted step is recorded wherever the item stands, as the graph appends its claim, so the
     // receipt it names exists.
-    if checked && rank <= current && !custody_reread {
+    if checked && rank <= current && !custody_reread && !late_consumption {
         return Ok(false);
     }
     // Forward steps follow the graph's message transitions, so a stream item moves as the same
@@ -394,6 +405,7 @@ fn record_lifecycle_checked(
     let recipient = sent.body.pointer("/fields/to").and_then(Value::as_str);
     let valid = !checked
         || custody_reread
+        || late_consumption
         || matches!((current, rank), (0, 1) | (1, 2) | (0, 2) | (2, 3) | (3, 4))
         // A person's displayed message has no harness handoff; their read is its delivery.
         || (rank == 3 && current <= 1 && actor.is_some_and(|actor| actor.starts_with("person/")) && actor == recipient)

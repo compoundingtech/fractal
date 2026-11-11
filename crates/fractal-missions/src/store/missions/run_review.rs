@@ -6,13 +6,7 @@ use fractal_store::store::{
     step_run_row_tx,
 };
 
-/// Snapshot loaded only inside the answer writer's transaction.
-#[doc(hidden)]
-pub struct ReviewOwnerSnapshot {
-    pub responsible_agents: BTreeSet<String>,
-    pub reviewer: String,
-    pub agentless: bool,
-}
+pub use fractal_store::store::agent_review_transaction::ReviewOwnerSnapshot;
 
 /// The only responsibility loader for the dormant agent-answer transaction helper.
 /// FINAL must use this loader before enabling the wire; callers cannot supply an owner set.

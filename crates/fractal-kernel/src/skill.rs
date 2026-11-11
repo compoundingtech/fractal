@@ -121,6 +121,7 @@ mod tests {
         assert!(description.len() <= 1024);
         for usage in [
             "`printenv ST_AGENT` prints this seat's identity. When it prints nothing",
+            "`\"$ST3_BIN\" agents show \"$ST_AGENT\"` prints this seat's charter",
             "`[PING from st3] message/ID from SENDER: TITLE` or inside `<smalltalk-message>`",
             "`\"$ST3_BIN\" conversations read message/ID --as \"$ST_AGENT\"`",
             "`\"$ST3_BIN\" conversations reply message/ID --from \"$ST_AGENT\" --body TEXT`",

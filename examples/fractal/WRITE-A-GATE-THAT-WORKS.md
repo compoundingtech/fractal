@@ -79,8 +79,8 @@ captured PATH, and make the owning step timeout strictly longer than the gate's 
 ## Exit 0 to pass, 1 for not yet
 
 A gate's exit status is its answer. 0 passes. 1 means not yet: the step keeps waiting and st runs
-the gate again a minute later, then twice as long after each further not yet, up to every fifteen
-minutes. Any other status breaks the gate, and so does a check that cannot start, that something
+the gate again five seconds later, then twice as long after each further not yet, up to every
+fifteen minutes. Any other status breaks the gate, and so does a check that cannot start, that something
 kills, that runs past its time limit, or that runs an `st` command st refused or that listed only
 part of a collection. A broken gate does not fail its step: the step waits, and whoever published
 the mission gets an attention item with the gate's output, to revise the gate.

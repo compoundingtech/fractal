@@ -1374,22 +1374,18 @@ fn malformed_or_duplicate_kdl_presentation_is_rejected() {
 }
 
 #[test]
-fn presentation_bounds_count_unicode_scalars_and_reject_noncanonical_values() {
+fn presentation_bounds_count_names_in_scalars_descriptions_in_bytes_and_reject_noncanonical_values() {
     use agent_spec::spec::{
-        AGENT_DESCRIPTION_MAX_CHARS, AGENT_NAME_MAX_CHARS, validate_presentation,
+        AGENT_DESCRIPTION_MAX_BYTES, AGENT_NAME_MAX_CHARS, validate_description,
+        validate_presentation,
     };
 
     let name_at_limit = "é".repeat(AGENT_NAME_MAX_CHARS);
-    let description_at_limit = "界".repeat(AGENT_DESCRIPTION_MAX_CHARS);
+    // 2,730 three-byte characters and two ASCII bytes: exactly 8,192 bytes.
+    let description_at_limit = format!("{}ab", "界".repeat(AGENT_DESCRIPTION_MAX_BYTES / 3));
+    assert_eq!(description_at_limit.len(), AGENT_DESCRIPTION_MAX_BYTES);
     assert!(validate_presentation("name", Some(&name_at_limit), AGENT_NAME_MAX_CHARS).is_ok());
-    assert!(
-        validate_presentation(
-            "description",
-            Some(&description_at_limit),
-            AGENT_DESCRIPTION_MAX_CHARS,
-        )
-        .is_ok()
-    );
+    assert!(validate_description(Some(&description_at_limit)).is_ok());
     assert!(
         validate_presentation(
             "name",
@@ -1398,19 +1394,14 @@ fn presentation_bounds_count_unicode_scalars_and_reject_noncanonical_values() {
         )
         .is_err()
     );
-    assert!(
-        validate_presentation(
-            "description",
-            Some(&format!("{description_at_limit}x")),
-            AGENT_DESCRIPTION_MAX_CHARS,
-        )
-        .is_err()
-    );
-    for (field, max_chars) in [
-        ("name", AGENT_NAME_MAX_CHARS),
-        ("description", AGENT_DESCRIPTION_MAX_CHARS),
-    ] {
-        assert!(validate_presentation(field, Some(r"slash/name\path"), max_chars).is_ok());
+    assert!(validate_description(Some(&format!("{description_at_limit}x"))).is_err());
+    assert!(validate_description(None).is_ok());
+    let check = |field: &str, value: &str| match field {
+        "name" => validate_presentation(field, Some(value), AGENT_NAME_MAX_CHARS),
+        _ => validate_description(Some(value)),
+    };
+    for field in ["name", "description"] {
+        assert!(check(field, r"slash/name\path").is_ok());
         for invalid in [
             "",
             " leading",
@@ -1420,10 +1411,7 @@ fn presentation_bounds_count_unicode_scalars_and_reject_noncanonical_values() {
             "line\u{2028}separator",
             "paragraph\u{2029}separator",
         ] {
-            assert!(
-                validate_presentation(field, Some(invalid), max_chars).is_err(),
-                "accepted {field} {invalid:?}"
-            );
+            assert!(check(field, invalid).is_err(), "accepted {field} {invalid:?}");
         }
     }
 }

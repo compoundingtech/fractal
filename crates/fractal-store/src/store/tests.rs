@@ -442,7 +442,7 @@ fn subject_claim_pages_seek_the_subject_index() {
         .unwrap();
     let connection = store.readers.get();
     for descending in [false, true] {
-        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(true, descending));
+        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(ClaimsSubject::Exact, false, descending, false));
         let plan = connection
             .prepare(/* sqlite-large-value: allow-for-now lv-h8911c1538a9c owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &query)
             .unwrap()
@@ -2328,8 +2328,10 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                     json!({"fields":{"state":"ready"}, "_operation":{"id":"op/malformed"}}),
                 ),
                 "operation-conflict" => (
-                    "harness.observed",
-                    json!({"fields":{"state":"ready"}, "_operation":operation}),
+                    "work.nudged",
+                    json!({"fields":{"attempt":1,"agent":"agent/node.test",
+                        "message":"message/invented-nudge","idle_since_unix_ms":"1",
+                        "reason":"invented control","waits":[]}, "_operation":operation}),
                 ),
                 "incremental-error:internal" => ("intent.desired", json!({})),
                 _ => ("harness.observed", json!({"fields":{"state":"ready"}})),
@@ -2527,6 +2529,7 @@ fn simple_replication_registers_unambiguous_event_operations() {
     }
     assert!(store.operation_projection_drift().unwrap().is_empty());
     assert!(store.project_replication_backlog().unwrap());
+    let replays = FULL_REPLAYS.with(std::cell::Cell::get);
     {
         let mut connection = store.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
@@ -2543,19 +2546,80 @@ fn simple_replication_registers_unambiguous_event_operations() {
             None,
         )
         .unwrap();
-        assert!(!try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap());
+        assert!(try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap());
         transaction.commit().unwrap();
     }
-    assert!(store.project_replication_backlog().unwrap());
-    assert!(store.operation_projection_drift().unwrap().is_empty());
-    let connection = store.connection.lock().unwrap();
     assert_eq!(
-        operation_tx(&connection, "op/simple-event")
+        operation_tx(&store.readers.get(), "op/simple-event")
             .unwrap()
             .unwrap()
             .2,
         "conflict"
     );
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays);
+    assert!(store.operation_projection_drift().unwrap().is_empty());
+    assert!(store.project_replication_backlog().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays);
+    let operations =
+        crate::store::message_send_tests_shared_delivery::operation_rows(&store.readers.get());
+    let digests = store
+        .replication_snapshot()
+        .unwrap()
+        .projection_digests
+        .clone();
+    store.replay_replication_graph().unwrap();
+    assert_eq!(
+        crate::store::message_send_tests_shared_delivery::operation_rows(&store.readers.get()),
+        operations
+    );
+    assert_eq!(
+        store.replication_snapshot().unwrap().projection_digests,
+        digests
+    );
+}
+
+#[test]
+fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
+    let store = Store::open_memory("node").unwrap();
+    store.project_replication_backlog().unwrap();
+    for (index, digest) in ["digest-one", "digest-two"].into_iter().enumerate() {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            &store.origin,
+            "step-run/invented-nudge",
+            WORK_NUDGED_KIND,
+            Some("daemon/runtime"),
+            &json!({"fields": {
+                "attempt": 1, "agent": "agent/node.test", "message": "message/invented-nudge",
+                "idle_since_unix_ms": "1", "reason": digest, "waits": []
+            }, "_operation": {"id": "op/structural-event", "request_digest": digest}}),
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap(),
+            index == 0
+        );
+        transaction.commit().unwrap();
+        drop(connection);
+        let replays = FULL_REPLAYS.with(std::cell::Cell::get);
+        store.project_replication_backlog().unwrap();
+        assert_eq!(
+            FULL_REPLAYS.with(std::cell::Cell::get),
+            replays + usize::from(index == 1)
+        );
+    }
+    assert_eq!(
+        operation_tx(&store.readers.get(), "op/structural-event")
+            .unwrap()
+            .unwrap()
+            .2,
+        "conflict"
+    );
+    assert!(store.operation_projection_drift().unwrap().is_empty());
 }
 
 pub(super) fn rewrite_envelope(
@@ -3363,7 +3427,8 @@ fn a_prefixs_subjects_are_read_one_seek_per_subject() {
 fn seat_steps_are_read_from_the_open_steps() {
     let store = Store::open_memory("node").unwrap();
     for agent in [None, Some("agent/seat")] {
-        let steps = query_plan(&store, SEAT_STEP_ROWS, params![agent, now_ms().to_string()]);
+        let spellings = agent.map(work_actor_spellings_json);
+        let steps = query_plan(&store, SEAT_STEP_ROWS, params![spellings, now_ms().to_string()]);
         assert!(
             steps
                 .iter()

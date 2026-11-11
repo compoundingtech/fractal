@@ -352,6 +352,13 @@ instead of assuming every assignee or claimant is an agent.
 
 `loop_round` and `loop_max_rounds` belong to the loop attached to that exact step in the current
 generation; they are null for a non-loop step. `loop_reason` is the observed loop-state reason.
+`program`, present only on a program step of a run the detail enriches, is its current attempt's
+journal: `entries` holds each key's latest `status` (`started`, `completed` or `failed`),
+`started_at`, `ended_at`, `ms`, the typed `error`, and the `child` run or ask the key waits on, in
+the order the keys first appear; the newest 200 journal entries are read and `truncated` says older
+ones exist. `open_key` is the innermost open key, `last_entry_at` the newest entry, and `fault` the
+open `program/host` or `program/stalled` fault (`scope`, `reason`), which the run's `blocker` also
+names when no scheduler fault does.
 `next_wake_at` is the observed not-before time (earliest work eligibility), not a delivery promise
 or a computed retry estimate. `wake_reason` is the deferral's blocked reason, otherwise the
 observed wake failure. `wake` carries the assignee and its current harness state/incarnation,
@@ -1337,7 +1344,10 @@ Observer and subscription lists and details are available at `/v1/client/observe
 `/v1/client/subscriptions`. Each resource includes its normalized specification, current state,
 and owning run, generation, and step. Agentless work includes `gate_kind`: `watch` for a standing
 step with no gate, `predicate`, `command`, `llm`, or `human` for a single gate family, `mixed`
-for combined families, and `run` for an `after-run` step.
+for combined families, `run` for an `after-run` step, and `program` for a program step. A program
+step's work also carries `program`: its innermost open journal key (`open_key`, with
+`open_since_unix_ms` and the `child` run or ask that key waits on), `last_entry_at_unix_ms`, and
+the `stalled_after_ms` past which `missions waiting-on` reports it as `no-progress`.
 
 ## Harness-neutral session timeline
 
@@ -1525,6 +1535,10 @@ binding response, even if a retry supplies different bytes and a current binding
 associated writes return HTTP 409 `idempotency-key-expired`, with the key and original claim id,
 when the saved response cannot be rebuilt. This is terminal (`retryable: false`), not a silent
 success; inspect the committed outcome before deliberately starting a new action with a fresh key.
+Revision approval retries can resume from the matching committed approval claim when the
+response is missing: they preserve the approval, finish any outstanding immediate cutover,
+and save the rebuilt result. A projection-drain refusal between approval, cutover and response
+storage does not turn the same approval key into a terminal expired-key refusal.
 
 Seven days covers the phone's retries with backoff and ordinary retries across a daemon
 restart. Exact saved-response replay lasts seven days; durable recognition of the original
@@ -2842,6 +2856,39 @@ Projection rebuild and heal retain a local rebuild frontier, so replaying older 
 claims cannot move a lifecycle-updated frontier backwards. This watermark survives on the
 same host without becoming shared projection or checkpoint authority.
 
+## Read positions
+
+A read position is one person's position in one conversation: the time of the newest prose they
+have seen there, on any device or host. Positions sync across a person's TUI, web and phone;
+per-device storage is only an offline cache. Discover the `read-positions` capability, version
+1. It is granted only when the session can list, follow and advance (`read.projections`,
+`read.arrangements`, `control.arrangements`, and a concrete person or trusted local fleet agent);
+otherwise a client keeps positions locally, as against an older daemon. No new scopes exist:
+positions are person workspace state, granted with arrangements.
+
+Read `GET /v1/client/read-positions?person=person%2FNAME` (ordinary cursor/limit pagination).
+A person session selects only its own person; another person is `forbidden`. Items are
+`ReadPosition` resources ordered by conversation: `id`
+(`read-position/person/NAME/<conversation>`), `kind: "read-position"`, `owner`,
+`conversation` (`agent/...` or `session/...`, at most 512 bytes), `at`, `revision` (the
+winning claim) and `updated_at`.
+
+Advance with the `read-position.advance` action, fenced by `snapshot_id` only:
+`{owner, conversation, at}`. Positions only move forward. An `at` not beyond the stored
+position completes without a claim; otherwise the daemon appends `read-position.advanced` on
+`read-position/person/NAME`. Every completed advance returns `read_position_at`, the stored
+position after the merge. Each host keeps the largest `at` per conversation (equal times go
+to the larger canonical claim key), so advances from several devices and hosts converge in any
+replication order, and idempotency keys may be fresh per send.
+
+Follow `{"kind":"subscribe","collection":"read-positions","person":"person/NAME"}`. Frames
+are ordinary resource frames; treat each as an invalidation and re-list. A frame is sent
+whenever any of the person's positions changes, also outside the window's rows.
+
+A position is unknown until a conversation is first read anywhere: nothing there is new.
+A conversation is unread when its position is known and its roster `last_prose_at` is more
+than 2 seconds (roster skew) after it.
+
 ## Agent and plain-shell creation
 
 `agent.create` takes `name`, `harness` (`claude`, `codex`, `omp`, `pi`, `opencode`), optional `host`,
@@ -2849,6 +2896,10 @@ same host without becoming shared projection or checkpoint authority.
 in `fractal agents new`. Workspace paths are absolute on the selected host; omission asks that host for
 its usual new-agent directory. The host creates missing agent workspaces. OpenCode does not accept
 `effort`. Message text is nonempty, at most 64 KiB, and uses the native harness startup argument.
+`description` is the agent's charter: nonempty UTF-8 of at most 8 KiB (8,192 bytes), lines
+included. A charter over 1,000 bytes publishes only when every active fleet member advertises
+`features.agent_charter=1` (see [compatibility](../compatibility.md#agent-charter-publication));
+otherwise the action fails with `agent-charter-feature-barrier` and publishes nothing.
 An existing active seat requires a different name; a stopped seat may be deliberately recreated.
 
 Names accept either a bare ID or the same ID prefixed with `agent/`; the prefix is
@@ -3491,6 +3542,23 @@ If the standby restarts while the primary is down, the standby cannot take over 
 
 Hosted validation must run `cargo run -p fractal-client-codegen -- --check`. Generated
 files remain generated; do not hand-edit clients for open JSON observation detail.
+
+## Usage hub quota relay
+
+The daemon accepts optional `[usage_hub]` configuration with `url` (the hub's base URL: https, or
+http on loopback only; no credentials, path, query or fragment) and `refresh_seconds` (default 30,
+range 1–3600). Only the operator selects the URL, and the daemon requests only its fixed
+`/api/v1/quota` path, directly (no proxy), refusing redirects, within a five-second deadline and a
+2 MB body limit. An edit applies on the next request without a restart. A daemon older than this
+key refuses a config file that sets it, so upgrade before setting it.
+
+`GET /v1/client/usage/quota` requires `read.projections` and uses the normal client-v0 envelope.
+Its value is `{state:"disabled"}`, `{state:"unavailable",refresh_seconds,reason}` or
+`{state:"available",refresh_seconds,snapshot}`. `snapshot` is the hub's own schema version 3
+document, relayed with its additive fields. Requests share one fetch and its success or failure
+for a refresh window, and errors never return an old document as available. Unavailable reasons
+distinguish `transport` from `invalid_snapshot`. A daemon without this route answers 404, which
+clients show the same as no source configured. Existing clients and routes are unaffected.
 
 ## External quota source v1
 

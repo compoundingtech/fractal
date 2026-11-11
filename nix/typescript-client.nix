@@ -37,6 +37,7 @@ let
       ../clients/typescript/fractal-declarations/package.json
       ../clients/typescript/fractal-scenarios/package.json
       ../clients/typescript/fractal-views/package.json
+      ../packages/fractal/package.json
       ../packages/fractal-ui/package.json
     ];
   };

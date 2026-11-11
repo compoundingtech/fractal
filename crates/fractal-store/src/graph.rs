@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::declaration_syntax::*;
+use crate::declaration_kdl::canonical_node;
 pub use crate::declaration_syntax::parse_duration;
 #[cfg(test)]
 use crate::model::GateSpec;
@@ -26,6 +27,7 @@ const ROOT_NODES: &[&str] = &[
     "mission-run",
     "planning-session",
     "message",
+    "objective",
     "repair",
     "schedule",
     "stop",
@@ -234,6 +236,7 @@ pub fn parse_intent_with_owner(
         .map_err(|error| FractalError::new("unsupported-kdl-version", error.to_string()))?;
     let mut deprecated_syntax = BTreeSet::new();
     canonicalize_terminal_declarations(&mut document, &mut deprecated_syntax);
+    lower_context_references(&mut document);
     let canonical_document = document.clone();
     lower_terminal_declarations(&mut document);
     let declarations = document
@@ -377,6 +380,12 @@ fn parse_desired_node(
         return Err(FractalError::new(
             "account-inside-mission",
             "an account declaration must be at the root",
+        ));
+    }
+    if kind == "objective" && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
         ));
     }
     match kind {
@@ -1687,6 +1696,7 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     validate_name(&name, false)?;
     match kind {
         "account" => validate_account(node)?,
+        "objective" => validate_objective(node)?,
         "doc" => validate_doc(node)?,
         "resource" => validate_resource(node)?,
         "observer" => validate_observer(node)?,
@@ -1702,6 +1712,8 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     }
     let subject = match kind {
         "doc" => format!("doc/{name}"),
+        // The kernel reader names the subject, so `objective "objective/x"` is not `objective/x`.
+        "objective" => format!("objective/{name}"),
         "lane" | "observer" | "subscription" | "schedule" if context.owner_run.is_some() => {
             format!(
                 "{kind}/{}/{}",
@@ -1737,6 +1749,23 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
             &name,
         )?;
         context.document_refs.insert(format!("doc/{name}@{hash}"));
+    }
+    Ok(())
+}
+
+/// An objective a fleet declares: the kernel's strict reader, and only an interval over claims
+/// named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
+fn validate_objective(node: &KdlNode) -> Result<(), FractalError> {
+    let objective = crate::objective::parse(&canonical_node(node)?)?;
+    if !objective.declarable() {
+        return Err(FractalError::new(
+            "objective-not-declarable",
+            format!(
+                "objective `{}`: a fleet declares an `interval` objective named NAMESPACE/NAME; `{}` indicators and one-segment names are the objectives Fractal ships",
+                objective.name,
+                objective.indicator.kind()
+            ),
+        ));
     }
     Ok(())
 }
@@ -2611,11 +2640,14 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         ));
     }
     if let Some(description) = child_string(document, "description")?
-        && description.len() > 1_000
+        && description.len() > agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
     {
         return Err(FractalError::new(
             "description-too-long",
-            "an agent description cannot exceed 1,000 bytes",
+            format!(
+                "an agent description, its charter, cannot exceed {} bytes",
+                agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES
+            ),
         ));
     }
     parse_workspace(document)?;
@@ -4405,7 +4437,10 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
         let gate = node.name().value() == "gate";
         let mission = node.name().value() == "mission";
         for child in children.nodes() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 collect_document_refs(child, output)?;
             }
         }
@@ -4422,54 +4457,6 @@ fn insert_subject(context: &mut ParseContext, subject: DesiredSubject) -> Result
         ));
     }
     Ok(())
-}
-
-fn canonical_node(node: &KdlNode) -> Result<Value, FractalError> {
-    let mut properties = BTreeMap::<String, Value>::new();
-    let mut arguments = Vec::new();
-    for entry in node.entries() {
-        let value = json_value(entry.value())?;
-        if let Some(name) = entry.name() {
-            if properties.insert(name.value().into(), value).is_some() {
-                return Err(FractalError::new(
-                    "duplicate-property",
-                    format!(
-                        "node `{}` repeats property `{}`",
-                        node.name().value(),
-                        name.value()
-                    ),
-                ));
-            }
-        } else {
-            arguments.push(value);
-        }
-    }
-    let children = node
-        .children()
-        .map(|document| {
-            document
-                .nodes()
-                .iter()
-                .map(canonical_node)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let mut output = Map::new();
-    output.insert("name".into(), Value::String(node.name().value().into()));
-    if !arguments.is_empty() {
-        output.insert("arguments".into(), Value::Array(arguments));
-    }
-    if !properties.is_empty() {
-        output.insert(
-            "properties".into(),
-            serde_json::to_value(properties).expect("BTreeMap serializes"),
-        );
-    }
-    if !children.is_empty() {
-        output.insert("children".into(), Value::Array(children));
-    }
-    Ok(Value::Object(output))
 }
 
 fn hash_json(value: &Value) -> String {
@@ -4529,6 +4516,28 @@ fn bounded_runtime_id(candidate: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_charter_holds_up_to_eight_kib_of_multiline_utf8() {
+        let agent = |description: &str| {
+            format!("version 2\nagent \"example/chartered\" {{\n  description {description:?}\n  command \"true\"\n}}\n")
+        };
+        // Nine bytes per line: a three-byte character, ASCII, and a newline.
+        let at_limit = format!("{}ab", "界 line\n".repeat(910));
+        assert_eq!(at_limit.len(), agent_spec::spec::AGENT_DESCRIPTION_MAX_BYTES);
+        let intent = parse_intent(&agent(&at_limit), "node").unwrap();
+        assert_eq!(
+            crate::model::canonical_child_string(
+                &intent.subjects["agent/example/chartered"].desired,
+                "description"
+            )
+            .as_deref(),
+            Some(at_limit.as_str())
+        );
+        let error = parse_intent(&agent(&format!("{at_limit}c")), "node").unwrap_err();
+        assert_eq!(error.code, "description-too-long");
+        assert!(error.message.contains("8192 bytes"), "{}", error.message);
+    }
 
     #[test]
     fn an_agent_checkout_needs_a_workspace_and_git_ref_names() {
@@ -4773,6 +4782,72 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    const OBJECTIVE: &str = r#"
+version 2
+
+objective "ops/change-rollout" {
+  about "A change, from its author marking it ready to every member that serves it"
+  indicator "interval" {
+    subject-prefix "custom/acme/change/"
+    start "custom.acme.change-ready" at="ready_at"
+    expect "custom.acme.change-merged" set="hosts" at="merged_at"
+    stop "custom.acme.change-applied" member="host" at="applied_at"
+    cancel "custom.acme.change-abandoned"
+    label "class"
+  }
+  window "7d" min-samples=3
+  target "p50" within="60s"
+  target "p95" within="5m"
+  on-breach "fault" owner="agent/ops/release-manager" backup="agent/ops/observability" condition="change-rollout-slo-missed"
+}
+"#;
+
+    #[test]
+    fn an_objective_is_a_root_declaration_the_kernel_reads() {
+        let intent = parse_intent(OBJECTIVE, "node").unwrap();
+        let desired = &intent.subjects["objective/ops/change-rollout"];
+        assert_eq!((desired.kind.as_str(), desired.member.is_none()), ("objective", true));
+        let objective = crate::objective::parse(&desired.desired).unwrap();
+        assert_eq!(objective.name, "ops/change-rollout");
+        assert!(objective.declarable());
+
+        let nested = parse_execution_intent(OBJECTIVE, "node", "run-1").expect_err("a run cannot own an objective");
+        assert_eq!(nested.code, "objective-inside-mission");
+        let body = OBJECTIVE.trim_start().trim_start_matches("version 2").trim();
+        for inside in [
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  {body}\n  step \"work\" {{ agentless }}\n}}\n"),
+            format!("version 2\nmission \"bad\" state=\"ready\" {{\n  goal \"No.\"\n  step \"work\" {{\n    {body}\n  }}\n}}\n"),
+        ] {
+            assert_eq!(parse_intent(&inside, "node").unwrap_err().code, "objective-inside-mission", "{inside}");
+        }
+    }
+
+    #[test]
+    fn only_an_interval_named_namespace_slash_name_is_declarable() {
+        let one_segment = OBJECTIVE.replace("\"ops/change-rollout\"", "\"change-rollout\"");
+        assert_eq!(parse_intent(&one_segment, "node").unwrap_err().code, "objective-not-declarable");
+
+        let native = r#"
+version 2
+objective "ops/statement" {
+  about "One SQL statement"
+  indicator "statement"
+  target "p99" within="25ms"
+  target "max" within="250ms"
+}
+"#;
+        assert_eq!(parse_intent(native, "node").unwrap_err().code, "objective-not-declarable");
+
+        for broken in [
+            OBJECTIVE.replace("  window \"7d\" min-samples=3\n", ""),
+            OBJECTIVE.replace("target \"p95\" within=\"5m\"", "target \"p95\" max=5"),
+            OBJECTIVE.replace("    label \"class\"\n", "    label \"class\"\n    retry \"x\"\n"),
+            OBJECTIVE.replace("backup=\"agent/ops/observability\"", "backup=\"agent/ops/release-manager\""),
+        ] {
+            assert_eq!(parse_intent(&broken, "node").unwrap_err().code, "invalid-objective", "{broken}");
+        }
     }
 
     #[test]
@@ -5786,6 +5861,51 @@ version 2
         assert_eq!(pty.normalized, terminal.normalized);
         assert!(pty.deprecated_syntax.contains("pty"));
         assert!(terminal.deprecated_syntax.is_empty());
+    }
+
+    #[test]
+    fn fractal_context_references_publish_the_same_mission_as_st_references() {
+        let source = |run: &str, workspace: &str, step: &str| {
+            format!(
+                r#"version 2
+agent "helper" {{ workspace "/tmp"; command "echo ${{FRACTAL_MISSION_RUN}}"; }}
+mission "spelling" state="ready" {{
+  goal "Work in {workspace}; keep $${{FRACTAL_MISSION_RUN}} literal."
+  agent "builder" {{ workspace "{workspace}/builder"; command "true"; }}
+  step "build" {{
+    assigned-to "agent/{run}/builder"
+    goal "Build {step} of {run}."
+    gate "prepared" {{ field "exit_code" "exec/{run}/prepare" is 0; }}
+  }}
+}}
+"#
+            )
+        };
+        let st = parse_test_intent(
+            &source("${ST_MISSION_RUN}", "${ST_WORKSPACE}", "${ST_STEP}"),
+            "node",
+        )
+        .unwrap();
+        let fractal = parse_test_intent(
+            &source("${FRACTAL_MISSION_RUN}", "${FRACTAL_WORKSPACE}", "${FRACTAL_STEP}"),
+            "node",
+        )
+        .unwrap();
+        assert_eq!(fractal.missions, st.missions);
+        assert_eq!(fractal.missions["spelling"].revision, st.missions["spelling"].revision);
+        assert_eq!(fractal.source_hash, st.source_hash);
+        assert_eq!(fractal.normalized, st.normalized);
+        assert!(fractal.missions["spelling"].goals[0].contains("$${FRACTAL_MISSION_RUN}"));
+        // Outside a mission `${…}` is shell text, not a context reference.
+        assert!(serde_json::to_string(&fractal.subjects["agent/node.helper"].desired)
+            .unwrap()
+            .contains("${FRACTAL_MISSION_RUN}"));
+        let unknown = parse_test_intent(
+            "version 2\nmission \"unknown\" state=\"ready\" { goal \"Use ${FRACTAL_UNKNOWN}.\"; step \"work\" { agentless; goal \"Work.\"; } }\n",
+            "node",
+        )
+        .unwrap_err();
+        assert_eq!(unknown.code, "unknown-variable");
     }
 
     #[test]

@@ -82,7 +82,7 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const link = <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
@@ -262,7 +262,7 @@ const MARKDOWN_COMPONENTS: Components = {
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
 export function ResourceChip({ resource, onOpen }: { resource: InlineResource; onOpen?: (path?: string) => void }) {
-  return <TooltipTrigger delay={300}><Button onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button><Tooltip {...stylex.props(styles.hoverCard)}><div {...stylex.props(styles.resourceTitle)}>{resource.path}<span {...stylex.props(styles.added)}>+{resource.added}</span><span {...stylex.props(styles.removed)}>−{resource.removed}</span></div>{resource.preview ? <pre {...stylex.props(styles.preview)}>{resource.preview}</pre> : null}</Tooltip></TooltipTrigger>
+  return <TooltipTrigger delay={300}><Button data-search-content onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button><Tooltip {...stylex.props(styles.hoverCard)}><div {...stylex.props(styles.resourceTitle)}>{resource.path}<span {...stylex.props(styles.added)}>+{resource.added}</span><span {...stylex.props(styles.removed)}>−{resource.removed}</span></div>{resource.preview ? <pre {...stylex.props(styles.preview)}>{resource.preview}</pre> : null}</Tooltip></TooltipTrigger>
 }
 /** Complete only the unfinished prose tail; fenced code and settled literal punctuation are untouched. */
 export function completeStreamingTail(source: string): string {

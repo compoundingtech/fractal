@@ -48,6 +48,8 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+mod assistant_admission;
+
 use fractal_daemon::ConversationReadsStore;
 use fractal_daemon::CustomStore;
 use fractal_daemon::AdhocWorkStore;
@@ -479,6 +481,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
+    (
+        "POST /v1/replication/replay",
+        "explicit planned-window operator replay holds the writer; covered by replication_replay::tests",
+    ),
     ("POST /v1/rules/set", "sets an authority rule"),
     (
         "POST /v1/client/actions",
@@ -629,6 +635,9 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/client/claims", "/v1/client/claims?limit=100"),
+    get("GET /v1/client/claims/by-id/{id}", "/v1/client/claims/by-id/{service_claim}"),
+    get("GET /v1/client/work-items/{*subject}", "/v1/client/work-items/{step}"),
     post("POST /v1/client/push-registration", "/v1/client/push-registration", |_, _| push_body()),
     Probe {
         route: "DELETE /v1/client/push-registration",
@@ -714,6 +723,10 @@ const PROBES: &[Probe] = &[
         "/v1/client/arrangements?person=person%2Fada",
     ),
     get(
+        "GET /v1/client/read-positions",
+        "/v1/client/read-positions?person=person%2Fada",
+    ),
+    get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
     ),
@@ -732,6 +745,7 @@ const PROBES: &[Probe] = &[
     post("POST /v1/sets/apply", "/v1/sets/apply", |_, attempt| {
         owned_set_request(&format!("apply-{attempt}"))
     }),
+    get("GET /v1/source/status", "/v1/source/status"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
@@ -853,6 +867,8 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
     // Measure the disabled gateway read; external fetch work is byte-bounded, not store-sized.
     get("GET /v1/client/quota", "/v1/client/quota"),
+    // The unconfigured usage hub returns disabled locally without an external request.
+    get("GET /v1/client/usage/quota", "/v1/client/usage/quota"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",
@@ -1045,6 +1061,9 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get("GET /v1/desired", "/v1/desired?subject={seat}"),
+    // Sparse kind selection must not walk every unrelated desired declaration.
+    get("GET /v1/desired", "/v1/desired?kind=mission&limit=1"),
     get(
         "GET /v1/resource-references/{*subject}",
         "/v1/resource-references/resource/bench/cost",
@@ -1472,6 +1491,23 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
         "cost-arrangement-current",
         json!([{"op":"rename","name":"Invented arrangement"}]),
     )
+}
+
+/// Retained advances grow while the projected answer stays one conversation.
+fn seed_read_positions(store: &Store, scale: f64) {
+    for advance in 0..((scale * 10_000.0).round() as u64).max(1) {
+        store.append_claim(&ClaimInput {
+            subject: fractal_schema::read_positions::subject(ARRANGEMENT_OWNER),
+            kind: fractal_schema::read_positions::KIND.into(),
+            actor: Some(ARRANGEMENT_OWNER.into()),
+            fields: BTreeMap::from([
+                ("owner".into(), json!(ARRANGEMENT_OWNER)),
+                ("conversation".into(), json!(ARRANGEMENT_PLACEMENT)),
+                ("at_ms".into(), json!(advance)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).expect("the read-position cost fixture must publish");
+    }
 }
 
 const MEMBERSHIP_OWNER: &str = "person/avery";
@@ -2915,6 +2951,74 @@ fn seed_git_change_reads(store: &Store, scale: f64) {
     }
 }
 
+#[cfg(test)]
+const SERVICE_PROBE_TOKEN: &str = "invented-cost-service-reader";
+
+// This integration-test target alone constructs the disabled Service profile.
+#[cfg(test)]
+fn seed_service_probe(store: &Store) -> String {
+    use fractal_daemon::api::client_v0::{credential_digest, external_grants};
+    const ID: &str = "787878787878787878787878";
+    store.append_claim(&ClaimInput {
+        subject:external_grants::subject(ID).unwrap(),kind:external_grants::GRANTED.into(),
+        actor:Some("person/bench-operator".into()),
+        fields:serde_json::from_value(json!({
+            "profile":"service","principal":"plugin/cost/reader","grant_id":ID,
+            "session_actor":format!("plugin/cost/reader/session/{ID}"),
+            "issuer":"person/bench-operator","expires_at_unix_ms":u64::MAX,
+            "credential_hash":credential_digest(SERVICE_PROBE_TOKEN),
+            "scopes":["read.claims","read.work"],
+        })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"gate-operation/cost/service-read".into(),kind:"gate.result".into(),actor:None,
+        fields:serde_json::from_value(json!({"verdict":"pass"})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap().id
+}
+
+#[cfg(test)]
+async fn service_probe(app: &Router, path: &str) -> Result<Value,String> {
+    use axum::{body::Body,http::Request};
+    use tower::ServiceExt as _;
+    let response = app.clone().oneshot(Request::builder().uri(path)
+        .header("authorization",format!("Bearer {SERVICE_PROBE_TOKEN}"))
+        .body(Body::empty()).map_err(|error| error.to_string())?)
+        .await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(),usize::MAX).await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("service read {path} failed: {status}"));
+    }
+    let envelope: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let answer = envelope["value"].clone();
+    if path.starts_with("/v1/client/claims/by-id/") {
+        if answer["body"]["fields"]["verdict"] != "pass" {
+            return Err("service receipt probe must read its populated receipt".into());
+        }
+    } else if path.starts_with("/v1/client/claims?") {
+        if !answer["claims"].as_array().is_some_and(|claims| !claims.is_empty()) {
+            return Err("service page probe must read populated claims".into());
+        }
+    } else if !answer["subject"].as_str().is_some_and(|subject| subject.starts_with("step-run/")) {
+        return Err("service work probe must read a populated work item".into());
+    }
+    Ok(answer)
+}
+
+async fn required_service_probe(app: &Router, path: &str) -> Value {
+    service_probe(app,path).await.unwrap_or_else(|error| {
+        panic!("seeded service probe must succeed before cost aggregation: {error}")
+    })
+}
+
+#[tokio::test]
+#[should_panic(expected = "seeded service probe must succeed before cost aggregation")]
+async fn missing_service_probe_is_fatal_before_cost_aggregation() {
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3041,6 +3145,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_read_positions(&store, scale))
+            .await
+            .unwrap();
+    }
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -3095,6 +3205,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let mut state = state;
     state.harness_question_sink = Some(harness_sink.clone());
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
+    let service_claim = seed_service_probe(&store);
+    let mut service_state = state.clone();
+    service_state.owning_person = Some("person/bench-operator".into());
+    let service_router = fractal_daemon::api::fabric_router(service_state);
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
     tokio::time::timeout(Duration::from_secs(120),
@@ -3162,6 +3276,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert("service_claim",service_claim);
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),
@@ -3303,6 +3418,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = arrangement_person
+        .get("/v1/client/read-positions?person=person%2Fada")
+        .await
+        .expect("the read-position list probe must read the selected owner's projection");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["owner"], ARRANGEMENT_OWNER);
+    assert_eq!(page["items"][0]["conversation"], ARRANGEMENT_PLACEMENT);
     let page: Value = membership_person
         .get(MEMBERSHIP_PATH)
         .await
@@ -3431,6 +3553,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
+            } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
+                let path = fixture.fill(probe.path,attempt);
+                counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
             } else if let Some(call) = probe.direct {
                 let (store, fixture) = (store.clone(), &fixture);
                 counted(|| async move {
@@ -3442,7 +3567,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 let body = probe.body.map(|body| body(&fixture, attempt));
                 let client = if path == MEMBERSHIP_PATH {
                     membership_person.clone()
-                } else if path.starts_with("/v1/client/arrangements") {
+                } else if path.starts_with("/v1/client/arrangements") || path.starts_with("/v1/client/read-positions") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
@@ -3530,7 +3655,14 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             }),
             ..cost
         };
-        costs.insert(probe.route.to_owned(), cost);
+        // Route coverage deduplicates by route, but both desired selection shapes need
+        // independent cost rows so the all-subject probe cannot hide the named probe.
+        let key = if probe.route == "GET /v1/desired" {
+            format!("{} ({})", probe.route, probe.path)
+        } else {
+            probe.route.to_owned()
+        };
+        costs.insert(key, cost);
     }
     // A real seat update invalidates its card between every read. Count only the read, using
     // the same canonical claim path as a driver; the warm probe above remains unchanged.

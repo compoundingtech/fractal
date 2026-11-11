@@ -1128,6 +1128,65 @@ rebuilds from its complete canonical history; the chunk limit does not bound tha
 fallback replay. The regression interleaves local writes with committed prefixes and checks the
 final graph against canonical replay.
 
+The projection gate covers the complete catch-up pass, including its between-chunk writer
+returns and final drains. Fenced actions cannot drain its markers between successful chunks.
+A local standalone person ask has already atomically materialized its run, generation and step;
+an unrelated aggregate's later canonical time does not require rebuilding that independent run.
+The incremental sweep skips that ask's redundant person-guard and global-order dirtiness only when those
+rows bind to the local ask, the run has no descendants, and its step/run/generation have no
+foreign claims. Foreign asks, repair markers and competing same-part history retain their
+canonical rebuilds.
+
+The contended receive benchmark attributes rebuild identity, dirty cause and receive/fence/action
+role across threads. It fails on a page taking 15 seconds or more, more than two rebuilds covering
+the huge target part in a page, any redundant already-materialized local-ask rebuild, or a route
+with no successful mutations. Other aggregates' legitimate rebuilds are reported separately.
+Page output separates projection-gate wait, writer wait, chunk count and final-drain rebuild time.
+
+Run-part rebuilds queued by these chunks remain pending durably until their canonical tree is
+rebuilt. Reconciliation and dispatch skip a pending part. Mission/run mutations use
+`with_run_fence` for the named run or step's part and its ancestor root, or
+`with_all_runs_fenced` for descendant, capacity, retirement, repair and cross-run owner-routing
+decisions. Both use one FIFO projection gate shared with receive, catch-up and maintenance.
+The gate stays held across drain turns, but each turn selects at most one pending aggregate in
+a standalone writer loan, commits it, and returns the writer before selecting again. A drain
+turn does not group-commit with another drain or the eventual action. This is option A: an
+individual aggregate still rebuilds from its full canonical history; no attempt is made to
+split that history or bound its own SQL duration.
+
+After every returned writer loan, completion summaries invalidate the affected caches and
+publish local `run-projection.finished` observations so readers re-evaluate on the normal
+change notification, without a retry timer. The full caught-up roster wake is sent only when
+no part is pending and replication projection is not deferred. Completing one part alone
+does not assert that all admitted envelopes are projected. Selection is fresh in every
+writer transaction: restoration's `replay_replication_graph` may interleave without the gate
+because it atomically replays the graph, updates projections and health, and clears or widens
+marker state in its own transaction.
+
+The action enters a separate foreground writer turn only after its fence is empty. That
+transaction rechecks pending state before running the action and checks generation and attempt
+fences against the drained tree, so a superseded cancellation or revision approval is refused
+rather than applied to the old generation. Queue, lane and attention claim admission retains
+the same selector inside its existing writer transaction, without nesting another writer.
+API-facing wrappers allow eight seconds for gate admission and between-part progress. On
+expiry they do not invoke the action: the existing retryable HTTP 503 `database-busy` carries
+`details.reason: "run-projection-drain"` and `details.pending_parts`. An already-running
+aggregate transaction finishes before this refusal; the eight seconds is not cancellation
+of its SQL. Daemon-only evaluator, observer and canonical-settlement paths use
+`with_run_fence_internal` or `with_all_runs_fenced_internal` to finish draining without this
+API refusal budget. Helpers shared with API callers retain the bounded wrappers.
+
+Both Rust clients retry only this typed mutation refusal with the identical serialized body
+and idempotency key, exponential pauses, and one total 60-second window. Before sending
+again they reserve the entire ordinary request deadline; a started mutation is never cancelled
+and misreported as an earlier refusal. The raw daemon client's `set_mutation_observer` and
+the typed SDK's `set_observer` (`Mutation` event) expose physical attempt count, total elapsed
+duration and cumulative retry-wait duration. Per-attempt SDK `Request` events remain unchanged.
+The daemon counts these refusals per matched route and method in
+`st.run_projection.drain.refusals`; no run, person or raw URL labels are recorded.
+Later receive chunks can queue a part again. Read APIs retain their existing catch-up behavior;
+there is no new error kind or claim format.
+
 The first start of a build with this rule replays from nothing once. A run that this node created
 could show as over in its old graph while its claims say it runs. Starting that work again long
 after anyone expected it would surprise people, so the node writes the claims that end the run as
@@ -1296,7 +1355,7 @@ episode stays open; that projection opens its own episode. The same pair and pro
 diverging again reopens the same episode. Comparisons are held in memory, so after a restart an
 open fault stays open until the next comparison that agrees.
 
-The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+The `projection-divergence` objective in `slo/objectives.kdl` counts open divergence faults
 fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
 read, so `fractal doctor` (as `slo/projection-divergence`), `fractal slo` and the SLO history read no claims
 for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any
@@ -1691,6 +1750,35 @@ or one crossing five seconds promotes retained boundaries to INFO with their
 original timestamps; subsequent client boundaries remain INFO. The client emits
 `client-send-start`, `connect-done`, `client-fresh-retry`,
 `client-headers-received`, and `client-failed`.
+The `client-failed` boundary also includes `peer` (the destination node name).
+
+Failed, unanswered, or overloaded worker backend exchange responses produce
+rate-limited stderr `fractal: replication exchange answer` lines with `correlation_id`, `peer`,
+`shard`, `outcome` (`failed`, `no-answer`, or `overload`), `code`, `phase`,
+`elapsed_ms`, `permit_wait_ms`, `local_receive_ms`, and `follow_up_export_ms`.
+`correlation_id=none` means the request did not carry a valid exchange UUID;
+an absent shard or unstarted measurement is `none`. Permit wait runs from request
+head arrival to permit acquisition. The receive/export split uses the retained
+job's original request clock, including on later polls; an unfinished phase reports
+its elapsed duration at the answer, not zero. `elapsed_ms` uses that same job clock
+(or the current request clock when admission is refused). Local receive failures
+also include `local_receive_http_status` when the typed error carries it.
+These lines contain machine metadata, never error bodies or free-form causes.
+
+The daemon receive handler produces rate-limited `fractal: replication receive error`
+stderr lines on backend errors with `route=/v1/internal/replication/receive`,
+`correlation_id` (a valid `x-fractal-exchange-id` header, otherwise `none`), and
+`code`. This is distinct from middleware request-duration logging. The handler
+does not currently expose a per-request gate/writer/apply/final-drain timing split.
+
+Both failure diagnostics use one shared bounded limiter per process: four fixed
+keys (worker failed, no-answer, overload, and daemon receive), one sample per key
+per 60 seconds. Peer names, shard IDs, correlation IDs, and error codes never
+create additional keys. Emitted samples append `suppressed=0`. On the next event,
+expired windows with suppressed repeats emit their original sample with
+`event=suppression-summary suppressed=N`; idle windows need no timer.
+Worker admission drops the exchange-jobs lock before formatting or writing these
+diagnostics; neither limiter nor exchange-jobs guards are held during stderr writes.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Adds an unused mergemaster v0.6.0 flake input, with no runtime or user-visible change.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The input is unused; no runtime policy, required check or merge-queue lane changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No runtime, wire, client or stored-format change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart or downtime is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or fractal release is required; the release hold remains in effect."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back removes only the unused input and its lock nodes."
+  }
+}

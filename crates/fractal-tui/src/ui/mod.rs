@@ -33,6 +33,7 @@ mod terminal_tab;
 #[cfg(test)]
 #[path = "../../tests/support/attach_default.rs"]
 mod attach_default;
+pub(crate) mod freshness;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
 pub use lastrun::note_exit as lastrun_note_exit;
@@ -40,12 +41,14 @@ pub use lastrun::terminal_gone as lastrun_terminal_gone;
 mod glass_store;
 mod lastrun;
 pub(crate) mod open_timing;
+pub(crate) mod attach_trace;
 pub mod layout;
 pub mod live;
 pub(crate) mod slo;
 pub mod pane;
 pub mod playback;
 mod drafts_store;
+mod read_store;
 mod prefs;
 mod recent;
 mod resource_sidebar;
@@ -92,7 +95,7 @@ use fractal_conversation_ui::pane::order;
 use fractal_conversation_ui::{PaneIntent, PaneState, Selection};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{self, Write},
     rc::Rc,
     time::{Duration, Instant},
@@ -300,6 +303,12 @@ pub enum Effect {
     /// Drop a failed or unconfirmed message from the conversation.
     Forget {
         entry: String,
+    },
+    /// Move the person's read position for a conversation in st (st keeps the larger); queued by
+    /// `Ui::queue_read_advances`, coalesced per conversation.
+    AdvanceReadPosition {
+        conversation: String,
+        at_ms: i64,
     },
 }
 
@@ -509,6 +518,9 @@ pub struct Ui {
     snoozed: HashSet<String>,
     /// Where this device keeps unsent drafts: none in tests and the demo, which touch nothing.
     pub(crate) drafts_path: Option<std::path::PathBuf>,
+    /// Where the person last read each conversation: st's positions merged with this device's,
+    /// cached on the device; nothing is written without a file (tests and the demo).
+    pub(crate) reads: read_store::ReadPositions,
     /// The drafts as last read from or written to that file.
     drafts_saved: HashMap<String, String>,
     /// When they were last written, and until when to leave a failing write alone.
@@ -703,6 +715,72 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Call only after terminal presentation succeeds. Advance through visible prose entries,
+    /// resolving their absolute timestamps from the transcript rather than the newer roster.
+    pub(crate) fn read_presented_conversations(
+        &mut self,
+        timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
+    ) {
+        if self.help || self.popover.is_some() || self.glasses.palette_open() {
+            return;
+        }
+        let shown: Vec<(String, i64)> = {
+            let frame = self.frame.borrow();
+            frame
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    let id = pane.key.strip_prefix("chat:")?;
+                    let entries = self.world.conversations.get(id)?.ready()?;
+                    let timeline = timelines.get(id)?;
+                    let at = pane.entries.iter().enumerate().filter_map(|(index, (entry_id, start))| {
+                        let end = pane.entries.get(index + 1).map_or(pane.total, |(_, line)| *line);
+                        if !pane.entry_visible(*start, end, &frame.covers) {
+                            return None;
+                        }
+                        let entry = entries.iter().find(|entry| entry.id == *entry_id)?;
+                        match &entry.body {
+                            Body::Assistant(text) if !text.is_empty() => {}
+                            Body::Mail { .. } => {}
+                            _ => return None,
+                        }
+                        let source = timeline.items.iter().find(|source| {
+                            entry_id == &source.id
+                                || entry_id.strip_prefix(&source.id).is_some_and(|suffix| suffix.starts_with('#'))
+                                || matches!(&source.body, fractal_client::TimelineBody::Message(message) if &message.message_id == entry_id)
+                        })?;
+                        match &source.body {
+                            fractal_client::TimelineBody::Content(_) if source.role == fractal_client::TimelineRole::Assistant => {}
+                            fractal_client::TimelineBody::Message(message)
+                                if source.role != fractal_client::TimelineRole::User
+                                    && !message.from.as_deref().is_some_and(|from| from.starts_with("person/"))
+                                    && !message.author.as_deref().is_some_and(|author| author.starts_with("person/")) => {}
+                            _ => return None,
+                        }
+                        read_store::at_ms(&source.timestamp)
+                    }).max()?;
+                    Some((id.to_owned(), at))
+                })
+                .collect()
+        };
+        let mut moved = false;
+        for (id, at) in shown {
+            moved |= self.reads.advance(&id, at);
+        }
+        if moved {
+            self.refresh_tab_statuses();
+        }
+    }
+
+    /// Queue the read positions st should hear about now: what this device read beyond what st
+    /// confirmed, one in flight and one every `read_store::COALESCE` per conversation, and only
+    /// while live against a daemon that keeps positions.
+    pub(crate) fn queue_read_advances(&mut self, now: Instant, live: bool) {
+        for (conversation, at_ms) in self.reads.due(now, live) {
+            self.effects.push(Effect::AdvanceReadPosition { conversation, at_ms });
+        }
+    }
+
     /// Release the pixels of every image more than a screen away from what the last frame
     /// showed, in every pane; an image in a tab not drawn is released too.
     pub(crate) fn release_far_images(&mut self) {
@@ -845,6 +923,7 @@ impl Ui {
             revoke: None,
             snoozed: HashSet::new(),
             drafts_path: None,
+            reads: read_store::ReadPositions::default(),
             drafts_saved: HashMap::new(),
             drafts_wrote: Instant::now(),
             drafts_backoff: None,
@@ -3042,6 +3121,17 @@ impl Ui {
             }
             *state
         };
+        if freshness::enabled() && key.starts_with("chat:") {
+            tracing::debug!(
+                target: "fractal_tui::freshness",
+                stage = "document", pane = key,
+                document_last_id = doc.entries.last().map(|(id, _)| id.as_str()),
+                line_count = total, follow = state.follow, top = state.top,
+                total, height,
+                main_pane_key = ?self.main_pane_key(),
+                focused_pane = ?self.focused_pane().map(|pane| pane.key()),
+            );
+        }
         let top = state.top;
         if matches!(
             Pane::parse(key),
@@ -3764,7 +3854,7 @@ impl Ui {
         // Tab badges are a compact form: the activity before the title, then what waits on you.
         marks.lines(text::wrap(
             &[text::run(
-                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts",
+                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts; • after the title, it said something since you last read it",
                 theme::soft(),
             )],
             column,
@@ -4812,8 +4902,10 @@ impl Ui {
             KeyCode::PageDown => self.scroll_main(self.page() as isize),
             KeyCode::Home => self.scroll_main(-100_000),
             KeyCode::End => {
+                self.freshness_panes("end_before");
                 self.follow_latest();
                 self.scroll_main(100_000);
+                self.freshness_panes("end_after");
             }
             KeyCode::Char('x') if self.tab() == 2 => self.system = !self.system,
             KeyCode::Enter if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_tool(),
