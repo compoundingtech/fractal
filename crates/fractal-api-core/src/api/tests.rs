@@ -2102,6 +2102,122 @@ fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
     );
 }
 
+#[tokio::test]
+async fn message_delivery_expiry_is_terminal_before_human_and_path_diagnostics() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let seat = "agent/expiry-delivery-recipient";
+    let append = |subject: &str, kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    append(seat, "runtime.observed", seat, json!({"status":"running", "incarnation_id":"one"}));
+    append(seat, "harness.observed", seat, json!({
+        "state":"working", "driver":"claude", "incarnation_id":"one", "blocked_on":"human", "ask":"permission"
+    }));
+    let now = client_now_ms();
+    assert!(message_delivery_value(store, seat, "sent", now, now).unwrap()["reason"]
+        .as_str().unwrap().contains("held outside"));
+    delivery_presence::record(seat, &json!({
+        "transport":"omp-channel", "pid":4242, "ready":false, "reason":"native handoff refused"
+    }).to_string());
+    assert!(delivery_presence::known(seat).unwrap().stale());
+    for reason in ["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"] {
+        let subject = format!("message/{reason}");
+        let sent = append(&subject, "message.sent", "person/sender", json!({
+            "from":"person/sender", "to":seat, "content":"expiry contract", "status":"sent"
+        }));
+        append(&subject, "message.expired", "daemon/runtime", json!({"status":"expired", "reason":reason}));
+        let (status, view) = get_request(router(app.clone()), &format!("/v1/messages/delivery/{subject}")).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        let delivery = &view["delivery"];
+        assert_eq!(delivery["state"], "expired", "{view}");
+        assert_eq!(delivery["phase"], "expired", "{view}");
+        assert_eq!(delivery["reason"], reason, "{view}");
+        assert!(delivery["age_ms"].is_number());
+        assert_eq!(delivery["recipient_delivery"]["state"], "stale");
+        assert!(delivery.get("history").is_none());
+        // A receipt arriving after the endpoint captured its view still wins.
+        let expired = store.message(&subject).unwrap().unwrap();
+        for phase in ["delivered", "read"] {
+            append(&subject, &format!("message.{phase}"), seat, json!({"status":phase}));
+            assert!(store.message_expiry(&subject).unwrap().unwrap().superseded);
+            let delivery = message_delivery_for(store, &expired, sent.accepted_at_unix_ms, now, None).unwrap();
+            assert_eq!(delivery["phase"], phase);
+            let (_, view) = get_request(router(app.clone()), &format!("/v1/messages/delivery/{subject}")).await;
+            assert_eq!(view["delivery"]["phase"], phase);
+            assert_ne!(view["delivery"]["state"], "expired");
+        }
+    }
+}
+
+#[test]
+fn message_delivery_expiry_survives_remote_unknown_but_not_real_relayed_receipts() {
+    let store = Arc::new(Store::open_memory("expiry-sender").unwrap());
+    let source = "version 2\nagent \"recipient\" { host \"expiry-remote\"; command \"true\"; }";
+    let intent = crate::graph::parse_intent(source, "expiry-sender").unwrap();
+    store.apply_internal(&intent, "expiry-remote-delivery").unwrap();
+    // The remote host's advertisement, as retained by replication.
+    {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::store::append_claim_tx(&transaction, "expiry-remote", "daemon/expiry-remote",
+            "daemon.started", Some("daemon/expiry-remote"), &json!({"fields":{
+                "status":"running", "features":{"seat_freshness_reads":1, "message_offsets":1}
+            }}), &[], None).unwrap();
+        transaction.commit().unwrap();
+    }
+    let seat = store.desired_subjects().unwrap().into_iter()
+        .find(|seat| seat.member.as_ref().is_some_and(|member| member.host == "expiry-remote"))
+        .unwrap().subject;
+    let subject = "message/expiry-relay";
+    let append = |kind: &str, actor: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    let sent = append("message.sent", "person/sender", json!({
+        "from":"person/sender", "to":seat, "content":"remote expiry", "status":"sent"
+    }));
+    append("message.expired", "daemon/runtime", json!({"status":"expired", "reason":"no-live-recipient"}));
+    let expired = store.message(subject).unwrap().unwrap();
+    assert_eq!(message_reads::relay_host(&store, &expired).unwrap().as_deref(), Some("expiry-remote"));
+    let unknown = message_reads::Relayed::Unknown { host:"expiry-remote".into(), reason:"unreachable".into() };
+    let delivery = |relayed: Option<&message_reads::Relayed>| message_delivery_for(
+        &store, &expired, sent.accepted_at_unix_ms, sent.accepted_at_unix_ms, relayed,
+    ).unwrap();
+    for relayed in [None, Some(&unknown)] {
+        assert_eq!(delivery(relayed)["state"], "expired");
+        assert_eq!(delivery(relayed)["reason"], "no-live-recipient");
+    }
+    for (phases, expected) in [
+        (&["delivered"][..], "delivered"), (&["read"][..], "read"),
+        (&["read", "closed"][..], "read"), (&["closed"][..], "expired"),
+    ] {
+        let marks = phases.iter().map(|phase| (format!("message.{phase}"), seat.clone()))
+            .chain(std::iter::once(("message.read".into(), "agent/not-on-remote".into())))
+            .map(|(kind, consumer)| crate::peer::RelayedMark {
+                kind, consumer, recorded_at_unix_ms: 1, receipt: "remote-receipt".into(),
+            }).collect();
+        let answers = message_reads::settle(&store, vec![("expiry-remote".into(), Ok(crate::peer::MessageMarksAnswer {
+            subject: subject.into(), held: true, marks,
+        }))]);
+        let answer = answers.get(subject).unwrap();
+        assert_eq!(answer.status(), phases.last().copied());
+        assert_eq!(delivery(Some(answer))["phase"], expected);
+        assert_eq!(delivery(Some(answer))["state"] == "expired", expected == "expired");
+        assert!(!store.message_expiry(subject).unwrap().unwrap().superseded);
+    }
+    append("message.read", &seat, json!({"status":"read"}));
+    assert_eq!(delivery(Some(&unknown))["state"], "read");
+}
+
 #[test]
 fn message_delivery_keeps_expired_claude_hook_mail_held_until_native_closure() {
     let store = Store::open_memory("expired-claude-hook-mail-hold").unwrap();
@@ -4254,6 +4370,8 @@ fn apply_request(state: &AppState, source: &str, actor: &str, key: &str) -> Appl
         expected_subjects: preview.subject_tokens,
         idempotency_key: key.into(),
         actor: Some(actor.into()),
+        program_bundles: Default::default(),
+        force_reason: None,
     }
 }
 
@@ -6665,6 +6783,14 @@ async fn mission_resolves_a_bare_document_to_immutable_bytes() {
 }
 
 async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value) {
+    preview_and_apply_with_bundles(app, kdl, BTreeMap::new()).await
+}
+
+async fn preview_and_apply_with_bundles(
+    app: Router,
+    kdl: &str,
+    program_bundles: BTreeMap<String, String>,
+) -> (Value, StatusCode, Value) {
     let (status, preview) = json_request(
         app.clone(),
         "/v1/intent/mission",
@@ -6691,11 +6817,81 @@ async fn preview_and_apply(app: Router, kdl: &str) -> (Value, StatusCode, Value)
                 .unwrap(),
             idempotency_key: format!("apply-{}", hex::encode(Sha256::digest(kdl))),
             actor: Some("person/alex".into()),
+            program_bundles,
+            force_reason: None,
         })
         .unwrap(),
     )
     .await;
     (preview, status, applied)
+}
+
+/// A publication carries its program bundles as base64, so both caller guards buffer a body up to
+/// the publication route limit (32 MiB) and hand a body past 16 MiB on whole.
+#[tokio::test]
+async fn caller_guards_pass_a_publication_body_past_sixteen_mebibytes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let padding = "a".repeat(20 * 1024 * 1024);
+    for (bound, body) in [
+        (Some("agent/example/publisher"), format!(r#"{{"actor":"agent/example/publisher","pad":"{padding}"}}"#)),
+        (None, format!(r#"{{"pad":"{padding}"}}"#)),
+    ] {
+        let mut request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        if bound.is_none() {
+            request.extensions_mut().insert(HarnessAncestry::Unavailable);
+        }
+        let passed = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = to_bytes(passed.into_body(), PUBLICATION_BODY_LIMIT).await.unwrap();
+        assert_eq!(bytes.len(), body.len(), "{bound:?}");
+    }
+}
+
+#[tokio::test]
+async fn publication_stores_the_program_bundle_its_declaration_names() {
+    use base64::Engine as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let app = router(state);
+    let bytes = b"export default {}";
+    let hash = hex::encode(Sha256::digest(bytes));
+    let kdl = format!(
+        "version 2\nmission \"land\" state=\"ready\" {{\n  goal \"Land.\"\n  step \"program\" {{ program \"/bundles/land.mjs\" sha256=\"{hash}\" }}\n}}"
+    );
+    let encoded = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let before = store.index().unwrap();
+    // A declaration whose bytes this member never received would be refused by every replica.
+    let (_, status, error) = preview_and_apply(app.clone(), &kdl).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "missing-program-bundle");
+    let (_, status, error) =
+        preview_and_apply_with_bundles(app.clone(), &kdl, BTreeMap::from([(hash.clone(), encoded(b"export default 2"))])).await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "program-bundle-hash-mismatch");
+    let (_, status, error) = preview_and_apply_with_bundles(
+        app.clone(),
+        &kdl,
+        BTreeMap::from([(hash.clone(), encoded(bytes)), ("0".repeat(64), encoded(b""))]),
+    )
+    .await;
+    assert!(status.is_client_error(), "{error}");
+    assert_eq!(error["code"], "unused-program-bundle");
+    assert_eq!(store.index().unwrap(), before);
+    assert_eq!(store.get_blob(&hash).unwrap(), None);
+
+    let (_, status, applied) =
+        preview_and_apply_with_bundles(app, &kdl, BTreeMap::from([(hash.clone(), encoded(bytes))])).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(store.get_blob(&hash).unwrap().as_deref(), Some(&bytes[..]));
+    // The published definition names the blob by `bundle_hash`, which promotes and replicates it.
+    let published = store.latest_claim("mission/land", Some("mission.published")).unwrap().unwrap();
+    assert!(published.body.to_string().contains(&format!("\"bundle_hash\":\"{hash}\"")), "{}", published.body);
 }
 
 #[tokio::test]
@@ -6938,6 +7134,8 @@ mission "invalid-message" state="ready" {
             expected_subjects: BTreeMap::new(),
             idempotency_key: "reject-invalid-nested-message".into(),
             actor: Some("person/alex".into()),
+            program_bundles: Default::default(),
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -9381,7 +9579,7 @@ fn roster_fixture_draining_seats(fixture: &RosterClaimsFixture) -> Vec<String> {
             expected_set: store.owned_sets().unwrap().first()
                 .map_or("absent".into(), |set| set.revision.clone()),
             rollout: None, adopt: Default::default(), allow_empty: false,
-            confirm_retire: None, expected_subjects: Default::default(),
+            confirm_retire: None, policy: None, expected_subjects: Default::default(),
         };
         let preview = store.owned_set_preview(&input, &options).unwrap();
         assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
@@ -12307,6 +12505,7 @@ version 2
         serde_json::to_value(MissionRetireRequest {
             actor,
             idempotency_key: key.into(),
+            force_reason: None,
         })
         .unwrap()
     };
@@ -12575,6 +12774,7 @@ agent "example/other" {
         serde_json::to_value(MissionRetireRequest {
             actor: agent.into(),
             idempotency_key: "free-retire".into(),
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -14936,7 +15136,7 @@ async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity()
             sha: format!("{:040x}", 1), sequence: 1,
         },
         expected_set: "absent".into(), rollout: None, adopt: Default::default(),
-        allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+        allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
     };
     let preview = state.store.owned_set_preview(&intent, &options).unwrap();
     assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);

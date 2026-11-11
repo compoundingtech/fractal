@@ -728,6 +728,7 @@ fn publish_owned_intent(store: &Store, intent: &crate::NormalizedIntent, sequenc
         adopt: BTreeSet::new(),
         allow_empty: false,
         confirm_retire: None,
+        policy: None,
         expected_subjects: BTreeMap::new(),
     };
     options.expected_subjects = store

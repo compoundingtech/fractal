@@ -8,7 +8,7 @@ import { Context, Effect, Layer, Schedule, Schema, SchemaAST } from 'effect'
 import { Activity, DurableDeferred, type Workflow } from 'effect/workflow'
 
 import { mission as dataMission, type MissionIntent } from './define.ts'
-import type { PersonReference } from './mod.ts'
+import type { Authority, PersonReference } from './mod.ts'
 import {
   keyed,
   Program,
@@ -76,7 +76,14 @@ export interface ProgramIntent<
   readonly id: string
   readonly goal: string
   readonly reportTo: MissionIntent['reportTo']
+  /** The mission's and its program step's timeout. */
   readonly timeout?: string
+  /** How long the program may go without a journal entry before its run reports it stalled. */
+  readonly stalledAfter?: string
+  /** At most this many runs at once (`concurrent-runs max=N`). */
+  readonly concurrentRuns?: number
+  /** What the mission's runs may do as `mission-run/RUN` (docs/st3/program-engine.md §3). */
+  readonly authority?: Authority
   readonly input: I
   readonly output?: O
   readonly error?: ES
@@ -95,13 +102,26 @@ export interface ProgramMission<
 
 type Meta = { readonly meta: { readonly url: string } }
 
-/** Each input is one native `input "name" kind="text"`, and a run supplies every one. */
 const encodesToString = (ast: SchemaAST.AST): boolean =>
   SchemaAST.isString(ast) ||
   SchemaAST.isTemplateLiteral(ast) ||
   (SchemaAST.isLiteral(ast) && typeof ast.literal === 'string') ||
   (SchemaAST.isEnum(ast) && ast.enums.every(([, value]) => typeof value === 'string')) ||
   (SchemaAST.isUnion(ast) && ast.types.every(encodesToString))
+
+/**
+ * The native inputs of a program mission: each field of `input` is one `input "name" kind="text"`,
+ * and a run supplies every one, so a field must be required and encode to a string.
+ */
+export const programInputNames = (input: Workflow.AnyStructSchema): readonly string[] =>
+  Object.entries(input.fields).map(([name, field]) => {
+    if (
+      SchemaAST.isOptional(field.ast) ||
+      encodesToString(SchemaAST.toEncoded(field.ast)) === false
+    )
+      throw new TypeError(`Program input ${name} must be required and encode to a string`)
+    return name
+  })
 
 /**
  * Declares a mission. With flat fields it is a data mission (see `Fractal.mission` in `fractal`).
@@ -134,12 +154,7 @@ export function mission(
 ): SubjectDefinition<'mission', unknown, never> {
   if (program === undefined) return dataMission(intent as Meta & MissionIntent)
   const { meta, ...rest } = intent as Meta & ProgramIntent<InputSchema, Codec, Codec | undefined>
-  for (const [name, field] of Object.entries(rest.input.fields))
-    if (
-      SchemaAST.isOptional(field.ast) ||
-      encodesToString(SchemaAST.toEncoded(field.ast)) === false
-    )
-      throw new TypeError(`Program input ${name} must be required and encode to a string`)
+  programInputNames(rest.input)
   const definition: ProgramMission<InputSchema, Codec, unknown> = {
     _tag: 'SubjectRef',
     kind: 'mission',

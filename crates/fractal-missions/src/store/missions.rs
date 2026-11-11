@@ -236,6 +236,25 @@ mod identifier_query_tests {
     }
 }
 
+fn child_context(
+    parent: &MissionRunView,
+    parent_step_run: &str,
+    default_selector: Option<WorkSelector>,
+    started_by: Option<String>,
+) -> ChildMissionContext {
+    ChildMissionContext {
+        root_revision: parent.root_revision.clone(),
+        root_run_id: parent
+            .root_mission_run
+            .strip_prefix("mission-run/")
+            .unwrap_or(&parent.root_mission_run)
+            .to_owned(),
+        parent_step_run: normalize_step_run(parent_step_run),
+        default_selector,
+        started_by,
+    }
+}
+
 /// Render a copy; the signed revision and execution spec remain physical.
 fn public_mission_spec(connection: &Connection, body: &str) -> Result<MissionSpec> {
     let mut mission: MissionSpec = serde_json::from_str(body)?;
@@ -1157,9 +1176,12 @@ fn mission_root_tree_run_tx(connection: &Connection, id: &str) -> Result<Mission
     // The human tree consumes step state, summaries and queue order, not each worker's wake,
     // timing and harness presentation histories.
     let mut view = mission_run_steps_view_tx(connection, id, true)?;
-    enrich_run_step_queues_tx(connection, &mut view)?;
+    let mission = enrich_run_step_queues_tx(connection, &mut view)?;
     view.provenance = crate::provenance::read(connection, &view.mission, &view.revision)?;
     view.loops = loop_run_views_tx(connection, &view)?;
+    if let Some(mission) = &mission {
+        view.programs = fractal_store::store::program_run_views_tx(connection, &view, mission)?;
+    }
     view.outcome = mission_run_outcome_tx(connection, &view)?;
     note_run_view_reads(&view);
     Ok(view)
@@ -1385,16 +1407,17 @@ const FAILURE_CANCELLATION_REASONS: &[&str] = &[
 ];
 
 /// Keep the tree's queue labels and order without work presentation enrichment.
-/// Read the current generation's pinned definition once for all of this run's steps.
+/// Read the current generation's pinned definition once for all of this run's steps, and return
+/// it for the run's other definition reads.
 fn enrich_run_step_queues_tx(
     connection: &Connection,
     view: &mut MissionRunView,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Option<MissionSpec>> {
     if view.steps.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let Some(mission) = pinned_generation_mission_tx(connection, &view.generation)? else {
-        return Ok(());
+        return Ok(None);
     };
     for view in &mut view.steps {
         if let Some(step) = crate::mission::find_step(&mission, &view.step) {
@@ -1402,7 +1425,7 @@ fn enrich_run_step_queues_tx(
             view.queue_position = step.queue_position;
         }
     }
-    Ok(())
+    Ok(Some(mission))
 }
 
 /// A run's header and each step's effective state, and with `summaries` each step's latest
@@ -1610,6 +1633,15 @@ pub trait MissionsStore {
             parent_step_run: &str,
             default_selector: Option<&WorkSelector>,
         ) -> Result<MissionRunView, FractalError>;
+    /// A child run a program step starts: the parent run starts it, so its creation is written
+    /// as `mission-run/PARENT` and it holds at most its parent's authority
+    /// (docs/st3/program-engine.md §3). The requester stays the parent's.
+    fn create_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+        ) -> Result<MissionRunView, FractalError>;
     /// An occurrence belongs to its schedule, regardless of the requesting member or revision.
     fn scheduled_mission_run_subject(schedule: &str, occurrence: u64) -> String;
     fn create_scheduled_mission_run(
@@ -1754,12 +1786,14 @@ pub trait MissionsStore {
     /// Retire a published mission: publish its current definition again as `retired`, so it
     /// leaves the mission lists and cannot start, while every revision and run stays in its
     /// history. The publication names who retired it. Publishing a ready revision brings the
-    /// mission back.
+    /// mission back. A member of an `enforce` owned set retires only with `force_reason`, which
+    /// records source debt in the same transaction.
     fn retire_mission(
             &self,
             mission: &str,
             actor: &str,
             idempotency_key: &str,
+            force_reason: Option<&str>,
         ) -> Result<MissionSpec, FractalError>;
     #[allow(clippy::too_many_arguments)]
     fn adopt_mission_revision_inner(
@@ -2939,16 +2973,21 @@ impl MissionsStore for Store {
         ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_inner(
             request,
-            Some(ChildMissionContext {
-                root_revision: parent.root_revision.clone(),
-                root_run_id: parent
-                    .root_mission_run
-                    .strip_prefix("mission-run/")
-                    .unwrap_or(&parent.root_mission_run)
-                    .to_owned(),
-                parent_step_run: normalize_step_run(parent_step_run),
-                default_selector: default_selector.cloned(),
-            }),
+            Some(child_context(parent, parent_step_run, default_selector.cloned(), None)),
+            None,
+            None,
+        )
+    }
+
+    fn create_program_child_mission_run(
+            &self,
+            request: &MissionRunRequest,
+            parent: &MissionRunView,
+            parent_step_run: &str,
+        ) -> Result<MissionRunView, FractalError> {
+        self.create_mission_run_inner(
+            request,
+            Some(child_context(parent, parent_step_run, None, Some(parent.subject.clone()))),
             None,
             None,
         )
@@ -2984,6 +3023,7 @@ impl MissionsStore for Store {
                 .into(),
             parent_step_run: normalize_step_run(schedule),
             default_selector: None,
+            started_by: None,
         });
         self.create_mission_run_inner(request, child, Some(&subject), None)
     }
@@ -4356,6 +4396,7 @@ impl MissionsStore for Store {
             mission: &str,
             actor: &str,
             idempotency_key: &str,
+            force_reason: Option<&str>,
         ) -> Result<MissionSpec, FractalError> {
         if let Some(response) = self
             .cached_idempotency_response(idempotency_key)
@@ -4388,7 +4429,8 @@ impl MissionsStore for Store {
         if let Some(response) = smallclaims::store::idempotency::cached_response(&transaction,idempotency_key)? {
             return serde_json::from_str(&response).map_err(internal);
         }
-        owned_sets::refuse_unmanaged(&transaction, &format!("mission/{mission_id}"))?;
+        // A set member retires through its set, or forced as source debt.
+        let gate = owned_sets::gate(&transaction, &format!("mission/{mission_id}"), owned_sets::Verb::MissionRetire, force_reason)?;
         let active = transaction
             .query_row(
                 "SELECT id FROM mission_runs
@@ -4410,18 +4452,44 @@ impl MissionsStore for Store {
         let predecessors =
             mission_definition_token_tx(&transaction, mission_id).map_err(internal)?;
         let body = serde_json::to_value(&retired).map_err(internal)?;
-        let claim = append_receipt_claim_tx(
-            &transaction,
-            &self.origin,
-            &retired.subject,
-            "mission.published",
-            Some(&actor),
-            &body,
-            &predecessors,
-            None,
-            idempotency_key,
-        )
+        let claim = if matches!(gate, owned_sets::Gate::Force(_)) {
+            fractal_store::store::append_source_forced_receipt_claim_tx(
+                &transaction,
+                &self.origin,
+                &retired.subject,
+                "mission.published",
+                Some(&actor),
+                &body,
+                &predecessors,
+                idempotency_key,
+            )
+        } else {
+            append_receipt_claim_tx(
+                &transaction,
+                &self.origin,
+                &retired.subject,
+                "mission.published",
+                Some(&actor),
+                &body,
+                &predecessors,
+                None,
+                idempotency_key,
+            )
+        }
         .map_err(internal)?;
+        match gate {
+            owned_sets::Gate::Allow => {}
+            owned_sets::Gate::Force(view) => {
+                owned_sets::record_debt_tx(&transaction, &self.origin, &view, &retired.subject,
+                    owned_sets::Verb::MissionRetire,
+                    owned_sets::Forced::Declaration { claim: &claim.id, revision: &retired.revision },
+                    None, Some(&actor), force_reason.unwrap_or_default(), None)?;
+            }
+            owned_sets::Gate::Audit(view, refused) => {
+                owned_sets::record_audit_tx(&transaction, &self.origin, &view, &retired.subject,
+                    owned_sets::Verb::MissionRetire, Some(&actor), &refused, None)?;
+            }
+        }
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h778d64bc900e owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_revisions(mission_id, revision, state, body, claim_id, created_index) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -4674,7 +4742,7 @@ impl MissionsStore for Store {
                     &[],
                     None,
                 )
-                .map_err(internal)?;
+                .map_err(smallclaims::error::typed)?;
             }
         }
         revision_seats::carry_completed_agents_tx(
@@ -4717,7 +4785,7 @@ impl MissionsStore for Store {
             None,
             idempotency_key,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         terminalize_generation_steps_tx(
             &transaction,
             &self.origin,
@@ -4744,7 +4812,7 @@ impl MissionsStore for Store {
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         if reopening {
             // The run's own state history says who reopened it, when, and why.
             append_claim_tx(
@@ -4762,7 +4830,7 @@ impl MissionsStore for Store {
                 &[],
                 None,
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
         }
         if let Some(proposal) = proposal {
             let changed = transaction
@@ -4793,7 +4861,7 @@ impl MissionsStore for Store {
                 &[],
                 None,
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
         }
         let view = mission_run_view_tx(&transaction, run_id).map_err(internal)?;
         transaction
@@ -7083,32 +7151,7 @@ impl MissionsStore for Store {
     }
 
     fn pending_observer_refresh_attempt(&self, observer: &str) -> Result<Option<String>> {
-        let connection = self.readers.get();
-        // The observations are listed once, not scanned for each request; see
-        // `pending_subscription_mission_requests`.
-        connection
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h9b4924d4a878 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &canonical_sql(
-                    "SELECT json_extract(request.body, '$.fields.attempt')
-                 FROM claims request
-                 WHERE request.subject=?1
-                   AND request.kind='observer.refresh-requested'
-                   AND (
-                     json_extract(request.body, '$.fields.attempt') IS NULL
-                     OR json_extract(request.body, '$.fields.attempt') NOT IN (
-                       SELECT json_extract(result.body, '$.fields.attempt') FROM claims result
-                       WHERE result.subject=?1
-                         AND result.kind IN ('observer.observed', 'observer.state')
-                         AND json_extract(result.body, '$.fields.attempt') IS NOT NULL
-                     )
-                   )
-                 ORDER BY CANONICAL_ASC(request)
-                 LIMIT 1",
-                ),
-                [observer],
-                |row| row.get(0),
-            )
-            .optional()
+        fractal_store::store::observer_refresh::pending_attempt(&self.readers.get(), observer)
             .map_err(Into::into)
     }
 

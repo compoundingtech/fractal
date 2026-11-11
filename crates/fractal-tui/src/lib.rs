@@ -977,6 +977,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return Ok(());
     }
     let open_timing = ui::open_timing::Trace::from_env(process_started);
+    let _freshness = ui::freshness::install()?;
     fractal_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
     if let Some(path) = std::env::var_os("FRACTAL_TUI_TIMING_LOG") {

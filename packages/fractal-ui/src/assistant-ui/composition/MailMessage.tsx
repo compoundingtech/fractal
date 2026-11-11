@@ -6,6 +6,7 @@ import type { MessageItem } from '../embrace-data/model'
 import { textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, spaceVars as s, geometryVars as g, radiusVars as r, surfaceVars as surface } from '../composition-tokens.stylex'
 import { Markdown } from './Markdown'
 import { TranscriptAttachments } from './TranscriptAttachments'
+import { useRevealOpen } from './transcript-reveal'
 
 /** A participant as the host names it: roster name or last ref segment, with the full ref for hover. */
 export interface MailParticipant { readonly label: string; readonly ref?: string }
@@ -36,11 +37,12 @@ export function MailMessage({ item, participants }: { readonly item: MessageItem
   const text = item.text
   const long = text !== undefined && longBody(text)
   const [expanded, setExpanded] = React.useState(false)
+  useRevealOpen(reveal => reveal.entryId === item.id, expanded, setExpanded)
   const bodyId = React.useId()
   return <MessagePrimitive.Root data-testid="mail-message" data-item-id={item.id} data-item-kind={item._tag} data-mail-look={involving ? 'involving_you' : 'between_others'} {...stylex.props(styles.mail, involving ? styles.involving : styles.between)}>
     <p data-testid="mail-header" {...stylex.props(styles.header, involving && styles.headerInvolving)}>
       <Name who={from} />{to !== undefined && <><span aria-label="to" {...stylex.props(styles.arrow)}> → </span><Name who={to} /></>}
-      {item.title !== undefined && item.title !== '' && <span {...stylex.props(styles.subject)}> · {item.title}</span>}
+      {item.title !== undefined && item.title !== '' && <span {...stylex.props(styles.subject)}> · <span data-search-mail-subject>{item.title}</span></span>}
     </p>
     {text === undefined
       ? <p data-testid="mail-body-missing" {...stylex.props(styles.missing)}>Message body not loaded</p>

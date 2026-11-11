@@ -244,8 +244,25 @@ a mission ID without `mission/`; `write` takes a subject, or a registered family
 `/*`. A pattern is exact or ends in `/*`, which covers everything under it. Parsing refuses an empty
 block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
 mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
-is. A mission without the block grants its runs nothing. The block is stored with the revision;
-the daemon does not enforce it yet. A request whose caller's ancestry carries a live run credential
+is. A mission without the block grants its runs nothing.
+
+Each claim written as `mission-run/RUN`, and each document a run binds, is decided at write
+admission; a run's message send stays on the graph append so the decision applies to it. The run
+holds the `authority` of its current generation's revision, intersected with its starter's: the
+actor of its `mission-run.created`, which is its requester, or `mission-run/PARENT` for a child a
+program starts (whose own effective authority is intersected in turn). A person, agent or daemon
+starter contributes everything free mode gives it, and the rules that restrict it decide each of
+the run's writes as well. The claim names the grant it needs: `mission.published` on `mission/ID`
+needs `publish ID`; a run's creation and a generation without a predecessor need `start ID`; a
+generation with a predecessor needs `revise ID`, as does everything a revision writes on the runs
+it changes, each on that run's mission; any other claim needs `write SUBJECT`. A run always
+journals `program.step` on its own step runs. `cancel` is reserved and grants nothing yet: setting
+another run's outcome, which is how a run is cancelled, takes a person or agent actor. A write
+outside the effective authority is refused with `run-authority-denied`, or, when the daemon's
+`[programs] authority` is `audit`, recorded as `rule.audited` on `rule/run-authority` and let
+through (`enforce` by default).
+
+A request whose caller's ancestry carries a live run credential
 (`ST_RUN_CREDENTIAL`, one per program attempt) is bound to `mission-run/RUN`: like a bound agent, it
 may not call internal routes, send a person header or name another `actor` or `requester`, and its
 writes are attributed to the run. The credential binds only while its attempt is the step run's
@@ -370,11 +387,12 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
   produces-mission "generated-mission"
   uses-mission output-of="producer-step"
   after-run "mission-run/RUN_ID"
+  program "/abs/bundle.mjs" sha256="HEX" stalled-after="10m"
   gate "NAME" { GATE_BODY }
 }
 ```
 
-`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
+`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, `after-run` and `program` are single fields.
 
 `fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
 
@@ -1240,6 +1258,17 @@ step "wait-for-build" {
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
 To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
+
+### Running a program
+
+`program` runs a step as a program the daemon's program engine executes: one ES module pinned by
+its sha256. The step is agentless and the program alone decides its outcome, so it cannot name
+an agent, gates, products, nested or used missions or `after-run`, and it cannot be a `finally`
+step. `fractal apply` sends the bundle's bytes with the publication; see [Program
+engine](program-engine.md). An older member would quarantine a revision with a program step (it
+hashes the mission without the field), so publication holds such a revision until every member
+advertises `mission_program=1` on its `daemon.started` (`mission-program-unavailable`, also an
+`apply --dry-run` blocker), as for `capacity` ([seat lanes](seat-lanes.md)).
 
 ## Run reports
 
