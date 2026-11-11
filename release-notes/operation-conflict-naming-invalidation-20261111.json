@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Invalidate naming projections transactionally when a shared operation becomes conflicted.",
+  "replay": {"status": "changed", "detail": "Naming-bearing operation conflicts reuse the canonical naming reducer only below a measured domain-history cap; larger histories defer to explicit repair without receipt replay."},
+  "schema": {"status": "none", "detail": "No schema changes; existing dirty and projection-health tables record invalidation and degradation."},
+  "rules": {"status": "none", "detail": "Canonical naming and operation winner rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "No claim or wire format changes."},
+  "manual": {"status": "changed", "detail": "An above-cap naming conflict requires the existing explicit graph repair; naming and declaration reads fail closed until repair."},
+  "recovery": {"status": "changed", "detail": "A neutral claim conflicting with an earlier rename can no longer leave its cached naming projection reported healthy. Degradation stays visible to store health and recovery until successful repair."},
+  "downtime": {"status": "unknown", "detail": "The ignored writer-held naming benchmark reports local p50 and p99; no production deployment timing is claimed."}
+}

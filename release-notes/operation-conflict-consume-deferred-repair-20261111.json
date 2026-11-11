@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Consume deferred replay requirements when an authorized automatic full repair succeeds.",
+  "replay": {"status": "changed", "detail": "With complete discovery and no graph-projecting conflict in the replay range, a successful automatic full replay clears the deferred-replay row in the same transaction that restores graph health. Graph-projecting conflicts still defer automatic replay."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Canonical operation and graph rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "No claim or wire format changes."},
+  "manual": {"status": "none", "detail": "Explicit full repair retains its existing deferred-row cleanup."},
+  "recovery": {"status": "changed", "detail": "Completing a conflict-free rediscovery requires at most one automatic full repair rather than repeating full replay on every later catch-up."},
+  "downtime": {"status": "unknown", "detail": "No production timing measurement is claimed."}
+}
