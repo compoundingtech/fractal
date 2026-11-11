@@ -142,9 +142,9 @@ describe('ConversationOverflowMenu', () => {
     expect([...document.querySelectorAll('[role="menuitem"]')].map(each => each.querySelector('span')?.textContent)).toEqual(['Restart', 'Suspend', 'Retire', 'Copy id', 'View KDL'])
     const menu = within(document.body).getByRole('menu', { name: 'More actions' })
     for (const row of agentActions({ state: 'running', activity: 'idle' })) {
-      expect(within(menu).getByRole('menuitem', { name: `${row.label}, ${row.what}` })).not.toBeNull()
+      expect(within(menu).getByRole('menuitem', { name: `${row.label}, ${row.what}` }).textContent).toBe(`${row.label} ${row.what}`)
     }
-    expect(within(menu).getByRole('menuitem', { name: 'View KDL, read its whole declaration' })).not.toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'View KDL, read its whole declaration' }).textContent).toBe('View KDL read its whole declaration')
   })
 
   it('starts a stopped seat without asking', async () => {

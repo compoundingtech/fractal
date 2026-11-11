@@ -98,12 +98,12 @@ export const ConversationOverflowMenu = ({ agent, onViewDeclaration }: {
             {/* Plain label spans keep RAC from generating aria-labelledby that overrides each full visible aria-label. */}
             {rows.map((row) => (
               <Aria.MenuItem key={row.key} id={row.key} textValue={row.label} aria-label={`${row.label}, ${row.what}`} {...stylex.props(styles.menuItem)}>
-                <span {...stylex.props(styles.label)}>{row.label}</span>
+                <span {...stylex.props(styles.label)}>{row.label}</span>{' '}
                 <Aria.Text slot="description" {...stylex.props(styles.what)}>{row.what}</Aria.Text>
               </Aria.MenuItem>
             ))}
             <Aria.MenuItem id="declaration" textValue="View KDL" aria-label="View KDL, read its whole declaration" {...stylex.props(styles.menuItem, rows.length > 0 && styles.menuItemApart)}>
-              <span {...stylex.props(styles.label)}>View KDL</span>
+              <span {...stylex.props(styles.label)}>View KDL</span>{' '}
               <Aria.Text slot="description" {...stylex.props(styles.what)}>read its whole declaration</Aria.Text>
             </Aria.MenuItem>
           </Aria.Menu>
