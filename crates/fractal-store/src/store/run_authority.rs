@@ -58,10 +58,15 @@ pub fn intersect(left: &[AuthorityGrant], right: &[AuthorityGrant]) -> Vec<Autho
     both.into_iter().collect()
 }
 
-/// The run a run-owned subject belongs to: `mission-run/RUN`, its generations and their step runs.
+/// The run a run-owned subject belongs to: `mission-run/RUN`, its generations, their step runs
+/// and its revision proposals.
 fn owning_run_tx(transaction: &Transaction<'_>, subject: &str) -> Result<Option<String>, FractalError> {
     if let Some(run) = subject.strip_prefix("mission-run/") {
         return Ok(Some(run.to_owned()));
+    }
+    if let Some(proposal) = subject.strip_prefix("revision-proposal/") {
+        return transaction.query_row("SELECT run_id FROM revision_proposals WHERE id=?1", [proposal], |row| row.get(0))
+            .optional().map_err(internal);
     }
     let generation = subject.strip_prefix("run-generation/")
         .or_else(|| subject.strip_prefix("step-run/").and_then(|rest| rest.split('/').next()));
@@ -118,17 +123,19 @@ fn refuse_foreign_run_tx(transaction: &Transaction<'_>, run: &str, target: &str,
     ))
 }
 
-/// Admit a `mission-run` declaration applied as `actor`. Its creation and cancellations are not
-/// written as the run, so the declaration itself decides which run they touch: a run declares
-/// only on itself and the runs it started, and never creates a run this way.
-pub(super) fn admit_declaration_tx(
+/// Admit `actor` acting on `mission-run/RUN` where nothing it writes names the run as its
+/// actor: a `mission-run` declaration it applies, whose creation and cancellations are written
+/// as the daemon, or a cancellation it requests. A run reaches only itself and the runs it
+/// started, and never creates a run this way.
+pub fn admit_reach_tx(
     transaction: &Transaction<'_>,
     actor: Option<&str>,
-    subject: &str,
+    run_subject: &str,
+    action: &str,
 ) -> Result<(), FractalError> {
     let Some(run) = actor.and_then(|actor| actor.strip_prefix("mission-run/")) else { return Ok(()) };
-    let target = subject.strip_prefix("mission-run/").unwrap_or(subject);
-    refuse_foreign_run_tx(transaction, run, target, &format!("declare `{subject}`"))
+    let target = run_subject.strip_prefix("mission-run/").unwrap_or(run_subject);
+    refuse_foreign_run_tx(transaction, run, target, &format!("{action} `mission-run/{target}`"))
 }
 
 /// The grant one claim needs, or none for the run's own journal. A start or a revision writes

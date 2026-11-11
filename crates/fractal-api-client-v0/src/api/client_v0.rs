@@ -78,6 +78,8 @@ mod launch_detail_tests;
 #[cfg(test)]
 mod mission_history_tests;
 #[cfg(test)]
+mod run_reach_tests;
+#[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
 #[path = "client_v0/published_attention_tests.rs"]
@@ -8779,6 +8781,7 @@ async fn dispatch_action(
                     &current.subject,
                     reason,
                     Some(expected_generation),
+                    Some(authority_actor.as_str()),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
