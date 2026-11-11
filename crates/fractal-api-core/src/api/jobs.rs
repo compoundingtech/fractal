@@ -10,6 +10,7 @@ use smallclaims::fleet::MemberState;
 pub fn requester_scoped_path(path: &str) -> bool {
     path == "/v1/client/jobs" || path.starts_with("/v1/client/jobs/")
 }
+pub mod cancel;
 
 fn refused(code: &'static str, status: StatusCode) -> ApiError {
     ApiError { status, code: code.into(), message: code.into(), details: Box::default() }

@@ -642,7 +642,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route("/v1/client/jobs", get(jobs::list).post(jobs::submit))
-        .route("/v1/client/jobs/{*id}", get(jobs::show))
+        .route(
+            "/v1/client/jobs/{*id}",
+            get(jobs::show).post(jobs::cancel::cancel),
+        )
         .route(
             "/v1/client/diagnostics",
             post(client_diagnostics::ingest)
@@ -2046,6 +2049,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "conflicting-host"
         | "stale-authority"
         | "origin-mismatch"
+        | "requester-unresolved"
+        | "not-requester"
+        | "job-terminal"
+        | "job-state-uncertain"
+        | "job-state-changed"
         | "invalid-answer"
         | "not-answerable"
         | "idempotency-key-expired"

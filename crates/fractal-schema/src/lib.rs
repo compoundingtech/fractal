@@ -3217,7 +3217,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("person_id", required_string()),
         ],
         "person.delegation-set" => &[("actions", required_array())],
-        "job.recorded" => &[("record", required_object())],
+        "job.recorded" => &[("record", required_object()), ("reason", string())],
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
             ("expires_at", string()),

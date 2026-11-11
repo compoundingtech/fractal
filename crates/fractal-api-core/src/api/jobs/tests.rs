@@ -167,6 +167,7 @@ async fn requester_private_routes_refuse_forged_or_unresolved_bound_callers() {
         ("GET", "/v1/client/jobs"),
         ("GET", "/v1/client/jobs/job/fixture"),
         ("POST", "/v1/client/jobs"),
+        ("POST", "/v1/client/jobs/job/fixture/cancel"),
     ] {
         let request = Request::builder().method(method).uri(path)
             .header(client_v0::LOCAL_PERSON_HEADER, "person/other")
@@ -205,4 +206,200 @@ async fn pending_subject_is_a_typed_stale_error_through_the_router() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["code"], "jobs-projection-stale");
+}
+
+fn record_event(state: &AppState, id: &str, event: fractal_jobs::Event) {
+    let row = read(state, |tx| projection::job_by_id(tx, id)).unwrap().unwrap();
+    let record = JobRecord::Transition { binding: row.binding, event };
+    state.store.append_claim(&ClaimInput {
+        subject: id.into(), kind: projection::KIND.into(), actor: Some("person/a".into()),
+        fields: BTreeMap::from([("record".into(), serde_json::to_value(record).unwrap())]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_is_requester_only_idempotent_and_preserves_receipts() {
+    use tower::ServiceExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let original = submit(State(state.clone()), session("person/a"), config(),
+        Ok(Json(input("withdraw")))).await.unwrap().0;
+    let id = original["job"]["id"].as_str().unwrap();
+    for (actor, code) in [("person/operator", "not-requester"), ("", "requester-unresolved")] {
+        let error = cancel::cancel(State(state.clone()), session(actor), config(),
+            AxumPath(format!("{id}/cancel"))).await.unwrap_err();
+        assert_eq!(error.code, code);
+    }
+    let app = super::super::router(state.clone()).layer(config().unwrap());
+    let request = Request::builder().method("POST").uri(format!("/v1/client/jobs/{id}/cancel"))
+        .header(client_v0::LOCAL_PERSON_HEADER, "person/a").body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+    let again = cancel::cancel(State(state.clone()), session("person/a"), config(),
+        AxumPath(format!("{id}/cancel"))).await.unwrap().0;
+    assert_eq!(again["job"]["state"]["state"], "withdrawn");
+    let repeated = submit(State(state.clone()), session("person/a"), config(),
+        Ok(Json(input("withdraw")))).await.unwrap().0;
+    assert_eq!(again, repeated);
+    assert_eq!(read(&state, |tx| projection::history_by_job(tx, id)).unwrap().len(), 2);
+    let fresh = submit(State(state), session("person/a"), config(),
+        Ok(Json(input("new-attempt")))).await.unwrap().0;
+    assert_ne!(fresh["job"]["id"], again["job"]["id"]);
+    assert_eq!(fresh["job"]["state"]["state"], "queued");
+}
+
+#[tokio::test]
+async fn running_cancel_records_intent_without_claiming_a_whole_tree_stop() {
+    use fractal_jobs::Event;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let submitted = submit(State(state.clone()), session("person/a"), config(),
+        Ok(Json(input("running")))).await.unwrap().0;
+    let id = submitted["job"]["id"].as_str().unwrap();
+    for event in [Event::Prepare, Event::Prepared] {
+        record_event(&state, id, event);
+    }
+    let row = read(&state, |tx| projection::job_by_id(tx, id)).unwrap().unwrap();
+    let record = JobRecord::LaunchIntent {
+        binding: row.binding,
+        intent: fractal_jobs::launch::LaunchIntent {
+            generation: fractal_jobs::launch::ExecutionGeneration(std::num::NonZeroU64::new(1).unwrap()),
+            outcome_file: root.path().join("outcome.json").to_str().unwrap().into(),
+        },
+    };
+    state.store.append_claim(&ClaimInput {
+        subject: id.into(), kind: projection::KIND.into(), actor: Some("person/a".into()),
+        fields: BTreeMap::from([("record".into(), serde_json::to_value(record).unwrap())]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    record_event(&state, id, Event::Started);
+    assert_eq!(read(&state, |tx| projection::job_by_id(tx, id)).unwrap().unwrap().state,
+        fractal_jobs::State::Running);
+    let response = cancel::cancel(State(state.clone()), session("person/a"), config(),
+        AxumPath(format!("{id}/cancel"))).await.unwrap().0;
+    assert_eq!(response["job"]["state"]["state"], "cancel-requested");
+    assert_eq!(response["admission"], "not wired");
+    let error = cancel::cancel(State(state), session("person/a"), None,
+        AxumPath(format!("{id}/cancel"))).await.unwrap_err();
+    assert_eq!(error.code, "jobs-disabled");
+}
+
+#[tokio::test]
+async fn explicit_lease_expiry_records_its_reason_and_preserves_the_submission_receipt() {
+    use fractal_jobs::stop_intent::{self, StopDecision, StopInput, StopOrigin};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let submitted = submit(State(state.clone()), session("person/a"), config(),
+        Ok(Json(input("expiry")))).await.unwrap().0;
+    let id = submitted["job"]["id"].as_str().unwrap();
+    let row = read(&state, |tx| projection::job_by_id(tx, id)).unwrap().unwrap();
+    let origin = StopOrigin::Requester { actor: Some("person/a") };
+    let StopDecision::Record { event, reason } =
+        stop_intent::decide(row.state, &row.requester, origin, StopInput::RequesterLeaseExpired)
+            .unwrap() else { panic!("queued lease expiry must withdraw") };
+    let record = JobRecord::Transition { binding: row.binding, event };
+    let claim = state.store.append_claim(&ClaimInput {
+        subject: id.into(), kind: projection::KIND.into(), actor: Some("person/a".into()),
+        fields: BTreeMap::from([
+            ("record".into(), serde_json::to_value(record).unwrap()),
+            ("reason".into(), serde_json::to_value(reason).unwrap()),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert_eq!(claim.body["fields"]["reason"], "requester-lease-expired");
+    let retry = submit(State(state), session("person/a"), config(),
+        Ok(Json(input("expiry")))).await.unwrap().0;
+    assert_eq!(retry["job"]["id"], submitted["job"]["id"]);
+    assert_eq!(retry["job"]["state"]["state"], "withdrawn");
+}
+
+#[tokio::test]
+async fn pre_unit6_claim_without_reason_validates_replicates_and_folds() {
+    let root = tempfile::tempdir().unwrap();
+    let source = state(root.path());
+    let submitted = submit(State(source.clone()), session("person/a"), config(),
+        Ok(Json(input("old-shape")))).await.unwrap().0;
+    let id = submitted["job"]["id"].as_str().unwrap();
+    let history = read(&source, |tx| projection::history_by_job(tx, id)).unwrap();
+    let claim = source.store.claim_by_id(&history[0].claim_id).unwrap().unwrap();
+    // Exactly the pre-unit-6 fields object: record only, with no reason field.
+    let fields: BTreeMap<String, Value> =
+        serde_json::from_value(claim.body["fields"].clone()).unwrap();
+    assert_eq!(fields.len(), 1);
+    assert!(fields.contains_key("record"));
+    let schema = fractal_schema::registry();
+    schema.validate_claim(&claim.subject, &claim.kind, &fields).unwrap();
+    schema.validate_replicated_claim(&claim.subject, &claim.kind, &fields).unwrap();
+    let key = read(&source, |tx| {
+        let membership = smallclaims::store::fleet_membership_tx(tx)?;
+        let MemberState::Current(member) = membership.state("node") else { unreachable!() };
+        Ok(member.member_key.clone())
+    }).unwrap();
+    let target = Store::open_memory("receiver").unwrap();
+    target.pin_fleet_anchor(&key).unwrap();
+    let exchange = source.store.export_replication_exchange("jobs-fixture", &Default::default())
+        .unwrap();
+    target.receive_replication_exchange("node", "jobs-fixture", &exchange).unwrap();
+    target.validate_replication_backlog().unwrap();
+    target.project_replication_backlog().unwrap();
+    assert_eq!(target.claim_by_id(&claim.id).unwrap().unwrap().body, claim.body);
+    let reader = target.readers.get();
+    let tx = reader.unchecked_transaction().unwrap();
+    assert_eq!(projection::job_by_id(&tx, id).unwrap().unwrap().state, fractal_jobs::State::Queued);
+    assert_eq!(projection::receipt_for_key(&tx, "person/a", "old-shape").unwrap().unwrap().1, id);
+}
+
+#[tokio::test]
+async fn concurrent_queued_cancels_write_one_transition_and_refuse_the_stale_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let submitted = submit(State(state.clone()), session("person/a"), config(),
+        Ok(Json(input("cancel-race")))).await.unwrap().0;
+    let id = submitted["job"]["id"].as_str().unwrap().to_owned();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let launch = || {
+        let (state, id, barrier) = (state.clone(), id.clone(), barrier.clone());
+        tokio::task::spawn_blocking(move || {
+            let snapshot = read(&state, |tx| {
+                Ok((projection::job_by_id(tx, &id)?,
+                    smallclaims::store::latest_claim_id_tx(tx, &id)?))
+            });
+            // Never unwrap or assert before the rendezvous: failures cannot strand a peer.
+            barrier.wait();
+            let (row, head) = snapshot.unwrap();
+            cancel::cancel_snapshot(&state, &session("person/a").0, &id, row.unwrap(), head)
+        })
+    };
+    let (first, second) = tokio::join!(launch(), launch());
+    let results = [first.unwrap(), second.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results.iter().find_map(|result| result.as_ref().err()).unwrap();
+    assert_eq!(error.code, "job-state-changed");
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    let history = read(&state, |tx| projection::history_by_job(tx, &id)).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[1].state, Some(fractal_jobs::State::Withdrawn));
+}
+
+#[tokio::test]
+async fn cancellation_suffix_edges_do_not_mutate_the_job() {
+    use tower::ServiceExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let submitted = submit(State(state.clone()), session("person/a"), config(),
+        Ok(Json(input("suffix")))).await.unwrap().0;
+    let id = submitted["job"]["id"].as_str().unwrap();
+    let app = super::super::router(state.clone()).layer(config().unwrap());
+    for (method, suffix) in [("POST", "/cancel/cancel"), ("GET", "/cancel"), ("POST", "")] {
+        let request = Request::builder().method(method)
+            .uri(format!("/v1/client/jobs/{id}{suffix}"))
+            .header(client_v0::LOCAL_PERSON_HEADER, "person/a").body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["code"], "not-found");
+    }
+    let row = read(&state, |tx| projection::job_by_id(tx, id)).unwrap().unwrap();
+    assert_eq!(row.state, fractal_jobs::State::Queued);
+    assert_eq!(read(&state, |tx| projection::history_by_job(tx, id)).unwrap().len(), 1);
 }

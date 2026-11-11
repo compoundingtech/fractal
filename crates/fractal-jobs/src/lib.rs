@@ -9,6 +9,7 @@ pub mod host_authority;
 pub mod identity;
 pub mod launch;
 pub mod recovery;
+pub mod stop_intent;
 
 /// A declaration only: background sorts before normal; neither grants admission or preemption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
