@@ -343,6 +343,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'terminal.screen': return ['terminal/example', options];
             case 'harness-inventory.get': return ['agent/example', {}, options];
             default:
+                if (id.startsWith('github-plugin.')) return ['acme', 'garden', 7, options];
                 if (id.startsWith('assistant.')) return [{}, { payload: { projection: id.slice('assistant.'.length), parameters: {}, max_response_bytes: 4096 } }, options];
                 if (id.endsWith('.get')) return ['resource/example', options];
                 if (id.startsWith('launch-')) return ['launch/example', {}, options];
