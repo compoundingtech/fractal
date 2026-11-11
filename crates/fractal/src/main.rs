@@ -8006,6 +8006,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
             slo.stop();
         }
     };
+    let (relayed_closes_stop, relayed_closes_stopped) = tokio::sync::watch::channel(false);
+    let relayed_closes_worker = tokio::spawn(
+        fractal_daemon::api::relayed_close_maintenance::run(state.clone(), relayed_closes_stopped),
+    );
     let serving = async {
         let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
@@ -8044,6 +8048,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let stopped = fractal_daemon::api::stop_before_listener_drop(
         serving, shutdown, stop_agents_request_slo,
     ).await;
+    relayed_closes_stop.send_replace(true);
+    if let Err(error) = relayed_closes_worker.await {
+        stderr_message("fractal", format_args!("relayed close maintenance stopped: {error}"));
+    }
     drop(agents_request_slo);
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
