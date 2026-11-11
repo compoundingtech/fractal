@@ -3930,6 +3930,319 @@ export const EventPage = /*#__PURE__*/ (() => Schema.Struct({
 export type EventPage = typeof EventPage.Type
 export type EventPageEncoded = typeof EventPage.Encoded
 
+export const GithubCheckRun = /*#__PURE__*/ (() => Schema.Struct({
+  "completed_at": Schema.OptionFromNullOr(Schema.String),
+  "conclusion": Schema.OptionFromNullOr(Schema.String),
+  "name": Schema.String,
+  "started_at": Schema.OptionFromNullOr(Schema.String),
+  "status": Schema.Literals(["queued","in_progress","completed","waiting","requested","pending"]),
+  "summary": Schema.OptionFromNullOr(Schema.String),
+  "url": Schema.String,
+  "workflow": Schema.OptionFromNullOr(Schema.String)
+}).annotate({ identifier: "GithubCheckRun" }))()
+export type GithubCheckRun = typeof GithubCheckRun.Type
+export type GithubCheckRunEncoded = typeof GithubCheckRun.Encoded
+
+/** Check runs and statuses on a pull request's head, at most 100. */
+export const GithubChecks = /*#__PURE__*/ (() => Schema.Struct({
+  "head_sha": Schema.String,
+  "runs": Schema.Array(GithubCheckRun),
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "GithubChecks", description: "Check runs and statuses on a pull request's head, at most 100." }))()
+export type GithubChecks = typeof GithubChecks.Type
+export type GithubChecksEncoded = typeof GithubChecks.Encoded
+
+/** Where a 301 from GitHub points, parsed back to a typed item; never followed. */
+export const GithubMovedTo = /*#__PURE__*/ (() => Schema.Struct({
+  "number": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "owner": Schema.String,
+  "repo": Schema.String
+}).annotate({ identifier: "GithubMovedTo", description: "Where a 301 from GitHub points, parsed back to a typed item; never followed." }))()
+export type GithubMovedTo = typeof GithubMovedTo.Type
+export type GithubMovedToEncoded = typeof GithubMovedTo.Encoded
+
+/** One GitHub plugin read of a GithubChecks: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubChecksRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubChecks, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubChecksRead", description: "One GitHub plugin read of a GithubChecks: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubChecksRead = typeof GithubChecksRead.Type
+export type GithubChecksReadEncoded = typeof GithubChecksRead.Encoded
+
+export const GithubReaction = /*#__PURE__*/ (() => Schema.Struct({
+  "content": Schema.String,
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "GithubReaction" }))()
+export type GithubReaction = typeof GithubReaction.Type
+export type GithubReactionEncoded = typeof GithubReaction.Encoded
+
+/** A GitHub account, by login and profile page; avatars are never fetched. */
+export const GithubUser = /*#__PURE__*/ (() => Schema.Struct({
+  "login": Schema.String,
+  "url": Schema.String
+}).annotate({ identifier: "GithubUser", description: "A GitHub account, by login and profile page; avatars are never fetched." }))()
+export type GithubUser = typeof GithubUser.Type
+export type GithubUserEncoded = typeof GithubUser.Encoded
+
+/** An issue or pull request comment; number is the item it is on. */
+export const GithubComment = /*#__PURE__*/ (() => Schema.Struct({
+  "author": Schema.OptionFromNullOr(GithubUser),
+  "author_association": Schema.String,
+  "body": Schema.String,
+  "created_at": Schema.String,
+  "id": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "number": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "owner": Schema.String,
+  "reactions": Schema.Array(GithubReaction),
+  "repo": Schema.String,
+  "updated_at": Schema.String,
+  "url": Schema.String
+}).annotate({ identifier: "GithubComment", description: "An issue or pull request comment; number is the item it is on." }))()
+export type GithubComment = typeof GithubComment.Type
+export type GithubCommentEncoded = typeof GithubComment.Encoded
+
+/** One GitHub plugin read of a GithubComment: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubCommentRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubComment, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubCommentRead", description: "One GitHub plugin read of a GithubComment: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubCommentRead = typeof GithubCommentRead.Type
+export type GithubCommentReadEncoded = typeof GithubCommentRead.Encoded
+
+export const GithubReview = /*#__PURE__*/ (() => Schema.Struct({
+  "author": Schema.OptionFromNullOr(GithubUser),
+  "body": Schema.String,
+  "id": Schema.String,
+  "state": Schema.Literals(["approved","changes_requested","commented","dismissed","pending"]),
+  "submitted_at": Schema.OptionFromNullOr(Schema.String),
+  "url": Schema.String
+}).annotate({ identifier: "GithubReview" }))()
+export type GithubReview = typeof GithubReview.Type
+export type GithubReviewEncoded = typeof GithubReview.Encoded
+
+export const GithubThreadComment = /*#__PURE__*/ (() => Schema.Struct({
+  "author": Schema.OptionFromNullOr(GithubUser),
+  "body": Schema.String,
+  "created_at": Schema.String,
+  "id": Schema.String,
+  "url": Schema.String
+}).annotate({ identifier: "GithubThreadComment" }))()
+export type GithubThreadComment = typeof GithubThreadComment.Type
+export type GithubThreadCommentEncoded = typeof GithubThreadComment.Encoded
+
+export const GithubReviewThread = /*#__PURE__*/ (() => Schema.Struct({
+  "comments": Schema.Array(GithubThreadComment),
+  "id": Schema.String,
+  "line": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "outdated": Schema.Boolean,
+  "path": Schema.String,
+  "resolved": Schema.Boolean
+}).annotate({ identifier: "GithubReviewThread" }))()
+export type GithubReviewThread = typeof GithubReviewThread.Type
+export type GithubReviewThreadEncoded = typeof GithubReviewThread.Encoded
+
+/** Latest opinionated reviews, review threads and issue comments, at most 100 of each; truncated when GitHub has more. */
+export const GithubConversation = /*#__PURE__*/ (() => Schema.Struct({
+  "comments": Schema.Array(GithubComment),
+  "review_threads": Schema.Array(GithubReviewThread),
+  "reviews": Schema.Array(GithubReview),
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "GithubConversation", description: "Latest opinionated reviews, review threads and issue comments, at most 100 of each; truncated when GitHub has more." }))()
+export type GithubConversation = typeof GithubConversation.Type
+export type GithubConversationEncoded = typeof GithubConversation.Encoded
+
+/** One GitHub plugin read of a GithubConversation: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubConversationRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubConversation, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubConversationRead", description: "One GitHub plugin read of a GithubConversation: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubConversationRead = typeof GithubConversationRead.Type
+export type GithubConversationReadEncoded = typeof GithubConversationRead.Encoded
+
+export const GithubFile = /*#__PURE__*/ (() => Schema.Struct({
+  "additions": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "deletions": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "patch": Schema.OptionFromNullOr(Schema.String),
+  "path": Schema.String,
+  "previous_path": Schema.OptionFromNullOr(Schema.String),
+  "status": Schema.Literals(["added","removed","modified","renamed","copied","changed","unchanged"])
+}).annotate({ identifier: "GithubFile" }))()
+export type GithubFile = typeof GithubFile.Type
+export type GithubFileEncoded = typeof GithubFile.Encoded
+
+/** A pull request's files, at most 3,000 and a bounded amount of patch text; truncated past either. */
+export const GithubFiles = /*#__PURE__*/ (() => Schema.Struct({
+  "files": Schema.Array(GithubFile),
+  "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "GithubFiles", description: "A pull request's files, at most 3,000 and a bounded amount of patch text; truncated past either." }))()
+export type GithubFiles = typeof GithubFiles.Type
+export type GithubFilesEncoded = typeof GithubFiles.Encoded
+
+/** One GitHub plugin read of a GithubFiles: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubFilesRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubFiles, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubFilesRead", description: "One GitHub plugin read of a GithubFiles: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubFilesRead = typeof GithubFilesRead.Type
+export type GithubFilesReadEncoded = typeof GithubFilesRead.Encoded
+
+export const GithubLabel = /*#__PURE__*/ (() => Schema.Struct({
+  "color": Schema.String,
+  "name": Schema.String
+}).annotate({ identifier: "GithubLabel" }))()
+export type GithubLabel = typeof GithubLabel.Type
+export type GithubLabelEncoded = typeof GithubLabel.Encoded
+
+export const GithubIssue = /*#__PURE__*/ (() => Schema.Struct({
+  "assignees": Schema.Array(Schema.String),
+  "author": Schema.OptionFromNullOr(GithubUser),
+  "body": Schema.String,
+  "closed_at": Schema.OptionFromNullOr(Schema.String),
+  "comments": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "created_at": Schema.String,
+  "is_pull_request": Schema.Boolean,
+  "labels": Schema.Array(GithubLabel),
+  "milestone": Schema.OptionFromNullOr(Schema.String),
+  "number": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "owner": Schema.String,
+  "repo": Schema.String,
+  "state": Schema.Literals(["open","closed"]),
+  "state_reason": Schema.OptionFromNullOr(Schema.Literals(["completed","not_planned","reopened"])),
+  "title": Schema.String,
+  "updated_at": Schema.String,
+  "url": Schema.String
+}).annotate({ identifier: "GithubIssue" }))()
+export type GithubIssue = typeof GithubIssue.Type
+export type GithubIssueEncoded = typeof GithubIssue.Encoded
+
+/** One GitHub plugin read of a GithubIssue: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubIssueRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubIssue, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubIssueRead", description: "One GitHub plugin read of a GithubIssue: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubIssueRead = typeof GithubIssueRead.Type
+export type GithubIssueReadEncoded = typeof GithubIssueRead.Encoded
+
+/** A pull request or issue another item links to, such as a closing issue. */
+export const GithubItemLink = /*#__PURE__*/ (() => Schema.Struct({
+  "number": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "owner": Schema.String,
+  "repo": Schema.String,
+  "state": Schema.String,
+  "title": Schema.String
+}).annotate({ identifier: "GithubItemLink", description: "A pull request or issue another item links to, such as a closing issue." }))()
+export type GithubItemLink = typeof GithubItemLink.Type
+export type GithubItemLinkEncoded = typeof GithubItemLink.Encoded
+
+export const GithubPullRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "additions": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "author": Schema.OptionFromNullOr(GithubUser),
+  "base_ref": Schema.String,
+  "body": Schema.String,
+  "changed_files": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "closed_at": Schema.OptionFromNullOr(Schema.String),
+  "closing_issues": Schema.Array(GithubItemLink),
+  "comments": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "commits": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "created_at": Schema.String,
+  "deletions": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "draft": Schema.Boolean,
+  "head_ref": Schema.String,
+  "head_sha": Schema.String,
+  "labels": Schema.Array(GithubLabel),
+  "merge_state": Schema.OptionFromNullOr(Schema.Literals([
+  "clean",
+  "dirty",
+  "blocked",
+  "behind",
+  "unstable",
+  "has_hooks",
+  "draft",
+  "unknown"
+])),
+  "merged_at": Schema.OptionFromNullOr(Schema.String),
+  "number": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "owner": Schema.String,
+  "repo": Schema.String,
+  "requested_reviewers": Schema.Array(Schema.String),
+  "review_decision": Schema.OptionFromNullOr(Schema.Literals(["approved","changes_requested","review_required"])),
+  "state": Schema.Literals(["open","closed","merged"]),
+  "title": Schema.String,
+  "updated_at": Schema.String,
+  "url": Schema.String
+}).annotate({ identifier: "GithubPullRequest" }))()
+export type GithubPullRequest = typeof GithubPullRequest.Type
+export type GithubPullRequestEncoded = typeof GithubPullRequest.Encoded
+
+/** One GitHub plugin read of a GithubPullRequest: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubPullRequestRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubPullRequest, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubPullRequestRead", description: "One GitHub plugin read of a GithubPullRequest: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubPullRequestRead = typeof GithubPullRequestRead.Type
+export type GithubPullRequestReadEncoded = typeof GithubPullRequestRead.Encoded
+
+export const GithubJob = /*#__PURE__*/ (() => Schema.Struct({
+  "completed_at": Schema.OptionFromNullOr(Schema.String),
+  "conclusion": Schema.OptionFromNullOr(Schema.String),
+  "name": Schema.String,
+  "started_at": Schema.OptionFromNullOr(Schema.String),
+  "status": Schema.Literals(["queued","in_progress","completed","waiting","requested","pending"]),
+  "url": Schema.String
+}).annotate({ identifier: "GithubJob" }))()
+export type GithubJob = typeof GithubJob.Type
+export type GithubJobEncoded = typeof GithubJob.Encoded
+
+export const GithubRun = /*#__PURE__*/ (() => Schema.Struct({
+  "completed_at": Schema.OptionFromNullOr(Schema.String),
+  "conclusion": Schema.OptionFromNullOr(Schema.String),
+  "event": Schema.String,
+  "head_branch": Schema.OptionFromNullOr(Schema.String),
+  "head_sha": Schema.String,
+  "id": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "jobs": Schema.Array(GithubJob),
+  "name": Schema.String,
+  "owner": Schema.String,
+  "pull_requests": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "repo": Schema.String,
+  "run_attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "started_at": Schema.OptionFromNullOr(Schema.String),
+  "status": Schema.Literals(["queued","in_progress","completed","waiting","requested","pending"]),
+  "url": Schema.String
+}).annotate({ identifier: "GithubRun" }))()
+export type GithubRun = typeof GithubRun.Type
+export type GithubRunEncoded = typeof GithubRun.Encoded
+
+/** One GitHub plugin read of a GithubRun: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable. */
+export const GithubRunRead = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "fetched_at": Schema.String, "item": GithubRun, "stale": Schema.Boolean, "status": Schema.Literal("found"), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("moved"), "to": GithubMovedTo, "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("gone"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "status": Schema.Literal("not_found"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "reason": Schema.optionalKey(Schema.Never), "retry_after_s": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "reason": Schema.String, "retry_after_s": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": Schema.Literal("unavailable"), "fetched_at": Schema.optionalKey(Schema.Never), "item": Schema.optionalKey(Schema.Never), "stale": Schema.optionalKey(Schema.Never), "to": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("status")).annotate({ identifier: "GithubRunRead", description: "One GitHub plugin read of a GithubRun: found (stale when answered from the daemon's cache after a failed revalidation), moved, gone, not_found (GitHub's 404, which includes no access) or unavailable." }))()
+export type GithubRunRead = typeof GithubRunRead.Type
+export type GithubRunReadEncoded = typeof GithubRunRead.Encoded
+
 export const MailBacklog = /*#__PURE__*/ (() => Schema.Struct({
   "cleanup_command": Schema.String,
   "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
