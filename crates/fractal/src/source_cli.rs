@@ -398,6 +398,11 @@ pub(crate) fn render_step_source(read: &MapRead) -> Option<String> {
     let node = map.node_at(kdl)?;
     let authored = map.authored_at(kdl)?;
     let mut out = format!("SOURCE     {}@{} {}\n", map.repository, short_sha(&map.sha), authored.lines());
+    // An unlisted step is placed at its nearest listed ancestor; that ancestor's helpers and
+    // values are not the step's.
+    if node.kdl != kdl {
+        return Some(out);
+    }
     for (frame, location) in map.via(node) {
         let _ = writeln!(out, "  via      {}", lines_label(location.path, location.start, location.end, frame.precision));
     }
