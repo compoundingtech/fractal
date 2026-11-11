@@ -115,6 +115,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     ref: row.id,
     terminal: terminalSubjectForAgent(row.id),
     ...(row.runtime_ids.length === 0 ? { terminalDisabledReason: 'This agent has no terminal.' } : {}),
+    runtimeKey: row.runtime_ids.join(' '),
     name: row.name,
     lifecycle: lifecycleOf(row),
     host: hostName(row),
@@ -288,6 +289,7 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   a.ref === b.ref &&
   a.terminal === b.terminal &&
   a.terminalDisabledReason === b.terminalDisabledReason &&
+  a.runtimeKey === b.runtimeKey &&
   a.name === b.name &&
   a.lifecycle._tag === b.lifecycle._tag &&
   a.host === b.host &&

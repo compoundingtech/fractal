@@ -27,7 +27,7 @@ import { incrDebug, setDebug } from '../telemetry/meters.tsx'
 
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import type { TextItem } from '../conversation/model.ts'
-import { undeclared } from '../monitor/source.ts'
+import { RELAY_PREFIX, relayUsageSource } from '../monitor/source.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
 import { instrumentFetch, recordSocketState } from '../telemetry/transport.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -742,8 +742,8 @@ export const liveSource = ({
       onCommit: (value: readonly TRow[]) => {
         const next = evidence.get(value) ?? decodedRoster
         const current = registry.get(atom)
-        if (current.decodeStale === next.decodeStale && sameUndecodable(current.undecodable, next.undecodable)) return
-        registry.set(atom, next.undecodable.length === 0 && !next.decodeStale ? decodedRoster : next)
+        if (current.decodeStale === next.decodeStale && current.hasMore === next.hasMore && sameUndecodable(current.undecodable, next.undecodable)) return
+        registry.set(atom, next.undecodable.length === 0 && !next.decodeStale && next.hasMore !== true ? decodedRoster : next)
       },
       observedFreshness: (value: readonly TRow[]): 'stale' | 'live' =>
         evidence.get(value)?.decodeStale ? 'stale' : 'live',
@@ -788,9 +788,9 @@ export const liveSource = ({
       fractal.followWindow(spec).pipe(
         Stream.map((event) => {
           if (event._tag !== 'Observed') return event
-          const { items, undecodable, decodeStale } = event.value
+          const { items, undecodable, decodeStale, hasMore } = event.value
           const value = items.filter((row): row is Mission => row.kind === 'mission')
-          missionsEvidence.record(value, { undecodable, decodeStale })
+          missionsEvidence.record(value, { undecodable, decodeStale, hasMore })
           return { _tag: 'Observed' as const, value }
         }),
       ),
@@ -1339,7 +1339,7 @@ export const liveSource = ({
           }),
         ),
       ),
-      usage: undeclared,
+      usage: { _tag: 'declared', source: relayUsageSource({ label: 'Gateway usage', prefix: `${origin}${RELAY_PREFIX}` }) },
       sync: {
         gateway: gatewaySync,
         agents: agentsRetained.sync,
