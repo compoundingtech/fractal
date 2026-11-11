@@ -638,6 +638,13 @@ Pending-row and witness indexes retain these variable TEXT keys inline.
 Reference/chunk conversion must preserve exact authenticated pairs and
 conservative conflict visibility until resumable attachment work finishes.
 
+The same producer owns `lv-h41fad2bc67c1`: a genuine authenticated local
+transition copies one newest base grant's effective record and variable identity
+keys into a conservative attachment witness before materializing that validated
+pair for owner management. Other pairs remain queued and bearer fences remain
+intact. Its `bound-or-reference-values-and-reclamation` TODO must preserve
+conservative visibility and witness cleanup; a one-row copy is not a byte bound.
+
 The seven maintenance queues register owner/subowner TEXT identities with local
 integer admission sequences. Insert/delete triggers maintain that registry;
 upgrade populates it from existing queued work, not raw claim history.

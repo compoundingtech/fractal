@@ -294,6 +294,16 @@ creation commit atomically; no append or receive transaction enumerates the
 opposite history. A first local base with no opposite history remains immediately
 usable. Late opposite claims create their own tasks, including pairs beyond an
 older task's high-water mark.
+Owner mutation responses are separate from bearer readiness. A genuine local
+policy or revocation append validates and materializes at most one pair against
+the indexed newest base, with constant-size witness/recompute work; remaining
+pairs are still background work. The configured authoritative owner can inspect
+that committed management result and retry immediately without using bearer
+authorization. Revoke retries preserve the original revocation; policy and
+read-trust retries each append one new revision, as before. These routes do not
+offer keyed replay. Their successful responses never lift the subject's bearer
+fence.
+
 
 The subject remains fenced until its attachment tasks and witness cleanup finish.
 Cleanup seeks exactly one witness by its queue admission sequence before

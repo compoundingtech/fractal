@@ -53,6 +53,9 @@ async fn fixture_for_owner_and_principal(scopes: &[&str], pin_trust: bool, owner
             AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
+    // Owner pin responses precede bounded attachment reconciliation. Read-proof
+    // fixtures begin only after the real maintenance path lifts the bearer fence.
+    while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
     fixture.state.store.start_agent_roster_refresher().unwrap();
     crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
     fixture.state.store.start_attention_list_refresher().unwrap();

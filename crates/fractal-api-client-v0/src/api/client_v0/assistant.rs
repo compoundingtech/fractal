@@ -6,7 +6,7 @@ pub use native::propose;
 pub use authorization::{ReadReceipt, finish as finish_read, pin as pin_read_trust, read as read_projection};
 pub use fractal_api_core::api::client_v0::assistant::*;
 pub use fractal_api_core::api::client_v0::assistant::{PRINCIPAL, append, authenticate, authorize_route, device_resources, trusted_issuer};
-use fractal_api_core::api::client_v0::external_grants::{projection_principal, projection_with_witness, revoked};
+use fractal_api_core::api::client_v0::external_grants::{owner_effective, owner_grant, owner_projection, owner_revoked, projection_principal, projection_with_witness, revoked};
 pub mod authorization;
 pub mod native;
 pub mod reads;
@@ -232,13 +232,12 @@ async fn revoke_inner(State(state): State<AppState>, Extension(session): Extensi
     let issuer = trusted_issuer(&state, &session)?;
     let _transition = TRANSITIONS.lock().await;
     let subject = subject(&id)?;
-    let granted = latest(&state, &subject, GRANTED)?
-        .ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
+    let granted = owner_grant(&state,&id)?;
     if granted.origin != state.store.origin() {
         return Err(forbidden("assistant revocation must run on its authoritative issuer"));
     }
-    if !revoked(&state, &granted)? {
-        let previous = effective(&state, &granted)?;
+    if !owner_revoked(&state, &granted)? {
+        let previous = owner_effective(&state, &granted)?;
         let source = fields(&granted)?;
         let mut value = json!({"version":1,"grant_id":source["grant_id"],
             "principal":projection_principal(source)?,"issuer":issuer,"transport":session.transport,
@@ -251,7 +250,7 @@ async fn revoke_inner(State(state): State<AppState>, Extension(session): Extensi
         append(&state, subject, REVOKED, issuer, value, Some(&previous))?;
         signal_changed(&state);
     }
-    Ok(Json(projection(&state, &granted)?))
+    Ok(Json(owner_projection(&state, &granted)?))
 }
 
 async fn update_policy_inner(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
@@ -265,13 +264,12 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     }
     let _transition = TRANSITIONS.lock().await;
     let subject = subject(&id)?;
-    let granted = latest(&state, &subject, GRANTED)?
-        .ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
+    let granted = owner_grant(&state,&id)?;
     if granted.origin != state.store.origin() {
         return Err(forbidden("assistant policy must change on its authoritative issuer"));
     }
-    if revoked(&state, &granted)? { return Err(forbidden("assistant grant was revoked")); }
-    let previous = effective(&state, &granted)?;
+    if owner_revoked(&state, &granted)? { return Err(forbidden("assistant grant was revoked")); }
+    let previous = owner_effective(&state, &granted)?;
     // Policy changes must not revive an expired grant: fail closed instead of extending it.
     if fields(&previous)?["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms() {
         return Err(forbidden("assistant grant expired; begin a new grant instead of renewing it"));
@@ -291,12 +289,77 @@ async fn update_policy_inner(State(state): State<AppState>, Extension(session): 
     value["outcome"] = json!("renewed-policy");
     append(&state, subject, POLICY, issuer, value, Some(&previous))?;
     signal_changed(&state);
-    Ok(Json(projection(&state, &granted)?))
+    Ok(Json(owner_projection(&state, &granted)?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn committed_owner_mutation(route: &str, kind: &str) {
+        use axum::{body::{Body, to_bytes}, http::Request};
+        use tower::ServiceExt;
+        use smallclaims::store::assistant_grant_authority as authority;
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let paired = paired(&state).await;
+        let id = paired["grant"]["id"].as_str().unwrap();
+        let granted = owner_grant(&state,id).unwrap();
+        let body = if route=="revoke" { Value::Null } else if route=="policy" {
+            json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES[..4],
+                "disclosure_consent":true,"consent_evidence":"owner approved renewal",
+                "minimal_read_mode":"approval-once"})
+        } else {
+            json!({"api_version":CLIENT_API_VERSION,"issuer":"approval/test","key_id":"test-key",
+                "attestor_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32]),
+                "shim_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([8_u8;32])})
+        };
+        let app = super::super::super::router_for_transport(state.clone(),
+            ClientTransportBoundary::Unix,&[crate::api::client_v0::routes]);
+        let mut first = None;
+        for attempt in 0..2 {
+            let mut request = Request::builder().method("POST")
+                .uri(format!("/v1/client/assistant/grants/{id}/{route}"))
+                .header(LOCAL_PERSON_HEADER,ISSUER).header("content-type","application/json")
+                .body(Body::from(if body.is_null() { String::new() } else { body.to_string() })).unwrap();
+            request.extensions_mut().insert(super::super::super::LocalPeer {
+                pid:8,peer_process:None,ancestor:None,
+            });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK,"{route} attempt {attempt}");
+            let response: Value = serde_json::from_slice(
+                &to_bytes(response.into_body(),usize::MAX).await.unwrap()).unwrap();
+            let committed = authority::management_transition(&state.store.readers.get(),&granted,kind)
+                .unwrap().expect("successful response must name a committed mutation");
+            let count = state.store.claims_for(&granted.subject,Some(kind)).unwrap().len();
+            if route=="revoke" {
+                assert_eq!(response["value"]["revoked"],true);
+                assert_eq!(count,1,"revoke retry must not append another revocation");
+                if let Some(first) = &first { assert_eq!(first,&committed.id); }
+            } else {
+                assert_eq!(count,attempt+1,"each policy or pin retry appends exactly one revision");
+                assert_eq!(response["value"]["policy_revision"],attempt+2);
+                assert_eq!(fields(&committed).unwrap()["policy_revision"],attempt+2);
+            }
+            first = Some(committed.id);
+            assert!(authority::subject_ready(&state.store.readers.get(),&granted.subject).is_err());
+            assert!(authenticate(&state,&credential_digest(paired["credential"].as_str().unwrap()),
+                "fabric-loopback").is_err(),"committed owner success must not lift the bearer fence");
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_revoke_reports_committed_state_and_retry_without_lifting_bearer_fence() {
+        committed_owner_mutation("revoke",REVOKED).await;
+    }
+    #[tokio::test]
+    async fn owner_policy_reports_committed_revision_and_retry_without_lifting_bearer_fence() {
+        committed_owner_mutation("policy",POLICY).await;
+    }
+    #[tokio::test]
+    async fn owner_pin_reports_committed_revision_and_retry_without_lifting_bearer_fence() {
+        committed_owner_mutation("read-trust",POLICY).await;
+    }
 
     const ISSUER: &str = "person/robin";
 
@@ -373,7 +436,8 @@ mod tests {
                 assert_eq!(response.status(), StatusCode::OK, "{profile:?}");
                 let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
                 assert_eq!(body["value"]["revoked"], true);
-                let revoked = latest(&state, &granted.subject, REVOKED).unwrap().unwrap();
+                let revoked = smallclaims::store::assistant_grant_authority::management_transition(
+                    &state.store.readers.get(),&granted,REVOKED).unwrap().unwrap();
                 assert_eq!(fields(&revoked).unwrap().get("profile"), fields(&granted).unwrap().get("profile"));
                 assert_eq!(revoked.actor.as_deref(), Some(ISSUER));
                 assert_eq!(revoked.origin, granted.origin);
@@ -422,9 +486,11 @@ mod tests {
             &to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
         assert_eq!(body["value"]["principal"], PRINCIPAL);
         assert_eq!(body["value"]["revoked"], true);
-        let revoked = latest(&state, &legacy.subject, REVOKED).unwrap().unwrap();
+        let revoked = smallclaims::store::assistant_grant_authority::management_transition(
+            &state.store.readers.get(),&legacy,REVOKED).unwrap().unwrap();
         assert_eq!(fields(&revoked).unwrap()["profile"], "service");
         assert_eq!(fields(&revoked).unwrap()["principal"], PRINCIPAL);
+        while !state.store.advance_assistant_grant_authority_backfill().unwrap() {}
         let Json(paired) = complete(&state, pairing_id, &completion, "fabric-loopback")
             .await.unwrap().expect("owner revocation must restore actual assistant admission");
         assert_eq!(paired["principal"], PRINCIPAL);

@@ -577,6 +577,20 @@ pub fn latest(connection: &Connection, subject: &str, kind: &str) -> Result<Opti
         params![subject,kind], |row| row.get(0)).optional().map_err(internal)?;
     record.map(decode).transpose()
 }
+
+/// Management evidence only. Callers must authenticate the authoritative owner;
+/// this must never be used to authorize a bearer while its subject is fenced.
+pub fn management_latest(connection: &Connection, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
+    let record: Option<String> = connection.query_row(
+        "SELECT record FROM assistant_grant_authority WHERE grant_subject=?1 AND kind=?2 ORDER BY store_index DESC LIMIT 1",
+        params![subject,kind], |row| row.get(0)).optional().map_err(internal)?;
+    record.map(decode).transpose()
+}
+
+/// Owner-management counterpart to `transition`; never bearer authorization.
+pub fn management_transition(connection: &Connection, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
+    transition_unchecked(connection,granted,kind).map_err(internal)
+}
 pub const CANDIDATES_QUERY: &str = "SELECT grant_record FROM assistant_grant_effective
     WHERE ?3 IS NOT NULL AND principal=?1 AND owner=?2 AND revoked=0 AND expires_at>?3
       AND (?4 IS NULL OR claim_id<>?4) AND (?5 IS NULL OR profile<>?5)
@@ -865,6 +879,21 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
                OR assistant_grant_pending.auth_envelope_hash IS NOT excluded.auth_envelope_hash
                OR assistant_grant_pending.auth_record_position IS NOT excluded.auth_record_position",
             params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?,proof_key,proof_sequence,proof_hash,proof_position])? != 0;
+        // One local transition may materialize only its newest base pair for
+        // owner management. All other pairs stay queued, and bearer fences stay
+        // intact. No base/transition product is visited in the append request.
+        if changed && !admitted && authenticated && local_append && claim.kind!=GRANTED
+            && let Some(base) = management_latest(connection,&claim.subject,GRANTED)?
+            && transition_valid(&base,&claim) {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h41fad2bc67c1 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_attachment_witnesses
+                 SELECT claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record
+                 FROM assistant_grant_effective WHERE claim_id=?1", [&base.id],
+            )?;
+            if insert_authority(connection,&claim,&base)? {
+                recompute_base(connection,&base.id)?;
+            }
+        }
         if changed && !admitted && authenticated { attach_claim(connection,&claim)?; }
         if admitted && !authenticated { rebuild_authenticated_subject(connection,&claim)?; }
         if matches!(authentication, Authentication::Pending) {
