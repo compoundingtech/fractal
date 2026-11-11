@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Remove redundant OptionalExtension imports from jobs queries and receipts; no behavior change.",
+  "replay": {"status": "changed", "detail": "Open catches up existing job history; bounded refold checks subject size before sorting or changing tables. Canonical submissions atomically reconstruct job rows, receipts and raw transition history. Reverse-arrival, malformed-record and repair fixtures cover rebuild equivalence."},
+  "schema": {"status": "changed", "detail": "Populate receipts with composite requester/key uniqueness and a unique job-ID index. Job IDs are versioned SHA-256 identities of requester/key, keeping conflicts subject-local. Durable receipt-bearing claims never rotate away."},
+  "rules": {"status": "none", "detail": "No execution admission or host activation. Unit-2 decisions run in the receipt's SQLite writer transaction. A new two-connection race fixture requires exactly one NewJob result, one ExistingJob with the same ID, and one persisted receipt."},
+  "compatibility": {"status": "changed", "detail": "Read-only Transaction queries expose job lookup, canonical host queue, raw transition history and receipts. Pending subjects return typed JobsProjectionStale; queues fence current and candidate hosts. Reads never drain pending work or acquire the writer."},
+  "downtime": {"status": "none", "detail": "No activation."},
+  "manual": {"status": "none", "detail": "No operator action. Automatic runtime repair-page dispatch remains deferred to approved 4c-2; affected reads explicitly report stale until existing flush/open/rebuild hooks drain pending subjects."},
+  "recovery": {"status": "changed", "detail": "Repair fixtures require stale reads without writes, followed by flush/rebuild equivalence. Histories and receipts do not authorize execution, and no whole-log fallback is introduced."}
+}
