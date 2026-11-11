@@ -91,7 +91,9 @@ pub fn decide_host_authority(
     if !authority.current
         || authority.declaration.is_empty()
         || authority.declaration != binding.authority_declaration
-        || evidence.existing_binding.is_some_and(|existing| existing != binding)
+        || evidence
+            .existing_binding
+            .is_some_and(|existing| existing != binding)
     {
         return Refuse(StaleAuthority);
     }
