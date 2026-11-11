@@ -559,25 +559,181 @@ and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
 
-## Assistant principal admission index review
+## Assistant principal admission and authenticated authority inventory
 
-`fractal_store::store` owns schema site `lv-hb9696ca837f7`, replacing
-`lv-h22c8c670811c`. The added principal admission index retains claim-kind TEXT
-and the effective principal JSON field inline; absent principals use the fixed
-`assistant/chatgpt` key. The composite seek changes neither claim bodies nor
-admission semantics. These keys remain variable-size, and SQLite maintains them
-on insertion and deletion; indexed lookup is not a byte-size or startup-cost
-proof. The producer maintainer retains `chunk-or-reference-variable-columns`
-responsibility while preserving effective-principal matching and claim authority.
+The admission-index review established the need for effective-principal matching
+(including the legacy `assistant/chatgpt` default), live-grant expiry range seeks,
+and subject/kind/origin/actor transition seeks that exclude another issuer's
+overlays. The authenticated authority projection in PR #5993 preserves those
+requirements without treating raw claim rows as authority.
 
-`fractal_api_core::api::client_v0::external_grants` owns the conservative
-read-only sink `lv-h99f1a302c7b1`. Its prepared admission query binds fixed claim
-kinds, an assistant principal and an optional expiry cutoff, then returns claim
-IDs after revocation and latest-policy filtering. It adds no writer or body copy;
-principal, subject and claim-ID TEXT keys remain variable-size. The producer
-maintainer retains `trace-statement-and-value-representation` responsibility for
-these bindings and returned identifiers; fewer candidates and indexed seeks do
-not establish encoded-size or execution-cost bounds.
+`smallclaims::store::assistant_grant_authority` owns schema site
+`lv-h01e62b989d49`. Its authority transition index includes the exact base claim
+and canonical store order; its effective-grant active index keys principal,
+owner, revocation, expiry and profile. Authenticated records, grant subjects,
+principal/actor keys and proof identities remain inline variable-size values.
+The producer retains `chunk-or-reference-variable-columns` responsibility:
+representation changes must preserve authentication, effective-principal
+matching, latest-policy/revocation selection and proof invalidation/reclamation.
+Indexed lookup and bounded catch-up batches prove neither encoded byte size nor
+total startup cost.
+
+The former raw-claim principal, principal/expiry and transition indexes and the
+raw transition-reader exception `lv-h1cad9af7ef23` are superseded, not a second
+production admission path. Raw claims remain evidence; projection readers must
+not restore authority to unauthenticated overlays.
+
+`fractal_api_core::api::client_v0::external_grants` no longer owns a raw SQL
+candidate sink: `lv-h99f1a302c7b1` and its intermediate batch-provenance
+replacement `lv-hc1c46de6a890` are superseded by the authenticated projection
+API. Candidate selection retains principal, owner, expiry, ignored-profile and
+excluded-claim filtering without rehydrating raw claim history as authority.
+The projection's record copies and variable index keys remain transitional debt,
+not an encoded-size or execution-cost guarantee.
+
+Owner management, audit and conflict-witness projection preserve historical
+Service-on-assistant identities through the broader projection-principal parser,
+so the authoritative owner can inspect and revoke that retained conflict evidence.
+Representation changes must preserve this recovery path without turning those
+historical identities into Service bearer credentials. Issuance and bearer
+authentication retain the strict profile-specific principal parser; Service
+credentials require a `plugin/<host>/<service>` principal.
+
+The merged `fractal_store::store` schema is `lv-h23dec68723c3`, replacing
+`lv-h6e39e16546c7` and `lv-h1ae4f9ad11c9`. It retains the desired-kind/subject
+index and local desired-write witness while removing the obsolete raw principal
+index. It also retains incoming assistant-prose indexes on replicated claims and
+local observations: subject/incarnation, canonical time/order and local frontier
+keys remain inline. Reference/chunk conversion must preserve their assistant-role
+and message/content predicates and indexed empty-result semantics; these variable
+columns and index keys remain size-unproven.
+
+The merged inventory additionally reviews the authority producer's pending proof
+identities, membership-window additions/retractions, resumable authentication
+cursors, dirty/recompute work, invalidation triggers, local-append witnesses and
+upgrade metadata. These retain inline claim/subject/writer/member-key strings,
+signed-record identities and record JSON so proof invalidation and catch-up
+remain exact. The owning producer must preserve those identities, atomic
+visibility and keyed reclamation when changing representation; batch counts do
+not bound individual values. Savepoint/release and composed read sinks remain
+conservative `trace-statement-and-value-representation` exceptions.
+
+The corresponding API, delivery, wake, authority, membership-property,
+receipt-cost and benchmark fixtures mutate isolated proof/cursor/claim state or
+count work to exercise those invariants. Their module owners retain the listed
+body/predecessor, exact-wire, generation/reclamation and reference TODOs; test
+coverage establishes no production value-size exemption.
+
+Reviewed manual flows `smallclaims::store::insert_claim`,
+`smallclaims::store::put_document_as` and
+`smallclaims::store::receive_replication_exchange_via` retain their existing
+representation TODOs. Local inserts now stamp the authority local-append witness;
+document writes preserve blob, idempotency and writer-admission semantics; exchange
+receipt preserves exact envelopes/signatures, carrier evidence and pending
+admission. Their refreshed fingerprints do not generalize document or transport
+limits into universal stored-value bounds.
+
+The `smallclaims::store::membership_query_tests` maintainer owns test-only sites
+`lv-hb5e52f377f02`, `lv-he6cdb35f9041` and `lv-h85da58ff0363`. These change a
+fixture claim's origin, copy an admitted record's inline raw bytes and identity
+into a sibling record, and replace a fixture signature with fixed invalid text.
+They exercise batch/scalar parity and shared-signature verification deduplication
+in an in-memory store; they add no production writer. The maintainer retains the
+listed body/predecessor and exact-wire representation TODOs for these fixture
+copies; this exception is not a byte-size or execution-cost proof.
+
+### Conditional legacy-state migration inventory
+
+`smallclaims::store::assistant_grant_authority` owns conservative transaction
+sinks `lv-hbad5073042d8` and `lv-h2bc6720e295e`, enclosing conditional legacy
+cursor/addition/auth-work migrations. Current-schema reopens inspect legacy
+state read-only and skip the savepoint when no migration is needed. Existing
+representation TODOs still cover requeued claim IDs, exact key/range obligations
+and rebuilt authentication work; moving migration out of trigger installation
+does not establish byte or upgrade-work bounds.
+
+`smallclaims::store::assistant_grant_authority_tests` owns `lv-h2693491dc162`,
+`lv-h39e4aa452548` and `lv-h6142d0df5172`. They restore legacy addition columns
+and exact proof/range values, insert a current resumable cursor and clear
+authentication work in an isolated fixture. The exact-wire and reclamation TODOs
+must preserve obligation retention and no-write repeat-install assertions through
+representation changes. These exceptions add no production writer or size proof.
+
+### Indexed owner-management transition inventory
+
+`smallclaims::store::assistant_grant_authority` owns management read sinks
+`lv-h0acc69f486f8` and `lv-ha81fbb31a83b`, and schema `lv-h01e62b989d49`.
+The revoke/policy expression indexes retain subject, kind, origin, actor,
+principal, profile and JSON-derived grant ID/issuer keys; the policy index also
+retains stored profile and session-actor keys before descending store order.
+The queries bind those exact immutable identities and return one authenticated
+record independently of reverse attachment, so unrelated history is not a
+scanned prefix. These inline TEXT/JSON values and index keys remain variable-size.
+Reference/chunk conversion must preserve identity applicability, canonical latest
+selection and null-versus-missing semantics; indexed LIMIT 1 is not a byte bound.
+
+`smallclaims::store::assistant_grant_attachment_tests` owns `lv-hd01abd6d9fce`,
+`lv-h556a1cd4fce4` and `lv-h763f36835f8e`: conservative prepare/bind sinks for
+the same production query constants. Their dynamic-source TODO must preserve the
+identity bindings and no-fullscan/no-sort cost regressions through representation
+changes; the fixture adds no production writer or value-size exemption.
+
+## Attachment work and queue-owner inventory (PR #6306)
+
+`smallclaims::store::assistant_grant_authority` owns attachment schema
+`lv-h01e62b989d49`, replacing `lv-hecb38ff7561b`, and queue-owner schema
+`lv-h8523b0e4eedf`. Attachment work stores candidate/base claim IDs, subject,
+origin, actor and lower/upper claim-ID cursors; conservative witnesses copy the
+effective grant's principal, owner, profile, expiry, revocation and record JSON.
+Pending-row and witness indexes retain these variable TEXT keys inline.
+Reference/chunk conversion must preserve exact authenticated pairs and
+conservative conflict visibility until resumable attachment work finishes.
+
+The same producer owns witness-copy site `lv-h41fad2bc67c1` and local completion
+sites `lv-h45c096d84c6c` and `lv-h133b802d1e9c`. Only the actual local-append
+transaction receives this allowance: its authenticated transition can materialize
+the newest management pair and consume one attachment candidate, for at most two
+transition pairs plus one optional repaired-base self-pair. The candidate's exact
+record/identity and conservative effective-grant witness remain inline.
+A subsequent completion-only probe may delete the exhausted task but never
+consume another candidate; witness cleanup deletes at most two base witnesses
+only after the subject's attachment tasks finish. Unrelated proof/dirty fences
+remain intact, and maintenance refreshes retain their ordinary one-unit budget.
+The producer's `bound-or-reference-values-and-reclamation` TODO must preserve
+candidate accounting, conservative visibility and keyed cleanup through
+representation changes; bounded row counts do not bound encoded bytes.
+
+The reviewed `smallclaims::store::insert_claim` flow retains
+`flow-h8ff255a3c271` and its body/predecessor preparation TODO. Its fingerprint
+now includes the dedicated `refresh_local_append` hook after stamping the local
+append witness, rather than granting this allowance to historical maintenance.
+
+The seven maintenance queues register owner/subowner TEXT identities with local
+integer admission sequences. Insert/delete triggers maintain that registry;
+upgrade populates it from existing queued work, not raw claim history.
+Per-queue metadata retains the current sequence cursor and fixed round frontier,
+and maintenance-turn metadata rotates the queues. These replace the old
+dirty/witness content-key cursors rather than creating a second scheduler.
+The registry's variable keys and old-cell/index reclamation remain the module's
+`chunk-or-reference-variable-columns` and
+`bound-or-reference-values-and-reclamation` work. Local sequence order and
+per-slice row counts do not establish byte-size or total-upgrade-cost bounds.
+
+The `assistant_grant_attachment_tests`, `assistant_grant_authority_tests` and
+`assistant_grant_authority_bench` producer modules retain their own exceptions
+for isolated witness/queue mutations, reset statements, count tables and
+measurement triggers. Their follow-up must preserve candidate accounting,
+conservative visibility, owner-round fairness and keyed cleanup when values
+move to references. Fixture constants and integer counters do not exempt their
+variable keys, copied grant records or declared indexes from representation review.
+
+`smallclaims::store::assistant_grant_membership_property_tests` owns renewed
+withdrawal sites `lv-haa8b386b739d` and `lv-h80511dab4ee6`. The fixture deletes
+an exact writer/sequence/envelope-hash receipt, or marks it pending, after real
+receive repairs it; the composed execution sink binds the same proof identity.
+The exact-wire and dynamic-source TODOs must preserve immediate authority fencing
+and the independently queued invalidation through reference/chunk conversion.
+This test-only mutation establishes no byte-size or execution-cost guarantee.
 
 ## Incremental observed credit heads
 
