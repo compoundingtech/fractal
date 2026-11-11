@@ -371,6 +371,60 @@ class Verifier(unittest.TestCase):
         other.note(commit, tree, key, 'machine/ci1', seconds=60)
         self.assertEqual(other.verify(tree, max_age=week)[0], 0)
 
+    def test_repository_local_gpg_program_cannot_validate_a_forged_pgp_header(self):
+        record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', sign=False)
+        raw = self.f.git('cat-file', 'commit', record)
+        header, message = raw.split('\n\n', 1)
+        forged = self.f.git('hash-object', '-t', 'commit', '-w', '--stdin', stdin=(
+            header + '\ngpgsig -----BEGIN PGP SIGNATURE-----\n'
+            ' \n Zm9yZ2Vk\n -----END PGP SIGNATURE-----\n\n' + message).encode())
+        self.f.git('update-ref', '-d', self.f.ref_of[record])
+        self.f.git('update-ref', self.f.ref_for(forged, self.tree), forged)
+        marker = self.f.repo / 'gpg-ran'
+        program = self.f.repo / 'fake-gpg'
+        program.write_text(
+            '#!/bin/sh\n'
+            'touch "$(dirname "$0")/gpg-ran"\n'
+            'cat >/dev/null\n'
+            'echo "[GNUPG:] NEWSIG" >&2\n'
+            'echo "[GNUPG:] GOODSIG 0123456789ABCDEF machine/ci1" >&2\n'
+            'echo "[GNUPG:] VALIDSIG 0123456789ABCDEF0123456789ABCDEF01234567 '
+            '2026-01-01 1767225600 0 4 0 1 10 00 0123456789ABCDEF0123456789ABCDEF01234567" >&2\n'
+            'echo "[GNUPG:] TRUST_FULLY 0 pgp" >&2\n')
+        program.chmod(0o755)
+        revocations = self.f.root / 'revocations'
+        revocations.write_text('')
+        for setting in ('gpg.program', 'gpg.openpgp.program'):
+            with self.subTest(setting=setting):
+                self.f.git('config', setting, str(program))
+                status, _ = evidence_verify.signature(str(self.f.repo), forged, str(self.f.keys), str(revocations))
+                self.assertNotEqual(status, 'G')
+                self.assertEqual(self.reason(self.tree), 'bad_signature')
+                self.assertFalse(marker.exists(), 'repository-local verifier was executed')
+                self.f.git('config', '--unset', setting)
+
+    def test_repository_local_ssh_program_does_not_override_real_verification(self):
+        record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.f.git('config', 'gpg.ssh.program', '/bin/false')
+        self.f.git('config', 'gpg.ssh.allowedSignersFile', '/dev/null')
+        code, result = self.f.verify(self.tree)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result['record'], record)
+
+    def test_git_pins_verifiers_and_ignores_global_and_system_config(self):
+        done = subprocess.CompletedProcess([], 0, stdout=b'ok', stderr=b'')
+        with mock.patch.object(evidence_verify.subprocess, 'run', return_value=done) as execute:
+            self.assertEqual(evidence_verify.git(str(self.f.repo), 'status',
+                             env={'GIT_CONFIG_GLOBAL': '/untrusted', 'GIT_CONFIG_NOSYSTEM': '0'}), b'ok')
+        command = execute.call_args.args[0]
+        config = [command[index + 1] for index, value in enumerate(command) if value == '-c']
+        for setting in ('gpg.program=/bin/false', 'gpg.openpgp.program=/bin/false',
+                        'gpg.x509.program=/bin/false', 'gpg.ssh.program=ssh-keygen'):
+            self.assertIn(setting, config)
+        environment = execute.call_args.kwargs['env']
+        self.assertEqual(environment['GIT_CONFIG_GLOBAL'], '/dev/null')
+        self.assertEqual(environment['GIT_CONFIG_NOSYSTEM'], '1')
+
     def test_signed_content_edited_after_signing_is_a_bad_signature(self):
         record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1)
         raw = run('git', '-C', str(self.f.repo), 'cat-file', 'commit', record)
