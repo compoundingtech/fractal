@@ -14,7 +14,7 @@ import { useDataSource } from '../data/react.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { blobRef, pinnedRef, type SubjectReads } from '../data/subjectReadPort.ts'
 import { agentDeclarationState, declarationSubject, missionDeclarationState } from '../declarations/model.ts'
-import { pinnedKdl, previousRevision, sourceMapState, textState } from '../declarations/sourceMap.ts'
+import { previousRevision, sourceMapState, textState } from '../declarations/sourceMap.ts'
 
 /** Where the sheet opens: a run chip pins the run's revision and the step's node. */
 export interface DeclarationTarget {
@@ -82,33 +82,32 @@ const SubjectSource = ({ target, close, Inspector, agent }: { readonly target: D
   const [chosen, setChosen] = React.useState(target.revision)
   const [node, setNode] = React.useState(target.node)
   const [compareFrom, setCompareFrom] = React.useState<string>()
-  // The current declaration is the live KDL tab and names the live revision.
+  // The current declaration is the live KDL tab. Its id is not a subject revision (agents name a
+  // declaration claim), so the map read without a revision resolves the current one server-side.
   const agentFeed = useAtomValue(agent ? reads.agentDeclaration.feed(subject) : notRead)
   const missionFeed = useAtomValue(agent ? notRead : reads.missionDefinition.feed(subject))
   const currentKdl = agent ? agentDeclarationState(agentFeed) : missionDeclarationState(missionFeed)
   const current = agent ? agentFeed : missionFeed
-  const live = current._tag === 'Observed' ? current.value.revision as string : undefined
-  const revision = chosen ?? live
-  const pinned = revision === undefined ? undefined : pinnedRef(subject, revision)
-  const mapState = sourceMapState(useAtomValue(pinned === undefined ? notRead : reads.sourceMap.feed(pinned)), revision ?? '')
+  const mapState = sourceMapState(useAtomValue(reads.sourceMap.feed(chosen === undefined ? subject : pinnedRef(subject, chosen))), chosen)
+  const map = mapState._tag === 'Ready' ? mapState.map : undefined
+  const live = mapState._tag === 'Ready' ? mapState.current : undefined
+  const revision = chosen ?? map?.revision
+  const pinned = map === undefined ? undefined : pinnedRef(subject, map.revision)
   // Source leads when a map exists or may still arrive; a subject without one opens on its KDL.
   const tab = pickedTab ?? (mapState._tag === 'Ready' || (mapState._tag === 'Loading' && current._tag !== 'Unavailable') ? 'source' : 'kdl')
-  const pinnedFeed = useAtomValue(pinned === undefined ? notRead : reads.declarationAt.feed(pinned))
-  const kdlAtRevision = textState(pinnedFeed, pinnedKdl, 'canonical KDL')
-  const map = mapState._tag === 'Ready' ? mapState.map : undefined
+  const kdlAtRevision: TextState = mapState._tag === 'Ready' ? { _tag: 'Ready', text: mapState.kdl } : mapState._tag === 'Loading' ? mapState : { _tag: 'Failed', message: mapState.message }
   const sourceTexts = useAtomValue(texts(map === undefined ? '|' : `${pinned}|${sourceFiles(map).map(file => map.files[file]!.blob_hash).join(',')}`))
   // Changes reads only while that tab is open.
   const from = compareFrom ?? (mapState._tag === 'Ready' && revision !== undefined ? previousRevision(mapState.revisions, revision) : undefined)
   const fromRef = tab !== 'changes' || from === undefined ? undefined : pinnedRef(subject, from)
-  const beforeState = sourceMapState(useAtomValue(fromRef === undefined ? notRead : reads.sourceMap.feed(fromRef)), from ?? '')
-  const beforeKdl = textState(useAtomValue(fromRef === undefined ? notRead : reads.declarationAt.feed(fromRef)), pinnedKdl, 'canonical KDL')
+  const beforeState = sourceMapState(useAtomValue(fromRef === undefined ? notRead : reads.sourceMap.feed(fromRef)), from)
   const before = beforeState._tag === 'Ready' ? beforeState.map : undefined
   const changed = map === undefined || before === undefined ? [] : changedFiles(before, map)
   const afterTexts = useAtomValue(texts(map === undefined ? '|' : `${pinned}|${changed.flatMap(file => file.after ?? []).join(',')}`))
   const beforeTexts = useAtomValue(texts(before === undefined ? '|' : `${fromRef}|${changed.flatMap(file => file.before ?? []).join(',')}`))
   const shownKdl: SubjectInspectorProps['kdl'] = chosen === undefined || chosen === live ? currentKdl
-    : kdlAtRevision._tag === 'Ready' ? { _tag: 'Ready', text: kdlAtRevision.text, language: 'kdl', source: `Canonical KDL from Fractal · revision ${chosen} · environment values redacted` }
-      : kdlAtRevision._tag === 'Loading' ? { _tag: 'Loading' } : { _tag: 'Failed', message: kdlAtRevision.message }
+    : mapState._tag === 'Ready' ? { _tag: 'Ready', text: mapState.kdl, language: 'kdl', source: `Canonical KDL from Fractal · revision ${chosen} · environment values redacted` }
+      : mapState
   return <Inspector
     title={subject}
     tab={tab}
@@ -125,7 +124,7 @@ const SubjectSource = ({ target, close, Inspector, agent }: { readonly target: D
     changes={mapState._tag !== 'Ready' ? mapState
       : from === undefined ? { _tag: 'Unavailable', message: 'This is the first mapped revision of this subject, so there is nothing to compare it with.' }
         : beforeState._tag !== 'Ready' ? beforeState
-          : { _tag: 'Ready', before: beforeState.map, after: mapState.map, beforeKdl, afterKdl: kdlAtRevision, texts: new Map([...beforeTexts, ...afterTexts]) }}
+          : { _tag: 'Ready', before: beforeState.map, after: mapState.map, beforeKdl: { _tag: 'Ready', text: beforeState.kdl }, afterKdl: kdlAtRevision, texts: new Map([...beforeTexts, ...afterTexts]) }}
     compareFrom={from}
     onCompareFromChange={setCompareFrom}
     actions={close}

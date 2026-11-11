@@ -719,13 +719,16 @@ Two reads, not projections, with the same `read.declarations` grant as the decla
 A refusal reads "Fractal does not show this source to this device".
 
 `source-map.get`, `GET /v1/client/source-maps?subject=…`, with an optional `revision` (default:
-the subject's current revision), answers `{subject, revision, map, revisions}` for an agent or
-mission. `map` is the `source.mapped` claim the revision's first mapped set publication recorded
-(`docs/st3/owned-sets.md`): repository, ref, sha, the contributing `files` with their sha256
-`blob_hash`, the declaration file and import closure as indices, and `nodes`, each a KDL node path
-with its TS span and frames (declaration → helper → value; `precision: enclosing` is a range, not
-a point). The KDL node path is the join key with the canonical KDL the declaration reads serve:
-agent, mission, step and gate nodes by name, others by index among same-named siblings.
+the subject's current revision), answers `{subject, revision, current?, map, kdl, revisions}` for
+an agent or mission. `map` is the `source.mapped` claim the revision's first mapped set
+publication recorded (`docs/st3/owned-sets.md`): repository, ref, sha, the contributing `files`
+with their sha256 `blob_hash`, the declaration file and import closure as indices, and `nodes`,
+each a KDL node path with its TS span and frames (declaration → helper → value; `precision:
+enclosing` is a range, not a point). `kdl` is that revision's canonical KDL with environment
+values redacted, and the node path is the join key with it: agent, mission, step and gate nodes
+by name, others by index among same-named siblings. Revisions here are subject revisions, which
+for agents differ from the declaration ids `agent-declaration.get` names; `current` is the
+subject's current revision, so a client marks the live one without comparing those ids.
 `revisions` lists every mapped revision of the subject, newest first. A revision without a map
 is not found; clients say the subject has no source map rather than guessing.
 
