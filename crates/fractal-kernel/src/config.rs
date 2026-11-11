@@ -631,7 +631,7 @@ impl Default for IdleNudgeSettings {
 
 
 /// Explicit classes are declarations only, never admission or preemption authority.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JobsConfig {
     pub enabled: bool,
@@ -1461,6 +1461,26 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jobs_configuration_defaults_and_roundtrips() {
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.jobs.is_none());
+        assert!(!toml::to_string(&absent).unwrap().contains("[jobs]"));
+        let empty: super::Config = toml::from_str("[jobs]").unwrap();
+        assert_eq!(empty.jobs, Some(super::JobsConfig::default()));
+        let configured: super::Config =
+            toml::from_str("[jobs]\nenabled=true\nallowed_classes=['heavy']").unwrap();
+        assert_eq!(configured.jobs, Some(super::JobsConfig {
+            enabled: true,
+            allowed_classes: vec!["heavy".into()],
+        }));
+        let restored: super::Config =
+            toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(restored.jobs, configured.jobs);
+        assert_eq!(restored, configured);
+        assert!(toml::from_str::<super::Config>("[jobs]\nunknown=true").is_err());
+    }
+
     #[test]
     fn run_authority_is_enforced_unless_the_config_asks_for_audit() {
         use super::RunAuthorityMode;
