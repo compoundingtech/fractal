@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Box submitted requests without changing durable JSON; preserve historical registry digests and cover pre-jobs unknown-kind waiting.",
+  "replay": {"status": "changed", "detail": "Register jobs across append, replication, flush, rebuild and graph replay. Only job subjects are folded in shared canonical order; empty rebuild/replay writes nothing. Illegal transitions, binding conflicts and malformed records remain refused raw history. Direct and fields-enveloped bodies normalize identically. No whole-log fallback."},
+  "schema": {"status": "changed", "detail": "Document the job subject and job.recorded required record object; exclude these later additions when reconstructing the historical assistant-principal registry."},
+  "rules": {"status": "changed", "detail": "Host-authority evidence fields are private with no production constructor. Projected and replicated facts are history only, never execution grants. Gate-slot remains admission."},
+  "compatibility": {"status": "changed", "detail": "A pre-jobs daemon stores an authenticated job.recorded claim opaquely with UnknownKind and retries the original immutable claim after upgrade. Exchange and known-claim projection continue. A changed registry digest gates projection comparison only, not exchange; historical assistant-principal registry digests are preserved. Canonical replay reconstructs original order after upgrade."},
+  "downtime": {"status": "none", "detail": "No host activation."},
+  "manual": {"status": "none", "detail": "No operator action. Automatic runtime repair-page dispatch remains separately gated; existing domain hooks drain pending subjects."},
+  "recovery": {"status": "changed", "detail": "Explicit rebuild reconstructs canonical histories; malformed schema-admitted records cannot poison open/rebuild. Oversized subject refolds refuse before projection mutation."}
+}
