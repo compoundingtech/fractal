@@ -36,10 +36,13 @@ struct Instruments {
     round_duration: Histogram<f64>,
     batch_size: Histogram<u64>,
     errors: Counter<u64>,
+    ingress_rejections: Counter<u64>,
 }
 static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
     let meter = opentelemetry::global::meter("smallclaims.replication");
     Instruments {
+        ingress_rejections: meter.u64_counter("st.replication.ingress.rejections")
+            .with_unit("{rejection}").build(),
         rounds: meter
             .u64_counter("st.replication.rounds")
             .with_unit("{round}")
@@ -59,6 +62,16 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
             .build(),
     }
 });
+
+pub(super) fn ingress_rejected(peer: &str, code: &str) {
+    if METRICS_ENABLED.load(Ordering::Relaxed) {
+        METRICS.ingress_rejections.add(1, &[
+            KeyValue::new("st.replication.peer", peer.to_owned()),
+            KeyValue::new("st.replication.code", code.to_owned()),
+        ]);
+    }
+    tracing::info!(target: "smallclaims::replication", peer, code, "replication ingress rejected");
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ErrorReason {

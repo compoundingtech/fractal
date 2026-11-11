@@ -1653,7 +1653,7 @@ impl Store {
             // alone owns the historical shadow queue until activation.
             return legacy::judge_claims(self, check_roots);
         }
-        self.record_judgment_failure(self.judge_claims_inner(check_roots, None, false))
+        self.record_judgment_failure(self.judge_claims_inner(check_roots, None, false, None))
     }
 
     /// Judge newly signed claims in ordinary passes, bounded to [`VERDICT_SLICE_LOANS`].
@@ -1663,8 +1663,23 @@ impl Store {
             return legacy::judge_claims(self, check_roots);
         }
         let judged = self.record_judgment_failure(
-            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS), true),
+            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS), true, None),
         )?;
+        self.hand_off_pending_verdicts()?;
+        Ok(judged)
+    }
+
+    /// Receive-only judgment slice; no new writer loan may outlive acquisition expiry.
+    pub fn judge_claims_slice_until(
+        &self, check_roots: bool, deadline: std::time::Instant,
+    ) -> Result<usize> {
+        if legacy::active(&self.readers.get())? {
+            return legacy::judge_claims_with_deadline(self, check_roots, Some(deadline));
+        }
+        let result = self.judge_claims_inner(
+            check_roots, Some(VERDICT_SLICE_LOANS), true, Some(deadline),
+        );
+        let judged = self.record_judgment_failure_with_deadline(result, Some(deadline))?;
         self.hand_off_pending_verdicts()?;
         Ok(judged)
     }
@@ -1688,10 +1703,23 @@ impl Store {
     /// One resumable judgment loan for the paced signature worker: the bootstrap's shadow
     /// judgment, and after it any backlog a resume or a trust-root change left.
     pub fn advance_signature_judgment(&self) -> Result<usize> {
-        self.record_judgment_failure(self.judge_claims_inner(true, Some(1), false))
+        self.record_judgment_failure(self.judge_claims_inner(true, Some(1), false, None))
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
+        self.record_judgment_failure_with_deadline(result, None)
+    }
+
+    fn record_judgment_failure_with_deadline(
+        &self, result: Result<usize>, deadline: Option<std::time::Instant>,
+    ) -> Result<usize> {
+        if result.as_ref().err().is_some_and(|error| {
+            error.downcast_ref::<FractalError>().is_some_and(|error| matches!(
+                error.code, "replication-ingress/receive-deadline" | "replication-ingress/writer-unavailable",
+            ))
+        }) {
+            return result;
+        }
         if let Err(error) = &result
             && migration::cancelled_by_caller(error)
         {
@@ -1705,8 +1733,12 @@ impl Store {
         if let Err(error) = &result
             && !migration::transient_storage_error(error)
         {
+            let connection = match self.replication_receive_writer(deadline, false) {
+                Ok(connection) => connection,
+                Err(_) => return result,
+            };
             migration::record_fault(
-                &self.connection.write(),
+                &connection,
                 &format!("verdict reconciliation: {error:#}"),
             )?;
         }
@@ -1717,6 +1749,7 @@ impl Store {
         check_roots: bool,
         max_loans: Option<usize>,
         fresh_only: bool,
+        deadline: Option<std::time::Instant>,
     ) -> Result<usize> {
         let migration = self.signature_migration()?;
         if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
@@ -1724,7 +1757,7 @@ impl Store {
         }
         let track_bootstrap = !migration.done();
         if check_roots {
-            let mut connection = self.connection.write();
+            let mut connection = self.replication_receive_writer(deadline, false)?;
             let transaction = connection.transaction()?;
             let roots = self.trust_roots(&transaction, &self.origin)?;
             let roots_digest = crate::hash::canonical_hash(&roots)?;
@@ -1741,7 +1774,7 @@ impl Store {
         let mut ordinary_claims = BTreeSet::new();
         loop {
             loans += 1;
-            let mut connection = self.connection.write_background();
+            let mut connection = self.replication_receive_writer(deadline, true)?;
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let roots = self.trust_roots(&transaction, &self.origin)?;

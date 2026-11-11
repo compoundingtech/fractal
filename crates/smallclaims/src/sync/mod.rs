@@ -81,6 +81,87 @@ const HEADER_ALIASES: [(&str, &str); 7] = [
 const MEMBER_SIGNATURE_DOMAIN: &str = "st3-member-v1";
 pub const MAX_EXCHANGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Monotonic receive origin carried locally, never accepted from peer wire headers.
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiveBudget {
+    pub accepted: std::time::Instant,
+}
+
+impl ReceiveBudget {
+    /// Production monotonic `Instant`; Tokio's existing paused clock is injectable in tests.
+    pub fn now() -> std::time::Instant {
+        tokio::time::Instant::now().into_std()
+    }
+
+    pub fn deadline(self) -> std::time::Instant {
+        self.accepted + std::time::Duration::from_secs(28)
+    }
+
+    pub fn tokio_deadline(self) -> tokio::time::Instant {
+        tokio::time::Instant::now() + self.deadline().saturating_duration_since(Self::now())
+    }
+
+    pub fn expired_at(self, now: std::time::Instant) -> bool {
+        now >= self.deadline()
+    }
+
+    pub fn check(self) -> std::result::Result<(), crate::error::Error> {
+        if self.expired_at(Self::now()) {
+            Err(crate::error::Error::new("replication-ingress/receive-deadline",
+                "replication receive exceeded its work budget"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+tokio::task_local! {
+    pub(crate) static RECEIVE_BUDGET: ReceiveBudget;
+}
+
+pub fn receive_budget() -> Option<ReceiveBudget> {
+    RECEIVE_BUDGET.try_with(|budget| *budget).ok()
+}
+
+/// A committed receipt remains successful when a later receive-only loan cannot start.
+pub fn receive_followup_deferred(peer: &str, code: &str) -> bool {
+    if !matches!(code, "replication-ingress/receive-deadline" | "replication-ingress/writer-unavailable") {
+        return false;
+    }
+    tracing::info!(target: "smallclaims::replication",
+        event = "replication.ingress.follow-up-deferred", code = "replication-ingress/follow-up-deferred",
+        peer, reason_code = code,
+        "replication receive follow-up deferred after durable receipt");
+    true
+}
+
+/// Only these ingress strings carry an ingress-specific HTTP disposition.
+pub fn ingress_status(code: &str) -> Option<axum::http::StatusCode> {
+    use axum::http::StatusCode;
+    match code {
+        "replication-ingress/raw-oversize" | "replication-ingress/inflated-oversize" =>
+            Some(StatusCode::PAYLOAD_TOO_LARGE),
+        "replication-ingress/malformed-deflate" | "replication-ingress/malformed-json" =>
+            Some(StatusCode::BAD_REQUEST),
+        "replication-ingress/receive-deadline" | "replication-ingress/writer-unavailable" =>
+            Some(StatusCode::SERVICE_UNAVAILABLE),
+        _ => None,
+    }
+}
+
+fn inflate_ingress(body: &[u8]) -> std::result::Result<Vec<u8>, &'static str> {
+    use std::io::Read as _;
+    let mut inflated = Vec::with_capacity(body.len().saturating_mul(3).min(MAX_EXCHANGE_BYTES));
+    flate2::read::ZlibDecoder::new(body)
+        .take(MAX_EXCHANGE_BYTES as u64 + 1)
+        .read_to_end(&mut inflated)
+        .map_err(|_| "replication-ingress/malformed-deflate")?;
+    if inflated.len() > MAX_EXCHANGE_BYTES {
+        return Err("replication-ingress/inflated-oversize");
+    }
+    Ok(inflated)
+}
+
 /// The largest whole manifest the worker hands the daemon to adopt. A manifest lists every
 /// tombstone so far, about 400 bytes each.
 pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024 * 1024;

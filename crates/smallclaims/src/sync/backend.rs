@@ -234,27 +234,54 @@ where
         let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
         let exchange = exchange.clone();
+        let budget = super::receive_budget();
         self.store().connection.spawn_blocking(move || crate::task_cpu::blocking("replication.receive", || {
+            if let Some(budget) = budget { budget.check()?; }
             let store = backend.store();
             if let Some(round_trip) = round_trip {
                 store.record_replication_round_trip(round_trip);
             }
-            let receipt = store
-                .receive_replication_exchange_via(
-                    &peer,
-                    &fleet_id,
-                    &exchange,
-                    round_trip.is_some(),
-                    carrier,
-                )
-                .map_err(anyhow::Error::msg)?;
-            store.record_transport_observation(&peer, "up", None, None)?;
-            let admission = store.validate_replication_backlog()?;
-            let repairs = store.apply_replication_repairs()?;
-            let projected = store.project_replication_backlog()?;
+            let receipt = match budget {
+                Some(budget) => store.receive_replication_exchange_until(
+                    &peer, &fleet_id, &exchange, round_trip.is_some(), carrier, budget.deadline(),
+                ),
+                None => store.receive_replication_exchange_via(
+                    &peer, &fleet_id, &exchange, round_trip.is_some(), carrier,
+                ),
+            }.map_err(anyhow::Error::new)?;
+            let followup = (|| -> Result<bool> {
+                if let Some(budget) = budget { budget.check()?; }
+                match budget {
+                    Some(budget) => store.record_transport_observation_until(
+                        &peer, "up", None, None, budget.deadline(),
+                    )?,
+                    None => store.record_transport_observation(&peer, "up", None, None)?,
+                }
+                let admission = match budget {
+                    Some(budget) => store.validate_replication_backlog_until(budget.deadline())?,
+                    None => store.validate_replication_backlog()?,
+                };
+                let repairs = match budget {
+                    Some(budget) => store.apply_replication_repairs_until(budget.deadline())?,
+                    None => store.apply_replication_repairs()?,
+                };
+                let projected = match budget {
+                    Some(budget) => store.project_replication_backlog_until(budget.deadline())?,
+                    None => store.project_replication_backlog()?,
+                };
+                Ok(projected && (admission.changed || repairs != 0))
+            })();
+            let changed = match followup {
+                Err(error) if error.downcast_ref::<crate::error::Error>().is_some_and(|error|
+                    super::receive_followup_deferred(&peer, error.code)) => {
+                    store.defer_replication_projection();
+                    true
+                }
+                result => result?,
+            };
             Ok(ReplicationReceiveResponse {
                 receipt,
-                changed: projected && (admission.changed || repairs != 0),
+                changed,
                 store_index: store.index()?,
             })
         }))

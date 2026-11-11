@@ -7,6 +7,42 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 /// This bounds dispatch overtaking, not elapsed time or SQL work inside a holder.
 pub const FOREGROUND_TURNS: usize = 8;
 
+/// A handoff owns its return path until a live borrower transfers it into WriterGuard.
+/// In particular, dropping a channel with a buffered handoff cannot drop the connection.
+#[doc(hidden)]
+pub struct ReceiveLoan {
+    pub(super) connection: Option<Connection>,
+    pub(super) give_back: std::sync::mpsc::SyncSender<Connection>,
+}
+
+impl Drop for ReceiveLoan {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            let _ = self.give_back.send(connection);
+        }
+    }
+}
+
+pub(super) fn receive_until(
+    receiver: &Receiver<ReceiveLoan>,
+    deadline: std::time::Instant,
+    now: &mut impl FnMut() -> std::time::Instant,
+) -> std::result::Result<ReceiveLoan, WriterLoanError> {
+    let remaining = deadline.checked_duration_since(now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(WriterLoanError::Expired)?;
+    let loan = receiver.recv_timeout(remaining).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => WriterLoanError::Expired,
+        std::sync::mpsc::RecvTimeoutError::Disconnected => WriterLoanError::Disconnected,
+    })?;
+    if now() >= deadline {
+        // The send succeeded, but acquisition did not: return exactly once, without SQL.
+        drop(loan);
+        return Err(WriterLoanError::Expired);
+    }
+    Ok(loan)
+}
+
 pub(super) enum LoanClass {
     Foreground,
     Background,

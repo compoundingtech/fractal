@@ -586,6 +586,21 @@ impl Client {
         self.request("POST", path, Some(body)).await
     }
 
+    /// Local receive bridge only: preserve the remaining ingress budget across Unix HTTP.
+    pub async fn post_receive_until<I: Serialize, O: DeserializeOwned>(
+        &self, path: &str, body: &I, deadline: std::time::Instant,
+    ) -> Result<O> {
+        anyhow::ensure!(matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)),
+            "receive budget propagation requires a local Unix endpoint");
+        let bytes = serde_json::to_vec(body)?;
+        let socket = self.endpoint.unix_socket().expect("checked Unix endpoint");
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now().into_std());
+        let response = unix_request(&socket, "POST", path, &bytes,
+            self.deadlines.connect, remaining,
+            RequestAuthority::ReceiveUntil(self.person.as_deref(), deadline)).await?;
+        decode_api_response(&response)
+    }
+
     /// Verify one GO from the local replica; this request must never use HTTP or sync.
     pub async fn verify_deploy_go(
         &self,
@@ -1318,6 +1333,7 @@ where
 /// A tunneled request cannot claim the Unix socket's local-person authority.
 enum RequestAuthority<'a> {
     LocalPerson(Option<&'a str>),
+    ReceiveUntil(Option<&'a str>, std::time::Instant),
     FabricBearer(Option<&'a reqwest::header::HeaderValue>),
 }
 
@@ -1332,9 +1348,10 @@ async fn unix_request(
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let (person, authorization) = match authority {
-        RequestAuthority::LocalPerson(person) => (person, None),
-        RequestAuthority::FabricBearer(credential) => (None, credential),
+    let (person, authorization, receive_deadline) = match authority {
+        RequestAuthority::LocalPerson(person) => (person, None, None),
+        RequestAuthority::ReceiveUntil(person, deadline) => (person, None, Some(deadline)),
+        RequestAuthority::FabricBearer(credential) => (None, credential, None),
     };
 
     let started = tokio::time::Instant::now();
@@ -1356,6 +1373,11 @@ async fn unix_request(
             body.len()
         )
         .into_bytes();
+        if let Some(deadline) = receive_deadline {
+            let ms = deadline.saturating_duration_since(tokio::time::Instant::now().into_std())
+                .as_millis().min(30_000);
+            request.extend_from_slice(format!("x-fractal-internal-receive-budget-ms: {ms}\r\n").as_bytes());
+        }
         if let Some(authorization) = authorization {
             request.extend_from_slice(b"Authorization: ");
             request.extend_from_slice(authorization.as_bytes());

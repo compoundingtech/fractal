@@ -375,19 +375,37 @@ pub(super) fn queue_affected_by_tx(connection: &Connection, claim_id: &str) -> R
 }
 
 pub(super) fn judge_claims(store: &Store, check_roots: bool) -> Result<usize> {
-    let result = judge_claims_inner(store, check_roots);
+    judge_claims_with_deadline(store, check_roots, None)
+}
+
+pub(super) fn judge_claims_with_deadline(
+    store: &Store, check_roots: bool, deadline: Option<std::time::Instant>,
+) -> Result<usize> {
+    let result = judge_claims_inner(store, check_roots, deadline);
     if let Err(error) = &result {
+        if error.downcast_ref::<FractalError>().is_some_and(|error| matches!(
+            error.code, "replication-ingress/receive-deadline" | "replication-ingress/writer-unavailable",
+        )) {
+            return result;
+        }
         let contention=error.downcast_ref::<FractalError>().is_some_and(FractalError::is_sqlite_contention)
             || error.downcast_ref::<rusqlite::Error>().is_some_and(|error|matches!(error,rusqlite::Error::SqliteFailure(code,_) if matches!(code.code,rusqlite::ErrorCode::DatabaseBusy|rusqlite::ErrorCode::DatabaseLocked)));
         if !contention {
-            store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h84df06b98d77 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET legacy_fault=?1 WHERE id=1 AND serving_legacy=1",[format!("{error:#}")])?;
+            let connection = match store.replication_receive_writer(deadline, false) {
+                Ok(connection) => connection,
+                // Do not replace the original judgment failure with a fault-recording loan failure.
+                Err(_) => return result,
+            };
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h84df06b98d77 owner=smallclaims::store::principals::legacy TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET legacy_fault=?1 WHERE id=1 AND serving_legacy=1",[format!("{error:#}")])?;
         }
     }
     result
 }
-fn judge_claims_inner(store: &Store, check_roots: bool) -> Result<usize> {
+fn judge_claims_inner(
+    store: &Store, check_roots: bool, deadline: Option<std::time::Instant>,
+) -> Result<usize> {
     if check_roots {
-        let mut connection = store.connection.write();
+        let mut connection = store.replication_receive_writer(deadline, false)?;
         let transaction = connection.transaction()?;
         if !active(&transaction)? {
             return Ok(0);
@@ -408,7 +426,7 @@ fn judge_claims_inner(store: &Store, check_roots: bool) -> Result<usize> {
     }
     let mut judged = 0;
     loop {
-        let mut connection = store.connection.write();
+        let mut connection = store.replication_receive_writer(deadline, false)?;
         let transaction =
             connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if !active(&transaction)? {

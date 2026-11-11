@@ -1939,20 +1939,23 @@ impl Backend for MainBackend {
         carrier: smallclaims::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
         let started = std::time::Instant::now();
-        self.client
-            .post(
-                &self.replication_path("receive"),
-                &ReplicationReceiveRequest {
-                    peer: peer.to_owned(),
-                    fleet_id: fleet_id.to_owned(),
-                    exchange: exchange.clone(),
-                    round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
-                    carrier,
-                },
-            )
-            .await.map_err(|error| Self::exchange_error(
-                error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
-            ))
+        let request = ReplicationReceiveRequest {
+            peer: peer.to_owned(),
+            fleet_id: fleet_id.to_owned(),
+            exchange: exchange.clone(),
+            round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
+            carrier,
+        };
+        let path = self.replication_path("receive");
+        let result = match smallclaims::sync::receive_budget() {
+            Some(budget) => self.client.post_receive_until(
+                &path, &request, budget.deadline() + Duration::from_secs(2),
+            ).await,
+            None => self.client.post(&path, &request).await,
+        };
+        result.map_err(|error| Self::exchange_error(
+            error, smallclaims::replication::ReplicationFailurePhase::LocalReceive, started,
+        ))
     }
 
     async fn checkpoint_manifest(

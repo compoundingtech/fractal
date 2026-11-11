@@ -510,6 +510,7 @@ impl ApiError {
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
             _ => StatusCode::UNPROCESSABLE_ENTITY,
         };
+        let status = smallclaims::sync::ingress_status(error.code).unwrap_or(status);
         let mut details = error.details;
         details.retain(|key, _| !matches!(key.as_str(), "projection_stage" | "projection_claim_id"
             | "projection_subject" | "projection_operation_id" | "projection_context_truncated"
@@ -1121,6 +1122,18 @@ async fn response_envelope_unbounded(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    request.extensions_mut().insert(transport);
+    let reply_export = matches!(transport, ClientTransportBoundary::Unix)
+        && replication::is_export_path(request.uri().path())
+        && request.headers().contains_key("x-fractal-internal-receive-budget-ms");
+    if replication::is_receive_path(request.uri().path()) || reply_export {
+        request = match replication::prepare_receive(request, transport).await {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
+    } else {
+        request.headers_mut().remove("x-fractal-internal-receive-budget-ms");
+    }
     if let Err(error) = wire_names::receive_headers(request.headers_mut()) {
         return error.into_response();
     }
@@ -1372,6 +1385,7 @@ async fn response_envelope_unbounded(
             });
             let polled_writer_wait = writer_wait.clone();
             let remote = served_remote.clone();
+            let receive_budget = request.extensions().get::<smallclaims::sync::ReceiveBudget>().copied();
             let result = read_deadline::spawn_mutation_handler(
                 state.store.clone(),
                 request_route.clone(),
@@ -1393,8 +1407,17 @@ async fn response_envelope_unbounded(
                         })
                     })
                 },
-            ).await;
-            let response = result.unwrap_or_else(|error| ApiError::internal(error).into_response());
+            );
+            let response = if let Some(budget) = receive_budget {
+                match tokio::time::timeout_at(budget.tokio_deadline(), result).await {
+                    Ok(result) => result.unwrap_or_else(|error| ApiError::internal(error).into_response()),
+                    Err(_) => ApiError::bad(FractalError::new(
+                        "replication-ingress/receive-deadline", "receive exceeded its response budget",
+                    )).into_response(),
+                }
+            } else {
+                result.await.unwrap_or_else(|error| ApiError::internal(error).into_response())
+            };
             diagnostic_handler.finish(if response.status().is_success() {
                 crate::relay_trace::Outcome::Completed
             } else {
@@ -10383,6 +10406,8 @@ fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Op
     match result {
         Ok(projected) => Ok(projected),
         Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error|
+            smallclaims::sync::ingress_status(error.code).is_some()) => Err(smallclaims::error::typed(error)),
         Err(error) => Err(FractalError::new("internal", error.to_string())),
     }
 }

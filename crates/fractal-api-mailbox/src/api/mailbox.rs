@@ -4186,7 +4186,11 @@ mod tests {
         };
         // Establish the remote incarnation before binding the live stream.
         let Json(initial) = super::super::replication_receive(
-            State(state.clone()), axum::http::HeaderMap::new(), Json(request()),
+            State(state.clone()), axum::http::HeaderMap::new(),
+            axum::Extension(smallclaims::sync::ReceiveBudget {
+                accepted: smallclaims::sync::ReceiveBudget::now(),
+            }),
+            Ok(Json(request())),
         )
             .await
             .unwrap();

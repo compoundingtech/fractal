@@ -429,6 +429,16 @@ pub enum WriterJob {
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
     },
+    /// Receive-only handoff owns its return path even if the waiting caller expires.
+    #[doc(hidden)]
+    ReceiveLend {
+        lent: std::sync::mpsc::SyncSender<writer_queue::ReceiveLoan>,
+        give_back: std::sync::mpsc::SyncSender<Connection>,
+        returned: std::sync::mpsc::Receiver<Connection>,
+        holder: crate::windows::holds::Holder,
+        enqueued: std::time::Instant,
+        origin: Option<telemetry::Origin>,
+    },
     /// Hands the connection to a caller until its guard gives it back.
     Lend {
         lent: std::sync::mpsc::SyncSender<Connection>,
@@ -446,6 +456,26 @@ pub const WRITE_BATCH_LIMIT: usize = 256;
 /// A batch takes in more queued writes only while it has run for less than this, so a write that
 /// arrives during a busy moment waits for about this long plus one write, not for a long batch.
 pub const WRITE_BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Failure to acquire the receive writer, never a later SQL or commit failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterLoanError {
+    Expired,
+    AdmissionClosed,
+    Disconnected,
+}
+
+impl std::fmt::Display for WriterLoanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Expired => "receive writer loan deadline expired",
+            Self::AdmissionClosed => "receive writer admission is closed",
+            Self::Disconnected => "receive writer is disconnected",
+        })
+    }
+}
+
+impl std::error::Error for WriterLoanError {}
 
 pub struct WriterGuard<'a> {
     pub connection: Option<Connection>,
@@ -665,7 +695,7 @@ impl WriterConnection {
                 telemetry::current_origin().unwrap_or_else(telemetry::Origin::other)));
         }
         let enqueued = match &job {
-            WriterJob::Batched { enqueued, .. } | WriterJob::Lend { enqueued, .. } | WriterJob::FenceLend { enqueued, .. } => Some(*enqueued),
+            WriterJob::Batched { enqueued, .. } | WriterJob::Lend { enqueued, .. } | WriterJob::FenceLend { enqueued, .. } | WriterJob::ReceiveLend { enqueued, .. } => Some(*enqueued),
             WriterJob::BackgroundReady(_) => None,
         };
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -689,6 +719,70 @@ impl WriterConnection {
     #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Foreground)
+    }
+
+    /// Borrow the foreground writer for receive work before its existing monotonic deadline.
+    /// Expiry cancels only acquisition: once acquired, SQL and commit run normally and the
+    /// guard retains the ordinary finalization/observer-before-return ordering.
+    #[track_caller]
+    pub fn write_receive_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> std::result::Result<WriterGuard<'_>, WriterLoanError> {
+        self.write_receive_with_clock(deadline, std::time::Instant::now)
+    }
+
+    #[track_caller]
+    fn write_receive_with_clock(
+        &self,
+        deadline: std::time::Instant,
+        mut now: impl FnMut() -> std::time::Instant,
+    ) -> std::result::Result<WriterGuard<'_>, WriterLoanError> {
+        debug_assert_no_pinned_read();
+        if now() >= deadline {
+            return Err(WriterLoanError::Expired);
+        }
+        let wait = crate::profile::writer_waiting();
+        let holder = crate::windows::holds::Holder::current();
+        let waiting = crate::windows::holds::Waiting::writer();
+        let (lent, lent_here) = std::sync::mpsc::sync_channel(1);
+        let (give_back, returned) = std::sync::mpsc::sync_channel(1);
+        let enqueued = std::time::Instant::now();
+        let origin = telemetry::current_origin();
+        let mut writer_operation = telemetry::WriterOperation::start("foreground", "write.lend");
+        {
+            let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
+            self.fifo.send_at(enqueued, || {
+                if now() >= deadline {
+                    return Err(WriterLoanError::Expired);
+                }
+                let jobs = jobs.as_ref().ok_or(WriterLoanError::AdmissionClosed)?;
+                jobs.send(WriterJob::ReceiveLend {
+                    lent, give_back, returned, holder, enqueued, origin,
+                }).map_err(|_| WriterLoanError::Disconnected)
+            })?;
+        }
+        let mut loan = writer_queue::receive_until(&lent_here, deadline, &mut now)?;
+        // ReceiveLoan returns a successful but expired handoff even if it was still buffered
+        // when recv_timeout returned. Only this path can transfer ownership into a guard.
+        let connection = loan.connection.take().expect("an acquired receive loan owns the writer");
+        drop(waiting);
+        telemetry::acknowledged(enqueued.elapsed(), false);
+        if let Some(operation) = &mut writer_operation {
+            operation.acquired(enqueued.elapsed());
+        }
+        Ok(WriterGuard {
+            changes_at_lend: connection.total_changes(),
+            connection: Some(connection),
+            give_back: loan.give_back.clone(),
+            committed_index: &self.committed_index,
+            observers: &self.observers,
+            finalizers: &self.finalizers,
+            handler_policy: &self.handler_policy,
+            mutation_observer: self.mutation_observer.as_ref(),
+            acquired: crate::profile::writer_acquired(wait),
+            writer_operation,
+        })
     }
 
     /// Borrow the same writer for one bounded maintenance/publication page. Pending foreground
@@ -929,6 +1023,19 @@ fn write_queue(
                     connection = back;
                     continue;
                 }
+                match returned.recv() {
+                    Ok(back) => connection = back,
+                    Err(_) => return,
+                }
+            }
+            WriterJob::ReceiveLend { lent, give_back, returned, holder, enqueued, origin } => {
+                fifo.dequeued_at(enqueued);
+                telemetry::queued(enqueued.elapsed(), origin.as_ref());
+                let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
+                let _holder = callbacks.3.map(|writer| writer.holding(origin));
+                let loan = writer_queue::ReceiveLoan { connection: Some(connection), give_back };
+                // Both failed send and a dropped buffered successful send return the loan.
+                drop(lent.send(loan));
                 match returned.recv() {
                     Ok(back) => connection = back,
                     Err(_) => return,

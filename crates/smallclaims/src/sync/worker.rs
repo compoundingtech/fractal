@@ -36,8 +36,6 @@ use crate::replication_diagnostics::{FAILURE_DIAGNOSTICS, FailureDiagnostics, Fa
 use crate::store::{CheckpointManifest, CheckpointManifestPage, CheckpointManifestRequest};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
-// Leave five seconds for signing, serialization and transport before the caller's deadline.
-const EXCHANGE_RESPONSE_BUDGET: Duration = Duration::from_secs(15);
 const EXCHANGE_POLL_BUDGET: Duration = Duration::from_secs(300);
 const OVERLOAD_RETRY: Duration = Duration::from_secs(5);
 const MAX_EXCHANGE_JOBS: usize = 4;
@@ -2468,9 +2466,23 @@ async fn observe_exchange_body(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let timing = Arc::new(ExchangeTiming::server(request.headers()));
+    let budget = super::ReceiveBudget { accepted: super::ReceiveBudget::now() };
+    request.headers_mut().remove("x-fractal-internal-receive-budget-ms");
+    request.extensions_mut().insert(budget);
+    let mut timing = ExchangeTiming::server(request.headers());
+    timing.started = budget.accepted;
+    let timing = Arc::new(timing);
     timing.record("head-received");
     request.extensions_mut().insert(Arc::clone(&timing));
+    let peer = request.headers().get(super::HEADER_NODE)
+        .and_then(|value| value.to_str().ok()).unwrap_or("unknown").to_owned();
+    if request.headers().get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_EXCHANGE_BYTES as u64)
+    {
+        return ingress_rejection(&peer, "replication-ingress/raw-oversize");
+    }
     let (parts, body) = request.into_parts();
     let complete = hyper::body::Body::is_end_stream(&body);
     if complete {
@@ -2483,7 +2495,28 @@ async fn observe_exchange_body(
         complete,
         failed: false,
     });
-    next.run(axum::extract::Request::from_parts(parts, body)).await
+    // Bound collection before extraction, and never poll the oversized body again.
+    let body = match tokio::time::timeout_at(
+        budget.tokio_deadline(), axum::body::to_bytes(body, MAX_EXCHANGE_BYTES),
+    ).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => {
+            if std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                return ingress_rejection(&peer, "replication-ingress/raw-oversize");
+            }
+            return (StatusCode::BAD_REQUEST, "replication request body could not be read").into_response();
+        }
+        Err(_) => return ingress_rejection(&peer, "replication-ingress/receive-deadline"),
+    };
+    next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(body))).await
+}
+
+fn ingress_rejection(peer: &str, code: &'static str) -> Response {
+    super::telemetry::ingress_rejected(peer, code);
+    (super::ingress_status(code).expect("known ingress code"),
+        axum::Json(serde_json::json!({ "code": code }))).into_response()
 }
 
 struct ExchangeTiming {
@@ -2510,7 +2543,7 @@ impl ExchangeTiming {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| uuid::Uuid::parse_str(value).ok())
                 .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
-            started: std::time::Instant::now(),
+            started: super::ReceiveBudget::now(),
             server: true,
             boundaries: Default::default(),
         }
@@ -2776,20 +2809,27 @@ async fn receive_exchange_inner_to<B: Backend>(
     diagnostics: &FailureDiagnostics,
     output: &mut (impl std::io::Write + Send),
 ) -> Response {
+    let budget = super::ReceiveBudget { accepted: timing.started };
+    if budget.expired_at(super::ReceiveBudget::now()) {
+        return ingress_rejection("unknown", "replication-ingress/receive-deadline");
+    }
     let body = if deflated(&headers) {
-        match inflate(&body, "an exchange request") {
+        match super::inflate_ingress(&body) {
             Ok(body) => Bytes::from(body),
-            Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("replication request body: {error:#}"),
-                )
-                    .into_response();
+            Err(code) => {
+                let peer = headers.get(super::HEADER_NODE)
+                    .and_then(|value| value.to_str().ok()).unwrap_or("unknown");
+                return ingress_rejection(peer, code);
             }
         }
     } else {
         body
     };
+    if deflated(&headers) && budget.expired_at(super::ReceiveBudget::now()) {
+        tracing::warn!(target: "smallclaims::replication",
+            overshoot_ms = super::ReceiveBudget::now().duration_since(budget.deadline()).as_millis() as u64,
+            "replication receive inflate completed after deadline");
+    }
     let sender = match state
         .auth
         .verify_sender(&headers, "POST", EXCHANGE_PATH, &body, None, None)
@@ -2804,6 +2844,10 @@ async fn receive_exchange_inner_to<B: Backend>(
         }
     };
     let request_digest = FleetAuth::body_digest(&body);
+    if budget.expired_at(super::ReceiveBudget::now()) {
+        return signed_ingress_rejection(&state, &request_digest, &sender.name,
+            "replication-ingress/receive-deadline");
+    }
     if let Err(refusal) = state.fleet.accept(&sender) {
         // Signed, so a removed member can trust it and stop dialing.
         return signed_refusal(&state, &request_digest, &refusal)
@@ -2865,16 +2909,14 @@ async fn receive_exchange_inner_to<B: Backend>(
             let request: ReplicationExchange = match serde_json::from_slice(&body) {
                 Ok(request) => request,
                 Err(_) => {
-                    return signed_error_response(
-                        &state,
-                        &request_digest,
-                        0,
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "invalid replication exchange",
-                    )
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                    return signed_ingress_rejection(&state, &request_digest, &relay,
+                        "replication-ingress/malformed-json");
                 }
             };
+            if budget.expired_at(super::ReceiveBudget::now()) {
+                return signed_ingress_rejection(&state, &request_digest, &relay,
+                    "replication-ingress/receive-deadline");
+            }
             // Bound retained answers as well as active backend work. Completed answers may be
             // recomputed safely: envelope receipt is idempotent.
             if jobs.len() >= MAX_EXCHANGE_JOBS {
@@ -2893,7 +2935,7 @@ async fn receive_exchange_inner_to<B: Backend>(
             let relay = relay.clone();
             let shard = shard.clone();
             let backend_timing = Arc::clone(timing);
-            tokio::spawn(crate::task_cpu::account(
+            tokio::spawn(super::RECEIVE_BUDGET.scope(budget, crate::task_cpu::account(
                 "replication.exchange",
                 async move {
                     let _permit = permit;
@@ -2909,6 +2951,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                             backend_timing.record("local-receive-done");
                             let received = received
                                 .map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
+                            budget.check()?;
                             if received.changed {
                                 backend.changed().await;
                             }
@@ -2939,6 +2982,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                         .await;
                         backend_timing.record("local-receive-done");
                         let received = received.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
+                        budget.check()?;
                         if received.receipt.received != 0 {
                             state.outbound_notify.send_modify(|generation| {
                                 *generation = generation.saturating_add(1)
@@ -2967,12 +3011,12 @@ async fn receive_exchange_inner_to<B: Backend>(
                     backend_timing.record("backend-done");
                     done.send_replace(Some(result));
                 },
-            ));
+            )));
         }
         let job = jobs.get(&job_key).unwrap();
         (job.answer.clone(), Arc::clone(&job.timing))
     };
-    let ready = tokio::time::timeout(EXCHANGE_RESPONSE_BUDGET, async {
+    let ready = tokio::time::timeout_at(budget.tokio_deadline(), async {
         loop {
             if let Some(result) = answer.borrow_and_update().clone() {
                 break Some(result);
@@ -3025,6 +3069,9 @@ async fn receive_exchange_inner_to<B: Backend>(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(Some(Err(failure))) => {
+            if super::ingress_status(&failure.code).is_some() {
+                super::telemetry::ingress_rejected(&relay, &failure.code);
+            }
             diagnostics.record_to(FailureKind::ExchangeFailed,
                 || job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)), output);
             // Let the next request retry a failed job. Reporting failure must never delay headers.
@@ -3034,7 +3081,8 @@ async fn receive_exchange_inner_to<B: Backend>(
                 "failure": failure,
             }));
             response.map(|mut response| {
-                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                *response.status_mut() = super::ingress_status(&failure.code)
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 response
             }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
@@ -3053,10 +3101,22 @@ async fn receive_exchange_inner_to<B: Backend>(
         }
         Err(_) => {
             diagnostics.record_to(FailureKind::ExchangeOverload,
-                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None), output);
-            signed_overload(&state, &request_digest)
+                || job_timing.failure_line(&headers, &relay, shard.as_deref(), "receive-deadline", None), output);
+            signed_ingress_rejection(&state, &request_digest, &relay,
+                "replication-ingress/receive-deadline")
         }
     }
+}
+
+fn signed_ingress_rejection<B: Backend>(
+    state: &PeerState<B>, digest: &str, peer: &str, code: &'static str,
+) -> Response {
+    super::telemetry::ingress_rejected(peer, code);
+    signed_response(state, digest, 0, serde_json::json!({ "code": code }))
+        .map(|mut response| {
+            *response.status_mut() = super::ingress_status(code).expect("known ingress code");
+            response
+        }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 fn finish_exchange_job(
@@ -4415,6 +4475,7 @@ async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
         }
         // Only authenticated, allowlisted machine codes survive. Never retain peer prose.
         let safe_code = match code {
+            code if super::ingress_status(code) == Some(status) => code,
             code @ ("replication-exchange-metadata-too-large"
                 | "replication-request-failed"
                 | "member-conflicted"

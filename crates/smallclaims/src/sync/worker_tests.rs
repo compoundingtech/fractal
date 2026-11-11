@@ -765,7 +765,7 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
         body,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     auth.verify(
@@ -4678,6 +4678,8 @@ mod retry_tests {
 struct SlowExport {
     local: Local<Store>,
     slow: Arc<std::sync::atomic::AtomicBool>,
+    release_export: Arc<tokio::sync::Notify>,
+    wake_after_receive: Option<Arc<tokio::sync::Notify>>,
     fail_next: Arc<std::sync::atomic::AtomicBool>,
     receives: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -4698,7 +4700,7 @@ impl Backend for SlowExport {
             anyhow::bail!("injected export failure");
         }
         if !summary_only && self.slow.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            tokio::time::sleep(Duration::from_secs(25)).await;
+            self.release_export.notified().await;
         }
         self.local
             .export(fleet_id, inventory, summary_only, signature_requests)
@@ -4755,20 +4757,35 @@ impl Backend for SlowExport {
         self.local.record_failure(peer, status, error, carrier, failure)
             .await
     }
+
+    async fn changed(&self) {
+        if let Some(wake) = &self.wake_after_receive {
+            let store = self.local.0.clone();
+            tokio::task::spawn_blocking(move || {
+                // The existing MainBackend::changed wake route runs these same stages.
+                store.validate_replication_backlog().unwrap();
+                store.apply_replication_repairs().unwrap();
+                store.project_replication_backlog().unwrap();
+            }).await.unwrap();
+            wake.notify_one();
+        }
+    }
 }
 
-/// Isolated two-node proof: a cancelled response leaves admitted envelopes intact;
-/// identical signed retries share backend work while a 25-second export exceeds the
-/// old caller deadline. No live graph, transport or fleet configuration is used.
-#[tokio::test]
-async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt() {
+/// Losing an answer never cancels an admitted receipt; deadline retries retain that job.
+#[tokio::test(start_paused = true)]
+async fn receive_deadline_preserves_interrupted_receipt_and_retained_answer() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for shard in [false, true] {
     let root = tempfile::tempdir().unwrap();
     let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
     let auth = FleetAuth::test(fleet_id, &[7; 32]);
     let left = Arc::new(plain_open(&root.path().join("birch.sqlite3"), "birch").unwrap());
     let right = Arc::new(plain_open(&root.path().join("cedar.sqlite3"), "cedar").unwrap());
     for store in [&left, &right] {
+        if shard {
+            store.bind_shard(&crate::shards::ShardId::parse("messages").unwrap()).unwrap();
+        }
         store.bind_fleet(fleet_id).unwrap();
         store
             .append_claim(&ClaimInput {
@@ -4785,6 +4802,8 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     let backend = SlowExport {
         local: Local(right.clone()),
         slow: Arc::new(AtomicBool::new(true)),
+        release_export: Arc::new(tokio::sync::Notify::new()),
+        wake_after_receive: None,
         fail_next: Arc::new(AtomicBool::new(false)),
         receives: Arc::new(AtomicUsize::new(0)),
     };
@@ -4794,6 +4813,11 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         auth.clone(),
         FleetContext::legacy(BTreeSet::from(["birch".into()])),
     );
+    let state = if shard {
+        state.with_shards(BTreeMap::from([("messages".into(), backend.clone())]))
+    } else {
+        state
+    };
     let query = left
         .export_replication_exchange(fleet_id, &ReplicationInventory::default())
         .unwrap();
@@ -4824,7 +4848,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     let started = tokio::time::Instant::now();
     let overload = receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()).await;
     assert_eq!(overload.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(started.elapsed() < REPLICATION_EXCHANGE_TIMEOUT);
+    assert!(started.elapsed() >= Duration::from_secs(27));
     let overload_headers = overload.headers().clone();
     let body = to_bytes(overload.into_body(), MAX_EXCHANGE_BYTES)
         .await
@@ -4850,8 +4874,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         .is_err()
     );
     let answer: PeerResponse<Value> = serde_json::from_slice(&body).unwrap();
-    assert_eq!(answer.value["code"], "replication-overloaded");
-    assert_eq!(answer.value["retry_after_ms"], 5000);
+    assert_eq!(answer.value["code"], "replication-ingress/receive-deadline");
     assert_eq!(
         backend.receives.load(Ordering::Relaxed),
         1,
@@ -4872,90 +4895,17 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let peer = PeerConfig {
-        name: "cedar".into(),
-        url: format!("http://{}", listener.local_addr().unwrap()),
-    };
-    let requests = Arc::new(AtomicUsize::new(0));
-    let count = requests.clone();
-    let app = peer_router(state, Router::new()).layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            count.fetch_add(1, Ordering::Relaxed);
-            async move { next.run(request).await }
-        },
-    ));
-    let server = tokio::spawn(axum::serve(listener, app).into_future());
-    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
-    let (answer, _) = post_signed(
-        &replication_http_client(),
-        &Local(left.clone()),
-        &peer,
-        "birch",
-        &auth,
-        &fleet,
-        &query,
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        requests.load(Ordering::Relaxed),
-        1,
-        "completed in-flight export is fetched, not restarted"
-    );
-    assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
-    Local(left.clone())
-        .receive("cedar", fleet_id, &answer, None, Default::default())
-        .await
-        .unwrap();
-    for store in [&left, &right] {
-        for writer in ["birch", "cedar"] {
-            assert_eq!(
-                store
-                    .claims_for(&format!("note/{writer}"), Some("example.note"))
-                    .unwrap()
-                    .len(),
-                1
-            );
-        }
+    backend.release_export.notify_one();
+    let expired = receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()).await;
+    assert_eq!(expired.status(), StatusCode::SERVICE_UNAVAILABLE,
+        "reply export may not acquire a new writer after the receive deadline");
+    let answer = receive_exchange(None, State(state), headers, bytes).await;
+    assert_eq!(answer.status(), StatusCode::OK);
+    assert_eq!(backend.receives.load(Ordering::Relaxed), 2,
+        "the committed first receipt survives; retry only receives a duplicate");
+    assert_eq!(right.claims_for("note/birch", Some("example.note")).unwrap().len(), 1,
+        "a timed-out response does not erase the committed receipt");
     }
-    // Once an answer is delivered, a later identical query must export fresh data.
-    post_signed(
-        &replication_http_client(),
-        &Local(left.clone()),
-        &peer,
-        "birch",
-        &auth,
-        &fleet,
-        &query,
-        false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(backend.receives.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        right
-            .claims_for("note/birch", Some("example.note"))
-            .unwrap()
-            .len(),
-        1
-    );
-    exchange(
-        &replication_http_client(),
-        &Local(left.clone()),
-        "birch",
-        &peer,
-        &auth,
-        &fleet,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        left.replication_inventory().unwrap().digest,
-        right.replication_inventory().unwrap().digest
-    );
-    server.abort();
 }
 
 #[tokio::test(start_paused = true)]
@@ -5246,6 +5196,8 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
     let backend = SlowExport {
         local: Local(right.clone()),
         slow: Arc::new(AtomicBool::new(false)),
+        release_export: Arc::new(tokio::sync::Notify::new()),
+        wake_after_receive: None,
         fail_next: Arc::new(AtomicBool::new(true)),
         receives: Arc::new(AtomicUsize::new(0)),
     };
@@ -5309,6 +5261,8 @@ async fn responder_failed_export_emits_failure_answer_diagnostic() {
     let backend = SlowExport {
         local: Local(store),
         slow: Arc::new(AtomicBool::new(false)),
+        release_export: Arc::new(tokio::sync::Notify::new()),
+        wake_after_receive: None,
         fail_next: Arc::new(AtomicBool::new(true)),
         receives: Arc::new(AtomicUsize::new(0)),
     };
@@ -5533,6 +5487,8 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
         let backend = SlowExport {
             local: Local(store.clone()),
             slow: Arc::new(AtomicBool::new(true)),
+            release_export: Arc::new(tokio::sync::Notify::new()),
+            wake_after_receive: None,
             fail_next: Arc::new(AtomicBool::new(false)),
             receives: received.clone(),
         };
@@ -6830,4 +6786,161 @@ fn a_retired_step_the_answer_left_out_is_asked_again() {
     // The peer's retired ranges were folding, so its answer has no retired part.
     walk.absorb(query, &ClaimRangeComparison { pair: "ours/theirs".into(), same: true, ..Default::default() });
     assert_eq!(walk.next_query().and_then(|query| query.retired), Some(asked));
+}
+
+#[tokio::test]
+async fn ingress_declared_raw_oversize_never_polls_or_inflates_body() {
+    let body = Body::from_stream(futures_util::stream::poll_fn(
+        |_: &mut std::task::Context<'_>| -> std::task::Poll<Option<Result<Bytes, std::io::Error>>> {
+            panic!("oversized declared body must never be polled")
+        },
+    ));
+    let app = Router::new().route(EXCHANGE_PATH, post(|| async { StatusCode::IM_A_TEAPOT }))
+        .layer(axum::middleware::from_fn(observe_exchange_body));
+    let response = app.oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
+        .header("content-length", (MAX_EXCHANGE_BYTES + 1).to_string())
+        .header("content-encoding", "deflate").body(body).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"],
+        "replication-ingress/raw-oversize");
+}
+
+#[tokio::test]
+async fn ingress_stream_cap_refuses_before_handler_and_peer_budget_header_is_stripped() {
+    let app = Router::new().route(EXCHANGE_PATH, post(
+        |axum::Extension(budget): axum::Extension<super::super::ReceiveBudget>, headers: HeaderMap| async move {
+            assert!(!budget.expired_at(std::time::Instant::now()));
+            assert!(!headers.contains_key("x-fractal-internal-receive-budget-ms"));
+            StatusCode::OK
+        }))
+        .layer(axum::middleware::from_fn(observe_exchange_body));
+    let response = app.clone().oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
+        .header("x-fractal-internal-receive-budget-ms", "0")
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let chunk = Bytes::from(vec![0; 1024 * 1024]);
+    let chunks = (0..65).map(|_| Ok::<_, std::io::Error>(chunk.clone())).collect::<Vec<_>>();
+    let response = app.oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
+        .header("content-encoding", "deflate")
+        .body(Body::from_stream(futures_util::stream::iter(chunks))).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[test]
+fn ingress_codes_and_inflate_limits_are_distinct() {
+    use super::super::{ReceiveBudget, inflate_ingress, ingress_status};
+    for (code, status) in [
+        ("raw-oversize", StatusCode::PAYLOAD_TOO_LARGE),
+        ("inflated-oversize", StatusCode::PAYLOAD_TOO_LARGE),
+        ("malformed-deflate", StatusCode::BAD_REQUEST),
+        ("malformed-json", StatusCode::BAD_REQUEST),
+        ("receive-deadline", StatusCode::SERVICE_UNAVAILABLE),
+        ("writer-unavailable", StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        assert_eq!(ingress_status(&format!("replication-ingress/{code}")), Some(status));
+    }
+    assert_eq!(ingress_status("unknown"), None);
+    assert_eq!(inflate_ingress(b"not deflate").unwrap_err(), "replication-ingress/malformed-deflate");
+    let bomb = deflate(&vec![0; MAX_EXCHANGE_BYTES + 1]).unwrap();
+    assert_eq!(inflate_ingress(&bomb).unwrap_err(), "replication-ingress/inflated-oversize");
+    let accepted = std::time::Instant::now();
+    let budget = ReceiveBudget { accepted };
+    assert!(!budget.expired_at(accepted + Duration::from_secs(27)));
+    assert!(budget.expired_at(accepted + Duration::from_secs(28)));
+    assert_eq!(budget.deadline(), accepted + Duration::from_secs(28));
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_receive_commit_survives_deadline_existing_wake_admits_projects_and_retry_is_duplicate() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for shard in [false, true] {
+        let awake = tokio::spawn(async { loop { tokio::task::yield_now().await; } });
+        let root = tempfile::tempdir().unwrap();
+        let fleet_id = "late-receipt-fixture";
+        let auth = FleetAuth::test(fleet_id, &[7; 32]);
+        let source = Arc::new(plain_open(&root.path().join("source.sqlite3"), "birch").unwrap());
+        let target = Arc::new(plain_open(&root.path().join("target.sqlite3"), "cedar").unwrap());
+        for store in [&source, &target] {
+            if shard {
+                store.bind_shard(&crate::shards::ShardId::parse("messages").unwrap()).unwrap();
+            }
+            store.bind_fleet(fleet_id).unwrap();
+        }
+        source.append_claim(&ClaimInput {
+            subject: "note/late".into(), kind: "example.note".into(), actor: None,
+            fields: BTreeMap::new(), evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let query = source.export_replication_exchange(fleet_id, &ReplicationInventory::default()).unwrap();
+        let bytes = Bytes::from(serde_json::to_vec(&query).unwrap());
+        let headers = auth.request_headers("birch", &bytes).unwrap();
+        let (entered, committed_waiter) = tokio::sync::oneshot::channel();
+        let entered = Mutex::new(Some(entered));
+        let (release, commit_gate) = std::sync::mpsc::sync_channel(1);
+        let commit_gate = Mutex::new(commit_gate);
+        // Existing managed-commit fixture seam: block only this receipt's first commit.
+        target.install_transaction_hooks(|_| Ok(()), move |_| {
+            if let Some(entered) = entered.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                commit_gate.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        }).unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let backend = SlowExport {
+            local: Local(target.clone()), slow: Arc::new(AtomicBool::new(false)),
+            release_export: Arc::new(tokio::sync::Notify::new()),
+            wake_after_receive: Some(wake.clone()),
+            fail_next: Arc::new(AtomicBool::new(false)),
+            receives: Arc::new(AtomicUsize::new(0)),
+        };
+        let state = PeerState::new(backend.clone(), "cedar".into(), auth.clone(),
+            FleetContext::legacy(BTreeSet::from(["birch".into()])));
+        let state = if shard {
+            state.with_shards(BTreeMap::from([("messages".into(), backend.clone())]))
+        } else { state };
+        let request = tokio::spawn(receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()));
+        committed_waiter.await.unwrap();
+        tokio::time::advance(Duration::from_secs(29)).await;
+        let timed_out = request.await.unwrap();
+        assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(timed_out.into_body(), 4096).await.unwrap();
+        let answer: PeerResponse<Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(answer.value["code"], "replication-ingress/receive-deadline");
+        assert!(target.latest_claim("note/late", Some("example.note")).unwrap().is_none());
+        // The commit lands only AFTER the request has already returned its deadline.
+        release.send(()).unwrap();
+        wake.notified().await;
+        assert_eq!(target.claims_for("note/late", Some("example.note")).unwrap().len(), 1);
+        assert!(!target.replication_projection_deferred(),
+            "the existing changed wake must project, not merely admit, the late receipt");
+        let duplicate = target.receive_replication_exchange("birch", fleet_id, &query).unwrap();
+        assert_eq!(duplicate.received, 0);
+        assert!(duplicate.duplicate > 0);
+        // The retained deadline result is consumed once, then retry gets a normal full reply.
+        let retained = receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()).await;
+        assert_eq!(retained.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let retry = receive_exchange(None, State(state), headers, bytes).await;
+        assert_eq!(retry.status(), StatusCode::OK);
+        let body = to_bytes(retry.into_body(), MAX_EXCHANGE_BYTES).await.unwrap();
+        let reply: PeerResponse<ReplicationExchange> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reply.value.peer, "cedar");
+        assert_eq!(backend.receives.load(Ordering::Relaxed), 2);
+        assert_eq!(target.claims_for("note/late", Some("example.note")).unwrap().len(), 1);
+        awake.abort();
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_network_body_is_not_a_terminal_size_rejection() {
+    let app = Router::new().route(EXCHANGE_PATH, post(|| async { StatusCode::IM_A_TEAPOT }))
+        .layer(axum::middleware::from_fn(observe_exchange_body));
+    let body = Body::from_stream(futures_util::stream::iter([
+        Err::<Bytes, _>(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fixture")),
+    ]));
+    let response = app.oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
+        .body(body).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    assert!(!String::from_utf8_lossy(&body).contains("replication-ingress/raw-oversize"));
 }

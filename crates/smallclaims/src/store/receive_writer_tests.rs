@@ -1245,3 +1245,40 @@ fn a_read_cancelled_while_waiting_for_the_recovery_search_releases_its_worker() 
     assert!(cancelled.unwrap().unwrap_err().contains("deadline"));
     assert!(*store.sealing_recovery.blocking_lock());
 }
+
+#[test]
+fn expired_receive_followup_does_not_seal_or_judge_and_existing_admission_pass_resumes() {
+    let source = node("birch");
+    let target = node("cedar");
+    let exchange = page(&source, &target, 2);
+    let receipt = target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert!(receipt.received > 0);
+    target.append_claim(&ClaimInput {
+        subject: "note/local-followup".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let seeded = target.seeded_batch_rowid.load(Ordering::Acquire);
+    let deadline = Instant::now();
+    let error = target.validate_replication_backlog_until(deadline).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<FractalError>().unwrap().code,
+        "replication-ingress/receive-deadline",
+    );
+    assert_eq!(target.seeded_batch_rowid.load(Ordering::Acquire), seeded,
+        "expired admission must not start its sealing prelude");
+    let error = target.judge_claims_slice_until(true, deadline).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<FractalError>().unwrap().code,
+        "replication-ingress/receive-deadline",
+    );
+    let admitted = target.validate_replication_backlog().unwrap();
+    assert!(admitted.valid > 0, "the existing pass owns the durable pending receipt");
+    let duplicate = target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert_eq!(duplicate.received, 0);
+    assert!(duplicate.duplicate > 0);
+}

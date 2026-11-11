@@ -1,6 +1,80 @@
 use crate::DeliveryStore;
 use super::*;
 
+pub(super) fn is_receive_path(path: &str) -> bool {
+    path == "/v1/internal/replication/receive"
+        || (path.starts_with("/v1/internal/replication/shard/") && path.ends_with("/receive"))
+}
+
+pub(super) fn is_export_path(path: &str) -> bool {
+    path == "/v1/internal/replication/export"
+        || (path.starts_with("/v1/internal/replication/shard/") && path.ends_with("/export"))
+}
+
+pub(super) async fn prepare_receive(
+    request: Request<Body>, transport: ClientTransportBoundary,
+) -> Result<Request<Body>, ApiError> {
+    prepare_receive_at(request, transport, smallclaims::sync::ReceiveBudget::now()).await
+}
+
+async fn prepare_receive_at(
+    mut request: Request<Body>, transport: ClientTransportBoundary, now: Instant,
+) -> Result<Request<Body>, ApiError> {
+    let remaining = request.headers_mut().remove("x-fractal-internal-receive-budget-ms")
+        .and_then(|value| value.to_str().ok().and_then(|value| value.parse::<u64>().ok()));
+    let elapsed = if matches!(transport, ClientTransportBoundary::Unix) {
+        match remaining {
+            Some(ms) => Duration::from_millis(30_000 - ms.min(30_000)),
+            None => {
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+                REPORTED.call_once(|| tracing::info!(
+                    "local replication receive has no usable remaining budget; using accept origin"));
+                Duration::ZERO
+            }
+        }
+    } else {
+        Duration::ZERO
+    };
+    let budget = smallclaims::sync::ReceiveBudget { accepted: now - elapsed };
+    request.extensions_mut().insert(budget);
+    if request.headers().get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > crate::peer::MAX_EXCHANGE_BYTES as u64)
+    {
+        return Err(ApiError::bad(FractalError::new(
+            "replication-ingress/raw-oversize", "receive body exceeds the raw limit")));
+    }
+    let (parts, body) = request.into_parts();
+    let body = match tokio::time::timeout_at(
+        budget.tokio_deadline(), axum::body::to_bytes(body, crate::peer::MAX_EXCHANGE_BYTES),
+    ).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(error)) => {
+            if std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                return Err(ApiError::bad(FractalError::new(
+                    "replication-ingress/raw-oversize", "receive body exceeds the raw limit")));
+            }
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST, code: "request-body-unreadable".into(),
+                message: "receive body could not be read".into(), details: Box::default(),
+            });
+        }
+        Err(_) => return Err(ApiError::bad(FractalError::new(
+            "replication-ingress/receive-deadline", "receive body exceeded its deadline"))),
+    };
+    Ok(Request::from_parts(parts, Body::from(body)))
+}
+
+fn receive_json(
+    request: Result<Json<ReplicationReceiveRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<ReplicationReceiveRequest, ApiError> {
+    request.map(|Json(request)| request).map_err(|error|
+        ApiError::bad(FractalError::new("replication-ingress/malformed-json", error.to_string())))
+}
+
 pub async fn replication_status(
     State(state): State<AppState>,
 ) -> Result<Json<ReplicationStatus>, ApiError> {
@@ -301,13 +375,16 @@ pub async fn replication_checkpoint_adopt(
 pub async fn replication_receive(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(request): Json<ReplicationReceiveRequest>,
+    axum::Extension(budget): axum::Extension<smallclaims::sync::ReceiveBudget>,
+    request: Result<Json<ReplicationReceiveRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let request = receive_json(request)?;
     let correlation = headers.get("x-fractal-exchange-id")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| uuid::Uuid::parse_str(value).ok());
     let store = state.store.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+        budget.check()?;
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -319,29 +396,36 @@ pub async fn replication_receive(
         }
         let notice_was_visible = store.replication_peer_in_sync_notice(&request.peer);
         // Only the worker's own requests carry a round trip, and only they prove its route out.
-        let receipt = store.receive_replication_exchange_via(
+        let receipt = store.receive_replication_exchange_until(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
             request.carrier,
+            budget.deadline(),
         )?;
+        let durable_receipt = receipt.clone();
+        let followup: std::result::Result<_, FractalError> = (|| {
+        budget.check()?;
         if store
             .observes_transport_to(&request.peer)
             .map_err(|error| FractalError::new("internal", error.to_string()))?
         {
             store
-                .record_transport_observation(&request.peer, "up", None, None)
-                .map_err(|error| FractalError::new("internal", error.to_string()))?;
+                .record_transport_observation_until(&request.peer, "up", None, None, budget.deadline())
+                .map_err(smallclaims::error::typed)?;
         }
+        budget.check()?;
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
             let admission = store
-                .validate_replication_backlog()
-                .map_err(|error| FractalError::new("internal", error.to_string()))?;
+                .validate_replication_backlog_until(budget.deadline())
+                .map_err(smallclaims::error::typed)?;
+            budget.check()?;
             let repairs = store
-                .apply_replication_repairs()
-                .map_err(|error| FractalError::new("internal", error.to_string()))?;
+                .apply_replication_repairs_until(budget.deadline())
+                .map_err(smallclaims::error::typed)?;
+            budget.check()?;
             (admission, repairs)
         } else {
             (Default::default(), 0)
@@ -350,6 +434,7 @@ pub async fn replication_receive(
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
         let projection = if new_data || was_deferred {
+            budget.check()?;
             use opentelemetry::trace::{Span as _, TraceContextExt as _};
             use tracing_opentelemetry::OpenTelemetrySpanExt as _;
             let receive = crate::otel::export_enabled().then(|| {
@@ -359,7 +444,7 @@ pub async fn replication_receive(
                 "st.replication.projection", "receive", receive,
             );
             let result = admitted_projection_result(
-                store.project_replication_backlog_unless_catching_up(),
+                store.project_replication_backlog_unless_catching_up_until(budget.deadline()),
             );
             if let Some(span) = span.as_mut() {
                 span.set_attribute(opentelemetry::KeyValue::new(
@@ -387,6 +472,7 @@ pub async fn replication_receive(
             Some(true)
         };
         let projected = projection.unwrap_or(false);
+        budget.check()?;
         let store_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -410,6 +496,18 @@ pub async fn replication_receive(
             changed && !quiet_only && projected,
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
+        })();
+        match followup {
+            Err(error) if smallclaims::sync::receive_followup_deferred(&request.peer, error.code) => {
+                store.defer_replication_projection();
+                Ok((ReplicationReceiveResponse {
+                    receipt: durable_receipt,
+                    changed: true,
+                    store_index: store.index().map_err(smallclaims::error::typed)?,
+                }, false, notice_was_visible))
+            }
+            result => result,
+        }
     })
     .await.inspect_err(|error| {
         smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
@@ -599,26 +697,36 @@ pub(crate) async fn stream_admitted(state: &AppState) {
 pub async fn shard_replication_receive(
     State(state): State<AppState>,
     AxumPath(shard): AxumPath<String>,
-    Json(request): Json<ReplicationReceiveRequest>,
+    axum::Extension(budget): axum::Extension<smallclaims::sync::ReceiveBudget>,
+    request: Result<Json<ReplicationReceiveRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let request = receive_json(request)?;
     let store = replication_shard(&state, &shard)?;
     let response = blocking_action(move || {
+        budget.check()?;
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         let before_index = store.index().map_err(internal)?;
-        let receipt = store.receive_replication_exchange_via(
+        let receipt = store.receive_replication_exchange_until(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
             request.carrier,
+            budget.deadline(),
         )?;
+        let durable_receipt = receipt.clone();
+        let followup: std::result::Result<_, FractalError> = (|| {
+        budget.check()?;
         // Held envelopes get another pass when the graph's membership moved since the last one.
         if replication_receive_has_new_data(receipt.received + receipt.signatures)
             || store.fleet_moved_since_admission().map_err(internal)?
         {
-            store.validate_replication_backlog().map_err(internal)?;
-            store.apply_replication_repairs().map_err(internal)?;
-            store.project_replication_backlog().map_err(internal)?;
+            store.validate_replication_backlog_until(budget.deadline()).map_err(smallclaims::error::typed)?;
+            budget.check()?;
+            store.apply_replication_repairs_until(budget.deadline()).map_err(smallclaims::error::typed)?;
+            budget.check()?;
+            store.project_replication_backlog_until(budget.deadline()).map_err(smallclaims::error::typed)?;
+            budget.check()?;
         }
         let store_index = store.index().map_err(internal)?;
         Ok(ReplicationReceiveResponse {
@@ -626,6 +734,17 @@ pub async fn shard_replication_receive(
             changed: store_index != before_index,
             store_index,
         })
+        })();
+        match followup {
+            Err(error) if smallclaims::sync::receive_followup_deferred(&request.peer, error.code) => {
+                store.defer_replication_projection();
+                Ok(ReplicationReceiveResponse {
+                    receipt: durable_receipt, changed: true,
+                    store_index: store.index().map_err(smallclaims::error::typed)?,
+                })
+            }
+            result => result,
+        }
     })
     .await?;
     if response.changed {
@@ -714,4 +833,72 @@ pub async fn test_shard_items(
 #[cfg(feature = "test-support")]
 pub async fn test_shard_peers(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     shard_replication_peers(State(state), AxumPath(crate::store::messages_shard::SHARD_ID.to_owned())).await
+}
+
+#[cfg(test)]
+mod ingress_tests {
+    use super::*;
+    use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn only_unix_receive_accepts_remaining_budget_and_it_never_extends_thirty_seconds() {
+        let now = Instant::now();
+        for (transport, header, elapsed_ms) in [
+            (ClientTransportBoundary::Unix, "12000", 18000),
+            (ClientTransportBoundary::Unix, "999999", 0),
+            (ClientTransportBoundary::Unix, "invalid", 0),
+            (ClientTransportBoundary::FabricLoopback, "0", 0),
+        ] {
+            let request = Request::builder().method("POST")
+                .uri("/v1/internal/replication/receive")
+                .header("x-fractal-internal-receive-budget-ms", header)
+                .body(Body::empty()).unwrap();
+            let request = prepare_receive_at(request, transport, now).await.unwrap();
+            let budget = request.extensions().get::<smallclaims::sync::ReceiveBudget>().unwrap();
+            assert_eq!(budget.accepted, now - Duration::from_millis(elapsed_ms));
+            assert!(!request.headers().contains_key("x-fractal-internal-receive-budget-ms"));
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_and_shard_refuse_declared_oversize_before_reading() {
+        for path in ["/v1/internal/replication/receive", "/v1/internal/replication/shard/messages/receive"] {
+            assert!(is_receive_path(path));
+            let body = Body::from_stream(futures_util::stream::poll_fn(
+                |_: &mut std::task::Context<'_>| -> std::task::Poll<Option<Result<axum::body::Bytes, std::io::Error>>> {
+                    panic!("declared oversize must not read even one frame")
+                },
+            ));
+            let request = Request::builder().method("POST").uri(path)
+                .header("content-length", (crate::peer::MAX_EXCHANGE_BYTES + 1).to_string())
+                .body(body).unwrap();
+            let error = prepare_receive_at(request, ClientTransportBoundary::Unix, Instant::now())
+                .await.unwrap_err();
+            assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(error.code, "replication-ingress/raw-oversize");
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_and_shard_emit_typed_malformed_json_and_retryable_body_deadline() {
+        for path in ["/v1/internal/replication/receive", "/v1/internal/replication/shard/messages/receive"] {
+            let root = tempfile::tempdir().unwrap();
+            let app = router(super::super::tests::state(root.path()));
+            let response = app.oneshot(Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from("{")).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"],
+                "replication-ingress/malformed-json");
+            let body = Body::from_stream(futures_util::stream::pending::<Result<axum::body::Bytes, std::io::Error>>());
+            let request = Request::builder().method("POST").uri(path)
+                .header("x-fractal-internal-receive-budget-ms", "0")
+                .body(body).unwrap();
+            let error = prepare_receive_at(request, ClientTransportBoundary::Unix, Instant::now())
+                .await.unwrap_err();
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.code, "replication-ingress/receive-deadline");
+        }
+    }
 }

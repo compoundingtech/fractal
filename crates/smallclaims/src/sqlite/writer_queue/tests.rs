@@ -465,3 +465,176 @@ fn real_hook_installation_barrier_waits_for_prior_background_return() {
         2
     );
 }
+
+#[test]
+fn receive_loan_distinguishes_expiry_closed_admission_and_disconnection() {
+    let writer = writer();
+    let now = Instant::now();
+    assert!(matches!(
+        writer.write_receive_with_clock(now, || now),
+        Err(WriterLoanError::Expired)
+    ));
+    let original = writer.jobs.lock().unwrap().take().unwrap();
+    assert!(matches!(
+        writer.write_receive_with_clock(now + Duration::from_secs(10), || now),
+        Err(WriterLoanError::AdmissionClosed)
+    ));
+    let (dead, receiver) = mpsc::channel();
+    drop(receiver);
+    *writer.jobs.lock().unwrap() = Some(dead);
+    assert!(matches!(
+        writer.write_receive_with_clock(now + Duration::from_secs(10), || now),
+        Err(WriterLoanError::Disconnected)
+    ));
+    *writer.jobs.lock().unwrap() = Some(original);
+    drop(writer.write());
+}
+
+#[test]
+fn expired_queued_receive_does_not_run_or_prevent_later_writer_loans() {
+    let writer = writer();
+    let held = writer.write();
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(10);
+    let mut reads = 0;
+    let result = writer.write_receive_with_clock(deadline, || {
+        reads += 1;
+        // Admission succeeds, but the same clock expires before waiting for the holder.
+        if reads >= 3 { deadline } else { now }
+    });
+    assert!(matches!(result, Err(WriterLoanError::Expired)));
+    drop(held);
+    let guard = writer.write();
+    assert_eq!(
+        guard.query_row("SELECT COUNT(*) FROM values_", [], |row| row.get::<_, u64>(0)).unwrap(),
+        0
+    );
+}
+
+fn receive_handoff() -> (mpsc::SyncSender<ReceiveLoan>, Receiver<ReceiveLoan>, Receiver<Connection>) {
+    let (lent, borrower) = mpsc::sync_channel(1);
+    let (give_back, returned) = mpsc::sync_channel(1);
+    let connection = Connection::open_in_memory().unwrap();
+    connection.pragma_update(None, "user_version", 71).unwrap();
+    assert!(lent.send(ReceiveLoan { connection: Some(connection), give_back }).is_ok());
+    (lent, borrower, returned)
+}
+
+fn assert_receive_returned_once(returned: &Receiver<Connection>) {
+    let connection = returned.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u64>(0)).unwrap(), 71);
+    assert!(matches!(returned.try_recv(), Err(TryRecvError::Disconnected)));
+}
+
+#[test]
+fn successful_receive_handoff_expiring_at_acquisition_returns_exactly_once() {
+    let (_lent, borrower, returned) = receive_handoff();
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(10);
+    let mut reads = 0;
+    let result = receive_until(&borrower, deadline, &mut || {
+        reads += 1;
+        if reads == 1 { now } else { deadline }
+    });
+    assert!(matches!(result, Err(WriterLoanError::Expired)));
+    assert_receive_returned_once(&returned);
+}
+
+#[test]
+fn successful_buffered_handoff_is_returned_when_borrower_expires_before_receiving() {
+    let (_lent, borrower, returned) = receive_handoff();
+    let deadline = Instant::now();
+    assert!(matches!(
+        receive_until(&borrower, deadline, &mut || deadline),
+        Err(WriterLoanError::Expired)
+    ));
+    drop(borrower);
+    assert_receive_returned_once(&returned);
+}
+
+#[test]
+fn failed_receive_handoff_returns_exactly_once_and_disconnected_wait_is_typed() {
+    let (lent, borrower) = mpsc::sync_channel(1);
+    let (give_back, returned) = mpsc::sync_channel(1);
+    drop(borrower);
+    drop(lent.send(ReceiveLoan {
+        connection: Some(Connection::open_in_memory().unwrap()),
+        give_back,
+    }));
+    let connection = returned.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(matches!(returned.try_recv(), Err(TryRecvError::Disconnected)));
+    drop(connection);
+    let (lent, borrower) = mpsc::sync_channel::<ReceiveLoan>(1);
+    drop(lent);
+    let now = Instant::now();
+    assert!(matches!(
+        receive_until(&borrower, now + Duration::from_secs(10), &mut || now),
+        Err(WriterLoanError::Disconnected)
+    ));
+}
+
+#[test]
+fn acquired_receive_guard_commits_after_deadline_and_notifies_before_next_loan() {
+    let writer = writer();
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(10);
+    let clock = std::cell::Cell::new(now);
+    let (sent, observed) = mpsc::channel();
+    let _observer = writer.observe_commits(move |connection| {
+        let count = connection.query_row("SELECT COUNT(*) FROM values_", [], |row| row.get::<_, u64>(0)).unwrap();
+        sent.send(count).unwrap();
+    });
+    let mut guard = writer.write_receive_with_clock(deadline, || clock.get()).unwrap();
+    let transaction = guard.transaction().unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h6c0a20efde54 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO values_ VALUES (71)", []).unwrap();
+    clock.set(deadline);
+    transaction.commit().unwrap();
+    assert!(observed.try_recv().is_err());
+    drop(guard);
+    assert_eq!(observed.recv_timeout(Duration::from_secs(10)).unwrap(), 1);
+    let guard = writer.write();
+    assert_eq!(guard.query_row("SELECT id FROM values_", [], |row| row.get::<_, u64>(0)).unwrap(), 71);
+}
+
+#[test]
+fn receive_sql_and_commit_failures_remain_transaction_errors_after_acquisition() {
+    let writer = writer();
+    {
+        let guard = writer.write_receive_until(Instant::now() + Duration::from_secs(10)).unwrap();
+        assert!(guard.execute(/* sqlite-large-value: allow-for-now lv-hdda3a803dc94 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO absent_table VALUES (1)", []).is_err());
+    }
+    writer.install_transaction_hooks(|_| Ok(()), |_| anyhow::bail!("receive commit refused")).unwrap();
+    {
+        let mut guard = writer.write_receive_until(Instant::now() + Duration::from_secs(10)).unwrap();
+        let transaction = guard.transaction().unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hd6b27d21a862 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO values_ VALUES (71)", []).unwrap();
+        assert!(transaction.commit().unwrap_err().to_string().contains("receive commit refused"));
+    }
+    assert_eq!(
+        writer.write().query_row("SELECT COUNT(*) FROM values_", [], |row| row.get::<_, u64>(0)).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn receive_native_commit_failure_is_not_an_acquisition_failure() {
+    let writer = writer();
+    {
+        let mut guard = writer.write_receive_until(Instant::now() + Duration::from_secs(10)).unwrap();
+        guard.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h7ca5d75cff75 owner=smallclaims::sqlite::writer_queue::tests TODO=chunk-or-reference-variable-columns */ "PRAGMA foreign_keys = ON;
+             CREATE TABLE receive_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE receive_child(parent INTEGER REFERENCES receive_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED);",
+        ).unwrap();
+        let transaction = guard.transaction().unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h6e1a4e2a568f owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO receive_child VALUES (71)", []).unwrap();
+        let error = transaction.commit().unwrap_err();
+        assert!(error.downcast_ref::<rusqlite::Error>().is_some());
+    }
+    let guard = writer.write_receive_until(Instant::now() + Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        guard.query_row("SELECT COUNT(*) FROM receive_child", [], |row| row.get::<_, u64>(0)).unwrap(),
+        0
+    );
+}

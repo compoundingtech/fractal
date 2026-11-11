@@ -7096,6 +7096,12 @@ impl Store {
     /// on a busy host's store, and no exchange waits for it. The daemon runs it after the
     /// reconnect window.
     pub fn replication_snapshot(&self) -> Result<Arc<ReplicationSnapshot>> {
+        self.replication_snapshot_with_deadline(None)
+    }
+
+    fn replication_snapshot_with_deadline(
+        &self, deadline: Option<std::time::Instant>,
+    ) -> Result<Arc<ReplicationSnapshot>> {
         // A write that lands between sealing and reading would be counted by the projection
         // digests but not by the inventory, and a peer comparing graphs at equal inventories
         // would find a difference that is not there. Seal again until the snapshot holds no
@@ -7105,7 +7111,7 @@ impl Store {
         loop {
             {
                 let _span = crate::profile::span("replication.seal");
-                self.seal_local_batches_after_frontier()?;
+                self.seal_local_batches_after_frontier_with_deadline(deadline)?;
             }
             snapshot = {
                 let _span = crate::profile::span("replication.snapshot");
@@ -7120,7 +7126,10 @@ impl Store {
         // writer, and writes queued behind it must not land between sealing and the snapshot.
         {
             let _span = crate::profile::span("replication.judge");
-            self.judge_claims_slice(false)?;
+            match deadline {
+                Some(deadline) => self.judge_claims_slice_until(false, deadline)?,
+                None => self.judge_claims_slice(false)?,
+            };
         }
         Ok(snapshot)
     }
@@ -7137,10 +7146,21 @@ impl Store {
     /// for batches skipped behind it. That search walks every batch; `seal_local_batches` runs
     /// it, and lowering the frontier then seals what it found.
     fn seal_local_batches_after_frontier(&self) -> Result<()> {
+        self.seal_local_batches_after_frontier_with_deadline(None)
+    }
+
+    fn seal_local_batches_after_frontier_with_deadline(
+        &self, deadline: Option<std::time::Instant>,
+    ) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
         let sealed_before = self.seeded_batch_rowid.load(Ordering::Acquire);
-        while self.seal_local_batch_chunk(target)? {}
+        while match deadline {
+            Some(deadline) => self.seal_local_batch_chunk_with_deadline(
+                target, prepared_seal::SEAL_PREPARED_BYTES, Some(deadline),
+            )?,
+            None => self.seal_local_batch_chunk(target)?,
+        } {}
         // Sealing signs this node's claims and leaves each waiting for its first verdict, and no
         // other work asks for it: a checkpoint, a status read or a proof seals without judging.
         // Hand what is pending to the paced job, as a slice that leaves work does. A seal that
@@ -7206,6 +7226,12 @@ impl Store {
 
     /// Seal the next chunk, keeping its payload within `budget` bytes but for one larger batch.
     fn seal_local_batch_chunk_within(&self, target: i64, budget: usize) -> Result<bool> {
+        self.seal_local_batch_chunk_with_deadline(target, budget, None)
+    }
+
+    fn seal_local_batch_chunk_with_deadline(
+        &self, target: i64, budget: usize, deadline: Option<std::time::Instant>,
+    ) -> Result<bool> {
         let prepared = {
             let _timing = time_stage(&self.replication_timers.snapshot);
             self.prepare_seal(target, budget)?
@@ -7217,7 +7243,7 @@ impl Store {
         if let Some(change) = SEAL_BEFORE_LOAN.with(|change| change.borrow_mut().take()) {
             change(self);
         }
-        let mut connection = self.connection.write();
+        let mut connection = self.replication_receive_writer(deadline, false)?;
         let _timing = time_stage(&self.replication_timers.snapshot);
         let seeded_through = self.seeded_batch_rowid.load(Ordering::Acquire);
         if seeded_through >= target {
@@ -7469,22 +7495,29 @@ impl Store {
     }
 
     pub fn export_replication_summary(&self, fleet_id: &str) -> Result<ReplicationExchange> {
-        self.replication_summary(fleet_id, true)
+        self.replication_summary(fleet_id, true, None)
+    }
+
+    pub fn export_replication_summary_until(
+        &self, fleet_id: &str, deadline: std::time::Instant,
+    ) -> Result<ReplicationExchange> {
+        self.replication_summary(fleet_id, true, Some(deadline))
     }
 
     /// A local scalar guard reads only `authority_digest`. Keep the full summary's fresh
     /// snapshot, metadata and errors, but avoid cloning/serializing its unused bucket list.
     /// This reduced inventory must not be used to construct a signed peer exchange.
     pub fn export_replication_authority_guard(&self, fleet_id: &str) -> Result<ReplicationExchange> {
-        self.replication_summary(fleet_id, false)
+        self.replication_summary(fleet_id, false, None)
     }
 
     fn replication_summary(
         &self,
         fleet_id: &str,
         include_buckets: bool,
+        deadline: Option<std::time::Instant>,
     ) -> Result<ReplicationExchange> {
-        let snapshot = self.replication_snapshot()?;
+        let snapshot = self.replication_snapshot_with_deadline(deadline)?;
         let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
         // A guard summary stays on this node, so it asks no peer and takes no backfill request.
@@ -7761,6 +7794,27 @@ impl Store {
         Ok(envelopes)
     }
 
+    fn replication_receive_writer(
+        &self, deadline: Option<std::time::Instant>, background: bool,
+    ) -> Result<crate::sqlite::WriterGuard<'_>, FractalError> {
+        if deadline.is_some_and(|deadline| crate::sync::ReceiveBudget::now() >= deadline) {
+            return Err(FractalError::new("replication-ingress/receive-deadline",
+                "replication receive expired before the next writer loan"));
+        }
+        match deadline {
+            Some(deadline) => self.connection.write_receive_until(deadline).map_err(|error| {
+                let code = match error {
+                    crate::sqlite::WriterLoanError::Expired => "replication-ingress/receive-deadline",
+                    crate::sqlite::WriterLoanError::AdmissionClosed
+                    | crate::sqlite::WriterLoanError::Disconnected => "replication-ingress/writer-unavailable",
+                };
+                FractalError::new(code, error.to_string())
+            }),
+            None if background => Ok(self.connection.write_background()),
+            None => Ok(self.connection.write()),
+        }
+    }
+
     pub fn receive_replication_exchange(
         &self,
         relay: &str,
@@ -7785,13 +7839,28 @@ impl Store {
         Ok(receipt)
     }
 
-    pub /* sqlite-large-value-flow: allow-for-now flow-h7818827323a6 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_via(
+    pub fn receive_replication_exchange_via(
         &self,
         relay: &str,
         fleet_id: &str,
         input: &ReplicationExchange,
         asks: bool,
         carrier: crate::replication::ReplicationCarrier,
+    ) -> Result<ReplicationReceipt, FractalError> {
+        self.receive_replication_exchange_inner(relay, fleet_id, input, asks, carrier, None)
+    }
+
+    /// Receive-only acquisition bound. Once a writer is lent, its commit is never cancelled.
+    pub fn receive_replication_exchange_until(
+        &self, relay: &str, fleet_id: &str, input: &ReplicationExchange, asks: bool,
+        carrier: crate::replication::ReplicationCarrier, deadline: std::time::Instant,
+    ) -> Result<ReplicationReceipt, FractalError> {
+        self.receive_replication_exchange_inner(relay, fleet_id, input, asks, carrier, Some(deadline))
+    }
+
+    /* sqlite-large-value-flow: allow-for-now flow-h20ad8d295836 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_inner(
+        &self, relay: &str, fleet_id: &str, input: &ReplicationExchange, asks: bool,
+        carrier: crate::replication::ReplicationCarrier, deadline: Option<std::time::Instant>,
     ) -> Result<ReplicationReceipt, FractalError> {
         if input.peer != relay {
             return Err(FractalError::new(
@@ -7850,7 +7919,7 @@ impl Store {
         // Immutable signature verification stays outside the writer. The guard returns before
         // any receipt counters, snapshot work or acknowledgement can observe success.
         let (received, duplicate, signatures, received_at) = {
-            let mut connection = self.connection.write_background();
+            let mut connection = self.replication_receive_writer(deadline, true)?;
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
@@ -7958,6 +8027,14 @@ impl Store {
             transaction.commit().map_err(internal)?;
             counts
         };
+        if let Some(deadline) = deadline {
+            let now = crate::sync::ReceiveBudget::now();
+            if now > deadline {
+                tracing::warn!(target: "smallclaims::replication", peer = relay,
+                    overshoot_ms = now.duration_since(deadline).as_millis() as u64,
+                    "replication receive commit completed after deadline");
+            }
+        }
         // Only a response to our own dial is carrier evidence for a locally initiated
         // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
         if asks {
@@ -8196,7 +8273,14 @@ impl Store {
     }
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
-        self.admit_replication_backlog(AdmissionAuthority::Membership)
+        self.admit_replication_backlog(AdmissionAuthority::Membership, None)
+    }
+
+    /// Receive-only admission: every new writer loan honors the original ingress deadline.
+    pub fn validate_replication_backlog_until(
+        &self, deadline: std::time::Instant,
+    ) -> Result<ReplicationAdmission> {
+        self.admit_replication_backlog(AdmissionAuthority::Membership, Some(deadline))
     }
 
     /// Admit the envelopes of a backup being restored. A backup holds only envelopes its source
@@ -8208,7 +8292,7 @@ impl Store {
     /// signatures that never come. Hashes and claims are checked as in normal admission, and
     /// restore verified every archived signature as it received it.
     pub fn admit_restored_backlog(&self) -> Result<ReplicationAdmission> {
-        self.admit_replication_backlog(AdmissionAuthority::Source)
+        self.admit_replication_backlog(AdmissionAuthority::Source, None)
     }
 
     /// Whether a shard's fleet authority changed its membership since the shard last admitted
@@ -8226,10 +8310,11 @@ impl Store {
     fn admit_replication_backlog(
         &self,
         authority: AdmissionAuthority,
+        deadline: Option<std::time::Instant>,
     ) -> Result<ReplicationAdmission> {
         // Read before the pass, so membership that changes during it is judged by the next one.
         let generation = self.fleet_authority.get().map(|fleet| fleet.fleet_generation()).transpose()?;
-        let admission = self.admit_replication_backlog_now(authority)?;
+        let admission = self.admit_replication_backlog_now(authority, deadline)?;
         if let Some(generation) = generation {
             self.admitted_fleet_generation.store(generation, Ordering::Release);
         }
@@ -8239,13 +8324,17 @@ impl Store {
     fn admit_replication_backlog_now(
         &self,
         authority: AdmissionAuthority,
+        deadline: Option<std::time::Instant>,
     ) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it, and
         // neither waits for the recovery search.
-        self.seal_local_batches_after_frontier()?;
-        self.judge_claims_slice(false)?;
+        self.seal_local_batches_after_frontier_with_deadline(deadline)?;
+        match deadline {
+            Some(deadline) => self.judge_claims_slice_until(false, deadline)?,
+            None => self.judge_claims_slice(false)?,
+        };
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self
@@ -8364,7 +8453,7 @@ impl Store {
                         hook();
                     }
                 });
-                let mut connection = self.connection.write_background();
+                let mut connection = self.replication_receive_writer(deadline, true)?;
                 let mut pass = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let (prepared_generation, prepared_membership) = membership.as_ref().unwrap();
@@ -8502,7 +8591,7 @@ impl Store {
             .verify
             .fetch_add(outcome.verify.as_nanos() as u64, Ordering::Relaxed);
         if retry_hash_mismatches || retry_subject_references {
-            let mut connection = self.connection.write_background();
+            let mut connection = self.replication_receive_writer(deadline, true)?;
             let transaction = connection.transaction()?;
             if retry_hash_mismatches {
                 transaction.execute(
@@ -8535,6 +8624,18 @@ impl Store {
     /// replay the whole graph after every exchange. It projects at most once per interval
     /// instead, and again as soon as it has caught up. `None` means it deferred.
     pub fn project_replication_backlog_unless_catching_up(&self) -> Result<Option<bool>> {
+        self.project_replication_backlog_unless_catching_up_inner(None)
+    }
+
+    pub fn project_replication_backlog_unless_catching_up_until(
+        &self, deadline: std::time::Instant,
+    ) -> Result<Option<bool>> {
+        self.project_replication_backlog_unless_catching_up_inner(Some(deadline))
+    }
+
+    fn project_replication_backlog_unless_catching_up_inner(
+        &self, deadline: Option<std::time::Instant>,
+    ) -> Result<Option<bool>> {
         let since = (now_ms() as u64).saturating_sub(
             self.last_replication_projection_unix_ms
                 .load(Ordering::Acquire),
@@ -8543,7 +8644,10 @@ impl Store {
             self.defer_replication_projection();
             return Ok(None);
         }
-        self.project_replication_backlog().map(Some)
+        match deadline {
+            Some(deadline) => self.project_replication_backlog_until(deadline),
+            None => self.project_replication_backlog(),
+        }.map(Some)
     }
 
     /// Whether admitted replicated claims wait for a deferred projection.
@@ -8582,7 +8686,8 @@ impl Store {
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn defer_replication_projection(&self) {
+    /// Keep admitted or pending receive work visible to the existing wake/projection passes.
+    pub fn defer_replication_projection(&self) {
         let _ = self.replication_projection_state.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -8700,12 +8805,20 @@ impl Store {
     }
 
     pub fn project_replication_backlog(&self) -> Result<bool> {
+
         self.project_replication_backlog_in_phase("replication")
+    }
+
+    pub fn project_replication_backlog_until(&self, deadline: std::time::Instant) -> Result<bool> {
+        self.project_replication_backlog_chunks(
+            Some(deadline), || {}, || {}, || {}, "replication", |line| eprintln!("{line}"), |_| {},
+        )
     }
 
     /// Identify the caller's phase in the terminal projection diagnostic.
     pub fn project_replication_backlog_in_phase(&self, phase: &str) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            None,
             || {},
             || {},
             || {},
@@ -8721,7 +8834,7 @@ impl Store {
         phase: &str,
         log: impl FnMut(&str),
     ) -> Result<bool> {
-        self.project_replication_backlog_chunks(|| {}, || {}, || {}, phase, log, |_| {})
+        self.project_replication_backlog_chunks(None, || {}, || {}, || {}, phase, log, |_| {})
     }
 
     /// Publish bounded observations on the projection thread; observers must not read the store.
@@ -8731,6 +8844,7 @@ impl Store {
         progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            None,
             || {},
             || {},
             || {},
@@ -8744,6 +8858,7 @@ impl Store {
     #[cfg(any(test, feature = "test-support"))]
     pub fn project_replication_backlog_with_yield(&self, between: impl FnMut()) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            None,
             between,
             || {},
             || {},
@@ -8760,6 +8875,7 @@ impl Store {
         before_clear: impl FnMut(),
     ) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            None,
             || {},
             before_clear,
             || {},
@@ -8776,6 +8892,7 @@ impl Store {
         before_gate: impl FnOnce(),
     ) -> Result<bool> {
         self.project_replication_backlog_chunks(
+            None,
             || {}, || {}, before_gate, "replication", |line| eprintln!("{line}"), |_| {},
         )
     }
@@ -8817,6 +8934,7 @@ impl Store {
 
     fn project_replication_backlog_chunks(
         &self,
+        deadline: Option<std::time::Instant>,
         mut between: impl FnMut(),
         mut before_clear: impl FnMut(),
         before_gate: impl FnOnce(),
@@ -8853,7 +8971,7 @@ impl Store {
             let mut progress_staged =
                 |update: ProjectionProgress| stages.during("callbacks", || progress(update));
             let mut log_staged = |line: &str| stages.during("callbacks", || log(line));
-            let mut connection = self.connection.write();
+            let mut connection = self.replication_receive_writer(deadline, false)?;
             stages.enter("begin");
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
             // fail immediately when the independent WAL checkpoint connection holds that lock.
@@ -9000,7 +9118,11 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
-                        self.judge_claims_slice(true).map_err(|error| {
+                        let judged = match deadline {
+                            Some(deadline) => self.judge_claims_slice_until(true, deadline),
+                            None => self.judge_claims_slice(true),
+                        };
+                        judged.map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
                             if error.is_sqlite_contention() {
@@ -9091,6 +9213,14 @@ impl Store {
     /// between pages resumes by starting over. A repair recorded after the list is read is applied
     /// by the next call; whoever records one calls this after it.
     pub fn apply_replication_repairs(&self) -> Result<usize> {
+        self.apply_replication_repairs_inner(None)
+    }
+
+    pub fn apply_replication_repairs_until(&self, deadline: std::time::Instant) -> Result<usize> {
+        self.apply_replication_repairs_inner(Some(deadline))
+    }
+
+    fn apply_replication_repairs_inner(&self, deadline: Option<std::time::Instant>) -> Result<usize> {
         let _timing = time_stage(&self.replication_timers.repair);
         let repairs = self
             .readers
@@ -9100,7 +9230,7 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let mut changed = 0;
         for page in repairs.chunks(REPAIR_CHUNK_CLAIMS) {
-            changed += self.apply_replication_repair_page(page)?;
+            changed += self.apply_replication_repair_page(page, deadline)?;
             #[cfg(test)]
             if STOP_BETWEEN_REPAIR_PAGES.with(std::cell::Cell::take) {
                 anyhow::bail!("stopped between repair pages");
@@ -9110,8 +9240,10 @@ impl Store {
     }
 
     /// One writer hold of `apply_replication_repairs`: these repairs, in this order.
-    fn apply_replication_repair_page(&self, page: &[String]) -> Result<usize> {
-        let mut connection = self.connection.write();
+    fn apply_replication_repair_page(
+        &self, page: &[String], deadline: Option<std::time::Instant>,
+    ) -> Result<usize> {
+        let mut connection = self.replication_receive_writer(deadline, false)?;
         let transaction = connection.transaction()?;
         let mut changed = 0;
         let mut operation_ids = BTreeSet::new();
@@ -9433,6 +9565,20 @@ impl Store {
         reason: Option<&str>,
         last_success_at: Option<u128>,
     ) -> Result<()> {
+        self.record_transport_observation_inner(peer, status, reason, last_success_at, None)
+    }
+
+    pub fn record_transport_observation_until(
+        &self, peer: &str, status: &str, reason: Option<&str>, last_success_at: Option<u128>,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        self.record_transport_observation_inner(peer, status, reason, last_success_at, Some(deadline))
+    }
+
+    fn record_transport_observation_inner(
+        &self, peer: &str, status: &str, reason: Option<&str>, last_success_at: Option<u128>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<()> {
         // Keep route refusals local so older members can admit transport observations.
         let status = if matches!(status, "down" | "refused") {
             "unknown"
@@ -9499,7 +9645,7 @@ impl Store {
         if let Some(last_success_at) = last_success_at.and_then(|value| u64::try_from(value).ok()) {
             fields.insert("last_success_at".into(), Value::from(last_success_at));
         }
-        self.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject,
             kind: "transport.observed".into(),
             actor: None,
@@ -9510,7 +9656,21 @@ impl Store {
                 "replication-transport:{peer}:{status}:{}",
                 now_ms()
             )),
-        })?;
+        };
+        if let Some(deadline) = deadline {
+            let mut connection = self.replication_receive_writer(Some(deadline), false)?;
+            let transaction = connection.transaction()?;
+            let mut body = json!({ "fields": input.fields, "evidence": input.evidence });
+            if let Some(key) = &input.idempotency_key {
+                idempotency::attach(&mut body, key)?;
+            }
+            self.runtime.append_claim_tx(&transaction, &self.origin, &input.subject, &input.kind,
+                input.actor.as_deref(), &body, &[], None)?;
+            self.runtime.after_projection(&transaction)?;
+            transaction.commit()?;
+        } else {
+            self.append_claim(&input)?;
+        }
         Ok(())
     }
 

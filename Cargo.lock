@@ -5882,6 +5882,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac",
+ "http-body-util",
  "hyper",
  "libc",
  "opentelemetry",
