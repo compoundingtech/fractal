@@ -103,6 +103,7 @@ pub enum ErrorCode {
     RetireIncarnationMismatch,
     InvalidCustodySuccessor,
     CustodyPending,
+    SetManagedSubject,
     AttentionMigrated,
     ArrangementExists,
     ArrangementFolderExists,

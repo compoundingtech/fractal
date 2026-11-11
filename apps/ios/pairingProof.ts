@@ -1,6 +1,15 @@
 // Match st3-client/device/grant_proof.rs. Crypto is supplied by Expo/CryptoKit in the app and
 // node:crypto in tests; no gateway value can supply the independently trusted fingerprint.
 import type { PersonPairedSession } from '../../clients/typescript/fractal-client';
+import { isClientApiVersion } from './protocolVersions.ts';
+
+export type PairingAdvertisement = { api_version?: string; capabilities?: Array<{ id: string; version: number; state: string }> };
+export const requirePairingAdvertisement = (advertisement: PairingAdvertisement): NonNullable<PairingAdvertisement['capabilities']> => {
+  if (!isClientApiVersion(advertisement.api_version) || !Array.isArray(advertisement.capabilities) || !advertisement.capabilities.some(c => c.id === 'device-key-proofs' && c.version === 1 && c.state === 'granted')) {
+    throw new Error('Member does not support verifiable device grants; upgrade it. The code was not submitted.');
+  }
+  return advertisement.capabilities;
+};
 
 export type ProofCrypto = {
   hash(bytes: Uint8Array): Promise<Uint8Array>;

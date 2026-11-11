@@ -147,6 +147,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case retireIncarnationMismatch
     case invalidCustodySuccessor
     case custodyPending
+    case setManagedSubject
     case notFound
     case forbidden
     case unsupportedCapability
@@ -237,6 +238,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "retire-incarnation-mismatch": .retireIncarnationMismatch
         case "invalid-custody-successor": .invalidCustodySuccessor
         case "custody-pending": .custodyPending
+        case "set-managed-subject": .setManagedSubject
         case "agents-publication-row-too-large": .agentsPublicationRowTooLarge
         case "attention-migrated": .attentionMigrated
         case "not-found": .notFound
@@ -329,6 +331,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .retireIncarnationMismatch: "retire-incarnation-mismatch"
         case .invalidCustodySuccessor: "invalid-custody-successor"
         case .custodyPending: "custody-pending"
+        case .setManagedSubject: "set-managed-subject"
         case .agentsPublicationRowTooLarge: "agents-publication-row-too-large"
         case .attentionMigrated: "attention-migrated"
         case .notFound: "not-found"

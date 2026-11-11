@@ -653,6 +653,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
         .route("/v1/client/documents/content", get(client_documents::document_get))
         .route("/v1/client/documents", get(client_documents::documents_list))
+        .route("/v1/client/claims", get(records::client_list_claims))
+        .route("/v1/client/claims/by-id/{id}", get(records::client_get_claim))
+        .route("/v1/client/work-items/{*subject}", get(work::client_get_work))
         .route("/v1/client/document-references", get(client_documents::document_references))
         .route("/v1/client/push-registration", post(client_push::register)
             .delete(client_push::unregister)
@@ -731,6 +734,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/gate-checks/{id}", get(runs::read_gate_check))
         .route("/v1/sets/preview", post(owned_sets::preview))
         .route("/v1/sets/apply", post(owned_sets::apply).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
+        .route("/v1/source/status", get(owned_sets::source_status))
         .route("/v1/intent/apply", post(launches::apply_with_bound).layer(DefaultBodyLimit::max(PUBLICATION_BODY_LIMIT)))
         .route("/v1/agents/rename", post(agents::rename_agent))
         .route("/v1/persons/rename", post(agents::rename_person))
@@ -1621,12 +1625,12 @@ pub fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
-/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+/// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
     request_latency().lock().unwrap().targets_only(Instant::now())
 }
 
-/// Every target's live windows, and every path's: see `slo/targets.toml`.
+/// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
@@ -1636,8 +1640,8 @@ fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
 }
 
-/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
-/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// Close each UTC minute of the member's CPU as it ends, for the `cpu` objective in
+/// `slo/objectives.kdl`: read the daemon's CPU at the boundary beside the newest reading each of
 /// the `workers` replication workers this member runs has sent, note a replication catch-up, and
 /// check the seats of the minute closed one boundary earlier, once every harness observation
 /// stamped inside it has committed. The first boundary is this daemon's start.
@@ -2019,6 +2023,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "retire-incarnation-mismatch"
         | "invalid-custody-successor"
         | "custody-pending"
+        | "set-managed-subject"
         | "not-found"
         | "forbidden"
         | "pairing-origin-required"
@@ -2768,11 +2773,11 @@ pub fn client_work_resources(
         // that chooses its next work and wake.
         let seat_ready = match actor {
             Some(actor) => {
-                let seat = if actor.contains('/') {
-                    actor.to_owned()
-                } else {
-                    format!("agent/{actor}")
-                };
+                // Queue lookup uses the same canonical actor as the shared seat selector,
+                // including when persisted steps still use a legacy spelling.
+                let actor = smallclaims::store::normalize_actor(actor, "agent");
+                let seat = fractal_schema::canonical_agent_actor(&actor)
+                    .unwrap_or(std::borrow::Cow::Borrowed(&actor));
                 let order = store.seat_run_order(&seat)?;
                 let steps = work
                     .iter()
@@ -3018,7 +3023,7 @@ fn client_work_values(
                 "definition_id": work.definition_hash,
                 "path": work.step,
                 "title": work.title,
-                "assigned_to": work.assigned_to,
+                "assigned_to": work.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "last_progress": work.progress_summary,
                 "progress_at": work.progress_at_unix_ms.map(client_timestamp),
                 "state": state,
@@ -3027,7 +3032,7 @@ fn client_work_values(
                 "program": program,
                 "attempt": work.attempt,
                 "readiness_epoch": work.readiness_epoch,
-                "claimant": work.claimant,
+                "claimant": work.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "claim_incarnation": work.claim_incarnation,
                 "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
@@ -5415,14 +5420,40 @@ fn message_delivery_for(
         })
     };
     let mut status = message.status.clone();
-    if let Some(host) = message_reads::relay_host(store, message)? {
-        match relayed {
-            Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) => {
-                if crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status) {
-                    status = (*relayed).to_owned();
-                }
+    let host = message_reads::relay_host(store, message)?;
+    if host.is_some()
+        && let Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) = relayed
+        && crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status)
+    {
+        status = (*relayed).to_owned();
+    }
+    // Durable expiry wins over seat diagnostics and an unavailable remote, but
+    // never over actual consumption, including a receipt just relayed by its host.
+    if let Some(expiry) = store.message_expiry(&message.subject)? {
+        if expiry.superseded
+            && let Some(current) = store.message(&message.subject)?
+            && crate::store::message_marks::rank(&current.status) > crate::store::message_marks::rank(&status)
+        {
+            status = current.status;
+        }
+        if !expiry.superseded && !matches!(status.as_str(), "delivered" | "read") {
+            if host.is_some()
+                && let Some(message_reads::Relayed::Answered { consumed: Some(phase), .. }) = relayed
+            {
+                return message_delivery_value(store, &message.to, phase, sent_at, now);
             }
-            Some(message_reads::Relayed::Answered { status: None, .. }) => {}
+            return Ok(json!({
+                "state": "expired", "phase": "expired",
+                "reason": expiry.claim.body["fields"]["reason"],
+                "age_ms": now.saturating_sub(sent_at),
+                "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+            }));
+        }
+        return message_delivery_value(store, &message.to, &status, sent_at, now);
+    }
+    if let Some(host) = host {
+        match relayed {
+            Some(message_reads::Relayed::Answered { .. }) => {}
             Some(message_reads::Relayed::Unknown { reason, .. }) => {
                 return Ok(unknown(reason.clone()));
             }
@@ -7496,6 +7527,9 @@ async fn serve_reserved_unix_with_lookup_ready(
                     if let Some(agent) = ancestry.agent() {
                         request.extensions_mut().insert(BoundAgent(agent.to_owned()));
                     }
+                    if let HarnessAncestry::Run(credential) = &ancestry {
+                        request.extensions_mut().insert(credential.clone());
+                    }
                     if matches!(ancestry, HarnessAncestry::Unavailable) {
                         request.extensions_mut().insert(HarnessAncestry::Unavailable);
                     }
@@ -7539,10 +7573,40 @@ mod gateway_listener_tests;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HarnessAncestry {
     Bound(String),
+    /// A program effect: an ancestor carries the run credential its attempt was started with
+    /// (docs/st3/program-engine.md §3). The guard resolves it to `mission-run/RUN`.
+    Run(RunCredential),
     Person,
     #[default]
     Unavailable,
 }
+
+/// A run credential read from a caller's exec-time environment. Its `Debug` never shows the
+/// secret, so ancestry diagnostics cannot leak it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RunCredential(String);
+
+impl RunCredential {
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RunCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RunCredential(..)")
+    }
+}
+
+/// The run a request's credential binds, set by the serving guard and never by a client.
+#[derive(Clone, Debug)]
+pub struct BoundRun(pub crate::store::run_credentials::RunBinding);
+
+pub use crate::store::run_credentials::RUN_CREDENTIAL_ENV;
 
 impl HarnessAncestry {
     fn agent(&self) -> Option<&str> {
@@ -7566,6 +7630,15 @@ impl HarnessAncestry {
     fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
         let primary = lookup("ST_AGENT");
         let legacy = lookup("FRACTAL_AGENT");
+        // A program effect acts as its run, never as an agent too: one environment naming both
+        // cannot be bound to either.
+        if let Some(credential) = lookup(RUN_CREDENTIAL_ENV) {
+            return if credential.is_empty() || primary.is_some() || legacy.is_some() {
+                Self::Unavailable
+            } else {
+                Self::Run(RunCredential::new(credential))
+            };
+        }
         if primary.is_none() && legacy.is_none() {
             return Self::Person;
         }
@@ -8015,6 +8088,38 @@ pub fn authorize_worker(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
 
+/// The identity a local request is bound to by its caller's ancestry: an agent harness, or the
+/// mission run a program effect acts as. Handlers that hold a bound caller to its own identity
+/// read this one extractor, so a bound run is never mistaken for an unbound person.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BoundActor {
+    Agent(String),
+    Run(String),
+}
+
+impl BoundActor {
+    pub fn of(extensions: &axum::http::Extensions) -> Option<Self> {
+        extensions.get::<BoundAgent>().map(|agent| Self::Agent(agent.0.clone()))
+            .or_else(|| extensions.get::<BoundRun>().map(|run| Self::Run(run.0.run.clone())))
+    }
+
+    /// The bound identity: the agent as the harness names it, or `mission-run/RUN`.
+    pub fn actor(&self) -> &str {
+        match self { Self::Agent(actor) | Self::Run(actor) => actor }
+    }
+}
+
+impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for BoundActor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(Self::of(&parts.extensions))
+    }
+}
+
 // The serving boundary supplies the immutable ancestry binding and its identity store before
 // any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(
@@ -8025,6 +8130,16 @@ async fn guard_bound_actor(
     request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
     let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
+    // A run credential binds only while its attempt runs; one that no longer binds leaves the
+    // caller unverifiable, so it writes nothing.
+    request.extensions_mut().remove::<BoundRun>();
+    if let Some(credential) = request.extensions().get::<RunCredential>().cloned() {
+        let lookup = store.clone();
+        match tokio::task::spawn_blocking(move || lookup.run_binding(credential.secret())).await {
+            Ok(Ok(binding)) => { request.extensions_mut().insert(BoundRun(binding)); }
+            _ => { request.extensions_mut().insert(HarnessAncestry::Unavailable); }
+        }
+    }
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
     // independently of the ingress observe/enforce rollout.
@@ -8082,7 +8197,9 @@ pub async fn guard_bound_request(
     bound_agent: Option<&str>,
     store: &Store,
 ) -> Result<Request<Body>, ApiError> {
-    let Some(bound_agent) = bound_agent else {
+    // A bound run follows the rules of a bound agent, as the actor `mission-run/RUN`.
+    let bound_run = request.extensions().get::<BoundRun>().map(|run| run.0.run.clone());
+    let Some(bound_agent) = bound_agent.or(bound_run.as_deref()) else {
         return if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
             guard_unverifiable_request(request).await
         } else {
@@ -8107,9 +8224,11 @@ pub async fn guard_bound_request(
         && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
-    let bound_identity = public_identity(
-        store, crate::store::identities::IdentityKind::Agent, bound_agent,
-    )?.identity;
+    let bound_identity = if bound_run.as_deref() == Some(bound_agent) {
+        bound_agent.to_owned()
+    } else {
+        public_identity(store, crate::store::identities::IdentityKind::Agent, bound_agent)?.identity
+    };
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
     for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
@@ -8270,7 +8389,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
+        "features": {"owned_sets":1,"owned_set_tasks":1,"source_enforcement":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -10783,6 +10902,10 @@ pub struct AgentSuspensionRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Suspend or resume a member of an `enforce` owned set anyway, recording source debt with
+    /// `reason`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// The seat a suspend or resume names: a declared service seat with no conflicting declaration.
@@ -10924,6 +11047,11 @@ pub fn request_suspend(
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
     }
+    let force_reason = request.force.then_some(request.reason.as_deref().unwrap_or_default());
+    state
+        .store
+        .source_gate(&subject, crate::store::owned_sets::Verb::Suspend, force_reason)
+        .map_err(ApiError::bad)?;
     let (current, member, token) = suspension_target(state, &subject)?;
     if let Some(suspension) =
         crate::suspension::current(&state.store, &subject).map_err(ApiError::internal)?
@@ -10980,20 +11108,25 @@ pub fn request_suspend(
         ),
         ("incarnation_id".into(), Value::String(incarnation.into())),
     ]);
-    if let Some(reason) = request.reason.filter(|reason| !reason.trim().is_empty()) {
-        fields.insert("reason".into(), Value::String(reason));
+    if let Some(reason) = request.reason.as_ref().filter(|reason| !reason.trim().is_empty()) {
+        fields.insert("reason".into(), Value::String(reason.clone()));
     }
-    let claim = state
+    let (claim, _) = state
         .store
-        .append_claim(&ClaimInput {
-            subject,
-            kind: "runtime.action.requested".into(),
-            actor: Some(actor),
-            fields,
-            evidence: vec![token],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
+        .append_source_gated(
+            &subject,
+            &ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some(actor),
+                fields,
+                evidence: vec![token],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            },
+            crate::store::owned_sets::Verb::Suspend,
+            force_reason,
+        )
         .map_err(ApiError::bad)?;
     signal_changed(state);
     Ok(claim)
@@ -11015,6 +11148,11 @@ pub fn request_resume(
     {
         return Ok(prior);
     }
+    let force_reason = request.force.then_some(request.reason.as_deref().unwrap_or_default());
+    state
+        .store
+        .source_gate(&subject, crate::store::owned_sets::Verb::Resume, force_reason)
+        .map_err(ApiError::bad)?;
     let (_, member, token) = suspension_target(state, &subject)?;
     check_suspension_fence(fence.as_ref(), None, &token)?;
     let suspension = crate::suspension::current(&state.store, &subject)
@@ -11076,17 +11214,22 @@ pub fn request_resume(
         fields.insert("host".into(), Value::String(host));
         fields.insert("source_host".into(), Value::String(member.host.clone()));
     }
-    let claim = state
+    let (claim, _) = state
         .store
-        .append_claim(&ClaimInput {
-            subject,
-            kind: "runtime.action.requested".into(),
-            actor: Some(actor),
-            fields,
-            evidence: vec![launch_token, suspend],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })
+        .append_source_gated(
+            &subject,
+            &ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: Some(actor),
+                fields,
+                evidence: vec![launch_token, suspend],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            },
+            crate::store::owned_sets::Verb::Resume,
+            force_reason,
+        )
         .map_err(ApiError::bad)?;
     signal_changed(state);
     Ok(claim)
@@ -11142,15 +11285,23 @@ async fn apply_with_authority(
         return Err(ApiError::bad(error));
     }
     store_program_bundles(&state, &intent, &request.program_bundles)?;
-    let mut response = state
-        .store
-        .apply_as(
+    let mut response = match request.force_reason.as_deref().map(str::trim) {
+        None => state.store.apply_as(
             &intent,
             &request.expected_subjects,
             &request.idempotency_key,
             Some(actor),
-        )
-        .map_err(ApiError::bad)?;
+        ),
+        Some(reason) if !reason.is_empty() => state.store.apply_forced(
+            &intent,
+            &request.expected_subjects,
+            &request.idempotency_key,
+            Some(actor),
+            reason,
+        ),
+        Some(_) => Err(FractalError::new("source-force-refused", "--force needs a nonempty --reason")),
+    }
+    .map_err(ApiError::bad)?;
     response.resolved_kdl = request.intent.kdl;
     signal_changed(&state);
     Ok(Json(response))
@@ -11239,13 +11390,19 @@ async fn post_delivery_hold(
     State(state): State<AppState>,
     Json(request): Json<crate::delivery_hold::HoldRequest>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
+    let force = request.force;
     let input =
         crate::delivery_hold::input(request, client_now_ms() as u64).map_err(ApiError::bad)?;
     let store = state.store.clone();
     let (claim, appended) = blocking_action(move || {
-        if input.fields.get("held") == Some(&Value::Bool(true))
-            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true))
-        {
+        use crate::store::owned_sets::Verb;
+        let holding = input.fields.get("held") == Some(&Value::Bool(true))
+            && input.fields.get("legacy_adoption") != Some(&Value::Bool(true));
+        let reason = input.fields.get("reason").and_then(Value::as_str).map(str::to_owned);
+        let force_reason = force.then_some(reason.as_deref()).flatten();
+        if holding {
+            // An owned set's source policy refuses, audits or records an ad hoc hold as debt.
+            store.source_gate(&input.subject, Verb::Hold, force_reason)?;
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -11260,7 +11417,11 @@ async fn post_delivery_hold(
                 ));
             }
         }
-        store.append_claim_outcome(&input)
+        if holding {
+            store.append_source_gated(&input.subject, &input, Verb::Hold, force_reason)
+        } else {
+            store.append_claim_outcome(&input)
+        }
     })
     .await?;
     if appended {
@@ -11348,6 +11509,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
     Ok(rows)
 }
 

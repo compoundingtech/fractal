@@ -1855,6 +1855,7 @@ export type ErrorCode = (
   | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
+  | "set-managed-subject"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -2360,7 +2361,7 @@ export type Message = ResourceHeader & {
   kind: "message";
   sent_at: Timestamp;
   session_id?: (Id | null);
-  state: "sent" | "delivered" | "read" | "closed";
+  state: "sent" | "delivered" | "read" | "closed" | "expired";
   status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;

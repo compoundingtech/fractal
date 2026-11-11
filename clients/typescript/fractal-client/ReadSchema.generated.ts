@@ -1716,6 +1716,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "retire-incarnation-mismatch",
   "invalid-custody-successor",
   "custody-pending",
+  "set-managed-subject",
   "attention-migrated",
   "arrangement-exists",
   "arrangement-folder-exists",
@@ -2284,7 +2285,7 @@ export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "sent_at": Timestamp,
   "session_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
-  "state": Schema.Literals(["sent","delivered","read","closed"]),
+  "state": Schema.Literals(["sent","delivered","read","closed","expired"]),
   /** Present when the recipient's seat runs on another host that keeps its receipts: whether that host answered. Absent when this host's own records are the whole answer. */
   "status_from": optionalKey(MessageStatusFrom),
   "tags": optionalKey(Schema.Array(Schema.String).check(Schema.isUnique())),

@@ -151,6 +151,10 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// What a write outside a mission run's authority does. Written only when it differs from
+    /// the default.
+    #[serde(skip_serializing_if = "ProgramsConfig::is_default")]
+    pub programs: ProgramsConfig,
     /// How long a person has to answer an ask that names no deadline. Written only when it
     /// differs from the default.
     #[serde(skip_serializing_if = "AsksConfig::is_default")]
@@ -458,6 +462,28 @@ impl LimitsConfig {
         );
         Ok(())
     }
+}
+
+/// `[programs]`: how the daemon holds a program's run to its authority
+/// (docs/st3/program-engine.md §3).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProgramsConfig {
+    /// `enforce` (the default) refuses a write outside a run's authority; `audit` lets it proceed
+    /// and records it.
+    pub authority: RunAuthorityMode,
+}
+
+impl ProgramsConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunAuthorityMode {
+    Audit,
+    #[default]
+    Enforce,
 }
 
 /// The reconcile pass cap when `[reconcile] max_passes_per_minute` is not set.
@@ -789,6 +815,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             logging: LoggingConfig::default(),
             reconcile: ReconcileConfig::default(),
+            programs: ProgramsConfig::default(),
             asks: AsksConfig::default(),
             codex_work_without_asking: None,
             wait_for_peers_after_start: None,
@@ -1388,6 +1415,16 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_authority_is_enforced_unless_the_config_asks_for_audit() {
+        use super::RunAuthorityMode;
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert_eq!(absent.programs.authority, RunAuthorityMode::Enforce);
+        let audit: super::Config = toml::from_str("[programs]\nauthority = \"audit\"\n").unwrap();
+        assert_eq!(audit.programs.authority, RunAuthorityMode::Audit);
+        assert!(toml::from_str::<super::Config>("[programs]\nauthority = \"off\"\n").is_err());
+    }
+
     #[test]
     fn usage_writer_configuration_is_explicit_and_agent_only() {
         let absent: super::Config = toml::from_str("").unwrap();
