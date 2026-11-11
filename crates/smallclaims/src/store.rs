@@ -284,6 +284,11 @@ fn projection_failure_log_line(
         "stage": field("projection_stage"), "claim_id": field("projection_claim_id"),
         "subject": field("projection_subject"), "operation_id": field("projection_operation_id"),
         "claim_kind": field("projection_claim_kind"),
+        "operation_conflict_count": details.get("operation_conflict_count"),
+        "canonical_claim_id": field("canonical_claim_id"),
+        "previous_claim_id": field("previous_claim_id"),
+        "projection_degraded": details.get("projection_degraded"),
+        "refold_error_code": field("refold_error_code"),
         "frontier": if details.get("projection_frontier_unknown").and_then(Value::as_bool).unwrap_or(false) { None } else { Some(frontier) }, "target": target,
         "suppressed_errors": emission.suppressed, "rate_bucket_overflow": emission.overflow,
         "context_truncated": details.get("projection_context_truncated").and_then(Value::as_bool).unwrap_or(false)
@@ -8892,6 +8897,17 @@ impl Store {
                                 .map_err(internal)?;
                             match projected {
                                 IncrementalProjection::Projected => None,
+                                IncrementalProjection::ProjectedWithContext { code, details } => {
+                                    let error = FractalError {
+                                        code,
+                                        message: "operation conflict reconciled without full replay".into(),
+                                        details,
+                                    };
+                                    self.log_projection_failure(
+                                        &error, phase, frontier, target, &mut log_staged,
+                                    );
+                                    None
+                                }
                                 IncrementalProjection::Replay(reason) => Some(reason.to_owned()),
                                 IncrementalProjection::ReplayWithContext { reason, details } => {
                                     let message = details
@@ -8933,6 +8949,43 @@ impl Store {
                 drop(incremental);
                 let projected = fallback_reason.is_none();
                 if let Some(reason) = fallback_reason {
+                    // A failed bounded repair must never turn into a whole-log fold merely
+                    // because another guard (or a projector error) requested fallback first.
+                    let conflict: Option<(String, String, Option<String>)> = transaction.query_row(
+                        "SELECT incoming.id,json_extract(incoming.body,'$._operation.id'),
+                           COALESCE(operations.canonical_claim_id,(SELECT id FROM checkpoint_claims
+                             WHERE operation_id=json_extract(incoming.body,'$._operation.id')
+                               AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+                             ORDER BY request_digest,id LIMIT 1))
+                         FROM claims incoming INDEXED BY claims_operation_index LEFT JOIN operations
+                           ON operations.id=json_extract(incoming.body,'$._operation.id')
+                         WHERE json_extract(incoming.body,'$._operation.id') IS NOT NULL
+                           AND (operations.state='conflict'
+                             OR operations.request_digest<>json_extract(incoming.body,'$._operation.request_digest')
+                             OR EXISTS(SELECT 1 FROM claims other INDEXED BY claims_operation_index
+                               WHERE json_extract(other.body,'$._operation.id')=json_extract(incoming.body,'$._operation.id')
+                                 AND json_extract(other.body,'$._operation.request_digest')<>json_extract(incoming.body,'$._operation.request_digest')
+                                 AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=other.id))
+                             OR EXISTS(SELECT 1 FROM checkpoint_claims
+                               WHERE operation_id=json_extract(incoming.body,'$._operation.id')
+                                 AND request_digest<>json_extract(incoming.body,'$._operation.request_digest')
+                                 AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)))
+                           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=incoming.id)
+                         ORDER BY incoming.store_index DESC LIMIT 1",
+                        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                    ).optional().map_err(internal)?;
+                    if let Some((claim_id, operation_id, previous_claim_id)) = conflict {
+                        let error = FractalError::new("operation-conflict-projection-degraded",
+                            json!({"operation_id":operation_id,"claim_id":claim_id,
+                                "previous_claim_id":previous_claim_id,
+                                "fallback_refused":reason}).to_string())
+                            .with_detail("projection_stage", "operation-conflict-no-replay")
+                            .with_detail("projection_operation_id", operation_id)
+                            .with_detail("projection_claim_id", claim_id)
+                            .with_detail("previous_claim_id", previous_claim_id);
+                        self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
+                        return Err(error);
+                    }
                     log_staged(&full_replay_log_line(phase, &reason, frontier, target));
                     stages.enter("replay");
                     #[cfg(any(test, feature = "test-support"))]
@@ -10730,21 +10783,37 @@ pub fn register_operation_tx(transaction: &Transaction<'_>, claim: &ClaimRecord)
             )?;
             Ok(dropped.is_empty())
         }
-        Some((stored_digest, canonical, state)) if stored_digest == request_digest => {
+        Some((stored_digest, canonical, state)) if stored_digest == request_digest && state == "active" => {
             if claim.id < canonical {
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-h6f9c71946a9a owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET canonical_claim_id=?2 WHERE id=?1",
                     params![operation_id, claim.id],
                 )?;
             }
-            Ok(state == "active" && canonical == claim.id)
+            Ok(canonical == claim.id)
         }
-        Some(_) => {
-            transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-hc9d2f03397dd owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id=?1",
-                [operation_id],
+        Some((stored_digest, canonical, state)) => {
+            // The row summarizes all earlier receipts. Its minimum digest may survive only
+            // as a tombstone, so include the retained canonical claim's actual digest too.
+            // This is the full replay's reducer, with constant work per new receipt.
+            let canonical_digest: String = transaction.query_row(
+                "SELECT json_extract(body,'$._operation.request_digest') FROM claims WHERE id=?1",
+                [&canonical], |row| row.get(0),
             )?;
-            Ok(false)
+            let mut metadata = OperationMetadata::default();
+            metadata.include(stored_digest.clone(), String::new(), false);
+            metadata.include(canonical_digest, canonical.clone(), true);
+            metadata.include(request_digest.to_owned(), claim.id.clone(), true);
+            let (digest, canonical_claim, mut next_state) = metadata.row().expect("a retained receipt");
+            if state == "conflict" { next_state = state.clone(); }
+            if (digest.as_str(), canonical_claim.as_str(), next_state.as_str())
+                != (stored_digest.as_str(), canonical.as_str(), state.as_str()) {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h60fdf4c7a583 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET request_digest=?2,canonical_claim_id=?3,state=?4 WHERE id=?1",
+                    params![operation_id, digest, canonical_claim, next_state],
+                )?;
+            }
+            Ok(state == "active" && stored_digest == request_digest && canonical == claim.id)
         }
     }
 }

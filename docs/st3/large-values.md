@@ -600,3 +600,26 @@ commit. Preserve these scenarios when the representation changes.
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+## Operation-conflict bounded refold (#9101)
+
+Reviewed for [dotfiles#9101](https://github.com/schickling/dotfiles/issues/9101):
+`fractal_store::store` owns `lv-hdacd188e0574` and `lv-h3b9353d94be0`,
+which retain operation/claim identifiers and typed conflict/refold diagnostics in
+the existing `projection_health` text columns. These are metadata, not claim bodies;
+the remaining debt is bounding every identifier and diagnostic representation and
+keyed reclamation when conflicts are repaired. `lv-h58880ffb5371`,
+`lv-h53bf80630f0f` and `lv-hc33c6f16bf1d` are fixed savepoint-control strings,
+with no payload binds; their conservative sink classification is retained.
+`smallclaims::store` owns `lv-h60fdf4c7a583`, updating one operation's existing
+digest/canonical-claim/state columns from the canonical reducer. Its next storage
+step is the same bounded-identifier representation as the other operation sites.
+Fixture-only `lv-hc0649a7fe6c7` and `lv-hf161f602d783` retain synthetic checkpoint
+metadata and stale-health setup to prove the no-replay fence. Their owners are
+`fractal_store::store::operation_conflict_tests`; no production population is added.
+
+The atomic-degradation correction also owns `lv-ha8b524108446` and
+`lv-he57da1ef4545`: the former retains the independent replay reason while receipt
+advances, and the latter clears only the successfully refolded subject's stale
+diagnostic. Both retain metadata, never claim bodies, with the same bounding debt.
+`lv-hf0bbe1f00bc2` is the second-chunk stale-health regression fixture.
