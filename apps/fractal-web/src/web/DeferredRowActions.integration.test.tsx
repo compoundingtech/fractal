@@ -54,7 +54,7 @@ it.each(['resolved', 'rejected'] as const)('keeps the roster and action trigger 
   const painted = container.querySelector('[data-milestone-row]')
   const treeRow = canvas.getByRole('row')
   expect(requested).not.toHaveBeenCalled()
-  expect(canvas.getByLabelText('Needs your attention')).toBeTruthy()
+  expect(canvas.getByLabelText('Needs you')).toBeTruthy()
   await React.act(async () => {
     treeRow.focus()
     treeRow.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
