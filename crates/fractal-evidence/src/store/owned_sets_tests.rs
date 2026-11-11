@@ -1507,8 +1507,13 @@ fn equal_source_content_conflicts_hold_effects_until_a_higher_source_resolves_th
     apply(amber, &bundle("initial", false), 10);
     signed_share_incrementally(amber, cobalt);
     signed_share_incrementally(amber, ivory);
-    apply(amber, &bundle("one", false), 20);
-    apply(cobalt, &bundle("two", false), 20);
+    for (publisher, input) in [(amber, bundle("one", false)), (cobalt, bundle("two", false))] {
+        let mut opts = options(publisher, 20);
+        opts.expected_subjects = publisher.owned_set_preview(&input, &opts).unwrap().expected_subjects;
+        publisher.apply_owned_set(
+            &input, &opts, &format!("set-{}-20", publisher.origin), "person/operator",
+        ).unwrap();
+    }
     signed_share_incrementally(amber, ivory);
     let last_good = ivory.selected_desired_token("agent/garden/orchard").unwrap();
     assert!(last_good.is_some());
