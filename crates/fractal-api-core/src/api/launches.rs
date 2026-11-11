@@ -1483,7 +1483,7 @@ pub async fn retire_mission(
     let actor = person_or_agent_actor(&request.actor, "mission-retire-authority-denied")?;
     let store = state.store.clone();
     let retired =
-        blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key))
+        blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key, request.force_reason.as_deref()))
             .await?;
     signal_changed(&state);
     let mut retired = retired;

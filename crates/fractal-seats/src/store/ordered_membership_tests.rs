@@ -858,7 +858,7 @@ fn direct_mission_retirement_flushes_membership_visibility_in_the_same_transacti
     edit(&store, json!([place(member, None, "a0")]));
     let retained = head(&store, member);
     assert_eq!(members(&store), vec![member]);
-    store.retire_mission(member, "person/ada", "retire-membership-mission").unwrap();
+    store.retire_mission(member, "person/ada", "retire-membership-mission", None).unwrap();
     assert!(rows(&store).is_empty());
     assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
     assert_eq!(head(&store, member), retained);
@@ -1550,7 +1550,7 @@ fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
                 assert!(rows(&store).is_empty(), "{family}");
             }
             MissionDeclaration => {
-                store.retire_mission(member, "person/ada", "registry-mission-retired").unwrap();
+                store.retire_mission(member, "person/ada", "registry-mission-retired", None).unwrap();
                 assert!(rows(&store).is_empty(), "{family}");
             }
             Document => {

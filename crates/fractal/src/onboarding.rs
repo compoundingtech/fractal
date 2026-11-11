@@ -426,6 +426,7 @@ async fn apply(
                 idempotency_key: hex::encode(hash.finalize()),
                 actor: config.person.clone(),
                 program_bundles: Default::default(),
+                force_reason: None,
             },
         )
         .await

@@ -194,6 +194,7 @@ pub(super) async fn run_agents(
                                 .context("setting or releasing a hold needs --reason")?,
                             idempotency_key: format!("delivery-hold:{}", uuid::Uuid::now_v7()),
                             legacy_adoption: false,
+                            force: args.force,
                         },
                     )
                     .await?;
@@ -331,6 +332,7 @@ pub(super) async fn run_agents(
                     no_gate_check: true,
                     check: false,
                     inputs: vec![],
+                    force_reason: None,
                 },
                 json_output,
             )
@@ -406,6 +408,7 @@ pub(super) async fn run_agents(
                     format!("st agents start {}", args.identity),
                     args.actor.clone(),
                     Some((&subject, &tokens)),
+                    args.force.then(|| args.reason.clone()).flatten(),
                 )
                 .await?
             };
@@ -495,9 +498,12 @@ pub(super) async fn run_agents(
                 endpoint,
                 "/v1/agents/suspend",
                 &subject,
-                &args.actor,
-                args.reason.as_deref(),
-                None,
+                SuspensionRequest {
+                    actor: &args.actor,
+                    reason: args.reason.as_deref(),
+                    host: None,
+                    force: args.force,
+                },
                 &args.timeout,
             )
             .await?;
@@ -523,9 +529,12 @@ pub(super) async fn run_agents(
                 endpoint,
                 "/v1/agents/resume",
                 &subject,
-                &args.actor,
-                None,
-                args.host.as_deref(),
+                SuspensionRequest {
+                    actor: &args.actor,
+                    reason: args.reason.as_deref(),
+                    host: args.host.as_deref(),
+                    force: args.force,
+                },
                 &args.timeout,
             )
             .await?;
@@ -720,11 +729,13 @@ pub(super) async fn run_agents(
                 print!("{kdl}");
                 return Ok(());
             }
-            let response = publish_text(
+            let response = publish_text_with_expected(
                 &cli_client(endpoint),
                 kdl,
                 format!("st agents stop {subject}"),
                 args.actor,
+                None,
+                args.force.then(|| args.reason.clone()).flatten(),
             )
             .await?;
             print_value(&response, json_output)?;
@@ -1588,27 +1599,34 @@ async fn run_agent_queue(
     Ok(())
 }
 
+/// What a suspend or resume request asks for, apart from its subject.
+struct SuspensionRequest<'a> {
+    actor: &'a str,
+    reason: Option<&'a str>,
+    host: Option<&'a str>,
+    force: bool,
+}
+
 /// Ask the daemon to suspend or resume `subject`, then wait for the request to finish: the seat
 /// suspended, or resumed with its harness bound to the suspended native session.
 async fn request_suspension(
     endpoint: &Endpoint,
     route: &str,
     subject: &str,
-    actor: &str,
-    reason: Option<&str>,
-    host: Option<&str>,
+    request: SuspensionRequest<'_>,
     timeout_text: &str,
 ) -> Result<fractal_client::Agent> {
     let timeout = fractal_daemon::graph::parse_duration(timeout_text, false)?;
     let client = cli_client(endpoint);
-    let request: ClaimRecord = client
+    let claim: ClaimRecord = client
         .post(
             route,
             &json!({
                 "subject": subject,
-                "actor": actor,
-                "reason": reason,
-                "host": host,
+                "actor": request.actor,
+                "reason": request.reason,
+                "host": request.host,
+                "force": request.force,
                 "idempotency_key": uuid::Uuid::now_v7().to_string(),
             }),
         )
@@ -1619,7 +1637,7 @@ async fn request_suspension(
         loop {
             if let ClientResource::Agent(agent) = gateway.agents_get(subject).await?.value
                 && let Some(suspension) = agent.suspension.clone()
-                && suspension.operation_id == request.id
+                && suspension.operation_id == claim.id
             {
                 let failure = || {
                     let blocking = if suspension.blocking.is_empty() {
