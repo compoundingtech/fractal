@@ -1339,7 +1339,7 @@ export const liveSource = ({
           }),
         ),
       ),
-      usage: { _tag: 'declared', source: relayUsageSource({ label: 'Gateway usage', prefix: `${origin}${RELAY_PREFIX}` }) },
+      usage: { _tag: 'declared', source: relayUsageSource({ label: 'Gateway usage', prefix: `${origin}${RELAY_PREFIX}`, fetchImpl: fetch }) },
       sync: {
         gateway: gatewaySync,
         agents: agentsRetained.sync,

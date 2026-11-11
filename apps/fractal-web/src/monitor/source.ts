@@ -40,13 +40,15 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const getJson = ({
   url,
   what,
+  fetchImpl = globalThis.fetch,
 }: {
   readonly url: string
   readonly what: 'quota' | 'history'
+  readonly fetchImpl?: typeof globalThis.fetch
 }): Effect.Effect<unknown, QuotaFailure> =>
   Effect.tryPromise({
     try: (signal) =>
-      fetch(url, { headers: { accept: 'application/json' }, credentials: 'same-origin', signal }),
+      fetchImpl(url, { headers: { accept: 'application/json' }, credentials: 'same-origin', signal }),
     catch: (error): QuotaFailure => ({
       kind: 'unreachable',
       reason: `${what} request failed: ${String(error)}`,
@@ -107,16 +109,20 @@ const relaySnapshot = (json: unknown): Effect.Effect<unknown, QuotaFailure> =>
 export const relayUsageSource = ({
   label,
   prefix = RELAY_PREFIX,
+  fetchImpl,
 }: {
   readonly label: string
   readonly prefix?: string
+  /** The owning live source's transport, including its replay and telemetry boundaries. */
+  readonly fetchImpl?: typeof globalThis.fetch
 }): UsageSource => ({
   label,
-  quota: getJson({ url: `${prefix}/quota`, what: 'quota' }).pipe(Effect.flatMap(relaySnapshot)),
+  quota: getJson({ url: `${prefix}/quota`, what: 'quota', fetchImpl }).pipe(Effect.flatMap(relaySnapshot)),
   history: (ledgerAccountId) =>
     getJson({
       url: `${prefix}/history?${new URLSearchParams({ account: ledgerAccountId }).toString()}`,
       what: 'history',
+      fetchImpl,
     }),
 })
 
