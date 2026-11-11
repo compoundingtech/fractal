@@ -113,7 +113,7 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
         }
         return Ok(());
     }
-    connection.execute_batch("SAVEPOINT assistant_grant_upgrade")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hff2d1c2b03b3 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_upgrade")?;
     connection.execute_batch(
         /* sqlite-large-value: allow-for-now lv-hcda5071d3120 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
