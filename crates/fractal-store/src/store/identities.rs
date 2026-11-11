@@ -6,6 +6,9 @@
 use super::*;
 use serde::Deserialize;
 
+#[path = "identities_conflict_scope.rs"]
+mod conflict_scope;
+
 pub const AGENT_RENAMED: &str = "agent.renamed";
 pub const MISSION_RENAMED: &str = "mission.renamed";
 pub const KINDS: &[&str] = &[AGENT_RENAMED, MISSION_RENAMED];
@@ -84,6 +87,7 @@ fn validate_name(kind: IdentityKind, id: &str) -> Result<(), FractalError> {
 /// Resolve in the caller's snapshot; no nested reader or writer acquisition.
 pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError> {
     validate_name(kind, id)?;
+    conflict_scope::check(connection, id)?;
     let row: Option<(String, String, Option<String>, Option<String>)> = connection.query_row(
         "SELECT h.identity,h.canonical_id,h.naming_revision,h.unavailable FROM identity_names n JOIN identity_heads h ON h.identity=n.identity WHERE n.name=?1 AND h.kind=?2",
         params![id,kind.label()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
@@ -103,11 +107,15 @@ pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &s
 /// Normalize references without making previously permissible undeclared references invalid.
 /// A known alias with missing/conflicting lifecycle evidence is never allowed through.
 pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<String, FractalError> {
-    let Some(_) = IdentityKind::of(id) else { return Ok(id.into()); };
-    // Reference readers also encounter historical storage keys that predate today's
-    // declaration grammar. Admission validates new names; reading an old key must not.
-    let (identity, blocked, pending): (String, Option<String>, Option<String>) = connection.query_row(
-        "SELECT COALESCE(n.identity,?1),h.unavailable,
+    Ok(checked_alias_conn(connection, id)?.unwrap_or_else(|| id.to_owned()))
+}
+
+fn checked_alias_conn(connection: &Connection, id: &str) -> Result<Option<String>, FractalError> {
+    if IdentityKind::of(id).is_none() { return Ok(None); }
+    conflict_scope::check(connection, id)?;
+    // Return only a changed spelling, so normalization need not allocate for stable names.
+    let (identity, blocked, pending): (Option<String>, Option<String>, Option<String>) = connection.query_row(
+        "SELECT CASE WHEN n.identity<>?1 THEN n.identity END,h.unavailable,
             (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1
                 THEN 'conflict' ELSE 'pending-replication' END FROM replica_records
              WHERE subject_hint=COALESCE(n.identity,?1) AND state IN ('unknown','invalid')
@@ -116,16 +124,16 @@ pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<Strin
          LEFT JOIN identity_heads h ON h.identity=n.identity",
         [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(internal)?;
-    if let Some(reason) = blocked.or(pending) { return Err(unavailable(&identity, &reason)); }
+    if let Some(reason) = blocked.or(pending) { return Err(unavailable(identity.as_deref().unwrap_or(id), &reason)); }
     Ok(identity)
 }
 
 pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput) -> Result<std::borrow::Cow<'a, ClaimInput>, FractalError> {
     let mut normalized = std::borrow::Cow::Borrowed(input);
-    let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [&input.subject], |row|row.get(0)).optional().map_err(internal)?;
+    let identity = checked_alias_conn(connection, &input.subject)?;
     if let Some(identity) = identity { normalized.to_mut().subject = identity; }
     if let Some(actor) = input.actor.as_deref() {
-        let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [actor], |row|row.get(0)).optional().map_err(internal)?;
+        let identity = checked_alias_conn(connection, actor)?;
         if let Some(identity) = identity { normalized.to_mut().actor = Some(identity); }
     }
     // Naming facts deliberately carry the previous public canonical name, not a rewritten
@@ -133,7 +141,7 @@ pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput)
     if !KINDS.contains(&input.kind.as_str()) {
         for field in ["from", "to", "assignee", "recipient", "report_to", "lease_owner"] {
             if let Some(id) = input.fields.get(field).and_then(Value::as_str) {
-                let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [id], |row|row.get(0)).optional().map_err(internal)?;
+                let identity = checked_alias_conn(connection, id)?;
                 if let Some(identity) = identity { normalized.to_mut().fields.insert(field.into(), json!(identity)); }
             }
         }
@@ -201,8 +209,7 @@ fn normalize_node<'a>(connection: &Connection, node: &'a Value) -> Result<std::b
             let Some(value) = argument.as_str() else { continue; };
             let prefix = match name { "agent" => Some("agent/"), "mission" => Some("mission/"), _ => None };
             let full = prefix.filter(|prefix| !value.starts_with(prefix)).map(|prefix| format!("{prefix}{value}"));
-            let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity",
-                [full.as_deref().unwrap_or(value)], |row| row.get(0)).optional().map_err(internal)?;
+            let identity = checked_alias_conn(connection, full.as_deref().unwrap_or(value))?;
             if let Some(identity) = identity {
                 let identity = if let Some(prefix) = prefix.filter(|_| full.is_some()) { identity.strip_prefix(prefix).unwrap_or(&identity) } else { &identity };
                 normalized.to_mut()["arguments"][index] = json!(identity);
@@ -220,7 +227,7 @@ fn normalize_node<'a>(connection: &Connection, node: &'a Value) -> Result<std::b
 }
 
 pub fn normalize_desired<'a>(connection: &Connection, desired: &'a DesiredSubject) -> Result<std::borrow::Cow<'a, DesiredSubject>, FractalError> {
-    let identity: Option<String> = connection.query_row("SELECT identity FROM identity_names WHERE name=?1 AND name<>identity", [&desired.subject], |row| row.get(0)).optional().map_err(internal)?;
+    let identity = checked_alias_conn(connection, &desired.subject)?;
     let node = normalize_node(connection, &desired.desired)?;
     if identity.is_none() && matches!(&node, std::borrow::Cow::Borrowed(_)) {
         return Ok(std::borrow::Cow::Borrowed(desired));
@@ -245,7 +252,7 @@ pub fn normalize_intent<'a>(connection: &Connection, intent: &'a NormalizedInten
     for subject in intent.subjects.keys().chain(intent.missions.values().map(|mission| &mission.subject)) {
         resolve_reference_conn(connection, subject)?;
     }
-    let aliases: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM identity_names WHERE name<>identity)", [], |row| row.get(0)).map_err(internal)?;
+    let aliases: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM identity_names WHERE name<>identity) OR EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:naming-operation-conflict')", [], |row| row.get(0)).map_err(internal)?;
     if !aliases { return Ok(std::borrow::Cow::Borrowed(intent)); }
     let mut normalized = intent.clone();
     normalized.subjects.clear();
@@ -418,7 +425,7 @@ pub fn writer_required() -> FractalError {
     FractalError::new("invalid-rename", "identity naming claims must be written through rename-id")
 }
 
-pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h40ca3df48b16 owner=fractal_store::store::identities TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS identity_heads (
+pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5aebafde05b8 owner=fractal_store::store::identities TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS identity_heads (
     identity TEXT PRIMARY KEY, kind TEXT NOT NULL, canonical_id TEXT NOT NULL,
     naming_revision TEXT, unavailable TEXT
 ) WITHOUT ROWID;
@@ -426,6 +433,10 @@ CREATE TABLE IF NOT EXISTS identity_names (
     name TEXT PRIMARY KEY, identity TEXT NOT NULL, claim_id TEXT
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS identity_names_identity ON identity_names(identity);
+CREATE INDEX IF NOT EXISTS claims_naming_from_index ON claims(json_extract(body,'$.fields.from'))
+WHERE kind IN ('agent.renamed','mission.renamed');
+CREATE INDEX IF NOT EXISTS claims_naming_to_index ON claims(json_extract(body,'$.fields.to'))
+WHERE kind IN ('agent.renamed','mission.renamed');
 CREATE TABLE IF NOT EXISTS identity_dirty (id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TRIGGER IF NOT EXISTS identity_claim_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published','agent.retired','record.repaired')
@@ -442,7 +453,84 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     rebuild(transaction)
 }
 
+// The naming domain includes cross-identity name reservations. Operation conflicts use its
+// canonical reducer only below this measured claim-history cap, never an unbounded flush.
+// The ignored writer-hold benchmark (100 samples after 10 warmups, unoptimized) measured
+// 4096 claims at p50/p99 575.031/802.102 ms. 64 was the largest sampled history below the
+// 50 ms p99 budget: 15.324/42.054 ms. These are sampled fold times, not a latency guarantee.
+pub(super) const OPERATION_CONFLICT_NAMING_CLAIMS: usize = 64;
+
+#[cfg(test)]
+thread_local! {
+    static OMIT_OPERATION_CONFLICT_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn mark_operation_conflict_dirty(transaction: &Transaction<'_>) -> Result<()> {
+    // The mutation probe omits exactly the production invalidation, not the fold or guard.
+    #[cfg(test)]
+    if OMIT_OPERATION_CONFLICT_DIRTY.get() { return Ok(()); }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h4a0e92262358 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO identity_dirty VALUES(1)", [])?;
+    Ok(())
+}
+
+pub(super) fn operation_touches_naming(connection: &Connection, operation: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+         WHERE json_extract(body,'$._operation.id')=?1
+           AND kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published'))
+         OR EXISTS(SELECT 1 FROM checkpoint_claims WHERE operation_id=?1
+           AND kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published'))",
+        [operation], |row| row.get(0),
+    )?)
+}
+
+pub(super) fn refold_operation_conflict(transaction: &Transaction<'_>, details: &serde_json::Map<String, Value>,
+    operations: &BTreeSet<String>) -> Result<bool> {
+    mark_operation_conflict_dirty(transaction)?;
+    let count: usize = transaction.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM claims INDEXED BY claims_kind_index
+         WHERE kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published') LIMIT ?1)",
+        [OPERATION_CONFLICT_NAMING_CLAIMS + 1], |row| row.get(0),
+    )?;
+    if count > OPERATION_CONFLICT_NAMING_CLAIMS {
+        record_degraded(transaction, &conflict_scope::report(transaction, details, operations)?)?;
+        return Ok(false);
+    }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h2f8124d35909 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:naming-operation-conflict'", [])?;
+    conflict_scope::clear(transaction)?;
+    holds::rebuilt(count);
+    holds::fold_progress(0, count);
+    flush(transaction)?;
+    holds::fold_progress(count, count);
+    Ok(true)
+}
+
+fn record_degraded(transaction: &Transaction<'_>, details: &Value) -> Result<()> {
+    conflict_scope::persist(transaction, details)?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hf50ecf2614c0 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES('projection:naming-operation-conflict','stale','operation-conflict-naming-refold-limit',?1,?2)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+        params![serde_json::to_string(details)?,now_ms().to_string()],
+    )?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hac2615d40a38 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES('projection:deferred-replay','stale','operation-conflict-replay-deferred','naming conflict requires explicit repair',?1)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+        [now_ms().to_string()],
+    )?;
+    Ok(())
+}
+
 pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
+    // Above-cap operation invalidations must not re-enter the unbounded lifecycle flush.
+    if transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:naming-operation-conflict')",
+        [], |row| row.get::<_, bool>(0),
+    )? {
+        if let Some(report) = conflict_scope::refresh(transaction)? { record_degraded(transaction, &report)?; }
+        return Ok(());
+    }
     if transaction.query_row("SELECT EXISTS(SELECT 1 FROM identity_dirty)", [], |row| row.get::<_,bool>(0))? {
         reduce(transaction, false)?;
     }
@@ -454,7 +542,10 @@ use smallclaims::naming::{Fact, Head, reduce as reduce_naming};
 /// Reduce the naming subgraph, independent of canonical-time or replication arrival order.
 /// Only naming/declaration lifecycle changes invoke this fold; unrelated work never does.
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
-    reduce(transaction, true)
+    reduce(transaction, true)?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5b8d52acffb1 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:naming-operation-conflict'", [])?;
+    conflict_scope::clear(transaction)?;
+    Ok(())
 }
 
 fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {
