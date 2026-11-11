@@ -6,6 +6,7 @@ pub const GRANTED: &str = "custom.client.assistant.v1.granted";
 pub const POLICY: &str = "custom.client.assistant.v1.policy";
 pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 const VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "1";
 const KINDS: [&str; 3] = [GRANTED, POLICY, REVOKED];
 pub const CLAIMS_PER_SLICE: usize = 64;
 pub const MEMBERSHIP_KEYS_PER_REFRESH: usize = 16;
@@ -99,8 +100,22 @@ pub fn transition_valid(grant: &ClaimRecord, transition: &ClaimRecord) -> bool {
 pub fn expiry_key(value: u64) -> String { format!("{value:020}") }
 
 pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
+    // Schema installation is distinct from the resumable authority backfill.
+    // Replacing an unchanged trigger invalidates durable consumer bindings, and
+    // even replacing the same meta value needlessly writes the database header.
+    if fleet_meta(connection, "assistant_grant_authority_schema_version")?.as_deref() == Some(SCHEMA_VERSION) {
+        if fleet_meta(connection, "assistant_grant_authority_local_origin")?.as_deref() != Some(local_origin) {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-hbbdcd60c3dad owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE meta SET value=?1 WHERE key='assistant_grant_authority_local_origin'",
+                [local_origin],
+            )?;
+        }
+        return Ok(());
+    }
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hff2d1c2b03b3 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_upgrade")?;
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h01e62b989d49 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-hcda5071d3120 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
             claim_id TEXT NOT NULL, base_claim_id TEXT NOT NULL,
             grant_subject TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
@@ -168,8 +183,9 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             ON assistant_grant_pending(origin,claim_id) WHERE authenticated=0;
          CREATE INDEX IF NOT EXISTS assistant_grant_auth_work_claim_index
             ON assistant_grant_auth_work(claim_id);
-         CREATE INDEX IF NOT EXISTS replica_records_grant_proof_index
-            ON replica_records(claim_id,writer,sequence,envelope_hash,position);
+         DROP INDEX IF EXISTS replica_records_grant_proof_index;
+         CREATE INDEX IF NOT EXISTS replica_records_writer_grant_proof_index
+            ON replica_records(writer,claim_id,sequence,envelope_hash,position);
          CREATE TABLE IF NOT EXISTS assistant_grant_retractions (
             id INTEGER PRIMARY KEY, writer TEXT NOT NULL, member_key TEXT NOT NULL,
             lower_sequence INTEGER NOT NULL, upper_sequence INTEGER NOT NULL,
@@ -230,12 +246,16 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE INDEX IF NOT EXISTS assistant_grant_membership_windows_seek
             ON assistant_grant_membership_windows(writer,start,member_key);"
     )?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hff2d1c2b03b3 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_upgrade")?;
     install_auth_cursor(connection)?;
     install_proof_invalidation_triggers(connection)?;
     install_auth_work(connection)?;
     install_queue_owners(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f117dab1bdd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_local_origin',?1)", [local_origin])?;
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h31877443d557 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_schema_version',?1)",
+        [SCHEMA_VERSION],
+    )?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h57db182d0631 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "RELEASE assistant_grant_upgrade")?;
     Ok(())
 }
@@ -342,10 +362,13 @@ fn queue_owner(connection: &Connection, queue: &str) -> Result<Option<(String,St
                 "SELECT sequence FROM assistant_grant_queue_sequences WHERE queue=?1",
                 [queue], |row| row.get(0),
             )?;
-            connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
-            )?;
-            seek(0,upper)?
+            let candidate = seek(0,upper)?;
+            if candidate.is_some() {
+                connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
+                )?;
+            }
+            candidate
         }
     };
     let Some((owner,subowner,sequence)) = candidate else { return Ok(None); };
@@ -1393,7 +1416,7 @@ fn addition_one(connection: &Connection) -> Result<bool> {
         return Ok(true);
     }
     let record: Option<(u64,String,i64,bool)> = connection.query_row(
-        "SELECT sequence,envelope_hash,position,state='valid' FROM replica_records INDEXED BY replica_records_grant_proof_index
+        "SELECT sequence,envelope_hash,position,state='valid' FROM replica_records INDEXED BY replica_records_writer_grant_proof_index
          WHERE claim_id=?1 AND writer=?2 AND sequence BETWEEN ?3 AND ?4
            AND (sequence,envelope_hash,position)>(?5,?6,?7)
            AND EXISTS(SELECT 1 FROM assistant_grant_auth_work WHERE writer=?2 AND claim_id=?1)
@@ -1593,7 +1616,9 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)", [], |row| row.get(0))?;
     if dirty { return Ok(false); }
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
+    if fleet_meta(connection, "assistant_grant_authority_version")?.as_deref() != Some(VERSION) {
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
+    }
     Ok(true)
 }
 

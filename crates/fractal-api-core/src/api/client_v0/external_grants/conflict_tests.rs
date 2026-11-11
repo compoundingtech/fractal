@@ -493,6 +493,9 @@ fn signed_revocation_arriving_before_its_grant_converges_without_conflict() {
     assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
     let granted = raw_claim(&b, &subject, GRANTED, OWNER, source);
     replicate(&b, &a);
+    // GRANTED arrives after REVOKED, so its reverse attachment is background
+    // work rather than the bounded synchronous local-transition fast path.
+    while !b.store.advance_assistant_grant_authority_backfill().unwrap() {}
     for state in [&a, &b] {
         let revoked = state.store.claim_by_id(&revoked.id).unwrap().unwrap();
         let granted = state.store.claim_by_id(&granted.id).unwrap().unwrap();

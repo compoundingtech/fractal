@@ -194,6 +194,24 @@ opening a writer transaction or resetting authentication work. No parallel
 membership-invalidation revision or trigger set is maintained. An identical
 signature is also a no-op.
 
+Authority schema installation has its own durable version, separate from backfill
+readiness. An unchanged reopen neither replaces triggers nor rewrites metadata;
+idle maintenance likewise leaves queue frontiers and completed backfill markers
+untouched. This preserves SQLite's schema cookie and durable consumer bindings.
+The `assistant_grant_*` tables are member-local derived authentication state,
+including effective snapshots: they depend on local verified receipts, arrival
+order and maintenance progress, not only canonical claims. Shared grant, policy
+and revocation evidence remains covered by the canonical claim digest; these
+local tables do not enter shared projection ordering or digest comparisons.
+Proof maintenance seeks `(writer, claim_id, sequence, envelope_hash, position)`,
+leaving claim-only checkpoint membership lookups on their existing claim index.
+The authority schema producer's transitional large-value entry is
+`lv-hcda5071d3120` (formerly `lv-h01e62b989d49`); its existing
+`chunk-or-reference-variable-columns` debt remains. The same producer owns
+`lv-hbbdcd60c3dad` and `lv-h31877443d557` for conditional local-origin and schema
+version metadata writes, retaining `bound-or-reference-values-and-reclamation`
+review debt rather than claiming value-size proof.
+
 Global not-ready applies only during initial/version backfill. Thereafter dirty
 or pending authentication fences only that grant subject, including a pending
 revoke; established credentials for unrelated subjects remain usable. The last
