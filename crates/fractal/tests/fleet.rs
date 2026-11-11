@@ -8203,10 +8203,10 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     n.start().await;
     // The reader is a seat on this member, so an agent's mail to it routes to the stream. A
     // slash-qualified name keeps its subject; a simple one would take the host as a prefix.
-    let reader = "agent/fleet/reader";
+    let reader = "agent/fleet/fixture-reader";
     let declaration = root.path().join("reader.kdl");
     fs::write(&declaration, format!(
-        "version 2\nagent \"fleet/reader\" {{ host \"n\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        "version 2\nagent \"fleet/fixture-reader\" {{ host \"n\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
         n.root
     )).unwrap();
     n.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
