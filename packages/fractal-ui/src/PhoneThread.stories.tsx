@@ -32,7 +32,7 @@ function PhoneThreadStory({ scheme, narrow }: { scheme: Scheme; narrow: boolean 
     <NarrowLayoutContext.Provider value={narrow}>
       <div data-testid="phone-column" {...stylex.props(styles.column)}>
         <EmbraceRuntimeProvider options={options}>
-          <ThreadHeader narrow={narrow} title="Row projection" freshness="live" sidebarCollapsed={narrow} onToggleSidebar={() => {}} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+          <ThreadHeader narrow={narrow} title="Row projection" freshness="live" sidebarCollapsed={narrow} onToggleSidebar={() => {}} panelOpen={false} terminalOpen={false} onTogglePanel={() => {}} onToggleTerminal={() => {}} />
           <div {...stylex.props(styles.transcript)}>{sections.map(section => <Transcript key={section.id} viewportKey={section.id} title={section.title} turns={section.turns} history={section.history} sync={sync} now={now} observedAt={now} onOpenTool={() => {}} />)}</div>
           <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn conversationLabel="Row projection" /></div>
         </EmbraceRuntimeProvider>
