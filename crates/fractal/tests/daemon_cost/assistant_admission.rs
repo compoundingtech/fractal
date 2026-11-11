@@ -515,6 +515,26 @@ async fn authenticated_get_during_pairing() {
             }
         }
     }).await.unwrap();
+    if indexed {
+        // Replication provenance does not materialize effective authority. The
+        // socket fixture does not start the daemon's authority worker, so settle
+        // real membership/authentication/attachment work before clean sampling.
+        let fixture_store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            const MAX_FIXTURE_AUTHORITY_SLICES: usize = 100_000;
+            let mut complete = false;
+            for _ in 0..MAX_FIXTURE_AUTHORITY_SLICES {
+                if fixture_store.advance_assistant_grant_authority_backfill().unwrap() {
+                    complete = true;
+                    break;
+                }
+            }
+            assert!(complete,
+                "q39 fixture authority drain did not complete within {MAX_FIXTURE_AUTHORITY_SLICES} slices");
+            assert!(!fixture_store.assistant_grant_authority_maintenance_pending().unwrap(),
+                "q39 clean sampling must begin with authority maintenance idle");
+        }).await.unwrap();
+    }
     let connection = rusqlite::Connection::open(&database).unwrap();
     let candidate_query = revision_api::candidate_query();
     let query = candidate_query.as_ref().map_or(A_QUERY, |(query, _)| *query);
