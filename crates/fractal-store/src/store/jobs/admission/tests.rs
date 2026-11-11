@@ -117,10 +117,14 @@ fn snapshot_lookup_failure_is_not_absence_and_identity_is_not_a_request_field() 
 fn replay_uses_claim_facts_without_membership_host_or_clock_lookups() {
     let store = crate::store::Store::open_memory("unrelated-fixture-node").unwrap();
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
-    let (_, claim, _, signature, _) = fixture();
+    let (_, mut claim, record, _, key) = fixture();
     let tx = connection.transaction().unwrap(); // No tables: any snapshot lookup fails.
-    for _ in 0..2 {
-        assert!(matches!(validate(&tx, &store, &claim, Some(&signature), Mode::Replay), Ok(Disposition::HistoryOnly)));
+    for body in [json!({"fields":{"record":record}}), json!({"record":record})] {
+        claim.body = body;
+        let signature = sign(&key, &claim);
+        for _ in 0..2 {
+            assert!(matches!(validate(&tx, &store, &claim, Some(&signature), Mode::Replay), Ok(Disposition::HistoryOnly)));
+        }
     }
     assert_eq!(tx.total_changes(), 0);
 }

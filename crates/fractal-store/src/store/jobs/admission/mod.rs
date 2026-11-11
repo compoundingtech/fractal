@@ -125,7 +125,8 @@ fn validate(
     signature: Option<&ClaimSignature>,
     mode: Mode,
 ) -> Result<Disposition, Refusal> {
-    let record: JobRecord = serde_json::from_value(claim.body["fields"]["record"].clone())
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    let record: JobRecord = serde_json::from_value(fields["record"].clone())
         .map_err(|_| Refusal::InvalidRecord)?;
     let snapshot = if mode == Mode::Replay {
         None
@@ -153,7 +154,7 @@ fn decide(
         kind: &claim.kind,
         actor: claim.actor.as_deref(),
         content: content_digest(&claim.subject, &claim.kind, claim.actor.as_deref(), &claim.body),
-        fields: &claim.body["fields"],
+        fields: claim.body.get("fields").unwrap_or(&claim.body),
     };
     // Partial field signatures and delegated principals cannot establish a full
     // host binding. All immutable fields must be covered by these exact bytes.
