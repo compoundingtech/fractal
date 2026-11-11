@@ -611,7 +611,8 @@ for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
         assert depth is None or re.fullmatch(r'[1-9][0-9]*', depth.group(1)), f'{workflow.name}: fetch-depth {depth.group(1)} may fetch every evidence tag'
     for number, line in enumerate(lines):
         if line.strip() == FETCH_STEP:
-            assert 'uses: actions/checkout@' in '\n'.join(lines[max(0, number - 8):number]), f'{workflow.name}:{number + 1}: the fetch step must follow its checkout'
+            job = max(at for at in range(number) if re.fullmatch(r'  [A-Za-z0-9_-]+:\s*', lines[at]))
+            assert 'uses: actions/checkout@' in '\n'.join(lines[job:number]), f'{workflow.name}:{number + 1}: the fetch step must follow a checkout in its job'
             scripts.add(fetch_script(lines, number))
 assert len(scripts) == 1, f'every full-history fetch must be the one script from workspace-ci.ts, found {len(scripts)}'
 script, = scripts

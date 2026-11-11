@@ -1,7 +1,7 @@
 //! A mission revision that declares a field an older build cannot read (`capacity` on the
-//! mission or a step, or the mission's run `authority`) is published only once every current
-//! member reads the field. A member whose build does not checks a replicated revision by hashing
-//! the mission as it reads it, without the field, and quarantines the claim
+//! mission or a step, the mission's run `authority`, or a `program` step) is published only once
+//! every current member reads the field. A member whose build does not checks a replicated
+//! revision by hashing the mission as it reads it, without the field, and quarantines the claim
 //! (docs/st3/seat-lanes.md, "Mixed versions"). Each member advertises each field on its own
 //! `daemon.started`, as the standby barrier reads `schedule_standby`.
 use super::*;
@@ -10,6 +10,8 @@ use super::*;
 pub const FEATURE: &str = "mission_capacity";
 /// The `daemon.started` feature of a build that reads a mission's run `authority`.
 pub const AUTHORITY_FEATURE: &str = "mission_authority";
+/// The `daemon.started` feature of a build that reads a step's `program`.
+pub const PROGRAM_FEATURE: &str = "mission_program";
 
 /// One mission field behind a fleet barrier: the feature that says a member reads it, the
 /// refusal code, and what to do once every member is upgraded.
@@ -20,7 +22,7 @@ struct Barrier {
     later: &'static str,
 }
 
-const BARRIERS: [Barrier; 2] = [
+const BARRIERS: [Barrier; 3] = [
     Barrier {
         feature: FEATURE,
         code: "mission-capacity-unavailable",
@@ -32,6 +34,12 @@ const BARRIERS: [Barrier; 2] = [
         code: "mission-authority-unavailable",
         declares: |mission| !mission.authority.is_empty(),
         later: "declare authority on a mission",
+    },
+    Barrier {
+        feature: PROGRAM_FEATURE,
+        code: "mission-program-unavailable",
+        declares: |mission| !mission.programs().is_empty(),
+        later: "declare a program step",
     },
 ];
 
@@ -268,5 +276,33 @@ mission "authorized" state="ready" {
         sync(&peer, &store);
         assert!(publish(&store, AUTHORIZED, "upgraded").unwrap().is_empty());
         assert_eq!(store.mission_spec("authorized", None).unwrap().unwrap().authority.len(), 1);
+    }
+
+    #[test]
+    fn a_revision_that_declares_a_program_step_waits_until_every_member_reads_it() {
+        let bundle = b"export default {}";
+        let source = format!(
+            "version 2\nmission \"programmed\" state=\"ready\" {{\n  goal \"Work.\"\n  step \"run\" {{ program \"/bundles/land.mjs\" sha256=\"{}\"; }}\n}}\n",
+            hex::encode(Sha256::digest(bundle))
+        );
+        let alone = Store::open_memory("alder").unwrap();
+        alone.put_blob(bundle).unwrap();
+        publish(&alone, &source, "alone").unwrap();
+        let (store, peer) = two_members();
+        store.put_blob(bundle).unwrap();
+        // Reading capacity and authority is not reading programs.
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {FEATURE: 1, AUTHORITY_FEATURE: 1}}));
+        sync(&peer, &store);
+        let refusal = publish(&store, &source, "older").unwrap_err();
+        assert_eq!(refusal.code, "mission-program-unavailable");
+        assert!(refusal.message.contains("has not advertised mission_program=1); declare a program step once every member is upgraded"),
+            "{}", refusal.message);
+        assert!(store.mission_spec("programmed", None).unwrap().is_none());
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {FEATURE: 1, AUTHORITY_FEATURE: 1, PROGRAM_FEATURE: 1}}));
+        sync(&peer, &store);
+        assert!(publish(&store, &source, "upgraded").unwrap().is_empty());
+        assert_eq!(store.mission_spec("programmed", None).unwrap().unwrap().programs().len(), 1);
     }
 }

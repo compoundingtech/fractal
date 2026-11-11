@@ -3394,7 +3394,9 @@ fn mission_resources_filtered(
                         });
                     let blocker = run.scheduler_fault.as_ref().map(|reason| json!({
                         "step": run.steps.first().map(|step| &step.subject), "reason": reason, "scope": crate::reconcile::FIRST_READINESS_FAULT_SCOPE,
-                    })).or_else(||
+                    })).or_else(|| run.programs.iter().find_map(|program| program.fault.as_ref().map(|fault| json!({
+                        "step": program.step_run, "reason": fault.reason, "scope": fault.scope,
+                    })))).or_else(||
                         run.steps.iter().find(|step| step.status == "blocked").map(
                             |step| json!({"step": step.subject, "reason": step.blocked_reason}),
                         ));
@@ -3416,6 +3418,7 @@ fn mission_resources_filtered(
                                 let loop_run = run.loops.iter().find(|loop_run| {
                                     loop_run.step_run == step.subject
                                 });
+                                let program = run.programs.iter().find(|program| program.step_run == step.subject);
                                 let wake = step.wake.as_ref().filter(|_| {
                                     !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
@@ -3464,6 +3467,27 @@ fn mission_resources_filtered(
                                     value["waits"] = json!(history.waits);
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
+                                }
+                                // Detail reads that enrich the run (`Store::mission_run`) carry
+                                // its program steps' journals.
+                                if let Some(program) = program {
+                                    let journal = &program.journal;
+                                    value["program"] = json!({
+                                        "open_key": journal.open.first(),
+                                        "entries": journal.entries.iter().map(|entry| json!({
+                                            "key": entry.key,
+                                            "status": entry.status,
+                                            "started_at": entry.started_at_unix_ms.map(client_timestamp),
+                                            "ended_at": entry.ended_at_unix_ms.map(client_timestamp),
+                                            "ms": entry.ms,
+                                            "error": entry.error,
+                                            "child": entry.child,
+                                        })).collect::<Vec<_>>(),
+                                        "truncated": journal.truncated,
+                                        "last_entry_at": journal.last_entry_at_unix_ms.map(client_timestamp),
+                                        "stalled_after_ms": program.stalled_after_ms,
+                                        "fault": program.fault.as_ref().map(|fault| json!({"scope": fault.scope, "reason": fault.reason})),
+                                    });
                                 }
                                 if let Some((low, high, samples)) = step_etas.get(&step.step)
                                     .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
@@ -4839,6 +4863,7 @@ fn native_replay_extent(
     let (tail, suppressed) = canonical_native_slice(
         state, snapshot, source, session, session_id, &messages,
         crate::external_sessions::TimelineOrder::Sequence, None, limit, managed, false,
+        &mut conversation_blocks::NativeReadAdmission::default(),
     )?;
     if source.driver != crate::external_sessions::ExternalDriver::OpenCode
         && tail.generation != generation
@@ -4896,6 +4921,7 @@ fn conversation_first_page_at_generation(
                     let (head, suppressed) = canonical_native_slice(
                         state, snapshot, source, session, session_id, &messages,
                         crate::external_sessions::TimelineOrder::Sequence, None, 1, managed, false,
+                        &mut conversation_blocks::NativeReadAdmission::default(),
                     )?;
                     Some(head.items.iter().filter_map(native_entry_sequence).max().unwrap_or(0)
                         .max(suppressed))
@@ -7787,6 +7813,8 @@ async fn apply_runtime_control_intent(
             expected_subjects: preview.subject_tokens,
             idempotency_key: format!("{}:runtime-intent", request.idempotency_key),
             actor: Some(actor.to_owned()),
+            program_bundles: Default::default(),
+            force_reason: None,
         }),
     )
     .await?
@@ -9036,6 +9064,7 @@ async fn dispatch_action(
                 idempotency_key: request.idempotency_key.clone(),
                 reason,
                 host: if action == "agent.resume" { p.get("host").and_then(Value::as_str).map(str::to_owned) } else { None },
+                force: false,
             };
             let fence = super::SuspensionFence {
                 incarnation,
@@ -16868,7 +16897,7 @@ mission "example/looped" state="ready" {
             .unwrap();
         state
             .store
-            .retire_mission("example/looped", "person/operator", "retire-looped")
+            .retire_mission("example/looped", "person/operator", "retire-looped", None)
             .unwrap();
         let current =
             mission_resources(&state.store, state.store.index().unwrap(), false, None).unwrap();
@@ -19325,11 +19354,11 @@ mission "example/zero-run" state="ready" {
         .unwrap();
         assert_eq!(page["items"].as_array().unwrap().len(), 20);
         assert_eq!(page["page"]["has_more"], true);
-        // A relayed owner read negotiates conversation blocks, so it also reads the newest 200
-        // entries its header summarizes; the frame itself is still the 20 asked for.
+        // The owner folds the newest 200 entries for its header, but only prepares
+        // display bodies for the page and its has-more probe.
         assert_eq!(
             conversation_blocks::prepared_bodies(),
-            CLIENT_MAX_PAGE_ITEMS,
+            21,
             "the owner prepared {} bodies for a 20-entry relayed frame",
             conversation_blocks::prepared_bodies()
         );

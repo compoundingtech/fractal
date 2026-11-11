@@ -1739,6 +1739,7 @@ mod tests {
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        programs: crate::config::ProgramsConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         wait_for_peers_after_start: None,

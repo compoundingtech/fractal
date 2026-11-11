@@ -352,6 +352,13 @@ instead of assuming every assignee or claimant is an agent.
 
 `loop_round` and `loop_max_rounds` belong to the loop attached to that exact step in the current
 generation; they are null for a non-loop step. `loop_reason` is the observed loop-state reason.
+`program`, present only on a program step of a run the detail enriches, is its current attempt's
+journal: `entries` holds each key's latest `status` (`started`, `completed` or `failed`),
+`started_at`, `ended_at`, `ms`, the typed `error`, and the `child` run or ask the key waits on, in
+the order the keys first appear; the newest 200 journal entries are read and `truncated` says older
+ones exist. `open_key` is the innermost open key, `last_entry_at` the newest entry, and `fault` the
+open `program/host` or `program/stalled` fault (`scope`, `reason`), which the run's `blocker` also
+names when no scheduler fault does.
 `next_wake_at` is the observed not-before time (earliest work eligibility), not a delivery promise
 or a computed retry estimate. `wake_reason` is the deferral's blocked reason, otherwise the
 observed wake failure. `wake` carries the assignee and its current harness state/incarnation,
@@ -1337,7 +1344,10 @@ Observer and subscription lists and details are available at `/v1/client/observe
 `/v1/client/subscriptions`. Each resource includes its normalized specification, current state,
 and owning run, generation, and step. Agentless work includes `gate_kind`: `watch` for a standing
 step with no gate, `predicate`, `command`, `llm`, or `human` for a single gate family, `mixed`
-for combined families, and `run` for an `after-run` step.
+for combined families, `run` for an `after-run` step, and `program` for a program step. A program
+step's work also carries `program`: its innermost open journal key (`open_key`, with
+`open_since_unix_ms` and the `child` run or ask that key waits on), `last_entry_at_unix_ms`, and
+the `stalled_after_ms` past which `missions waiting-on` reports it as `no-progress`.
 
 ## Harness-neutral session timeline
 

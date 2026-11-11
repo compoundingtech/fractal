@@ -26,6 +26,7 @@ pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
 pub mod workspace_observations;
+pub mod observer_refresh;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
@@ -73,6 +74,9 @@ pub mod schedule_active_run_tests;
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
+mod program_bundles;
+pub mod run_credentials;
+pub mod run_authority;
 pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -176,6 +180,7 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::model::{ApplyResponse, AttentionActionView, AttentionClosing, AttentionItemView, AttentionRequest, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, Capability, ClaimInput, ClaimRecord, ClaimsPage, ClaimsSummary, ContextUsage, DependencySpec, DesiredSubject, EventRecord, FaultView, HumanReviewView, IntentInput, LoopRoundView, LoopRunView, MAX_EVAL_TIMEOUT_MS, SESSION_CLAIMS, MessageView, MissionDefinitionView, MissionInputKind, MissionResponse, MissionRevisionOperation, MissionRunDeclaration, MissionRunInput, MissionRunOutcomeView, MissionRunRequest, MissionRunView, MissionSpec, MissionState, NormalizedIntent, OperationalAnnotation, OperationalRepairItem, OperationalRepairPlan, OperationalRepairResult, PlannedAction, PlanningCandidateView, PlanningPreviewView, PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch, ReplicaRepairDeclaration, ResourceRefreshOperation, RevisionCutover, RevisionProposalView, RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus, UsageSummary, WorkSelector, WorkWakeView};
+use fractal_kernel::program_journal::{self, ProgramFault, ProgramJournal, ProgramRunView};
 #[cfg(any(test, feature = "test-support"))]
 use crate::model::WorkRequest;
 #[cfg(test)]
@@ -351,6 +356,10 @@ mod wake_lookup_tests;
 mod status_summary_tests;
 #[cfg(test)]
 mod run_eta_tests;
+#[cfg(test)]
+mod run_credentials_tests;
+#[cfg(test)]
+mod run_authority_tests;
 #[cfg(test)]
 mod run_eta_review_tests;
 pub mod client_summary;
@@ -804,7 +813,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h23dec68723c3 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1ae4f9ad11c9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -960,6 +969,9 @@ WHERE kind='custom.client.pairing-completed';
 CREATE INDEX IF NOT EXISTS claims_assistant_v1_credential_index
 ON claims(json_extract(body, '$.fields.credential_hash'), store_index)
 WHERE kind='custom.client.assistant.v1.granted';
+-- Match parameterized admission by kind and effective principal, including legacy ChatGPT grants.
+CREATE INDEX IF NOT EXISTS claims_assistant_v1_principal_index
+ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
 -- A runtime incarnation's claims about a subject by acceptance time, so when a session began
 -- and last changed are two seeks instead of a read of every claim the subject has. The
 -- expression is INCARNATION_OF_CLAIM, which queries repeat so the planner uses this index.
@@ -2444,6 +2456,10 @@ pub struct ChildMissionContext {
     pub root_run_id: String,
     pub parent_step_run: String,
     pub default_selector: Option<WorkSelector>,
+    /// Who starts the child when it is not its requester: `mission-run/PARENT` for a child a
+    /// program starts. Its creation claims are written as this actor, and run authority takes it
+    /// as the child's starter (docs/st3/program-engine.md §3).
+    pub started_by: Option<String>,
 }
 
 fn stale_ref_request_tx(connection: &Connection, resource: &str, discovery: &str) -> Result<Option<String>> {
@@ -3161,32 +3177,7 @@ impl Store {
 
     /// The reason for an open fault on `subject` in `scope`, if the latest record is a fault.
     pub fn reconcile_fault(&self, subject: &str, scope: &str) -> Result<Option<String>> {
-        let connection = self.readers.get();
-        let body: Option<String> = connection
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-hb42a56e4a272 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
-                    "SELECT body FROM claims WHERE subject=?1 AND kind='reconcile.fault'
-                   AND json_extract(body, '$.fields.scope')=?2
-                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-                ),
-                params![subject, scope],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(body) = body else {
-            return Ok(None);
-        };
-        let body: Value = serde_json::from_str(&body)?;
-        let fields = body.get("fields").unwrap_or(&body);
-        Ok(
-            (fields.get("status").and_then(Value::as_str) == Some("faulted")).then(|| {
-                fields
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            }),
-        )
+        Ok(reconcile_fault_tx(&self.readers.get(), subject, scope)?)
     }
 
     /// Latest preparation outcome for one message and the recipient's current incarnation.
@@ -3327,6 +3318,31 @@ impl Store {
             publication::CommitChecks {
                 owned: None,
                 guard: Some(guard),
+                force: None,
+            },
+        )
+    }
+
+    /// Publish plain declarations, accepting ad hoc changes to owned-set members as source
+    /// debt with `reason`. Each forced member holds until its set publishes again.
+    pub fn apply_forced(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        key: &str,
+        actor: Option<&str>,
+        reason: &str,
+    ) -> Result<ApplyResponse, FractalError> {
+        self.apply_as_impl(
+            intent,
+            expected,
+            key,
+            actor,
+            None,
+            publication::CommitChecks {
+                owned: None,
+                guard: None,
+                force: Some(reason),
             },
         )
     }
@@ -3363,7 +3379,7 @@ impl Store {
     ) -> Result<ApplyResponse, FractalError> {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
-        let publication::CommitChecks { owned, guard } = checks;
+        let publication::CommitChecks { owned, guard, force } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
                 declared_admission::validate_publication(transaction, &self.origin, intent)?;
@@ -3403,16 +3419,21 @@ impl Store {
                 schedule_standby::validate_publication(transaction, &self.origin, intent)?;
                 mission_capacity::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
+                program_bundles::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
                 let mut one_shot_sets = BTreeMap::new();
+                let mut forced = BTreeMap::<String, (owned_sets::View, owned_sets::Verb)>::new();
+                let mut audited = Vec::new();
                 if let (Some(plan), Some(options)) = (&owned_plan, owned) {
+                    owned_sets::check_publisher(plan, actor)?;
                     owned_sets::validate_apply(plan, options)?;
                     if plan.preview.noop {
                         return cache_local_apply_receipt_tx(transaction,ApplyResponse {
                             changed: false, store_index: current_index_tx(transaction).map_err(internal)?,
                             batch_id: None, claim_ids: Vec::new(), subject_tokens: BTreeMap::new(),
                             reconcile_subjects: Vec::new(), resolved_kdl: String::new(), operations: Vec::new(),
+                            source_debts_recorded: Vec::new(), source_debts_reverted: Vec::new(),
                         },local_receipt,idempotency_key);
                     }
                 } else {
@@ -3424,7 +3445,33 @@ impl Store {
                             one_shot_sets.insert(subject.clone(), set);
                             continue;
                         }
-                        owned_sets::refuse_unmanaged(transaction, subject)?;
+                        // A mission run materializes its own declarations; source does not route run starts,
+                        // so a claimed namespace does not gate them. Set members still refuse them.
+                        if intent.subjects.get(subject).is_some_and(|desired| desired.owner_run.is_some()) {
+                            owned_sets::refuse_unmanaged(transaction, subject)?;
+                            continue;
+                        }
+                        let new = owned_sets::owner(transaction, subject, None)?.is_none()
+                            && match intent.subjects.get(subject) {
+                                Some(_) => intent_leaves_tx(transaction, subject).map_err(internal)?.is_empty(),
+                                None => mission_definition_token_tx(transaction, subject.trim_start_matches("mission/"))
+                                    .map_err(internal)?.is_empty(),
+                            };
+                        let verb = match (new, intent.subjects.get(subject)) {
+                            (true, _) => owned_sets::Verb::Create,
+                            (false, Some(desired)) => owned_sets::Verb::of_declaration(transaction, desired)?,
+                            (false, None) => match intent.missions.values().find(|m| &m.subject == subject) {
+                                Some(mission) if mission_state_name(&mission.state) == "retired" => owned_sets::Verb::MissionRetire,
+                                _ => owned_sets::Verb::MissionPublish,
+                            },
+                        };
+                        match owned_sets::gate(transaction, subject, verb, force)? {
+                            owned_sets::Gate::Allow => {}
+                            owned_sets::Gate::Force(view) => {
+                                forced.insert(subject.clone(), (*view, verb));
+                            }
+                            owned_sets::Gate::Audit(view, refused) => audited.push((subject.clone(), *view, verb, *refused)),
+                        }
                     }
                 }
                 let intent = owned_plan.as_ref().map_or(intent, |p| &p.intent);
@@ -3795,6 +3842,8 @@ impl Store {
                         reconcile_subjects: Vec::new(),
                         resolved_kdl: String::new(),
                         operations: Vec::new(),
+                        source_debts_recorded: Vec::new(),
+                        source_debts_reverted: Vec::new(),
                     };
                     transaction
                         .execute(
@@ -3807,6 +3856,14 @@ impl Store {
                         .map_err(internal)?;
                     return cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key);
                 }
+                let forced_diffs = if forced.is_empty() {
+                    BTreeMap::new()
+                } else {
+                    declarations::diffs(transaction, intent,
+                        forced.keys().map(String::as_str).filter(|s| intent.subjects.contains_key(*s)),
+                        Some(current_index_tx(transaction).map_err(internal)?))?
+                };
+                let mut forced_claims = Vec::new();
                 let now = write_time(transaction, &self.origin).map_err(internal)?;
                 let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
                 let previous_hash = previous_batch_hash(transaction, &self.origin).map_err(internal)?;
@@ -3898,6 +3955,9 @@ impl Store {
                     insert_event(transaction, store_index, "intent.desired", subject, &body)
                         .map_err(internal)?;
                     claim_ids.push(claim_id.clone());
+                    if forced.contains_key(subject) {
+                        forced_claims.push((subject.clone(), claim_id.clone(), revision.clone()));
+                    }
                     tokens.insert(subject.clone(), vec![claim_id]);
                     reconcile_subjects.push(subject.clone());
                 }
@@ -3975,6 +4035,9 @@ impl Store {
                     )
                     .map_err(internal)?;
                     claim_ids.push(claim_id.clone());
+                    if forced.contains_key(&mission.subject) {
+                        forced_claims.push((mission.subject.clone(), claim_id.clone(), mission.revision.clone()));
+                    }
                     tokens.insert(mission.subject.clone(), vec![claim_id]);
                 }
                 for declaration in intent.mission_runs.values() {
@@ -4239,6 +4302,20 @@ impl Store {
                         reason: "the replacement claim resolved the invalid record".into(),
                     });
                 }
+                let mut source_debts_recorded = Vec::new();
+                for (subject, claim_id, revision) in &forced_claims {
+                    let (view, verb) = &forced[subject];
+                    let debt = owned_sets::record_debt_tx(transaction, &self.origin, view, subject, *verb,
+                        owned_sets::Forced::Declaration { claim: claim_id, revision }, forced_diffs.get(subject), actor,
+                        force.unwrap_or_default(), Some(&batch_id))?;
+                    claim_ids.push(debt.id.clone());
+                    source_debts_recorded.push(debt);
+                }
+                for (subject, view, verb, refused) in &audited {
+                    let record = owned_sets::record_audit_tx(transaction, &self.origin, view, subject, *verb,
+                        actor, refused, Some(&batch_id))?;
+                    claim_ids.push(record.id);
+                }
                 if let Some(plan) = &owned_plan {
                     let receipt = owned_sets::commit_tx(transaction, &self.origin, plan, actor, &batch_id)?;
                     tokens.insert(plan.preview.set.clone(), vec![receipt.id.clone()]);
@@ -4258,6 +4335,9 @@ impl Store {
                     reconcile_subjects,
                     resolved_kdl: String::new(),
                     operations: operation_receipts,
+                    source_debts_recorded,
+                    source_debts_reverted: owned_plan.as_ref()
+                        .map(|plan| plan.preview.reverted_debts.clone()).unwrap_or_default(),
                 };
                 transaction
                     .execute(
@@ -6877,29 +6957,12 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
-        let connection = self.readers.get();
-        let order = if descending { "DESC" } else { "ASC" };
-        let query = format!(
-            "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-             FROM claims WHERE subject=?1 AND kind=?2 AND (?3 IS NULL OR store_index<?3)
-             ORDER BY store_index {order} LIMIT ?4"
-        );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9b3b2893e731 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
-        let rows = statement.query_map(
-            params![subject, kind, before_index, limit.saturating_add(1) as u64],
-            claim_from_row,
-        )?;
-        let mut claims = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        let next_cursor = if claims.len() > limit {
-            claims.pop();
-            claims.last().map(|claim| claim.store_index)
-        } else {
-            None
-        };
-        Ok(ClaimsPage {
-            claims,
-            next_cursor,
-        })
+        Ok(claims_for_subject_kind_at_tx(&self.readers.get(), subject, kind, before_index, descending, limit)?)
+    }
+
+    /// The current attempt's journal of a program step, from its newest `limit` entries.
+    pub fn program_journal(&self, step: &str, attempt: u32, limit: usize) -> Result<ProgramJournal> {
+        Ok(program_journal_tx(&self.readers.get(), step, attempt, limit)?)
     }
 
     /// Bounded timeline history for exactly one runtime incarnation. The
@@ -7218,7 +7281,7 @@ impl Store {
                AND (?3 IS NULL OR store_index<?3)
              ORDER BY store_index {order} LIMIT ?4"
         );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h136410fb8620 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9b3b2893e731 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         let rows = statement.query_map(
             params![
                 subject,
@@ -7256,7 +7319,7 @@ impl Store {
              FROM claims WHERE kind=?1 AND (?2 IS NULL OR store_index<?2)
              ORDER BY store_index {order} LIMIT ?3"
         );
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfe84a7d32f14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h136410fb8620 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         let rows = statement.query_map(
             params![kind, before_index, limit.saturating_add(1) as u64],
             claim_from_row,
@@ -7463,6 +7526,7 @@ impl Store {
                 | "resource.observed"
                 | "subscription.state"
                 | "message.closed"
+                | "message.expired"
                 | "message.delivered"
                 | "message.read"
                 | "message.sent"
@@ -7962,7 +8026,7 @@ fn adopt_declared_mission_revision_tx(
             &[],
             Some(batch_id),
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         if status == "draining" {
             transaction
                 .execute(
@@ -8057,7 +8121,7 @@ fn adopt_declared_mission_revision_tx(
                 &[],
                 Some(batch_id),
             )
-            .map_err(internal)?;
+            .map_err(smallclaims::error::typed)?;
             claim_ids.push(claim.id);
         }
     }
@@ -8104,7 +8168,7 @@ fn adopt_declared_mission_revision_tx(
         &[],
         Some(batch_id),
     )
-    .map_err(internal)?;
+    .map_err(smallclaims::error::typed)?;
     claim_ids.push(superseded.id);
     claim_ids.extend(terminalize_generation_steps_tx(
         transaction,
@@ -8132,7 +8196,7 @@ fn adopt_declared_mission_revision_tx(
         &[],
         Some(batch_id),
     )
-    .map_err(internal)?;
+    .map_err(smallclaims::error::typed)?;
     claim_ids.push(created.id);
     Ok((claim_ids, false))
 }
@@ -8220,31 +8284,9 @@ fn request_declared_resource_refresh_tx(
     operation: &ResourceRefreshOperation,
     batch_id: &str,
 ) -> Result<Vec<String>, FractalError> {
-    let desired = {
-        let mut statement = transaction
-            .prepare("SELECT subject, body, revision FROM desired WHERE kind='observer'")
-            .map_err(internal)?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(internal)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(internal)?
-    };
-    let observers = desired
+    let observers = observer_refresh::active_observers_tx(transaction)?
         .into_iter()
-        .filter_map(|(subject, body, revision)| {
-            serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|desired| crate::graph::observer_spec(&desired))
-                .filter(|spec| !spec.stopped && spec.resource == operation.resource)
-                .map(|_| (subject, revision))
-        })
+        .filter(|(_, _, spec)| spec.resource == operation.resource)
         .collect::<Vec<_>>();
     if observers.is_empty() {
         return Err(FractalError::new(
@@ -8253,25 +8295,18 @@ fn request_declared_resource_refresh_tx(
         ));
     }
     let mut claims = Vec::new();
-    for (observer, revision) in observers {
+    for (observer, revision, _) in observers {
         let attempt = hex::encode(Sha256::digest(format!(
             "st3.resource-refresh.v1\0{}\0{}\0{}",
             operation.resource, operation.id, observer
         )));
-        let claim = append_claim_tx(
+        let claim = observer_refresh::append_observer_refresh_tx(
             transaction,
             origin,
-            &observer,
-            "observer.refresh-requested",
-            None,
-            &json!({"fields": {
-                "revision": revision,
-                "attempt": attempt,
-            }}),
-            &[],
+            (&observer, &revision),
+            &attempt,
             Some(batch_id),
-        )
-        .map_err(internal)?;
+        )?;
         claims.push(claim.id);
     }
     Ok(claims)
@@ -11496,6 +11531,25 @@ pub fn append_claim_tx_with_assistant_answer(
     forced_batch: Option<&str>,
     authorization: Option<&assistant_write::AssistantWriteAuthorization>,
 ) -> Result<ClaimRecord> {
+    append_claim_tx_admitted(transaction, origin, subject, kind, actor, body, predecessors, forced_batch,
+        authorization, false)
+}
+
+/// `source_forced`: the subject's owning set already admitted this declaration as a forced
+/// write with source debt ([`owned_sets::gate`]), so the plain set-member refusal is skipped.
+#[allow(clippy::too_many_arguments)]
+fn append_claim_tx_admitted(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    forced_batch: Option<&str>,
+    authorization: Option<&assistant_write::AssistantWriteAuthorization>,
+    source_forced: bool,
+) -> Result<ClaimRecord> {
     let mut assistant_body;
     let body = if let Some(authorization) = authorization {
         if kind != "message.sent" || actor != Some(authorization.principal())
@@ -11554,6 +11608,7 @@ pub fn append_claim_tx_with_assistant_answer(
         body,
         predecessors,
         forced_batch,
+        source_forced,
     )
 }
 
@@ -11594,11 +11649,12 @@ fn replicated_work_validation_fields<'a>(
     body: &Value,
     predecessors: &[String],
     forced_batch: Option<&str>,
+    source_forced: bool,
 ) -> Result<ClaimRecord> {
     fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     agent_charter::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
-    if matches!(kind, "intent.desired" | "mission.published") {
+    if matches!(kind, "intent.desired" | "mission.published") && !source_forced {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
@@ -11616,6 +11672,8 @@ fn replicated_work_validation_fields<'a>(
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
     let fields = schema_fields_for_body(kind, body)?;
+    run_authority::admit_tx(transaction, origin, actor, kind, subject, &fields)
+        .map_err(anyhow::Error::new)?;
     human_review_reassignment::admit_reassignment(transaction, kind, &fields)
         .map_err(anyhow::Error::new)?;
     if kind == "person.delegation-set"
@@ -11698,6 +11756,28 @@ pub fn append_receipt_claim_tx(
         predecessors,
         forced_batch,
     )?;
+    register_operation_tx(transaction, &record)?;
+    Ok(record)
+}
+
+/// [`append_receipt_claim_tx`] for a declaration of a set member that [`owned_sets::gate`]
+/// admitted as forced in this transaction; the caller records its source debt in the same
+/// transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn append_source_forced_receipt_claim_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    key: &str,
+) -> Result<ClaimRecord> {
+    let mut body = body.clone();
+    smallclaims::store::idempotency::attach(&mut body, key)?;
+    let record = append_claim_tx_admitted(transaction, origin, subject, kind, actor, &body, predecessors, None,
+        None, true)?;
     register_operation_tx(transaction, &record)?;
     Ok(record)
 }
@@ -11963,6 +12043,9 @@ fn message_view_at_with_desired(
             }
             actual["status"] = json!(marked);
         }
+    }
+    if let Some(status) = message_expiry::status(connection, subject)? {
+        actual["status"] = json!(status);
     }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
@@ -17553,11 +17636,10 @@ pub fn try_project_simple_replication_tx(
             }
         }
     }
-    // Event-only claims do not change the structural graph. Their operation
-    // registry can advance with the frontier. Message sends reconcile an ambiguous
-    // receipt from that operation's indexed history, using the full replay's reducer.
-    // Other kinds retain the full replay guard for ambiguous IDs.
-    let mut reconciled_message_operations = BTreeSet::new();
+    // Event-only claims and message sends reconcile ambiguous receipts from that
+    // operation's indexed history, using the full replay's reducer. Structural
+    // kinds retain the full replay guard for ambiguous IDs.
+    let mut reconciled_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -17574,22 +17656,52 @@ pub fn try_project_simple_replication_tx(
         if repaired {
             continue;
         }
-        if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
+        let graph_neutral = !replay_projects_kind(&claim.kind);
+        if graph_neutral && reconciled_operations.contains(operation_id) {
             continue;
         }
-        if let Some((stored_digest, _, state)) =
-            operation_tx(transaction, operation_id).map_err(|error| {
+        let stored_operation = operation_tx(transaction, operation_id).map_err(|error| {
+            incremental_claim_error(internal(error), claim, "operation-registry")
+        })?;
+        let conflict = stored_operation.as_ref().is_some_and(|(digest, _, state)| {
+            digest.as_str() != request_digest || state != "active"
+        });
+        // A checkpoint can leave only tombstones, with no operations row. Before
+        // folding either case, inspect only this operation's indexed history:
+        // a structural claim sharing the key needs its projections replayed too.
+        if conflict || (graph_neutral && stored_operation.is_none()) {
+            let neutral_history = graph_neutral && (|| -> rusqlite::Result<bool> {
+                let mut statement = transaction.prepare_cached(
+                    "SELECT kind FROM claims INDEXED BY claims_operation_index
+                     WHERE json_extract(body, '$._operation.id')=?1
+                     UNION ALL
+                     SELECT kind FROM checkpoint_claims INDEXED BY checkpoint_claims_operation
+                     WHERE operation_id=?1 AND operation_id IS NOT NULL",
+                )?;
+                let mut rows = statement.query([operation_id])?;
+                while let Some(row) = rows.next()? {
+                    let kind = row.get_ref(0)?;
+                    let kind = kind.as_str().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, kind.data_type(), Box::new(error))
+                    })?;
+                    if replay_projects_kind(kind) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })().map_err(|error| {
                 incremental_claim_error(internal(error), claim, "operation-registry")
-            })?
-            && (stored_digest != request_digest || state != "active")
-        {
-            if claim.kind == "message.sent" {
+            })?;
+            if neutral_history {
                 repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
                     incremental_claim_error(internal(error), claim, "operation-registry")
                 })?;
-                reconciled_message_operations.insert(operation_id.to_owned());
+                reconciled_operations.insert(operation_id.to_owned());
                 continue;
             }
+            let (stored_digest, state) = stored_operation.as_ref()
+                .map(|(digest, _, state)| (digest.as_str(), state.as_str()))
+                .unwrap_or(("", "missing"));
             crate::profile::note("replay: operation-conflict");
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason: "operation-conflict",
@@ -21773,7 +21885,7 @@ pub fn terminalize_generation_steps_tx(
             &[],
             batch_id,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(claim.id);
     }
     Ok(claim_ids)
@@ -22243,7 +22355,7 @@ pub fn cancel_descendant_mission_runs_tx(
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(run_claim.id);
         let generation_claim = append_claim_tx(
             transaction,
@@ -22255,7 +22367,7 @@ pub fn cancel_descendant_mission_runs_tx(
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         claim_ids.push(generation_claim.id);
     }
     Ok(claim_ids)
@@ -22416,6 +22528,11 @@ pub fn mission_run_view_and_definition_tx(
     view.outcome = mission_run_outcome_tx(connection, &view)?;
     if presentation {
         view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
+        if !view.steps.is_empty()
+            && let Some(mission) = definitions.of(connection, &view.generation)?
+        {
+            view.programs = program_run_views_tx(connection, &view, mission)?;
+        }
     }
     Ok((view, mission))
 }
@@ -22526,6 +22643,7 @@ pub fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         steps: Vec::new(),
         loops: Vec::new(),
+        programs: Vec::new(),
         stuck_gates: Vec::new(),
         scheduler_fault: None,
     })
@@ -22686,6 +22804,126 @@ pub fn loop_run_views_tx(
         });
     }
     Ok(loops)
+}
+
+/// Each program step of `run` with its current attempt's journal and open program fault.
+pub fn program_run_views_tx(
+    connection: &Connection,
+    run: &MissionRunView,
+    mission: &MissionSpec,
+) -> rusqlite::Result<Vec<ProgramRunView>> {
+    let mut programs = Vec::new();
+    for step in &run.steps {
+        let Some(program) = crate::mission::find_step(mission, &step.step).and_then(|spec| spec.program.as_ref())
+        else {
+            continue;
+        };
+        let mut fault = None;
+        for scope in [program_journal::HOST_FAULT_SCOPE, program_journal::STALLED_FAULT_SCOPE] {
+            if let Some(reason) = reconcile_fault_tx(connection, &step.subject, scope)? {
+                fault = Some(ProgramFault { scope: scope.to_owned(), reason });
+                break;
+            }
+        }
+        programs.push(ProgramRunView {
+            step_run: step.subject.clone(),
+            path: step.step.clone(),
+            attempt: step.attempt,
+            bundle_hash: program.bundle_hash.clone(),
+            stalled_after_ms: program_journal::stalled_after_ms(program),
+            journal: program_journal_tx(connection, &step.subject, step.attempt, program_journal::VIEW_ENTRIES)?,
+            fault,
+        });
+    }
+    Ok(programs)
+}
+
+/// One attempt's journal of a program step from the step's newest `limit` entries. Every entry of
+/// an earlier attempt is older than the current attempt's first, so the page holds the current
+/// attempt's newest entries.
+pub fn program_journal_tx(
+    connection: &Connection,
+    step: &str,
+    attempt: u32,
+    limit: usize,
+) -> rusqlite::Result<ProgramJournal> {
+    let page = claims_for_subject_kind_at_tx(connection, step, program_journal::JOURNAL_KIND, None, true, limit)?;
+    let current = |claim: &&ClaimRecord| claim.body.pointer("/fields/attempt").and_then(Value::as_u64) == Some(u64::from(attempt));
+    let truncated = page.next_cursor.is_some() && page.claims.last().is_some_and(|claim| current(&claim));
+    Ok(ProgramJournal::fold(
+        page.claims
+            .iter()
+            .filter(current)
+            .map(|claim| (claim.body.get("fields").unwrap_or(&claim.body), claim.accepted_at_unix_ms)),
+        truncated,
+    ))
+}
+
+/// Bounded claim history for one subject/kind projection, backed by the composite index.
+pub fn claims_for_subject_kind_at_tx(
+    connection: &Connection,
+    subject: &str,
+    kind: &str,
+    before_index: Option<u64>,
+    descending: bool,
+    limit: usize,
+) -> rusqlite::Result<ClaimsPage> {
+    let order = if descending { "DESC" } else { "ASC" };
+    let query = format!(
+        "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+         FROM claims WHERE subject=?1 AND kind=?2 AND (?3 IS NULL OR store_index<?3)
+         ORDER BY store_index {order} LIMIT ?4"
+    );
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfe84a7d32f14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
+    let rows = statement.query_map(
+        params![subject, kind, before_index, limit.saturating_add(1) as u64],
+        claim_from_row,
+    )?;
+    let mut claims = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let next_cursor = if claims.len() > limit {
+        claims.pop();
+        claims.last().map(|claim| claim.store_index)
+    } else {
+        None
+    };
+    Ok(ClaimsPage {
+        claims,
+        next_cursor,
+    })
+}
+
+/// The reason for an open fault on `subject` in `scope`, if the latest record is a fault.
+pub fn reconcile_fault_tx(
+    connection: &Connection,
+    subject: &str,
+    scope: &str,
+) -> rusqlite::Result<Option<String>> {
+    let body: Option<String> = connection
+        .query_row(
+            /* sqlite-large-value: allow-for-now lv-hb42a56e4a272 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT body FROM claims WHERE subject=?1 AND kind='reconcile.fault'
+                   AND json_extract(body, '$.fields.scope')=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+            ),
+            params![subject, scope],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let body: Value = serde_json::from_str(&body)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(body.len(), rusqlite::types::Type::Text, Box::new(error)))?;
+    let fields = body.get("fields").unwrap_or(&body);
+    Ok(
+        (fields.get("status").and_then(Value::as_str) == Some("faulted")).then(|| {
+            fields
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        }),
+    )
 }
 
 pub fn revision_proposal_view_tx(
@@ -22948,6 +23186,8 @@ pub fn append_claim_with_subject_fences(
 }
 
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
+/// Writes that belong with a newly appended claim, in its transaction; a replay runs none.
+pub type ClaimFollowUp<'a> = dyn Fn(&Transaction<'_>, &ClaimRecord) -> Result<(), FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22963,6 +23203,8 @@ pub struct ClaimCommitContext<'a> {
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Dedicated client operations publish a native receipt in the same transaction.
     pub client_operation: bool,
+    /// Only a replicated claim (written in the writer's batch) can carry follow-up writes.
+    pub then: Option<&'a ClaimFollowUp<'a>>,
     /// Write the claim as a build from before its kind became a local observation did: a
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
@@ -23065,12 +23307,18 @@ pub fn append_claim_with_commit_context(
             || local_code(input)
             || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
         let connection = graph.readers.get();
         admission(&connection)?;
         let input = identities::normalize_claim_input(&connection, input)?;
         return append_local_observation_fenced(graph, &input, event_runtime);
     }
     if latest_retention(&input.kind) {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
         let connection = graph.readers.get();
         admission(&connection)?;
         let input = identities::normalize_claim_input(&connection, input)?;
@@ -23375,6 +23623,7 @@ pub fn append_claim_with_commit_context(
                 &body,
                 &predecessors,
                 None,
+                false,
             )
             .map_err(claim_append_error)?;
             if operation.is_some() {
@@ -23384,6 +23633,9 @@ pub fn append_claim_with_commit_context(
             })()?;
             if context.client_operation && outcome.1 {
                 crate::pairing::append_operation_receipt_tx(transaction, &outcome.0).map_err(internal)?;
+            }
+            if outcome.1 && let Some(then) = context.then {
+                then(transaction, &outcome.0)?;
             }
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;

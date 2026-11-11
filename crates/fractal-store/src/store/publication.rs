@@ -9,6 +9,8 @@ pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), FractalError> + S
 pub struct CommitChecks<'a> {
     pub owned: Option<&'a owned_sets::Options>,
     pub guard: Option<&'a Guard>,
+    /// `--force --reason`: accept ad hoc changes to owned-set members as source debt.
+    pub force: Option<&'a str>,
 }
 
 pub struct Check {

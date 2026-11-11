@@ -32,7 +32,7 @@ pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyh
             .is_none())
 }
 
-/// A batch settles when every member is delivered/read or terminally withdrawn (closed).
+/// A batch settles when every member is delivered/read or terminally withdrawn (closed/expired).
 /// Read outside recovery locks; withdrawal never manufactures a delivery receipt.
 pub fn recovery_batch_settled(
     store: &Store,
@@ -42,6 +42,9 @@ pub fn recovery_batch_settled(
         return Ok(false);
     }
     for subject in batch {
+        if store.message_expiry(subject)?.is_some_and(|expiry| !expiry.superseded) {
+            continue;
+        }
         let settled = if !crate::store::messages_shard::graph_sent(store, subject)? {
             mailbox_reads::lifecycle_step(store, subject, "message.delivered")?.is_some()
                 || mailbox_reads::lifecycle_step(store, subject, "message.read")?.is_some()
@@ -452,8 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn native_poll_drains_twelve_in_settled_batches_and_rejects_stale_floors() {
-        for withdraw in [false, true] {
+    fn native_poll_drains_twelve_in_settled_batches_including_expiry_and_rejects_stale_floors() {
+        for phase in ["delivered", "closed", "expired"] {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("graph.db");
         let store = Store::open(&database, "node").unwrap();
@@ -493,15 +496,17 @@ mod tests {
                     if position == 0 { "message.staged" } else { "message.delivered" }, seat).unwrap();
             }
             assert!(poll().is_empty(), "a staged member must block the next batch");
-            let phase = if withdraw { "closed" } else { "delivered" };
+            let withdraw = phase != "delivered";
             store.append_claim(&ClaimInput {
                 subject: expected.first().unwrap().clone(), kind: format!("message.{phase}"),
                 actor: Some(if withdraw { "daemon/runtime" } else { seat }.into()),
-                fields: BTreeMap::from([("status".into(), json!(phase))]),
+                fields: if phase == "expired" {
+                    BTreeMap::from([("status".into(), json!(phase)), ("reason".into(), json!("cutoff-uncertain-attempt"))])
+                } else { BTreeMap::from([("status".into(), json!(phase))]) },
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
             if withdraw {
-                assert_eq!(store.message(expected.first().unwrap()).unwrap().unwrap().status, "closed");
+                assert_eq!(store.message(expected.first().unwrap()).unwrap().unwrap().status, phase);
                 assert!(crate::store::message_marks::recorded_at(
                     &store.readers.get(), expected.first().unwrap(), &["message.delivered", "message.read"], None,
                 ).unwrap().is_none());

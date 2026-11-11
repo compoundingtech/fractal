@@ -70,6 +70,9 @@ merge-group/main/manual runs are preserved. Its token has only Actions write and
 Cancellation is asynchronous: the request summary is not terminal cancellation proof,
 and scheduling can start a legacy job before the observer runs. The one-day observation
 records actual build/test job starts as well as accepted requests and final cancellations.
+A cancellation HTTP 409 triggers one identity-checked metadata read: an already completed run
+is successful admission (including skipped runs); a still-active or unqualified run remains an
+explicit conflict failure. The observer does not retry the cancellation or force-cancel.
 GitHub does not emit the requested activity for reruns; do not rerun drafts.
 
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run retains
@@ -244,6 +247,8 @@ or restoring build archives. When both entries exist, the cache job stops after 
 A miss is flagged as P0 and fills the missing entries with builds only: selected test
 executables, Clippy artifacts, the integration binary, the Genie shell, or the isolation
 archive and VM driver. The published fleet baseline is downloaded rather than compiled.
+Warmers reuse the setup checkout before probing and do not check out again afterward:
+the shared `withCompatArchives` download must survive until the historical baseline is read.
 These cache jobs do not repeat workspace tests or the isolation VM; the separately selected
 post-merge proof jobs provide hosted execution when queue evidence requires it. The
 TypeScript dependency cache is also kept on main without repeating its tests.

@@ -1723,6 +1723,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "retire-incarnation-mismatch",
   "invalid-custody-successor",
   "custody-pending",
+  "set-managed-subject",
   "attention-migrated",
   "arrangement-exists",
   "arrangement-folder-exists",
@@ -2291,7 +2292,7 @@ export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "sent_at": Timestamp,
   "session_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
-  "state": Schema.Literals(["sent","delivered","read","closed"]),
+  "state": Schema.Literals(["sent","delivered","read","closed","expired"]),
   /** Present when the recipient's seat runs on another host that keeps its receipts: whether that host answered. Absent when this host's own records are the whole answer. */
   "status_from": optionalKey(MessageStatusFrom),
   "tags": optionalKey(Schema.Array(Schema.String).check(Schema.isUnique())),
@@ -2453,6 +2454,37 @@ export const MissionStepEta = /*#__PURE__*/ (() => Schema.Struct({
 export type MissionStepEta = typeof MissionStepEta.Type
 export type MissionStepEtaEncoded = typeof MissionStepEta.Encoded
 
+export const MissionStepProgramEntry = /*#__PURE__*/ (() => Schema.Struct({
+  /** The child mission run or ask subject the key waits on. */
+  "child": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The child mission run or ask subject the key waits on." }),
+  "ended_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** The typed failure with its `_tag` and fields, cut to 300 characters. */
+  "error": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The typed failure with its `_tag` and fields, cut to 300 characters." }),
+  "key": Schema.String,
+  /** The effect's duration. */
+  "ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "The effect's duration." }),
+  "started_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "status": openEnum(["started","completed","failed"])
+}).annotate({ identifier: "MissionStepProgramEntry" }))()
+export type MissionStepProgramEntry = typeof MissionStepProgramEntry.Type
+export type MissionStepProgramEntryEncoded = typeof MissionStepProgramEntry.Encoded
+
+export const MissionStepProgram = /*#__PURE__*/ (() => Schema.Struct({
+  /** Each key's latest entry in this attempt, in the order the keys first appear; the newest 200 entries are read. */
+  "entries": Schema.Array(MissionStepProgramEntry).annotate({ description: "Each key's latest entry in this attempt, in the order the keys first appear; the newest 200 entries are read." }),
+  /** The open `program/host` or `program/stalled` fault on the step. */
+  "fault": Schema.OptionFromOptionalNullOr(Schema.Struct({ "reason": Schema.String, "scope": Schema.String }), NULL_NONE).annotate({ description: "The open `program/host` or `program/stalled` fault on the step." }),
+  "last_entry_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** The innermost open key: the most recently started key without a result. */
+  "open_key": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The innermost open key: the most recently started key without a result." }),
+  /** How long the journal may go without a new entry before the step raises `program/stalled`. */
+  "stalled_after_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({ description: "How long the journal may go without a new entry before the step raises `program/stalled`." }),
+  /** Older journal entries exist beyond the ones read. */
+  "truncated": Schema.Boolean.annotate({ description: "Older journal entries exist beyond the ones read." })
+}).annotate({ identifier: "MissionStepProgram" }))()
+export type MissionStepProgram = typeof MissionStepProgram.Type
+export type MissionStepProgramEncoded = typeof MissionStepProgram.Encoded
+
 export const MissionStepTransition = /*#__PURE__*/ (() => Schema.Struct({
   /** Unix milliseconds. */
   "at": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Unix milliseconds." }),
@@ -2545,6 +2577,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   /** When st last nudged this held step's holder for idling with nothing set to wake it. */
   "nudged_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When st last nudged this held step's holder for idling with nothing set to wake it." }),
   "path": Schema.String,
+  /** Mission detail only, on the runs it enriches: a program step's current attempt journal. Absent for other steps and on older daemons. */
+  "program": optionalKey(MissionStepProgram),
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "since": Timestamp,
@@ -2990,6 +3024,19 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonAnswerRecord = typeof PersonAnswerRecord.Type
 export type PersonAnswerRecordEncoded = typeof PersonAnswerRecord.Encoded
 
+export const WorkProgram = /*#__PURE__*/ (() => Schema.Struct({
+  /** The child mission run or ask subject the open key waits on. */
+  "child": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The child mission run or ask subject the open key waits on." }),
+  "last_entry_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
+  /** The most recently started journal key without a result: the innermost open key. */
+  "open_key": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The most recently started journal key without a result: the innermost open key." }),
+  "open_since_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
+  /** How long the journal may go without a new entry before the step has made no progress. */
+  "stalled_after_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1))).annotate({ description: "How long the journal may go without a new entry before the step has made no progress." })
+}).annotate({ identifier: "WorkProgram" }))()
+export type WorkProgram = typeof WorkProgram.Type
+export type WorkProgramEncoded = typeof WorkProgram.Encoded
+
 export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
   "assigned_to": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -3005,7 +3052,16 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "execution_started_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE),
   /** Accumulated execution wait against this attempt's wait budget. */
   "execution_waited_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1)))).annotate({ description: "Accumulated execution wait against this attempt's wait budget." }),
-  "gate_kind": Schema.OptionFromOptionalNullOr(Schema.Literals(["watch","predicate","command","llm","human","mixed","run"]), NULL_NONE),
+  "gate_kind": Schema.OptionFromOptionalNullOr(Schema.Literals([
+  "watch",
+  "predicate",
+  "command",
+  "llm",
+  "human",
+  "mixed",
+  "run",
+  "program"
+]), NULL_NONE),
   "generation_id": Id,
   "goals": Schema.Array(Schema.String),
   "id": Id,
@@ -3020,6 +3076,8 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "path": Schema.String,
   /** Responses to the asks this attempt made, or a person ask's own response. */
   "person_answers": optionalKey(Schema.Array(PersonAnswerRecord)).annotate({ description: "Responses to the asks this attempt made, or a person ask's own response." }),
+  /** A program step's innermost open journal key and journal timing; null for other work. */
+  "program": Schema.OptionFromOptionalNullOr(WorkProgram, NULL_NONE).annotate({ description: "A program step's innermost open journal key and journal timing; null for other work." }),
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),

@@ -872,11 +872,50 @@ pub struct StepSpec {
     /// completes and fails when it fails or is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run: Option<String>,
+    /// The program bundle this agentless step runs (docs/st3/program-engine.md). The daemon's
+    /// program engine owns the step's outcome. Omitted when absent, so other steps hash as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
     pub gates: Vec<GateSpec>,
     pub nested_mission: Option<Box<MissionSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
+/// hash is part of the step's definition, so a mission revision binds exactly one program. The
+/// field is named `bundle_hash` so publishing the declaration promotes the stored blob and every
+/// replica receives it with the declaration; `bundle` is the author's path, kept as provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgramSpec {
+    pub bundle: String,
+    pub bundle_hash: String,
+    /// How long the program may go without a new journal entry before its run reports it stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+}
+
+impl MissionSpec {
+    /// Every program this mission declares, with its step's path, including nested missions and
+    /// loop rounds.
+    pub fn programs(&self) -> Vec<(&str, &ProgramSpec)> {
+        let mut programs = Vec::new();
+        for step in self.steps.values() {
+            if let Some(program) = &step.program {
+                programs.push((step.path.as_str(), program));
+            }
+            if let Some(nested) = &step.nested_mission {
+                programs.extend(nested.programs());
+            }
+            if let Some(loop_spec) = &step.loop_spec {
+                for mission in [Some(&loop_spec.round), loop_spec.on_keep.as_ref(), loop_spec.on_discard.as_ref()].into_iter().flatten() {
+                    programs.extend(mission.programs());
+                }
+            }
+        }
+        programs
+    }
 }
 
 /// How the resource edge was authored. Older stored URI edges predate this discriminator.
@@ -1571,6 +1610,41 @@ pub struct DeclarationDiff {
     pub fields: BTreeSet<String>,
 }
 
+/// An ad hoc change to a member of an owned set, accepted only with `--force --reason`
+/// (`store::owned_sets`). It stays open while the set revision it diverged from is selected;
+/// the next publication of that set closes it and reports it here as reverted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceDebt {
+    /// The `source.debt.recorded` claim.
+    pub id: String,
+    pub subject: String,
+    /// `apply` for a forced declaration, otherwise the lifecycle verb (`hold`).
+    pub verb: String,
+    pub set: String,
+    /// `owned-set/NAME@REVISION` the change diverged from.
+    pub set_revision: String,
+    pub repository: String,
+    pub r#ref: String,
+    pub sha: String,
+    /// The forced declaration claim, for `apply`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    pub actor: Option<String>,
+    pub reason: String,
+    /// Changed JSON pointers of the forced declaration against the set's.
+    #[serde(default)]
+    pub fields: BTreeSet<String>,
+    pub recorded_at: String,
+    /// In a publication report: `reverted` when the new source differs from the forced
+    /// declaration, `adopted` when the source now declares it, `closed` for runtime verbs
+    /// (`hold`, `suspend`, `resume`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The `source.debt.closed` claim and the set revision that wrote it, once closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionResponse {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1782,6 +1856,13 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
+    /// The bytes of each program bundle the intent declares, base64 by sha256 (the
+    /// `ProgramSpec::bundle_hash`). The daemon verifies and stores them before it publishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
+    /// Accept an ad hoc change to an owned-set member and record it as source debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1796,6 +1877,12 @@ pub struct ApplyResponse {
     pub resolved_kdl: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<PlannedAction>,
+    /// Source debt this forced publication recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_recorded: Vec<SourceDebt>,
+    /// Open source debt this set publication closed, with each change it reverted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_reverted: Vec<SourceDebt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2987,6 +3074,9 @@ pub struct MissionRunView {
     pub steps: Vec<StepRunView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loops: Vec<LoopRunView>,
+    /// Each program step's current journal, computed for presentation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<crate::program_journal::ProgramRunView>,
     /// Unresolved exit-code field gates on terminal execs, computed for mission details.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stuck_gates: Vec<String>,
@@ -3628,6 +3718,9 @@ pub struct MissionRunReportView {
 pub struct MissionRetireRequest {
     pub actor: String,
     pub idempotency_key: String,
+    /// Retire a member of an `enforce` owned set ad hoc, recording source debt with this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
