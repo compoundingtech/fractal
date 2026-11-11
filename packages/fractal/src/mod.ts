@@ -319,6 +319,7 @@ const AgentSchemaFields = Schema.Struct({
   name: Schema.optionalKey(Text),
   description: Schema.optionalKey(Text),
   principal: Schema.optionalKey(PersonReferenceSchema),
+  lifecycle: Schema.optionalKey(Schema.Literal('standing', 'owner', 'bounded')),
   ...DeclaredAdmissionFields,
   host: Schema.optionalKey(Text),
   workspace: Schema.optionalKey(Text),
@@ -2521,6 +2522,7 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
     ...optionalChild({ name: 'name', value: a.name }),
     ...optionalChild({ name: 'description', value: a.description }),
     ...optionalChild({ name: 'principal', value: a.principal?.subject }),
+    ...optionalChild({ name: 'lifecycle', value: a.lifecycle }),
     ...declaredAdmissionNodes(a),
     ...optionalChild({ name: 'host', value: a.host }),
   ]
