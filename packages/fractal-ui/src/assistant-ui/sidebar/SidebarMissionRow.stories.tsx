@@ -119,14 +119,16 @@ function MissionParentStory() {
 }
 
 
-function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; readonly phone?: boolean }) {
+function MissionRowsStory({ scheme, phone = false, queueLifecycle = false }: { readonly scheme: Scheme; readonly phone?: boolean; readonly queueLifecycle?: boolean }) {
+  const [drained, setDrained] = React.useState(false)
   return <main data-testid="mission-rows" data-scheme={scheme} {...stylex.props(styles.root, phone && styles.phoneFrame, scheme === 'light' && lightTheme)}>
     <NarrowLayoutContext.Provider value={phone}><ThemePortal>
       <span aria-hidden="true" data-tone-probe="" {...stylex.props(styles.toneProbe)} />
+      {queueLifecycle && <button type="button" onClick={() => setDrained(value => !value)}>{drained ? 'Restore queue' : 'Drain queue'}</button>}
       <div data-host="designed" {...stylex.props(styles.column, phone && styles.phoneColumn)}>
         {folders.map(folder => <section key={folder.label} aria-label={`Project ${folder.label}`} data-folder={folder.label} {...stylex.props(styles.folder)}>
           <h3 {...stylex.props(styles.heading)}>{folder.label}</h3>
-          {folder.rows.map(item => <MilestoneAgentRow key={item.ref} row={item} now={storyNow} />)}
+          {folder.rows.map(item => <MilestoneAgentRow key={item.ref} row={drained && item.title === 'Port the upstream sidebar' && item.missionContext?._tag === 'Mission' ? { ...item, missionContext: { ...item.missionContext, queued: [] } } : item} now={storyNow} />)}
         </section>)}
       </div>
       {phone && <MissionParentStory />}
@@ -329,6 +331,7 @@ const queuedDialog = () => document.querySelector<HTMLElement>('[role="dialog"][
 
 /** "+N" opens an accessible dialog popover on press, never on hover; Escape closes it and returns focus. Ends open for the a11y check. */
 const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
+  const drain = within(canvasElement).getByRole('button', { name: 'Drain queue' })
   const trigger = queuedTrigger(canvasElement)
   await expect(trigger).toHaveTextContent('+2')
   await expect(trigger).toHaveAttribute('aria-expanded', 'false')
@@ -381,8 +384,21 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(queuedDialog()).toBeNull())
   await waitFor(() => expect(trigger).toHaveFocus())
-  // Keyboard opens it too; leave it open so the a11y check sees the popover.
+  // Keyboard opens it too, before a live-data update removes the open trigger.
   await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(queuedDialog()).toBeVisible())
+  // Invoke the state update without an outside pointer press that would dismiss the dialog first.
+  drain.click()
+  await waitFor(() => expect(queuedDialog()).toBeNull())
+  await waitFor(() => expect(missionRow.querySelector('[data-mission-trigger]')).toBeNull())
+  await userEvent.unhover(missionRow)
+  await userEvent.hover(missionRow)
+  if (!window.matchMedia(touchPointerQuery).matches) {
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).not.toBeNull())
+  }
+  within(canvasElement).getByRole('button', { name: 'Restore queue' }).click()
+  const restored = await waitFor(() => queuedTrigger(canvasElement))
+  await userEvent.click(restored)
   await waitFor(() => expect(queuedDialog()).toBeVisible())
 }
 
@@ -433,7 +449,7 @@ export const OpensMission: Story = {
   },
 }
 
-export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed +1 and +2 mission queues prove popover geometry, keyboard focus, Escape and hover-free disclosure; catalog queues vary with work.' } }, play: queuedPlay }
+export const QueuedMissions: Story = { tags: ['critical'], name: 'Queued missions · "+N" popover', parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed +1 and +2 mission queues prove popover geometry, keyboard focus, Escape, hover-free disclosure and preview recovery when live data drains an open queue; catalog queues vary with work.' } }, render: ({ scheme }) => <MissionRowsStory scheme={scheme} queueLifecycle />, play: queuedPlay }
 export const QueuedMissionsLight: Story = { ...QueuedMissions, name: 'Queued missions · "+N" popover · light', args: { scheme: 'light' } }
 
 const etaAsOf = storyNow - 120_000

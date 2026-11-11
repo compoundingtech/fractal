@@ -81,7 +81,7 @@ export function SidebarMissionLine({ mission, info = live, touch = false, now, f
   const adHoc = isAdHocMissionSlug(slug)
   const adHocText = adHoc && step._tag !== 'Waiting' && !titleAbove ? mission.title : undefined
   const triggerSlot = (mark: boolean) => <span data-line2-slot="mission" data-mission-info={info._tag.toLowerCase()} data-mission-updated-at={info._tag !== 'Live' ? info.updatedAt : undefined} {...stylex.props(styles.missionSlot, touch && styles.missionSlotTouch, muted && styles.mutedInk)}>
-    <MissionInfoTrigger mission={mission} adHoc={adHoc} mark={mark} info={info} queued={queued} touch={touch} now={now} onOpenChange={onOverlayOpenChange} />
+    <MissionInfoTrigger key={mission.id} mission={mission} adHoc={adHoc} mark={mark} info={info} queued={queued} touch={touch} now={now} onOpenChange={onOverlayOpenChange} />
   </span>
   const mainMark = !muted && !adHoc && mission.progress._tag === 'Known'
   const main = <>
@@ -138,11 +138,19 @@ const queuedNoun = (count: number) => count === 1 ? 'mission' : 'missions'
  * the queue and, for retained info, why it is muted.
  */
 function MissionInfoTrigger({ mission, adHoc, mark, info, queued, touch, now, onOpenChange }: { readonly mission: Mission; readonly adHoc: boolean; readonly mark: boolean; readonly info: SidebarMissionInfo; readonly queued: Mission['queued']; readonly touch: boolean; readonly now: number | undefined; readonly onOpenChange?: (open: boolean) => void }) {
+  const lifecycle = React.useRef({ open: false, onOpenChange })
+  lifecycle.current.onOpenChange = onOpenChange
+  React.useEffect(() => () => {
+    if (lifecycle.current.open) lifecycle.current.onOpenChange?.(false)
+  }, [])
   const retained = info._tag !== 'Live'
   const hasProgress = mark && !adHoc && mission.progress._tag === 'Known'
   const clock = React.useMemo(() => now === undefined ? undefined : fixedClock(now), [now])
   const body = <MissionInfoBody info={info} queued={queued} />
-  return <DialogTrigger onOpenChange={onOpenChange}>
+  return <DialogTrigger onOpenChange={open => {
+    lifecycle.current.open = open
+    onOpenChange?.(open)
+  }}>
     <Button data-mission-trigger={retained ? 'info' : 'queued'} data-queued-missions={queued.length > 0 ? queued.length : undefined} {...stylex.props(styles.trigger, touch && styles.triggerTouch)}>
       {mark && <MissionProgressMark progress={adHoc ? { _tag: 'Unknown' } : mission.progress} retained={retained} />}
       {queued.length > 0 && <span data-queued-count={queued.length} {...stylex.props(styles.count)}>{hasProgress && <VisuallyHidden>, </VisuallyHidden>}+{queued.length}<VisuallyHidden> more {queuedNoun(queued.length)} queued</VisuallyHidden></span>}

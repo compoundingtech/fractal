@@ -37,6 +37,12 @@ export const AgentRowActions = (props: AgentRowActionsProps) => {
   const touch = useTouchLayout()
   const [menuOpen, setMenuOpen] = React.useState(false)
   const [detailsOpen, setDetailsOpen] = React.useState(false)
+  const lifecycle = React.useRef({ menuOpen, detailsOpen, onMenuOpenChange: props.onMenuOpenChange, onDetailsOpenChange: props.onDetailsOpenChange })
+  lifecycle.current = { menuOpen, detailsOpen, onMenuOpenChange: props.onMenuOpenChange, onDetailsOpenChange: props.onDetailsOpenChange }
+  React.useEffect(() => () => {
+    if (lifecycle.current.menuOpen) lifecycle.current.onMenuOpenChange?.(false)
+    if (lifecycle.current.detailsOpen) lifecycle.current.onDetailsOpenChange?.(false)
+  }, [])
   const changeDetailsOpen = (open: boolean) => {
     setDetailsOpen(open)
     props.onDetailsOpenChange?.(open)
