@@ -305,6 +305,21 @@ class ReleaseNotes(unittest.TestCase):
         self.assertFalse(any(command[1] == 'show' and ':release-notes/' in command[-1]
                              for command in commands))
 
+    def test_batch_intentionally_includes_git_quoted_fragment_names(self):
+        # NUL-delimited tree paths fix the old silent omission of quoted names.
+        names = ['café', 'double"quote', 'back\\slash', 'tab\tname', 'line\nname']
+        for name in names:
+            self.add_fragment(name)
+        source = self.commit('Fragments with Git-quoted names')
+        expected = {f'release-notes/{name}.json': fragment() for name in names}
+        self.assertEqual(
+            {path: json.loads(content) for path, content in fragment_texts(self.repo, source)},
+            expected)
+        self.write('release-notes/café.json', '{')
+        invalid = self.commit('Invalid Git-quoted historical fragment')
+        with self.assertRaisesRegex(ImpactError, 'release-notes/café.json: invalid JSON'):
+            collect(self.repo, source, invalid)
+
     def test_batch_preserves_invalid_json_diagnostic_and_validation_order(self):
         self.write('release-notes/z.json', '{}')
         self.write('release-notes/a.json', '{\r\n')
