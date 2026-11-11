@@ -175,7 +175,7 @@ fn attachment_budget_product(remote: bool, bases_first: bool, budget: Duration) 
         pairs += work.pair_inserts;
         candidates += work.candidates;
         completions += work.completions;
-        assert!(slices<=finite_bound, "one-unit attachment maintenance failed to finish");
+        assert!(slices<=finite_bound, "attachment_budget_product exceeded {finite_bound} slices");
         if done { break; }
     }
     assert_eq!(pairs, BASES*TRANSITIONS, "every compatible base/transition pair must attach exactly once");
@@ -493,7 +493,7 @@ fn invalid_attachment_candidates_each_consume_a_zero_duration_unit() {
         completions += work.completions;
         if complete { done=true; break; }
     }
-    assert!(done);
+    assert!(done, "invalid_attachment_candidates_each_consume_a_zero_duration_unit exceeded 128 slices");
     assert_eq!(candidates, 23, "invalid candidates escaped shared work accounting");
     assert_eq!(completions, 1, "empty partition completion must be its own unit");
     authority::subject_ready(&store.readers.get(), SUBJECT).unwrap();
@@ -529,7 +529,7 @@ fn late_opposite_claim_attaches_after_an_older_task_captured_its_high_water() {
     for _ in 0..128 {
         if attachment_slice(&store, Duration::ZERO).0 { done=true; break; }
     }
-    assert!(done);
+    assert!(done, "late_opposite_claim_attaches_after_an_older_task_captured_its_high_water exceeded 128 slices");
     let attached: bool = store.readers.get().query_row(
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_authority WHERE claim_id=?1 AND base_claim_id=?2)",
         params![policy.id,late.id], |row| row.get(0),
@@ -545,9 +545,12 @@ fn trimming_an_attachment_owner_and_opposite_mid_task_does_not_restore_stale_pai
     drain_authority(&store);
     attachment_install_counter(&store.connection.write());
     let transitions = attachment_append_group(&store, false, 5);
+    let mut advanced = false;
     for _ in 0..100 {
-        if attachment_slice(&store, Duration::ZERO).1.candidates>0 { break; }
+        if attachment_slice(&store, Duration::ZERO).1.candidates>0 { advanced=true; break; }
     }
+    assert!(advanced,
+        "trimming_an_attachment_owner_and_opposite_mid_task_does_not_restore_stale_pairs did not reach candidate work within 100 slices");
     // Raw trim is a real demotion path: retire an owning transition and an
     // opposite base while other tasks still hold their fixed candidate bounds.
     {

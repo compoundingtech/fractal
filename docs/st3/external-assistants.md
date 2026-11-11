@@ -233,6 +233,15 @@ create an authentication oracle. Operators can see the cause in trusted-local
 authorization denial. Clean-grant inspection omits optional cleared-conflict
 explanations for other subjects whose authentication is pending, rather than
 denying inspection or weakening an established conflict witness.
+Repeated maintenance must use `Store::advance_assistant_grant_authority_backfill`,
+which prepares and generation-checks the real sealed membership view. The raw
+connection slice used once at startup cannot prepare that view: a stale durable
+`applied_generation` intentionally blocks membership-dependent queue work until
+the Store driver supplies verified membership, even for an empty snapshot.
+Raw-connection migration fixtures use the test-support
+`prepare_membership_for_test` adapter to run the same sealed fold and production
+window preparation/application transactionally, without invoking a Store schema
+upgrade or changing the fixture's baseline storage version and claims indexes.
 
 After the authority backfill completes, `fractal doctor` lists every pending
 unauthenticated, unmarked local grant claim ID under the claim-store check with

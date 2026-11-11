@@ -194,7 +194,14 @@ fn assert_fresh_backfill(store: &Store, expected_windows: &Windows, context: &st
         /* sqlite-large-value: allow-for-now lv-h268eaf45d33c owner=smallclaims::store::assistant_grant_membership_property_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE assistant_grant_membership_state SET applied_generation=?1 WHERE id=1",
         [fleet_generation(&transaction).unwrap()],
     ).unwrap();
-    while !authority::backfill_slice(&transaction, Duration::from_secs(1)).unwrap() {}
+    let mut completed = false;
+    for _ in 0..4096 {
+        if authority::backfill_slice(&transaction, Duration::from_secs(1)).unwrap() {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "assert_fresh_backfill exceeded 4096 slices: {context}");
     assert_eq!(actual, projection_rows(&transaction),
         "authority, pending authentication, or effective rows differ from fresh backfill: {context}");
     transaction.rollback().unwrap();
@@ -608,11 +615,14 @@ fn repeated_future_floor_window_additions_do_not_reauthenticate_or_fence_establi
         authority::take_authentication_claims();
         receive_without_authority_maintenance(&target, &export(&sponsor, &target));
         assert_established_grants_ready(&target, &grants);
-        loop {
+        let mut completed = false;
+        for _ in 0..4096 {
             let complete = target.advance_assistant_grant_authority_backfill().unwrap();
             assert_established_grants_ready(&target, &grants);
-            if complete { break; }
+            if complete { completed = true; break; }
         }
+        assert!(completed,
+            "repeated_future_floor_window_additions_do_not_reauthenticate_or_fence_established_history exceeded 4096 slices at admission {index}");
         let fresh_windows = windows(&fleet_membership_tx(&target.readers.get()).unwrap());
         assert_eq!(fresh_windows.len(), 3 + index as usize,
             "future-floor admission failed to add a real window");
@@ -661,11 +671,14 @@ fn membership_retraction_reauthenticates_only_rows_using_the_lost_recorded_key()
     authority::take_authentication_attempts();
     authority::take_authentication_claims();
     receive_without_authority_maintenance(&target, &export(&anchor, &target));
-    loop {
+    let mut completed = false;
+    for _ in 0..4096 {
         let complete = target.advance_assistant_grant_authority_backfill().unwrap();
         assert_established_grants_ready(&target, std::slice::from_ref(&retained_grant));
-        if complete { break; }
+        if complete { completed = true; break; }
     }
+    assert!(completed,
+        "membership_retraction_reauthenticates_only_rows_using_the_lost_recorded_key exceeded 4096 slices");
     // One failed key page followed by end-of-evidence may require more than one
     // authentication call. Record exactly which claims were refreshed below.
     assert!(authority::take_authentication_attempts() > 0);

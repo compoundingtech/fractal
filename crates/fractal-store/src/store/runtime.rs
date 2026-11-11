@@ -896,6 +896,18 @@ mod schema_install_tests {
         use smallclaims::store::assistant_grant_authority as authority;
         use std::time::Duration;
 
+        fn drain_authority(connection: &Connection, phase: &str) {
+            const MAX_SLICES: usize = 128;
+            assert!(authority::prepare_membership_for_test(connection).unwrap(),
+                "{phase}: the fixture's empty sealed membership must fit one preparation page");
+            for _ in 0..MAX_SLICES {
+                if authority::backfill_slice(connection,Duration::from_secs(1)).unwrap() {
+                    return;
+                }
+            }
+            panic!("{phase}: assistant authority did not complete within {MAX_SLICES} raw maintenance slices");
+        }
+
         const OBSOLETE_INDEXES: [&str; 3] = [
             "claims_assistant_v1_principal_index",
             "claims_assistant_v1_principal_expiry_index",
@@ -992,9 +1004,9 @@ mod schema_install_tests {
                         "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
                     ).unwrap();
                 }
-                // The modern constructor completed its empty projection. Model
-                // a pre-projection store instead of mistaking incremental,
-                // subject-fenced dirty work for a global initial backfill.
+                // The modern constructor completed its empty projection. Reset
+                // history readiness to exercise an initial rebuild of retained,
+                // durably local evidence, not incremental subject-fenced work.
                 connection.execute(
                     "DELETE FROM meta WHERE key='assistant_grant_authority_version'
                         OR key LIKE 'assistant_grant_authority_cursor/%'", [],
@@ -1012,7 +1024,23 @@ mod schema_install_tests {
                 // A zero-budget slice makes partial progress without marking it ready.
                 assert!(!authority::backfill_slice(&connection, Duration::ZERO).unwrap());
                 assert!(authority::ready(&connection).is_err());
-                while !authority::backfill_slice(&connection, Duration::from_secs(1)).unwrap() {}
+                // The raw slice cannot prepare a sealed membership snapshot.
+                // A fresh constructor leaves its durable applied generation at
+                // -1. Prepare the real sealed view without a full Store open,
+                // which would independently upgrade the baseline user_version.
+                let applied: i64 = connection.query_row(
+                    "SELECT applied_generation FROM assistant_grant_membership_state WHERE id=1",
+                    [], |row| row.get(0),
+                ).unwrap();
+                let generation: i64 = connection.query_row(
+                    "SELECT value FROM fleet_generation WHERE id=1", [], |row| row.get(0),
+                ).unwrap();
+                assert_ne!(applied,generation,"fixture must retain the missing membership-snapshot prerequisite");
+                drain_authority(&connection,"initial historical backfill");
+                assert_eq!(connection.query_row(
+                    "SELECT applied_generation FROM assistant_grant_membership_state WHERE id=1",
+                    [], |row| row.get::<_,i64>(0),
+                ).unwrap(),generation,"shared production preparation must persist the verified sealed snapshot");
                 authority::ready(&connection).unwrap();
                 assert_eq!(snapshot(&connection), before, "version {version}: raw evidence");
                 assert_eq!(claims_indexes(&connection), indexes_before, "projection must not build or drop raw claims indexes");
@@ -1048,7 +1076,7 @@ mod schema_install_tests {
                 assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
                     .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
                 assert!(!authority::contains(&connection, "active").unwrap());
-                while !authority::backfill_slice(&connection, Duration::from_secs(1)).unwrap() {}
+                drain_authority(&connection,"older-build unsigned revoke reconciliation");
                 assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
                     .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
                 assert!(!authority::contains(&connection, "active").unwrap());
