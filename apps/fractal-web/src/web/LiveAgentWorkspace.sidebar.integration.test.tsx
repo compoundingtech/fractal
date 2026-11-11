@@ -385,7 +385,7 @@ it('reveals a slightly future activity timestamp when only the leaf clock catche
   }
 })
 
-it('reveals a future status boundary in ClockedThreadHeader without rendering the header projection', async () => {
+it('keeps a calm agent\'s status, and its clock, out of ClockedThreadHeader without rendering the header projection', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
   const at = '1970-01-01T00:00:05.500Z'
@@ -398,9 +398,11 @@ it('reveals a future status boundary in ClockedThreadHeader without rendering th
     const header = host.querySelector('section[aria-label="Agent workspace"] header')!
     expect(header).not.toBeNull()
     const count = projectedRows.mock.calls.length
+    // Suspended is calm: no mark beside the title, so no status clock there either, before or after its boundary.
+    expect(header.querySelector('[data-status]')).toBeNull()
     expect(header.querySelector('time')).toBeNull()
     await act(async () => registry.set(now, 6000))
-    expect(header.querySelector('time')?.textContent).toBe('0s')
+    expect(header.querySelector('time')).toBeNull()
     expect(projectedRows).toHaveBeenCalledTimes(count)
   } finally {
     projectedRows.mockRestore()

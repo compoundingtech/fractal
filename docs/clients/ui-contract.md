@@ -156,6 +156,9 @@ Cached calls without an open live prompt never establish that a question is stil
 Mission tabs include current question prompts of agents assigned to that mission;
 Inbox includes all current question prompts. Titles retain a 26-cell budget.
 Counts disappear first when space is tight, then the suffix; activity stays on the left.
+The web sidebar's own tab bar paints the same attention facts with its kit icons and
+tabular count pills, which also show a count of one and a neutral count, and speaks them
+as words; the suffix above stays the terminal's treatment.
 Subject membership indexes are rebuilt on observation updates, not per tab per frame.
 
 Each split has an independent, non-persisted tab-strip view. Wheel right/down over its

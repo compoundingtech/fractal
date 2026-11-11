@@ -707,7 +707,8 @@ async function checkPlainCopy(root:HTMLElement,targets:readonly HTMLElement[]){
   for(const target of targets){const allowed=root.ownerDocument.createElement('span');allowed.textContent=` ${allowedMatched}.`;target.append(allowed);try{assertPlainCopy(root)}finally{allowed.remove()}}
   assertPlainCopy(root)
 }
-const productionTail=`${tailPrefix}Workspace, Subagents, Declared bindings, Missions, Pull requests, CI runs, Reviews, Files touched, History.`
+// Reviews and Declared bindings belong to Resources, not the Details missing-facts tail.
+const productionTail=`${tailPrefix}Workspace, Subagents, Missions, Pull requests, CI runs, Files touched, History.`
 const identityGap='Production phone identity paints a missing fact, a dangling separator or a redundant empty mission'
 /** Identity and meta carry only known facts; `Mission none` paints only when it is the sole Overview fact. */
 function assertProductionIdentity(root:HTMLElement){
@@ -742,12 +743,18 @@ function ProductionPhoneSheet({scheme,children}:{readonly scheme:Args['scheme'];
     </NarrowLayoutContext.Provider></ThemePortal>
   </div>
 }
+/** The production inspector row names Details, Changes and Resources in order; counted tabs append their count. */
+const productionTabs=[/^Details$/,/^Changes(, \d+)?$/,/^Resources(, \d+)?$/]
+function requireProductionInspector(panel:HTMLElement){
+  const names=[...panel.querySelectorAll<HTMLElement>('[role="tab"]')].map(tab=>(tab.getAttribute('aria-label')??tab.textContent??'').trim())
+  requireContract(names.length===productionTabs.length&&names.every((name,index)=>productionTabs[index]!.test(name))&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details, Changes and Resources')
+}
 /** Opens the phone sheet as a user does and waits for the inspector inside it. */
 async function openPhoneSheet(canvasElement:HTMLElement){
   const canvas=within(canvasElement),opener=canvas.getByRole('button',{name:'Agent details'})
   await userEvent.click(opener)
   const sheet=await canvas.findByRole('dialog',{name:'Agent details'}),panel=await within(sheet).findByRole('complementary',{name:'Agent inspector'})
-  await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+  await waitFor(()=>requireProductionInspector(panel))
   return {opener,sheet,panel}
 }
 function ProductionPhoneInspector({ scheme }: Args) {
@@ -1192,7 +1199,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     if(narrow){const opened=await openPhoneSheet(canvasElement);panel=opened.panel;assertSheetClose(opened.sheet)}
     else{
       panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'})
-      await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+      await waitFor(()=>requireProductionInspector(panel))
       requireContract(panel.getBoundingClientRect().height>=899,'Production desktop inspector lost its dock-height layout')
       assertDesktopClose(panel)
     }
@@ -1220,25 +1227,22 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     }
     await checkPlainCopy(panel,whyPanel?[summary,whyPanel]:[summary])
     if(state==='reported'){
-      // A reported subagent opens a plain read-only dialog.
-      const card=[...panel.querySelectorAll<HTMLElement>('button')].find(button=>button.textContent?.includes(ompSubagent.label));requireContract(card,'Missing reported subagent card')
-      await userEvent.click(card)
-      const dialog=await within(doc.body).findByRole('dialog',{name:'Reported resource details'})
-      requireContract(dialog.textContent?.includes("Reported details only; this resource can't be opened from here."),'Subagent dialog lacks its plain read-only line')
-      await checkPlainCopy(dialog,[dialog])
-      assertPlainCopy(panel)
-      const dialogClose=within(dialog).getByRole('button',{name:'Close'})
-      if(narrow){
-        // Measured only once the dialog is open: its Close joins the 44px phone sweep, and a shrunken Close is rejected.
-        requireContract(touchTargets(dialog).includes(dialogClose),'Phone dialog sweep omitted its Close')
-        assertTouch(touchTargets(dialog))
-        const closeStyle=dialogClose.getAttribute('style')
-        try{dialogClose.style.minWidth='0';dialogClose.style.width='24px';dialogClose.style.height='24px';await rejectsCause(touchFloor,()=>assertTouch(touchTargets(dialog)))}
-        finally{if(closeStyle===null)dialogClose.removeAttribute('style');else dialogClose.setAttribute('style',closeStyle)}
-        assertTouch(touchTargets(dialog))
+      // A reported session has no agent target: its complete facts are inline, without a fake open action.
+      const reportedFactShape='Reported subagent facts are missing or interactive'
+      const assertReportedFact=()=>{
+        const row=[...panel.querySelectorAll<HTMLElement>('[data-details-resource-static]')].find(node=>node.querySelector('[data-details-resource-title]')?.textContent===`${ompSubagent.label} · ${ompSubagent.model} · ${ompSubagent.sessionId}`)
+        requireContract(row,reportedFactShape)
+        requireContract(row.textContent?.includes('Subagent session · $2.86 · 12 requests')&&!row.matches('[tabindex]')&&!row.querySelector('button,a[href],[tabindex],[role="button"]'),reportedFactShape)
+        requireContract(!/Parent ·|First observed|Last observed/.test(row.textContent??''),'Subagent fact invents unreported lineage or lifetime')
+        return row
       }
-      await userEvent.click(dialogClose)
-      await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
+      const row=assertReportedFact()
+      // Restoring an open affordance to this unopenable fact is rejected, not silently ignored.
+      row.setAttribute('tabindex','0')
+      try{await rejectsCause(reportedFactShape,assertReportedFact)}finally{row.removeAttribute('tabindex')}
+      assertReportedFact()
+      await checkPlainCopy(row,[row])
+      assertPlainCopy(panel)
     }
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
     // Keyboard read recovery on the accounting seat (healthy Refresh) and the failed-reads seat, at phone and desktop widths.
