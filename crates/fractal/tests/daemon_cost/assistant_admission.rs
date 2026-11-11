@@ -75,6 +75,9 @@
 //! receipt flush and can include background daemon SQL. No production code changes.
 //! Current-head candidate diagnostics read the effective authority projection only;
 //! the separate historical index DDL probe is not a current admission measurement.
+//! After clean q39 sampling, indexed foreign-grant runs also measure authentication
+//! with a matching proof recheck held queued under the Store writer guard.
+//! Assertions bracket each sample; this destructive fixture runs last.
 //! Latencies use the real daemon's bound sockets, bearer middleware, grant lookup,
 //! projection and durable approval consumption.
 
@@ -239,6 +242,83 @@ fn profile_reads(path: &std::path::Path, from: usize, label: &str) -> u64 {
         .filter(|row| row["label"] == label).collect::<Vec<_>>();
     assert_eq!(rows.len(), 1, "expected exactly one new {label} profile row; set ST3_PROFILE_SLOW_MS=0");
     rows[0]["read_acquisitions"].as_u64().expect("profile rows report read_acquisitions")
+}
+
+/// Withdraw a real replicated record through the production API, never by inserting
+/// queue rows. Retain the Store writer after commit so maintenance cannot consume
+/// the recheck while authentication reads the committed WAL snapshot.
+fn queued_subject_authentication(state: &AppState, connection: &rusqlite::Connection, profile_log: &std::path::Path) -> Value {
+    use smallclaims::store::assistant_grant_authority::SUBJECT_PENDING_QUERY;
+    let (claim_id, subject, digest, envelope) = connection.query_row(
+        "SELECT pending.claim_id,pending.grant_subject,
+                json_extract(pending.record,'$.body.fields.credential_hash'),
+                envelopes.writer,envelopes.sequence,envelopes.previous_hash,
+                envelopes.envelope_hash,envelopes.accepted_at_unix_ms,envelopes.payload
+         FROM assistant_grant_pending AS pending
+         JOIN replica_envelopes AS envelopes
+           ON envelopes.writer=pending.origin AND envelopes.sequence=pending.auth_sequence
+          AND envelopes.envelope_hash=pending.auth_envelope_hash
+         WHERE pending.authenticated=1 AND pending.kind=?1 AND pending.origin<>?2
+           AND pending.auth_record_position=0
+         ORDER BY pending.claim_id LIMIT 1",
+        rusqlite::params![GRANTED,NODE],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,
+            smallclaims::claim::ReplicaEnvelope {
+                writer:row.get(3)?,sequence:row.get(4)?,previous_hash:row.get(5)?,
+                hash:row.get(6)?,accepted_at_unix_ms:row.get::<_,String>(7)?.parse().unwrap(),
+                payload:row.get(8)?,member_key:None,signature:None,
+            })),
+    ).expect("queued measurement needs an authenticated foreign grant at record position zero");
+    assert!(api::client_v0::external_grants::authenticate(state,&digest,"http").unwrap().is_some());
+    let mut writer = state.store.graph.connection.write();
+    let transaction = writer.transaction().unwrap();
+    smallclaims::store::record_invalid_replica_envelope(
+        &transaction,&envelope,
+        &smallclaims::error::Error::new("admission-bench-proof-withdrawn","synthetic fixture withdraws its authenticated proof"),
+    ).unwrap();
+    transaction.commit().unwrap();
+    let matching_rechecks = || connection.query_row(
+        "SELECT count(*) FROM assistant_grant_pending AS pending
+         JOIN assistant_grant_proof_rechecks AS work ON work.claim_id=pending.claim_id
+         WHERE pending.grant_subject=?1 AND pending.claim_id=?2",
+        rusqlite::params![subject,claim_id], |row| row.get::<_,u64>(0),
+    ).unwrap();
+    let queued = matching_rechecks();
+    assert!(queued>0,"proof withdrawal must leave a matching committed recheck");
+    let mut samples = Vec::new();
+    for _ in 0..8 {
+        assert_eq!(matching_rechecks(),queued,"matching obligations must remain queued at measurement");
+        let mut pending = connection.prepare(SUBJECT_PENDING_QUERY).unwrap();
+        assert!(pending.query_row([&subject],|row| row.get::<_,bool>(0)).unwrap());
+        let subject_pending_sql_work = sql_work(smallclaims::sqlite::work::SqliteWork {
+            statements:1,
+            vm_steps:u64::try_from(pending.get_status(rusqlite::StatementStatus::VmStep)).unwrap(),
+            fullscan_steps:u64::try_from(pending.get_status(rusqlite::StatementStatus::FullscanStep)).unwrap(),
+            sorts:u64::try_from(pending.get_status(rusqlite::StatementStatus::Sort)).unwrap(),
+            autoindex_rows:u64::try_from(pending.get_status(rusqlite::StatementStatus::AutoIndex)).unwrap(),
+        });
+        let from = profile_lines(profile_log);
+        let started = Instant::now();
+        let operation = smallclaims::profile::Op::start("admission-bench/authenticate-queued",None).unwrap();
+        let entered = operation.enter();
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let authenticated = api::client_v0::external_grants::authenticate(state,&digest,"http").unwrap();
+        let authentication_sql_work = sql_work(work.finish());
+        drop(entered);
+        operation.finish();
+        let authentication_ms = started.elapsed().as_secs_f64()*1000.0;
+        assert!(authenticated.is_none(),"queued proof work must deny authentication");
+        let authentication_read_acquisitions = profile_reads(profile_log,from,"admission-bench/authenticate-queued");
+        assert_eq!(matching_rechecks(),queued,"authentication must not consume queued work");
+        samples.push(json!({"subject_pending_sql_work":subject_pending_sql_work,
+            "authentication_sql_work":authentication_sql_work,
+            "authentication_read_acquisitions":authentication_read_acquisitions,
+            "authentication_ms":authentication_ms,"authenticated":false,
+            "matching_queued_rechecks_before":queued,"matching_queued_rechecks_after":matching_rechecks()}));
+    }
+    drop(writer);
+    json!({"subject":subject,"claim_id":claim_id,"obligation_kind":"proof-recheck",
+        "queue_hold":"Store writer retained across committed withdrawal and all samples","samples":samples})
 }
 
 // Real signed membership and replication, outside measured requests. Merely
@@ -584,6 +664,9 @@ async fn authenticated_get_during_pairing() {
         assert!(output.status.success());
         String::from_utf8(output.stdout).unwrap()
     };
+    let queued_subject_authentication = if indexed && foreign_active>0 && !counts_only {
+        Some(queued_subject_authentication(&state,&rusqlite::Connection::open(&database).unwrap(),&profile_log))
+    } else { None };
     let final_connection = rusqlite::Connection::open(&database).unwrap();
     let final_rows: u64 = final_connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
     let report = json!({"variant":variant,"read_counts_only":counts_only,"revision_api":revision_api::REVISION,
@@ -603,6 +686,7 @@ async fn authenticated_get_during_pairing() {
             "read_acquisitions":"existing profile read_acquisitions: pooled read-connection/snapshot acquisitions per operation"},
         "final_total_claim_rows":final_rows,"admission_query":query,
         "conflict_fold_diagnostics":diagnostics,
+        "queued_subject_authentication":queued_subject_authentication,
         "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms,
         "explain_with_index":after,
         "measurements":measurements});
