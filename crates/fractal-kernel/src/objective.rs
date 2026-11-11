@@ -497,10 +497,11 @@ fn parse_interval(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Res
 }
 
 impl Interval {
-    /// Every claim kind the interval reads, each with one role.
+    /// Every claim kind the interval reads, once each. One kind has one role, except that the
+    /// expect claim may also start the sample (`start` and `expect` naming the same kind).
     pub fn kinds(&self) -> Vec<&str> {
         let mut kinds = vec![self.start.kind.as_str()];
-        kinds.extend(self.expect.as_ref().map(|(event, _)| event.kind.as_str()));
+        kinds.extend(self.expect.as_ref().map(|(event, _)| event.kind.as_str()).filter(|kind| *kind != self.start.kind));
         kinds.push(self.stop.0.kind.as_str());
         kinds.extend(self.cancel.as_deref());
         if let Some((pause, resume)) = &self.pause {
