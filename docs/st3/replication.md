@@ -552,6 +552,50 @@ schema migration or claim rewrite is required. The signed two-member regression
 checks legacy replay, waiting records, continued known-claim exchange, preserved receipt bytes,
 and graph/table convergence after upgrading the older registry.
 
+### Real-release jobs rolling-upgrade proof
+
+`scripts/jobs-rolling-upgrade-proof` drives the same isolated foreground
+create/invite/join, loopback transport and replication-worker lifecycle as the
+`crates/fractal/tests/fleet.rs` compatibility fixture. It does not install services
+or contact an existing fleet. A uses the checksum/BUILD-verified release selected
+by `.github/fleet-compat-baseline.json` (`v0.3.32` when introduced); B uses the
+provided series-head executable. The script byte-compares `--released-bin` with
+`scripts/compat-baseline`'s real archive executable; a reduced registry is not a
+substitute for that release.
+
+On a Linux development runner with Bash, curl, jq, Python 3.11+, pty and a delegated
+writable cgroup-v2 directory, build/fetch the binaries and run:
+
+```sh
+cargo build --locked -p fractal --bin fractal
+released=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/jobs-baseline")
+scripts/jobs-rolling-upgrade-proof \
+  --released-bin "$released" --head-bin target/debug/fractal \
+  --output-dir "$RUNNER_TEMP/jobs-upgrade-evidence" \
+  --cgroup-parent "$DELEGATED_CGROUP"
+```
+
+Use a fresh output directory. The delegated cgroup must be beneath
+`/sys/fs/cgroup/`; the script creates and removes its own empty child without
+moving any process. Jobs need explicit `enabled = true`, `allowed_classes =
+["heavy"]` and a real `keeper_cgroups` namespace. This supplies the production
+accept-time pidfd/cgroup recursion guard, not an activation bypass. Submission
+only records queued intent: execution admission remains unwired.
+
+The recording phase submits a job without `reason`, then cancels the queued job
+to record `reason` and withdrawal. Before upgrading A in its original state
+directory, the script requires both exact claim IDs to be retained as
+`unknown-claim-kind`, absent from admitted claims, and a later document binding
+to project on A. After startup admission retry, requester-scoped show/list
+responses, immutable job history claims, read-only SQLite `job_history` projection
+rows, registry digests and all shared projection digests must agree. Show/list
+expose current job rows, not full histories. Each phase prints PASS or the failing phase
+prints FAIL. Successful runtime is normally a few minutes, excluding the build
+and release download; individual asynchronous waits are bounded at 150 seconds.
+Daemon/worker logs, requests and API evidence remain in the output directory,
+along with private temporary fleet state. **Do not publish that directory or
+its test keys**; publish only suitably redacted proof logs.
+
 ## Projection digest coverage and cost
 
 [`PROJECTION_DIGEST_TABLES` in `crates/fractal-store/src/store.rs`](../../crates/fractal-store/src/store.rs)

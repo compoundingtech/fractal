@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a real released-binary rolling-upgrade proof for job.recorded claims with and without reason.",
+  "replay": {"status": "none", "detail": "The manual proof requires released-member UnknownKind retention followed by startup admission retry in the unchanged state directory, identical original claim histories and identical projected job histories after upgrade."},
+  "schema": {"status": "none", "detail": "No registry or schema substitutions. The released executable is byte-compared with the checksum and BUILD.json verified fleet compatibility archive."},
+  "rules": {"status": "none", "detail": "Uses production requester-scoped jobs APIs and the real pidfd/cgroup recursion guard; no admission or authorization bypass."},
+  "compatibility": {"status": "none", "detail": "scripts/jobs-rolling-upgrade-proof reuses the fleet fixture's private create/invite/join, loopback transports, foreground workers and Linux process supervisor. It requires a later ordinary document binding to project while job claims wait, then compares requester show/list results, projected histories, immutable claims, registry, authority and shared projection digests after upgrading the released member."},
+  "downtime": {"status": "none", "detail": "Manual development-host proof only. No CI requirement, production fleet access or service installation. Jobs execution admission remains unwired."},
+  "manual": {"status": "changed", "detail": "Provide --released-bin, --head-bin, a fresh --output-dir and a writable delegated --cgroup-parent. See docs/st3/replication.md for binary acquisition, prerequisites and invocation. Every phase prints PASS or the failing phase prints FAIL; private logs and temporary test fleet state are retained for the runner."},
+  "recovery": {"status": "none", "detail": "The existing Linux subreaper owns test descendants. The script stops its processes and removes its own empty keeper cgroup on exit. Evidence contains private test keys and must not be published unredacted."}
+}
