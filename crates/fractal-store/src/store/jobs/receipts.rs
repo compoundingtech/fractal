@@ -1,6 +1,5 @@
 use super::*;
 use fractal_jobs::identity::{IdempotencyDecision, RequestDigest, decide_idempotency};
-use rusqlite::OptionalExtension as _;
 use sha2::{Digest as _, Sha256};
 
 /// One subject per requester/key prevents a receipt conflict from requiring another
