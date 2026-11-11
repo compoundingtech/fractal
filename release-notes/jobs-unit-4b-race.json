@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make the inactive jobs receipt-level idempotency contention fixture deterministic.",
+  "replay": {"status": "none", "detail": "Test-only change; no replay hooks or triggers."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Thread A reserves under BEGIN IMMEDIATE and holds its write lock until thread B's SQLite busy handler has fired. B retries contention with an explicit 30-second deadline, then must receive ExistingJob carrying A's ID."},
+  "compatibility": {"status": "none", "detail": "The test explicitly identifies persistent receipts as the idempotency mechanism and still requires exactly one persisted receipt and one distinct job ID. No production behavior changes."},
+  "downtime": {"status": "none", "detail": "No activation."},
+  "manual": {"status": "none", "detail": "No operator action. Rust verification is not run in this assignment."},
+  "recovery": {"status": "none", "detail": "No recovery changes."}
+}

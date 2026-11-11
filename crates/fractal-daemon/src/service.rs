@@ -1715,6 +1715,7 @@ mod tests {
         person: None,
         browser_pairing_login: None,
         pairing_legacy_allowances: Vec::new(),
+        jobs: None,
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),

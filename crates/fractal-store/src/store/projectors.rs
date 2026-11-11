@@ -58,6 +58,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "arrangements", run: arrangements::open },
     Hook { name: "limits", run: limits::open_limits },
     Hook { name: "usage-credits", run: usage_credits::open },
+    Hook { name: "jobs", run: crate::jobs::open },
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },
@@ -123,6 +124,11 @@ pub const APPEND: &[AppendProjector] = &[
         project: arrangements::project,
     },
     AppendProjector {
+        name: "jobs",
+        takes: Takes::Kinds(&[crate::jobs::KIND]),
+        project: crate::jobs::project,
+    },
+    AppendProjector {
         name: "ordered-membership",
         takes: Takes::Kinds(&["ordered-membership.edited"]),
         project: ordered_membership::project,
@@ -148,6 +154,11 @@ pub const REPLICATED: &[AppendProjector] = &[
         project: arrangements::project_replicated,
     },
     AppendProjector {
+        name: "jobs",
+        takes: Takes::Kinds(&[crate::jobs::KIND]),
+        project: crate::jobs::project,
+    },
+    AppendProjector {
         name: "ordered-membership-project",
         takes: Takes::Kinds(&["ordered-membership.edited"]),
         project: ordered_membership::project,
@@ -167,6 +178,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },
     Hook { name: "run-eta", run: run_eta::flush },
+    Hook { name: "jobs", run: crate::jobs::flush },
     Hook { name: "ordered-membership", run: ordered_membership::flush },
 ];
 
@@ -186,6 +198,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
     Hook { name: "wake-lookup", run: wake_lookup::rebuild },
+    Hook { name: "jobs", run: crate::jobs::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
@@ -202,6 +215,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
+    ReplayStage { phase: "full-replay/jobs", run: crate::jobs::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];

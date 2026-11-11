@@ -217,6 +217,7 @@ impl FractalRuntime {
         agent_messages::create_schema(connection)?;
         client_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        crate::jobs::create_schema(connection)?;
         // After every projection its triggers maintain.
         message_marks::create_triggers(connection)?;
         relayed_closes::create_triggers(connection)?;

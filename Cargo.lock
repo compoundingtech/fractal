@@ -1610,6 +1610,7 @@ dependencies = [
  "fractal-api-core",
  "fractal-client",
  "fractal-drivers",
+ "fractal-jobs",
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
@@ -2135,6 +2136,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -2527,6 +2529,7 @@ dependencies = [
  "fractal-delivery-base",
  "fractal-drivers",
  "fractal-github-base",
+ "fractal-jobs",
  "fractal-kernel",
  "fractal-missions-base",
  "fractal-runtime",
