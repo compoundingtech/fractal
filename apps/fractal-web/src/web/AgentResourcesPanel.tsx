@@ -7,6 +7,10 @@ import { DateTime } from 'effect'
 import type { ResourceObservation } from '@fractal/client/schema'
 import { Icon, type IconName } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { HoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
+import { useEntityCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
+import { ResourceEntityCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/ResourceCard.tsx'
+import type { EntityStatusTone } from '../../../../packages/fractal-ui/src/assistant-ui/entity/entity.ts'
 import { DetailsResources } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
 import type { DetailsSection } from '@fractal/ui/assistant-ui'
 import { colorVars as c, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -78,17 +82,37 @@ const humanTitle = (resource: ResourceObservation): string => {
 }
 
 /** Click opens through the panel's host; a Cmd-click asks for the background once the tab shell's `useOpenable` replaces this. */
+/** Failure words draw the kit's red status; any other reported state stays a neutral word. */
+const stateTone = (state: string): EntityStatusTone => /fail|error|cancel/i.test(state) ? 'failed' : /success|merged|closed|done|complete/i.test(state) ? 'done' : 'neutral'
+
+/** The resource's own card, when no plugin source knows it better: kind, state, when it was observed and its link. Raw refs stay out, as on the row. */
+const ObservedResourceCard = ({ resource }: { readonly resource: ResourceObservation }) => {
+  const kind = resourceKind(resource.kind)
+  const state = resourceState(resource)
+  const url = resource.facts.url
+  return <ResourceEntityCard id={resource.id} title={humanTitle(resource)} kind={kind.label} icon={kind.icon}
+    {...(state === undefined ? {} : { status: { tone: stateTone(state), label: state.replaceAll('_', ' ') } })}
+    meta={[
+      { icon: 'clock', label: 'Observed', value: <HumanTime at={DateTime.toEpochMillis(resource.observed_at)} kind="relative" /> },
+      ...(typeof url === 'string' && url.length > 0 ? [{ icon: 'globe' as const, label: 'Link', value: url }] : []),
+    ]} />
+}
+
 export const ResourceRow = ({ resource, onOpen }: { readonly resource: ResourceObservation; readonly onOpen: (ref: string, background: boolean) => void }) => {
   const narrow = React.useContext(NarrowLayoutContext)
   const kind = resourceKind(resource.kind)
   const state = resourceState(resource)
+  // A plugin's card (a GitHub PR) when a source knows this ref, so its row, tab and mention agree; else the observed facts.
+  const known = useEntityCard({ kind: 'resource', id: resource.id })
   return <li>
-    <button type="button" data-resource-row onClick={event => onOpen(resource.id, event.metaKey || event.ctrlKey)} {...stylex.props(styles.row, narrow && styles.rowTouch)}>
-      <span {...stylex.props(styles.kind)}><Icon name={kind.icon} label={kind.label} size={14} /></span>
-      <span {...stylex.props(styles.title)}>{humanTitle(resource)}</span>
-      {state === undefined ? null : <span {...stylex.props(styles.meta)}>{state.replaceAll('_', ' ')}</span>}
-      <span {...stylex.props(styles.meta)}><HumanTime at={DateTime.toEpochMillis(resource.observed_at)} kind="relative" aria-label="Resource observed" /></span>
-    </button>
+    <HoverCard placement="left top" content={() => known ?? <ObservedResourceCard resource={resource} />}>
+      <button type="button" data-resource-row onClick={event => onOpen(resource.id, event.metaKey || event.ctrlKey)} {...stylex.props(styles.row, narrow && styles.rowTouch)}>
+        <span {...stylex.props(styles.kind)}><Icon name={kind.icon} label={kind.label} size={14} /></span>
+        <span {...stylex.props(styles.title)}>{humanTitle(resource)}</span>
+        {state === undefined ? null : <span {...stylex.props(styles.meta)}>{state.replaceAll('_', ' ')}</span>}
+        <span {...stylex.props(styles.meta)}><HumanTime at={DateTime.toEpochMillis(resource.observed_at)} kind="relative" aria-label="Resource observed" /></span>
+      </button>
+    </HoverCard>
   </li>
 }
 
