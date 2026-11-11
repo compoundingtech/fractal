@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate and render source-pinned release upgrade-impact notes."""
 import argparse
+import io
 import json
 import math
 from pathlib import Path
@@ -53,6 +54,35 @@ def resolve(repo, ref):
 
 def source_text(repo, source, path):
     return subprocess.check_output(['git', 'show', f'{source}:{path}'], cwd=repo, text=True)
+
+
+def fragment_texts(repo, source):
+    entries = subprocess.check_output(
+        ['git', 'ls-tree', '-r', '-z', source, '--', FRAGMENTS], cwd=repo)
+    blobs = []
+    for entry in entries.split(b'\0'):
+        if not entry:
+            continue
+        metadata, path = entry.split(b'\t', 1)
+        if path.startswith(FRAGMENTS.encode()) and path.endswith(b'.json'):
+            blobs.append((path.decode(), metadata.split()[2]))
+    # communicate() drains stdout while writing requests, so neither pipe can
+    # deadlock when a tree has more fragments than fit in a pipe buffer.
+    output = subprocess.check_output(
+        ['git', 'cat-file', '--batch'], cwd=repo,
+        input=b''.join(oid + b'\n' for _, oid in blobs))
+    stream = io.BytesIO(output)
+    for path, oid in blobs:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0] != oid or header[1] != b'blob':
+            raise ImpactError(f'{path}: missing fragment blob')
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b'\n':
+            raise ImpactError(f'{path}: incomplete fragment blob')
+        # Match subprocess text=True decoding and universal-newline handling.
+        with io.TextIOWrapper(io.BytesIO(content)) as text_stream:
+            yield path, text_stream.read()
 
 
 def text(value, label):
@@ -142,12 +172,10 @@ def collect(repo, since, source):
         raise ImpactError('previous release source must be an ancestor of the candidate')
     commits = git(repo, 'rev-list', '--first-parent', '--reverse', f'{since}..{source}').splitlines()
     # Read the final candidate tree: uncommitted edits and a newer checkout never alter notes.
-    paths = [path for path in git(repo, 'ls-tree', '-r', '--name-only', source, '--', FRAGMENTS).splitlines()
-             if path.startswith(FRAGMENTS) and path.endswith('.json')]
     fragments = {}
-    for path in paths:
+    for path, content in fragment_texts(repo, source):
         try:
-            fragment = json.loads(source_text(repo, source, path))
+            fragment = json.loads(content)
         except json.JSONDecodeError as error:
             raise ImpactError(f'{path}: invalid JSON: {error}') from error
         validate(fragment, path)
