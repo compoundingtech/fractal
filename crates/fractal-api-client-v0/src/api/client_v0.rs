@@ -3377,7 +3377,9 @@ fn mission_resources_filtered(
                         });
                     let blocker = run.scheduler_fault.as_ref().map(|reason| json!({
                         "step": run.steps.first().map(|step| &step.subject), "reason": reason, "scope": crate::reconcile::FIRST_READINESS_FAULT_SCOPE,
-                    })).or_else(||
+                    })).or_else(|| run.programs.iter().find_map(|program| program.fault.as_ref().map(|fault| json!({
+                        "step": program.step_run, "reason": fault.reason, "scope": fault.scope,
+                    })))).or_else(||
                         run.steps.iter().find(|step| step.status == "blocked").map(
                             |step| json!({"step": step.subject, "reason": step.blocked_reason}),
                         ));
@@ -3399,6 +3401,7 @@ fn mission_resources_filtered(
                                 let loop_run = run.loops.iter().find(|loop_run| {
                                     loop_run.step_run == step.subject
                                 });
+                                let program = run.programs.iter().find(|program| program.step_run == step.subject);
                                 let wake = step.wake.as_ref().filter(|_| {
                                     !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
@@ -3447,6 +3450,27 @@ fn mission_resources_filtered(
                                     value["waits"] = json!(history.waits);
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
+                                }
+                                // Detail reads that enrich the run (`Store::mission_run`) carry
+                                // its program steps' journals.
+                                if let Some(program) = program {
+                                    let journal = &program.journal;
+                                    value["program"] = json!({
+                                        "open_key": journal.open.first(),
+                                        "entries": journal.entries.iter().map(|entry| json!({
+                                            "key": entry.key,
+                                            "status": entry.status,
+                                            "started_at": entry.started_at_unix_ms.map(client_timestamp),
+                                            "ended_at": entry.ended_at_unix_ms.map(client_timestamp),
+                                            "ms": entry.ms,
+                                            "error": entry.error,
+                                            "child": entry.child,
+                                        })).collect::<Vec<_>>(),
+                                        "truncated": journal.truncated,
+                                        "last_entry_at": journal.last_entry_at_unix_ms.map(client_timestamp),
+                                        "stalled_after_ms": program.stalled_after_ms,
+                                        "fault": program.fault.as_ref().map(|fault| json!({"scope": fault.scope, "reason": fault.reason})),
+                                    });
                                 }
                                 if let Some((low, high, samples)) = step_etas.get(&step.step)
                                     .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
