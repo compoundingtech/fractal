@@ -1176,9 +1176,12 @@ fn mission_root_tree_run_tx(connection: &Connection, id: &str) -> Result<Mission
     // The human tree consumes step state, summaries and queue order, not each worker's wake,
     // timing and harness presentation histories.
     let mut view = mission_run_steps_view_tx(connection, id, true)?;
-    enrich_run_step_queues_tx(connection, &mut view)?;
+    let mission = enrich_run_step_queues_tx(connection, &mut view)?;
     view.provenance = crate::provenance::read(connection, &view.mission, &view.revision)?;
     view.loops = loop_run_views_tx(connection, &view)?;
+    if let Some(mission) = &mission {
+        view.programs = fractal_store::store::program_run_views_tx(connection, &view, mission)?;
+    }
     view.outcome = mission_run_outcome_tx(connection, &view)?;
     note_run_view_reads(&view);
     Ok(view)
@@ -1404,16 +1407,17 @@ const FAILURE_CANCELLATION_REASONS: &[&str] = &[
 ];
 
 /// Keep the tree's queue labels and order without work presentation enrichment.
-/// Read the current generation's pinned definition once for all of this run's steps.
+/// Read the current generation's pinned definition once for all of this run's steps, and return
+/// it for the run's other definition reads.
 fn enrich_run_step_queues_tx(
     connection: &Connection,
     view: &mut MissionRunView,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Option<MissionSpec>> {
     if view.steps.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let Some(mission) = pinned_generation_mission_tx(connection, &view.generation)? else {
-        return Ok(());
+        return Ok(None);
     };
     for view in &mut view.steps {
         if let Some(step) = crate::mission::find_step(&mission, &view.step) {
@@ -1421,7 +1425,7 @@ fn enrich_run_step_queues_tx(
             view.queue_position = step.queue_position;
         }
     }
-    Ok(())
+    Ok(Some(mission))
 }
 
 /// A run's header and each step's effective state, and with `summaries` each step's latest

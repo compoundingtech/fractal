@@ -1829,6 +1829,9 @@ pub struct Work {
     pub progress_at: Option<String>,
     pub state: String,
     pub gate_kind: Option<String>,
+    /// A program step's innermost open journal key and journal timing.
+    #[serde(default)]
+    pub program: Option<WorkProgram>,
     pub attempt: u64,
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
@@ -1863,6 +1866,19 @@ pub struct Work {
     pub person_answers: Vec<PersonAnswerRecord>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
+}
+/// A program step's innermost open journal key and journal timing.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct WorkProgram {
+    #[serde(default)]
+    pub open_key: Option<String>,
+    #[serde(default)]
+    pub open_since_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub child: Option<String>,
+    #[serde(default)]
+    pub last_entry_at_unix_ms: Option<u64>,
+    pub stalled_after_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentRelationship {
