@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, ensure};
 use fractal_jobs::{Event, State as JobState, host_authority::JobHostBinding, transition};
 use fractal_jobs::identity::{ExecutionRequest, IdempotencyKey};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde::{Deserialize, Serialize};
 use smallclaims::claim::ClaimRecord;
 
@@ -16,6 +16,12 @@ const REFOLD_LIMIT: usize = 4096;
 pub enum JobRecord {
     Submitted { binding: JobHostBinding, identity: IdempotencyKey, request: ExecutionRequest },
     Transition { binding: JobHostBinding, event: Event },
+    LaunchIntent { binding: JobHostBinding, intent: fractal_jobs::launch::LaunchIntent },
+    LaunchRefused {
+        binding: JobHostBinding,
+        intent: fractal_jobs::launch::LaunchIntent,
+        refusal: fractal_jobs::launch::LaunchRefusal,
+    },
 }
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
@@ -162,11 +168,39 @@ fn apply(
             *current = Some((binding.clone(), JobState::Queued));
         }
         JobRecord::Transition { binding, event } => {
+            ensure!(*event != Event::LaunchIntent, "job-launch-generation-required");
             let (existing, state) = current.as_mut().context("job-not-submitted")?;
             ensure!(existing == binding, "job-binding-conflict");
             let next = transition(*state, *event)?;
             tx.execute("UPDATE jobs SET state=?2,queued=?3,updated_at=?4 WHERE id=?1",
                 params![subject, serde_json::to_string(&next)?, matches!(next, JobState::Queued), at])?;
+            *state = next;
+        }
+        JobRecord::LaunchIntent { binding, intent } => {
+            ensure!(!intent.outcome_file.is_empty(), "job-outcome-file-required");
+            let (existing, state) = current.as_mut().context("job-not-submitted")?;
+            ensure!(existing == binding, "job-binding-conflict");
+            let next = transition(*state, Event::LaunchIntent)?;
+            tx.execute("UPDATE jobs SET state=?2,queued=0,updated_at=?3 WHERE id=?1",
+                params![subject, serde_json::to_string(&next)?, at])?;
+            *state = next;
+        }
+        JobRecord::LaunchRefused { binding, intent, .. } => {
+            let (existing, state) = current.as_mut().context("job-not-submitted")?;
+            ensure!(existing == binding, "job-binding-conflict");
+            let recorded: String = tx.query_row(
+                "SELECT event FROM job_history WHERE job_id=?1 AND refusal IS NULL
+                 AND json_extract(event,'$.action')='launch-intent' ORDER BY ordinal DESC LIMIT 1",
+                [subject], |row| row.get(0),
+            ).optional()?.context("job-launch-intent-required")?;
+            let JobRecord::LaunchIntent { intent: expected, .. } = serde_json::from_str(&recorded)?
+                else { unreachable!() };
+            ensure!(*intent == expected, "job-launch-intent-mismatch");
+            let next = transition(*state, Event::Refuse {
+                refusal: fractal_jobs::RefusalReason::HolderPrecondition,
+            })?;
+            tx.execute("UPDATE jobs SET state=?2,queued=0,updated_at=?3 WHERE id=?1",
+                params![subject, serde_json::to_string(&next)?, at])?;
             *state = next;
         }
     }

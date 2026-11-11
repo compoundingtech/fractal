@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive generation-bearing job launch intent and outcome contracts (unit 7a)",
+  "replay": {"status": "changed", "detail": "Jobs-only refolding retains generation and receipt path, refuses unversioned launch transitions, duplicate intents and generation-mismatched refusals. No shared writer or generic fold changes."},
+  "schema": {"status": "none", "detail": "No table or schema-version changes; job.recorded gains launch-intent and launch-refused records."},
+  "rules": {"status": "none", "detail": "Admission is not wired. Intent history is not execution authority; no runtime caller or activation."},
+  "compatibility": {"status": "changed", "detail": "Pure B6 outcomes use holderOutcome, never exit status. All four caps require Measured and true. Stable keeper/job-generation names support unit 8. Counters-unavailable is typed, never zero."},
+  "downtime": {"status": "none", "detail": "No live behavior changes."},
+  "manual": {"status": "none", "detail": "No activation, configuration defaults or deployment changes."},
+  "recovery": {"status": "none", "detail": "Unit 8 owns restart recovery: uncertain intent becomes unknown-after-host-loss, never rerun."}
+}
