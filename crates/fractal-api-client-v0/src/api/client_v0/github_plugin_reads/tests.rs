@@ -437,7 +437,7 @@ fn repository(full_name: &str) -> Raw {
 }
 
 async fn read(cache: &std::sync::Mutex<Cache>, canned: &Canned, path: &str) -> Result<Fetched, Failure> {
-    rest_read(cache, path, |path, _| std::future::ready(canned.fetch(path))).await
+    rest_read(cache, &pat_auth(), path, |path, _| std::future::ready(canned.fetch(path))).await
 }
 
 #[tokio::test]
@@ -496,4 +496,76 @@ async fn an_unresolvable_relocation_is_unavailable() {
         assert!(matches!(failure, Failure::Unavailable { .. }), "{location}: {failure:?}");
         assert!(canned.0.lock().unwrap().is_empty(), "{location}: an expected request was not sent");
     }
+}
+
+fn pat_auth() -> crate::github_http::GithubAuth {
+    crate::github_http::GithubAuth::Local { token: Arc::new("fixture-pat".into()), cache: None }
+}
+
+fn installation(root: &std::path::Path, id: u64) -> crate::github_http::GithubAuth {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = root.join("gh-ci");
+    std::fs::create_dir_all(&directory).unwrap();
+    let token = directory.join("acme.token");
+    std::fs::write(&token, "fixture-installation").unwrap();
+    std::fs::set_permissions(token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(directory.join("acme.json"), serde_json::to_vec(&json!({
+        "installation_id": id,
+        "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+        "permissions": {"metadata": "read", "contents": "read", "pull_requests": "read"},
+        "repository_selection": "selected"
+    })).unwrap()).unwrap();
+    crate::github_http::app_read::select(Some(root), "acme", "gh-ci", &pat_auth())
+}
+
+#[tokio::test]
+async fn cache_principals_isolate_fresh_documents_etags_failures_and_relocations() {
+    let cache = std::sync::Mutex::new(Cache::default());
+    let root = tempfile::tempdir().unwrap();
+    let pat = pat_auth();
+    let path = "/repos/acme/garden/pulls/7";
+    rest_read(&cache, &pat, path, |_, etag| async move {
+        assert!(etag.is_none());
+        ok(json!({"principal": "pat"}), Some("\"pat\""))
+    }).await.unwrap();
+    for id in [42, 43] {
+        let auth = installation(root.path(), id);
+        // Still inside the PAT/previous installation freshness window: selection must fetch,
+        // and neither failure nor revalidation may reuse that principal's document or ETag.
+        let calls = AtomicUsize::new(0);
+        let result = rest_read(&cache, &auth, path, |_, etag| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert!(etag.is_none());
+            std::future::ready(Err(Failure::unavailable("fixture upstream failure")))
+        }).await;
+        assert!(matches!(result, Err(Failure::Unavailable { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let item = rest_read(&cache, &auth, path, |_, etag| async move {
+            assert!(etag.is_none());
+            ok(json!({"installation": id}), Some("\"app\""))
+        }).await.unwrap();
+        assert_eq!(item.value["installation"], id);
+    }
+    let moved_path = "/repos/acme/garden/issues/9";
+    for (auth, destination) in [(pat, "old"), (installation(root.path(), 44), "new"), (installation(root.path(), 45), "newest")] {
+        let calls = AtomicUsize::new(0);
+        let moved = rest_read(&cache, &auth, moved_path, |path, etag| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert!(etag.is_none());
+            std::future::ready(Ok(if path == "/repositories/42" {
+                repository(&format!("acme/{destination}"))
+            } else {
+                redirect("https://api.github.com/repositories/42/issues/9")
+            }))
+        }).await.unwrap_err();
+        assert_eq!(moved, Failure::Moved(GithubMovedTo { owner: "acme".into(), repo: destination.into(), number: Some(9) }));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+    let auth = installation(root.path(), 46);
+    let failure = rest_read(&cache, &auth, moved_path, |path, etag| async move {
+        assert!(etag.is_none());
+        if path == "/repositories/42" { Err(Failure::unavailable("fixture lookup failure")) }
+        else { Ok(redirect("https://api.github.com/repositories/42/issues/9")) }
+    }).await.unwrap_err();
+    assert!(matches!(failure, Failure::Unavailable { .. }));
 }

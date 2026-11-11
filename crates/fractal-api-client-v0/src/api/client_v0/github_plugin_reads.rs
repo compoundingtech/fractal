@@ -516,6 +516,7 @@ fn requested_number(path: &str) -> Option<u64> {
 pub(crate) async fn resolve_relocation<F, Fut>(
     cache: &std::sync::Mutex<Cache>,
     key: &str,
+    auth: &crate::github_http::GithubAuth,
     original_path: &str,
     repository_id: u64,
     location_number: Option<u64>,
@@ -526,7 +527,7 @@ where
     Fut: Future<Output = Result<Raw, Failure>>,
 {
     let path = format!("/repositories/{repository_id}");
-    let lookup = cached(cache, &format!("GET {path}"), true, |etag| fetch(path, etag)).await;
+    let lookup = cached(cache, &format!("GET {} {path}", auth.cache_principal()), true, |etag| fetch(path, etag)).await;
     let Ok(repository) = lookup else {
         return Failure::unavailable(UNRESOLVED_MOVE);
     };
@@ -549,15 +550,15 @@ where
 }
 
 /// `GET {path}` through `cache` with `fetch`, resolving a relocation to `moved` with one more read.
-pub(crate) async fn rest_read<F, Fut>(cache: &std::sync::Mutex<Cache>, path: &str, fetch: F) -> Result<Fetched, Failure>
+pub(crate) async fn rest_read<F, Fut>(cache: &std::sync::Mutex<Cache>, auth: &crate::github_http::GithubAuth, path: &str, fetch: F) -> Result<Fetched, Failure>
 where
     F: Fn(String, Option<String>) -> Fut,
     Fut: Future<Output = Result<Raw, Failure>>,
 {
-    let key = format!("GET {path}");
+    let key = format!("GET {} {path}", auth.cache_principal());
     match cached(cache, &key, true, |etag| fetch(path.to_owned(), etag)).await {
         Err(Failure::Relocated { repository_id, number }) => {
-            Err(resolve_relocation(cache, &key, path, repository_id, number, &fetch).await)
+            Err(resolve_relocation(cache, &key, auth, path, repository_id, number, &fetch).await)
         }
         other => other,
     }
@@ -588,15 +589,15 @@ impl Reads {
 
     /// `GET {API_BASE}{path}`, cached with ETag revalidation.
     async fn rest(&mut self, path: &str) -> Result<Fetched, Failure> {
-        rest_read(&CACHE, path, |path, etag| self.get(path, etag)).await
+        let auth = crate::github_http::read_auth_for_url(&format!("{API_BASE}{path}"), &credential().await?);
+        rest_read(&CACHE, &auth, path, |path, etag| self.get(auth.clone(), path, etag)).await
     }
 
     /// One no-follow `GET {API_BASE}{path}` within the route's budget.
-    fn get(&self, path: String, etag: Option<String>) -> impl Future<Output = Result<Raw, Failure>> + use<> {
+    fn get(&self, auth: crate::github_http::GithubAuth, path: String, etag: Option<String>) -> impl Future<Output = Result<Raw, Failure>> + use<> {
         let budget = self.remaining();
         async move {
             let budget = budget?;
-            let auth = credential().await?;
             let mut request = crate::resource::github_api_client()
                 .get(format!("{API_BASE}{path}"))
                 .timeout(budget)
@@ -611,11 +612,11 @@ impl Reads {
 
     /// One fixed GraphQL query, cached by TTL only (GraphQL has no ETag).
     async fn graphql(&mut self, name: &str, query: &'static str, variables: Value) -> Result<Fetched, Failure> {
-        let key = format!("POST /graphql {name} {variables}");
+        let auth = credential().await?;
+        let key = format!("POST {} /graphql {name} {variables}", auth.cache_principal());
         let budget = self.remaining();
         cached(&CACHE, &key, false, |_| async move {
             let budget = budget?;
-            let auth = credential().await?;
             let body = serde_json::to_vec(&json!({ "query": query, "variables": variables }))
                 .map_err(|_| Failure::unavailable("GraphQL request could not be encoded"))?;
             let request = crate::resource::github_api_client()
