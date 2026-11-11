@@ -265,6 +265,7 @@ fn timeline(entry: usize, entry_type: &str, role: &str) -> Value {
     json!({
         "incarnation_id": INCARNATION, "driver": "codex", "entry_id": format!("prose-{entry}"),
         "entry_type": entry_type, "operation": "append", "revision": 1,
+        "sequence": entry + 1,
         "role": role, "final": true, "body": {"text": "Words"}
     })
 }

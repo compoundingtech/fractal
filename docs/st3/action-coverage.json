@@ -2897,6 +2897,14 @@
   ],
   "stui_effects": [
     {
+      "effect": "AdvanceReadPosition",
+      "tests": [
+        "crates/fractal-tui/src/ui/glass.rs::presented_reads_queue_the_latest_advance_only_when_live_and_supported",
+        "crates/fractal-tui/src/ui/live.rs::read_positions_advance_in_st_and_list_by_the_larger_from_any_device"
+      ],
+      "verification": "presented-prose reducer queues the latest read only while live with read-position support and one advance in flight; real Unix-socket adapter advances and lists positions, preserves the larger value across devices, merges server confirmation and refuses another person's reads"
+    },
+    {
       "effect": "RetryConversation",
       "tests": [
         "crates/fractal-tui/src/ui/mod.rs::conversation_open_retry_does_not_act_inside_a_draft_or_on_a_ready_conversation",

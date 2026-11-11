@@ -5983,6 +5983,40 @@ mod tests {
     }
 
     #[test]
+    fn presented_reads_queue_the_latest_advance_only_when_live_and_supported() {
+        let mut ui = tab_badge_world();
+        let now = Instant::now();
+        ui.show_tab(1);
+        ui.effects.clear();
+        for at in [60_000, 90_000] {
+            let timelines = presented_read_timeline(&mut ui, at);
+            let _ = screen(&ui);
+            ui.read_presented_conversations(&timelines);
+        }
+
+        ui.queue_read_advances(now, true);
+        assert!(ui.effects.is_empty(), "wait until st supports read positions");
+        ui.reads.connected(now);
+        assert_eq!(ui.reads.list_due(now), Some(true));
+        ui.reads.listed(Ok(Some(Vec::new())), now);
+        ui.queue_read_advances(now, false);
+        assert!(ui.effects.is_empty(), "do not send while offline");
+
+        ui.queue_read_advances(now, true);
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::AdvanceReadPosition { conversation, at_ms: 90_000 }] if conversation == "agent/b"),
+            "send the latest presented prose, not each intermediate read: {:?}",
+            ui.effects
+        );
+        ui.effects.clear();
+        let timelines = presented_read_timeline(&mut ui, 120_000);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        ui.queue_read_advances(now + read_store::COALESCE, true);
+        assert!(ui.effects.is_empty(), "only one advance may be in flight");
+    }
+
+    #[test]
     fn roster_before_transcript_does_not_advance_presented_reads() {
         let mut ui = tab_badge_world();
         let mut timelines = presented_read_timeline(&mut ui, 60_000);
