@@ -101,6 +101,8 @@ async fn bound_pairing_requires_its_trusted_local_issuer() {
     let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let left = fixture(left_root.path(), "binding-issuer");
     let right = fixture(right_root.path(), "binding-other-issuer");
+    // Establish fleet/node signers before sealing the begin operation.
+    super::pairing_order_tests::replicate(&left, &right);
     let approved = public_key();
     let challenge = begin(&left, Some(pairing_verifier::device_key_fingerprint(&approved))).await;
     super::pairing_order_tests::replicate(&left, &right);
@@ -190,8 +192,12 @@ async fn bound_pairing_rejects_an_untrusted_local_begin_record() {
         })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
     assert!(!state.store.client_operation_is_trusted(&begun).unwrap());
+    let before_grants: Vec<_> = claims(&state, "principal.key-granted")
+        .into_iter().map(|grant| grant.id).collect();
     let before = state.store.index().unwrap();
     assert!(finish(&state, &json!({"pairing_id":pairing_id,"code":code}), &approved).await.unwrap_err().message.contains("requires a new pairing"));
     assert_eq!(state.store.index().unwrap(), before);
-    assert!(claims(&state, "principal.key-granted").is_empty());
+    let after_grants = claims(&state, "principal.key-granted");
+    assert_eq!(after_grants.iter().map(|grant| grant.id.clone()).collect::<Vec<_>>(), before_grants);
+    assert!(!after_grants.iter().any(|grant| grant.body["fields"]["key"] == approved));
 }
