@@ -234,6 +234,9 @@ pub struct ReplicationFirstSync {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationExportRequest {
+    /// Destination for local-daemon export exclusion; not part of the peer exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<String>,
     pub fleet_id: String,
     pub inventory: ReplicationInventory,
     #[serde(default)]
@@ -250,6 +253,14 @@ pub struct ReplicationExportRequest {
     /// The other side's signature requests, to answer in the exported exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signature_requests: Vec<ReplicaEnvelopeId>,
+}
+
+/// Local worker-to-daemon persistence request; never sent to a replication peer.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReplicationOutboundParkRequest {
+    pub peer: String,
+    pub hashes: Vec<String>,
+    pub code: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

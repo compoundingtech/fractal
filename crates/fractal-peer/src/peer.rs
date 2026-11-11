@@ -1869,25 +1869,30 @@ impl Backend for MainBackend {
 
     async fn export(
         &self,
+        peer: &str,
         fleet_id: &str,
         inventory: &ReplicationInventory,
         summary_only: bool,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
         let started = std::time::Instant::now();
-        self.client
-            .post(
-                &self.replication_path("export"),
-                &ReplicationExportRequest {
-                    fleet_id: fleet_id.to_owned(),
-                    inventory: inventory.clone(),
-                    summary_only,
-                    authority_guard: false,
-                    authority_digest_only: false,
-                    signature_requests: signature_requests.to_vec(),
-                },
-            )
-            .await.map_err(|error| Self::exchange_error(
+        let path = self.replication_path("export");
+        let request = ReplicationExportRequest {
+            peer: Some(peer.to_owned()),
+            fleet_id: fleet_id.to_owned(),
+            inventory: inventory.clone(),
+            summary_only,
+            authority_guard: false,
+            authority_digest_only: false,
+            signature_requests: signature_requests.to_vec(),
+        };
+        let result = match smallclaims::sync::receive_budget() {
+            Some(budget) => self.client.post_receive_until(
+                &path, &request, budget.deadline() + Duration::from_secs(2),
+            ).await,
+            None => self.client.post(&path, &request).await,
+        };
+        result.map_err(|error| Self::exchange_error(
                 error, smallclaims::replication::ReplicationFailurePhase::LocalExport, started,
             ))
     }
@@ -1899,6 +1904,7 @@ impl Backend for MainBackend {
             .post(
                 &self.replication_path("export"),
                 &ReplicationExportRequest {
+                    peer: None,
                     fleet_id: fleet_id.to_owned(),
                     inventory: ReplicationInventory::default(),
                     summary_only: true,
@@ -1918,6 +1924,7 @@ impl Backend for MainBackend {
             .post(
                 &self.replication_path("export"),
                 &ReplicationExportRequest {
+                    peer: None,
                     fleet_id: fleet_id.to_owned(),
                     inventory: ReplicationInventory::default(),
                     summary_only: true,
@@ -1928,6 +1935,24 @@ impl Backend for MainBackend {
             )
             .await?;
         Ok(response.exchange.authority_digest)
+    }
+
+    async fn park_outbound(
+        &self,
+        peer: &str,
+        hashes: &[String],
+        code: &str,
+        _episode: Option<&str>,
+    ) -> Result<()> {
+        let _: Value = self.client.post(
+            &self.replication_path("outbound-park"),
+            &smallclaims::replication::ReplicationOutboundParkRequest {
+                peer: peer.to_owned(),
+                hashes: hashes.to_vec(),
+                code: code.to_owned(),
+            },
+        ).await?;
+        Ok(())
     }
 
     async fn receive(
@@ -2380,7 +2405,7 @@ mod tests {
             socket: PathBuf::new(),
             shard: None,
         };
-        let result = backend.export("sample", &ReplicationInventory::default(), false, &[]).await;
+        let result = backend.export("", "sample", &ReplicationInventory::default(), false, &[]).await;
         server.abort();
         let _ = server.await;
         let error = result.unwrap_err();

@@ -1079,3 +1079,56 @@ fn legacy_sign_own_envelopes_range_tx(
     }
     Ok(unsigned.len())
 }
+
+#[tokio::test(start_paused = true)]
+async fn reply_export_expiry_between_seal_commits_never_starts_the_next_loan() {
+    use std::sync::atomic::AtomicUsize;
+    let awake = tokio::spawn(async { loop { tokio::task::yield_now().await; } });
+    let store = node("maple");
+    for index in 0..130 {
+        note(&store, &format!("note/reply-expiry-{index}"), BTreeMap::new());
+    }
+    let commits = Arc::new(AtomicUsize::new(0));
+    let counted = commits.clone();
+    store.install_transaction_hooks(|_| Ok(()), move |_| {
+        counted.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }).unwrap();
+    let (entered, second_loan) = tokio::sync::oneshot::channel();
+    let (release, gate) = std::sync::mpsc::sync_channel(1);
+    let exporting = store.clone();
+    let deadline = crate::sync::ReceiveBudget::now() + std::time::Duration::from_secs(28);
+    let export = tokio::task::spawn_blocking(move || {
+        // Existing hook runs after preparation, before each chunk's loan.
+        before_the_loan(move |_| {
+            before_the_loan(move |_| {
+                entered.send(()).unwrap();
+                gate.recv().unwrap();
+            });
+        });
+        exporting.export_replication_exchange_answering_until(
+            Some("birch"), FLEET, &ReplicationInventory::default(), &[], deadline,
+        )
+    });
+    second_loan.await.unwrap();
+    let through = store.seeded_batch_rowid.load(Ordering::Acquire);
+    assert!(through > 0);
+    assert!(through < max_batch_rowid(&store.readers.get()).unwrap());
+    assert_eq!(commits.load(Ordering::Relaxed), 1);
+    tokio::time::advance(std::time::Duration::from_secs(29)).await;
+    release.send(()).unwrap();
+    let error = crate::error::typed(export.await.unwrap().unwrap_err());
+    assert_eq!(error.code, "replication-ingress/receive-deadline");
+    assert_eq!(crate::sync::ingress_status(error.code),
+        Some(axum::http::StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(commits.load(Ordering::Relaxed), 1,
+        "expiry before the second seal loan must not begin a second commit");
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), through);
+    let retry = store.export_replication_exchange_answering_for_peer(
+        "birch", FLEET, &ReplicationInventory::default(), &[],
+    ).unwrap();
+    assert_eq!(retry.peer, "maple");
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire),
+        max_batch_rowid(&store.readers.get()).unwrap());
+    awake.abort();
+}

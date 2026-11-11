@@ -732,10 +732,30 @@ impl WriterConnection {
         self.write_receive_with_clock(deadline, std::time::Instant::now)
     }
 
+    /// Receive-only fallible acquisition in the existing background queue, preserving its
+    /// bounded foreground overtaking and configuration-fence watermark semantics.
+    #[track_caller]
+    pub fn write_background_receive_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> std::result::Result<WriterGuard<'_>, WriterLoanError> {
+        self.write_receive_class_with_clock(deadline, true, std::time::Instant::now)
+    }
+
     #[track_caller]
     fn write_receive_with_clock(
         &self,
         deadline: std::time::Instant,
+        now: impl FnMut() -> std::time::Instant,
+    ) -> std::result::Result<WriterGuard<'_>, WriterLoanError> {
+        self.write_receive_class_with_clock(deadline, false, now)
+    }
+
+    #[track_caller]
+    fn write_receive_class_with_clock(
+        &self,
+        deadline: std::time::Instant,
+        background: bool,
         mut now: impl FnMut() -> std::time::Instant,
     ) -> std::result::Result<WriterGuard<'_>, WriterLoanError> {
         debug_assert_no_pinned_read();
@@ -749,7 +769,9 @@ impl WriterConnection {
         let (give_back, returned) = std::sync::mpsc::sync_channel(1);
         let enqueued = std::time::Instant::now();
         let origin = telemetry::current_origin();
-        let mut writer_operation = telemetry::WriterOperation::start("foreground", "write.lend");
+        let mut writer_operation = telemetry::WriterOperation::start(
+            if background { "background" } else { "foreground" }, "write.lend",
+        );
         {
             let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
             self.fifo.send_at(enqueued, || {
@@ -757,9 +779,23 @@ impl WriterConnection {
                     return Err(WriterLoanError::Expired);
                 }
                 let jobs = jobs.as_ref().ok_or(WriterLoanError::AdmissionClosed)?;
-                jobs.send(WriterJob::ReceiveLend {
+                let job = WriterJob::ReceiveLend {
                     lent, give_back, returned, holder, enqueued, origin,
-                }).map_err(|_| WriterLoanError::Disconnected)
+                };
+                if background {
+                    if self.background.closed.load(Ordering::Acquire) {
+                        return Err(WriterLoanError::Disconnected);
+                    }
+                    let queue = self.background.queue
+                        .get_or_init(|| Arc::new(writer_queue::BackgroundQueue::default()));
+                    if queue.try_push(job)? && jobs.send(WriterJob::BackgroundReady(queue.clone())).is_err() {
+                        queue.close();
+                        return Err(WriterLoanError::Disconnected);
+                    }
+                    Ok(())
+                } else {
+                    jobs.send(job).map_err(|_| WriterLoanError::Disconnected)
+                }
             })?;
         }
         let mut loan = writer_queue::receive_until(&lent_here, deadline, &mut now)?;

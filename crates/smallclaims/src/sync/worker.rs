@@ -2474,8 +2474,8 @@ async fn observe_exchange_body(
     let timing = Arc::new(timing);
     timing.record("head-received");
     request.extensions_mut().insert(Arc::clone(&timing));
-    let peer = request.headers().get(super::HEADER_NODE)
-        .and_then(|value| value.to_str().ok()).unwrap_or("unknown").to_owned();
+    let peer = super::signed_fields(request.headers()).ok().and_then(|fields| fields[1])
+        .unwrap_or("unknown").to_owned();
     if request.headers().get("content-length")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
@@ -2814,22 +2814,24 @@ async fn receive_exchange_inner_to<B: Backend>(
         return ingress_rejection("unknown", "replication-ingress/receive-deadline");
     }
     let body = if deflated(&headers) {
-        match super::inflate_ingress(&body) {
+        let inflated = super::inflate_ingress(&body);
+        let now = super::ReceiveBudget::now();
+        if budget.expired_at(now) {
+            tracing::warn!(target: "smallclaims::replication",
+                overshoot_ms = now.duration_since(budget.deadline()).as_millis() as u64,
+                "replication receive inflate completed after deadline");
+        }
+        match inflated {
             Ok(body) => Bytes::from(body),
             Err(code) => {
-                let peer = headers.get(super::HEADER_NODE)
-                    .and_then(|value| value.to_str().ok()).unwrap_or("unknown");
+                let peer = super::signed_fields(&headers).ok().and_then(|fields| fields[1])
+                    .unwrap_or("unknown");
                 return ingress_rejection(peer, code);
             }
         }
     } else {
         body
     };
-    if deflated(&headers) && budget.expired_at(super::ReceiveBudget::now()) {
-        tracing::warn!(target: "smallclaims::replication",
-            overshoot_ms = super::ReceiveBudget::now().duration_since(budget.deadline()).as_millis() as u64,
-            "replication receive inflate completed after deadline");
-    }
     let sender = match state
         .auth
         .verify_sender(&headers, "POST", EXCHANGE_PATH, &body, None, None)
@@ -2951,13 +2953,13 @@ async fn receive_exchange_inner_to<B: Backend>(
                             backend_timing.record("local-receive-done");
                             let received = received
                                 .map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
-                            budget.check()?;
                             if received.changed {
                                 backend.changed().await;
                             }
+                            budget.check()?;
                             backend_timing.record("follow-up-export-start");
                             backend
-                                .export(state.auth.fleet_id(), &request.inventory, false, &request.signature_requests)
+                                .export(&relay, state.auth.fleet_id(), &request.inventory, false, &request.signature_requests)
                                 .await
                                 .map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, started, None))
                         }
@@ -2992,6 +2994,7 @@ async fn receive_exchange_inner_to<B: Backend>(
                         let response = state
                             .backend
                             .export(
+                                &relay,
                                 state.auth.fleet_id(),
                                 &request.inventory,
                                 false,
@@ -3684,7 +3687,7 @@ async fn exchange_inner<B: Backend>(
     // reconciliation, not more envelope requests, settles those.
     let attempt = std::time::Instant::now();
     let first = backend
-        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+        .export(&peer.name, auth.fleet_id(), &ReplicationInventory::default(), true, &[])
         .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalExport, attempt, None))?
         .exchange;
     let own_checkpoint = first.inventory.checkpoint.clone();
@@ -3720,6 +3723,7 @@ async fn exchange_inner<B: Backend>(
     if different || !remote.signature_requests.is_empty() {
         let push = backend
             .export(
+                &peer.name,
                 auth.fleet_id(),
                 &remote.inventory,
                 false,
@@ -3727,10 +3731,27 @@ async fn exchange_inner<B: Backend>(
             )
             .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::FollowUpExport, attempt, None))?
             .exchange;
+        // Bind terminal refusals to exactly this fitted page, never a later export or inventory.
+        let sent_hashes = push.envelopes.iter().map(|envelope| envelope.hash.clone()).collect::<Vec<_>>();
         let started = std::time::Instant::now();
         // A peer that says it takes compressed requests gets a large push compressed.
-        let (response, _) =
-            post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
+        let (response, _) = match
+            post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await
+        {
+            Ok(answer) => answer,
+            Err(error) => {
+                if let Some(failure) = error.downcast_ref::<ReplicationExchangeFailure>()
+                    && terminal_ingress_code(&failure.code)
+                    && !sent_hashes.is_empty()
+                {
+                    // A failed commit stays retryable. Only a committed exclusion permits
+                    // this terminal transition; wakes and restarts consult the same table.
+                    backend.park_outbound(&peer.name, &sent_hashes, &failure.code, None).await?;
+                    return Ok(true);
+                }
+                return Err(error);
+            }
+        };
         ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
         // The peer stores a push before it answers, so its inventory moved if the push landed.
@@ -4225,6 +4246,12 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
             body.len()
         ),
     }
+}
+
+fn terminal_ingress_code(code: &str) -> bool {
+    matches!(code,
+        "replication-ingress/raw-oversize" | "replication-ingress/inflated-oversize"
+        | "replication-ingress/malformed-deflate" | "replication-ingress/malformed-json")
 }
 
 struct RequestPreparation {

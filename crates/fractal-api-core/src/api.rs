@@ -860,6 +860,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
         .route(
+            "/v1/internal/replication/outbound-park",
+            post(replication::replication_outbound_park),
+        )
+        .route(
             "/v1/internal/replication/receive",
             post(replication::replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
         )
@@ -937,6 +941,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/shard/{shard}/export",
             post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/outbound-park",
+            post(replication::shard_replication_outbound_park),
         )
         .route(
             "/v1/internal/replication/shard/{shard}/receive",

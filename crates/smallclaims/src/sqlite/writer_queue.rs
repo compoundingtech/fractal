@@ -64,8 +64,14 @@ pub struct BackgroundQueue(Mutex<Pending>);
 impl BackgroundQueue {
     /// Only transition from empty needs a wake; no per-job scan or notification backlog.
     pub(super) fn push(&self, job: WriterJob) -> bool {
+        self.try_push(job).expect("the background writer queue is closed")
+    }
+
+    pub(super) fn try_push(&self, job: WriterJob) -> std::result::Result<bool, WriterLoanError> {
         let mut pending = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        assert!(!pending.closed, "the background writer queue is closed");
+        if pending.closed {
+            return Err(WriterLoanError::AdmissionClosed);
+        }
         let wake = pending.jobs.is_empty();
         pending.last = pending
             .last
@@ -73,7 +79,7 @@ impl BackgroundQueue {
             .expect("writer admission exhausted");
         let sequence = pending.last;
         pending.jobs.push_back((sequence, job));
-        wake
+        Ok(wake)
     }
 
     pub(super) fn watermark(&self) -> u64 {

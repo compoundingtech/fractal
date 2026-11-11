@@ -4183,6 +4183,7 @@ mod tests {
                 .unwrap(),
             // The native replication worker supplies this for its own dials.
             round_trip_ms: Some(1),
+            carrier: Default::default(),
         };
         // Establish the remote incarnation before binding the live stream.
         let Json(initial) = super::super::replication_receive(

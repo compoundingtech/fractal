@@ -638,3 +638,65 @@ fn receive_native_commit_failure_is_not_an_acquisition_failure() {
         0
     );
 }
+
+#[test]
+fn receive_background_acquisition_preserves_foreground_overtaking_bound() {
+    let writer = writer();
+    let held = writer.write();
+    let original = writer.jobs.lock().unwrap().take().unwrap();
+    let (proxy, incoming) = mpsc::channel();
+    *writer.jobs.lock().unwrap() = Some(proxy);
+    std::thread::scope(|scope| {
+        let (acquired, acquisition) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let writer_ref = &writer;
+        let borrower = scope.spawn(move || {
+            let guard = writer_ref.write_background_receive_until(Instant::now() + Duration::from_secs(10)).unwrap();
+            acquired.send(()).unwrap();
+            released.recv().unwrap();
+            drop(guard);
+        });
+        let notification = incoming.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(matches!(notification, WriterJob::BackgroundReady(_)));
+        *writer.jobs.lock().unwrap() = Some(original.clone());
+        original.send(notification).unwrap();
+        let foreground = selected_loans(&writer, FOREGROUND_TURNS + 1);
+        drop(held);
+        for next in foreground.iter().take(FOREGROUND_TURNS) {
+            let connection = next.acquire();
+            assert!(acquisition.try_recv().is_err());
+            next.release(connection);
+        }
+        acquisition.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(foreground[FOREGROUND_TURNS].lent.try_recv().is_err());
+        release.send(()).unwrap();
+        foreground[FOREGROUND_TURNS].release(foreground[FOREGROUND_TURNS].acquire());
+        borrower.join().unwrap();
+    });
+}
+
+#[test]
+fn expired_background_receive_does_not_panic_or_block_following_writer() {
+    let writer = writer();
+    let held = writer.write();
+    let now = Instant::now();
+    let deadline = now + Duration::from_secs(10);
+    let mut reads = 0;
+    assert!(matches!(writer.write_receive_class_with_clock(deadline, true, || {
+        reads += 1;
+        if reads >= 3 { deadline } else { now }
+    }), Err(WriterLoanError::Expired)));
+    drop(held);
+    drop(writer.write());
+}
+
+#[test]
+fn receive_background_closed_admission_is_fallible() {
+    let writer = writer();
+    writer.background.queue.get_or_init(|| Arc::new(BackgroundQueue::default())).close();
+    assert!(matches!(
+        writer.write_background_receive_until(Instant::now() + Duration::from_secs(10)),
+        Err(WriterLoanError::AdmissionClosed)
+    ));
+    drop(writer.write());
+}

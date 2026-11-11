@@ -67,12 +67,22 @@ impl GuardBackend {
 impl Backend for GuardBackend {
     async fn export(
         &self,
+        _peer: &str,
         _fleet: &str,
         _inventory: &ReplicationInventory,
         _summary: bool,
         _signatures: &[crate::claim::ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
         Ok(response("ordinary-full-export".into()))
+    }
+    async fn park_outbound(
+        &self,
+        _peer: &str,
+        _hashes: &[String],
+        _code: &str,
+        _episode: Option<&str>,
+    ) -> Result<()> {
+        unreachable!()
     }
     async fn guard_summary(&self, _fleet: &str) -> Result<ReplicationExportResponse> {
         let call = self.calls.fetch_add(1, Ordering::Relaxed);

@@ -114,6 +114,214 @@ fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
     Store::open(path, origin, Arc::new(Plain))
 }
 
+/// Source-pinned compatibility client: the request/signature/refusal slice of
+/// 6088f8af sync/worker.rs::post_signed_to_timed (same sender blob as d2e1d3bb).
+/// Deliberately retains the old open string allowlist, not today's terminal classifier.
+/// Only exchange application refusals are exercised here; membership/leave and overload
+/// polling branches are outside this fixture's response matrix.
+async fn old_sender_signed_refusal(
+    peer: &PeerConfig, auth: &FleetAuth, fleet: &FleetContext, request: &ReplicationExchange,
+) -> Result<ReplicationExchange> {
+    let body = serde_json::to_vec(request)?;
+    let digest = FleetAuth::body_digest(&body);
+    let headers = auth.request_headers_for(EXCHANGE_PATH, "sender", &body)?;
+    let response = replication_http_client().post(format!("{}{EXCHANGE_PATH}", peer.url))
+        .headers(headers).body(body).send().await?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.bytes().await?;
+    if !status.is_success() && !headers.contains_key(HEADER_SIGNATURE) {
+        anyhow::bail!("{}", unsigned_refusal(&peer.name, status, &bytes));
+    }
+    let bytes = if deflated(&headers) {
+        inflate(&bytes, "old sender fixture response")?
+    } else { bytes.to_vec() };
+    let responder = auth.verify_sender(&headers, "RESPONSE", EXCHANGE_PATH,
+        &bytes, Some(&peer.name), Some(&digest))?;
+    anyhow::ensure!(fleet.accept(&responder).is_ok(), "old sender membership refused response");
+    if !status.is_success() {
+        let refusal = serde_json::from_slice::<PeerResponse<Value>>(&bytes).ok().map(|r| r.value);
+        let code = refusal.as_ref().and_then(|value| value["code"].as_str()).unwrap_or_default();
+        let safe_code = match code {
+            code @ ("replication-exchange-metadata-too-large" | "replication-request-failed"
+                | "member-conflicted" | "member-signature-required" | "member-left"
+                | "member-removed" | "not-a-member") => code,
+            _ => "replication-peer-rejected",
+        };
+        anyhow::bail!("{safe_code}");
+    }
+    let response: PeerResponse<ReplicationExchange> = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()),
+        "the peer API version differs");
+    Ok(response.value)
+}
+
+#[test]
+fn outbound_parks_survive_restart_and_do_not_starve_later_pages_or_other_peers() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("sender.sqlite3");
+    let fleet = "park-page-fixture";
+    let store = plain_open(&path, "sender").unwrap();
+    store.bind_fleet(fleet).unwrap();
+    let mut claims = Vec::new();
+    for n in 0..5 {
+        claims.push(claim_walk_note(&store, &format!("park/{n}")));
+        store.seal_local_batches().unwrap();
+    }
+    let mut inventory = ReplicationInventory { accepts: Some(2), ..Default::default() };
+    let first = store.export_replication_exchange_answering_for_peer("blocked", fleet, &inventory, &[]).unwrap();
+    assert_eq!(first.envelopes.len(), 2);
+    let first_hashes = first.envelopes.iter().map(|e| e.hash.clone()).collect::<Vec<_>>();
+    store.park_outbound("blocked", &first_hashes, "replication-ingress/raw-oversize", Some("fixture-episode")).unwrap();
+    let second = store.export_replication_exchange_answering_for_peer("blocked", fleet, &inventory, &[]).unwrap();
+    assert_eq!(second.envelopes.len(), 2);
+    let second_hashes = second.envelopes.iter().map(|e| e.hash.clone()).collect::<Vec<_>>();
+    store.park_outbound("blocked", &second_hashes, "replication-ingress/raw-oversize", Some("fixture-episode")).unwrap();
+    let mut parked = first_hashes;
+    parked.extend(second_hashes);
+    assert_eq!(parked.len(), 4, "parked prefix spans more than one page");
+    // Compact missing-payload selection and legacy full-inventory selection both filter
+    // before their respective page limit, rather than losing the remainder behind a prefix.
+    for compact in [false, true] {
+        inventory.buckets = Vec::new();
+        // A nonempty foreign range activates compact missing-payload selection.
+        if compact {
+            let other = plain_memory("other").unwrap();
+            other.bind_fleet(fleet).unwrap();
+            claim_walk_note(&other, "other/note");
+            inventory.buckets = other.export_replication_summary(fleet).unwrap().inventory.buckets;
+        }
+        let remaining = store.export_replication_exchange_answering_for_peer("blocked", fleet, &inventory, &[]).unwrap();
+        assert_eq!(remaining.envelopes.len(), 1);
+        assert!(!parked.contains(&remaining.envelopes[0].hash));
+        assert_eq!(store.export_replication_exchange_answering_for_peer("unblocked", fleet, &inventory, &[]).unwrap().envelopes.len(), 2);
+    }
+    // A claim-range request with matching inventory must not bypass the exclusion.
+    let mut ask = store.export_replication_summary(fleet).unwrap().inventory;
+    ask.claim_range_query = Some(crate::replication::ClaimRangeQuery {
+        claims,
+        ..Default::default()
+    });
+    let answer = store.export_replication_exchange_answering_for_peer("blocked", fleet, &ask, &[]).unwrap();
+    assert!(answer.envelopes.iter().all(|e| !parked.contains(&e.hash)));
+    drop(store);
+    let reopened = plain_open(&path, "sender").unwrap();
+    let next = reopened.export_replication_exchange_answering_for_peer("blocked", fleet, &ReplicationInventory::default(), &[]).unwrap();
+    assert!(next.envelopes.iter().all(|e| !parked.contains(&e.hash)));
+    // Old-worker/no-destination IPC deliberately retains pre-cutover export semantics.
+    let old = reopened.export_replication_exchange_answering(
+        fleet, &ReplicationInventory::default(), &[],
+    ).unwrap();
+    assert!(old.envelopes.iter().any(|e| parked.contains(&e.hash)));
+    let count: u64 = reopened.readers.get().query_row("SELECT count(*) FROM outbound_parks", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 4);
+}
+
+/// Exercise actual request signing, reply verification and push construction. No rejection
+/// becomes terminal until the writer transaction commits; unsigned proxy 413s never park.
+#[tokio::test]
+async fn authenticated_ingress_parks_only_the_sent_page_after_a_successful_commit() {
+    for (code, status, signed, terminal) in [
+        ("replication-ingress/raw-oversize", StatusCode::PAYLOAD_TOO_LARGE, true, true),
+        ("replication-ingress/inflated-oversize", StatusCode::PAYLOAD_TOO_LARGE, true, true),
+        ("replication-ingress/malformed-deflate", StatusCode::BAD_REQUEST, true, true),
+        ("replication-ingress/malformed-json", StatusCode::BAD_REQUEST, true, true),
+        ("replication-ingress/receive-deadline", StatusCode::SERVICE_UNAVAILABLE, true, false),
+        ("replication-ingress/writer-unavailable", StatusCode::SERVICE_UNAVAILABLE, true, false),
+        ("replication-ingress/raw-oversize", StatusCode::PAYLOAD_TOO_LARGE, false, false),
+        ("replication-exchange-metadata-too-large", StatusCode::PAYLOAD_TOO_LARGE, true, false),
+        ("replication-ingress/raw-oversize", StatusCode::BAD_REQUEST, true, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let fleet_id = "signed-ingress-fixture";
+        let auth = FleetAuth::test(fleet_id, &[53; 32]);
+        let local = Arc::new(plain_open(&root.path().join("sender.sqlite3"), "sender").unwrap());
+        local.bind_fleet(fleet_id).unwrap();
+        claim_walk_note(&local, "one/sent");
+        let remote = Arc::new(plain_memory("peer").unwrap());
+        remote.bind_fleet(fleet_id).unwrap();
+        let state = PeerState::new(Local(remote.clone()), "peer".into(), auth.clone(),
+            FleetContext::legacy(BTreeSet::from(["sender".into()])));
+        let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sent = observed.clone();
+        let app = Router::new().route(EXCHANGE_PATH, post(move |body: Bytes| {
+            let state = state.clone();
+            let remote = remote.clone();
+            let sent = sent.clone();
+            async move {
+                let request: ReplicationExchange = serde_json::from_slice(&body).unwrap();
+                let digest = FleetAuth::body_digest(&body);
+                if request.envelopes.is_empty() {
+                    return signed_response(&state, &digest, 0, remote.export_replication_summary(fleet_id).unwrap()).unwrap();
+                }
+                sent.lock().unwrap().extend(request.envelopes.iter().map(|e| e.hash.clone()));
+                if !signed { return status.into_response(); }
+                let mut response = signed_response(&state, &digest, 0, serde_json::json!({"code": code})).unwrap();
+                *response.status_mut() = status;
+                response
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = PeerConfig { name: "peer".into(), url: format!("http://{}", listener.local_addr().unwrap()) };
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let backend = Local(local.clone());
+        let fleet = FleetContext::legacy(BTreeSet::from(["peer".into()]));
+        // Old/new sender x old/new receiver refusal matrix, over real signed HTTP.
+        // The old receiver case is its preexisting metadata-too-large refusal; the
+        // new receiver cases are the six typed ingress responses above.
+        let old_push = local.export_replication_exchange_answering_for_peer(
+            "peer", fleet_id, &ReplicationInventory::default(), &[],
+        ).unwrap();
+        let mut old_backoff = PeerBackoff::default();
+        for _ in 0..2 {
+            let error = old_sender_signed_refusal(&peer, &auth, &fleet, &old_push).await.unwrap_err();
+            if signed {
+                let expected = if code == "replication-exchange-metadata-too-large" {
+                    code
+                } else { "replication-peer-rejected" };
+                assert_eq!(error.to_string(), expected);
+            }
+            assert!(!old_backoff.next().is_zero(), "old sender retries with ordinary backoff");
+        }
+        assert_eq!(old_backoff.failures, 2);
+        old_backoff = PeerBackoff::default(); // Old wake-generation behavior.
+        assert_eq!(old_backoff.failures, 0);
+        observed.lock().unwrap().clear();
+        if terminal {
+            local.connection.write().execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h6df03cfff180 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER fail_park BEFORE INSERT ON outbound_parks
+                 BEGIN SELECT RAISE(ABORT, 'injected park commit failure'); END;"
+            ).unwrap();
+            assert!(exchange(&replication_http_client(), &backend, "sender", &peer, &auth, &fleet).await.is_err());
+            let count: u64 = local.readers.get().query_row("SELECT count(*) FROM outbound_parks", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 0, "failed persistence cannot enter terminal state");
+            local.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-hb0f4017fc0a8 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER fail_park").unwrap();
+            observed.lock().unwrap().clear();
+        }
+        let result = exchange(&replication_http_client(), &backend, "sender", &peer, &auth, &fleet).await;
+        assert_eq!(result.is_ok(), terminal, "{code}, signed={signed}, status={status}");
+        let recorded: Vec<String> = local.readers.get().prepare(
+            "SELECT envelope_hash FROM outbound_parks ORDER BY envelope_hash"
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        if terminal {
+            let mut actual = observed.lock().unwrap().clone();
+            actual.sort();
+            actual.dedup();
+            assert_eq!(recorded, actual);
+            // Each new exchange models a new wake generation; none can send the parked unit.
+            observed.lock().unwrap().clear();
+            for _ in 0..3 {
+                exchange(&replication_http_client(), &backend, "sender", &peer, &auth, &fleet).await.unwrap();
+            }
+            assert!(observed.lock().unwrap().iter().all(|hash| !recorded.contains(hash)),
+                "new alert envelopes may move, but a wake cannot resend the rejected unit");
+        } else {
+            assert!(recorded.is_empty());
+        }
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn signed_default_answer_cannot_draw_envelopes_from_a_named_shard() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -749,7 +957,7 @@ fn fleet_secret_loading_accepts_private_raw_or_hex_files_only() {
 #[tokio::test]
 async fn an_authenticated_failure_has_a_request_bound_signature() {
     let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[5; 32]);
-    let body = Bytes::from_static(b"not json");
+    for body in [Bytes::from_static(b"not json"), Bytes::from_static(b"{}")] {
     let request_digest = FleetAuth::body_digest(&body);
     let response = receive_exchange(
         None,
@@ -768,6 +976,8 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let refusal: PeerResponse<Value> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refusal.value["code"], "replication-ingress/malformed-json");
     auth.verify(
         &headers,
         "RESPONSE",
@@ -777,6 +987,7 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
         Some(&request_digest),
     )
     .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -4468,7 +4679,7 @@ mod retry_tests {
                 let mut settled = true;
                 for index in 0..2 {
                     let current = Local(stores[index].clone())
-                        .export(fleet_id, &ReplicationInventory::default(), true, &[])
+                        .export("", fleet_id, &ReplicationInventory::default(), true, &[])
                         .await
                         .unwrap()
                         .exchange
@@ -4687,6 +4898,7 @@ struct SlowExport {
 impl Backend for SlowExport {
     async fn export(
         &self,
+        peer: &str,
         fleet_id: &str,
         inventory: &ReplicationInventory,
         summary_only: bool,
@@ -4703,8 +4915,17 @@ impl Backend for SlowExport {
             self.release_export.notified().await;
         }
         self.local
-            .export(fleet_id, inventory, summary_only, signature_requests)
+            .export(peer, fleet_id, inventory, summary_only, signature_requests)
             .await
+    }
+    async fn park_outbound(
+        &self,
+        peer: &str,
+        hashes: &[String],
+        code: &str,
+        episode: Option<&str>,
+    ) -> Result<()> {
+        self.local.park_outbound(peer, hashes, code, episode).await
     }
     async fn receive(
         &self,
@@ -6815,10 +7036,12 @@ async fn ingress_stream_cap_refuses_before_handler_and_peer_budget_header_is_str
             StatusCode::OK
         }))
         .layer(axum::middleware::from_fn(observe_exchange_body));
-    let response = app.clone().oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
-        .header("x-fractal-internal-receive-budget-ms", "0")
-        .body(Body::empty()).unwrap()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    for supplied in ["0", "30000"] {
+        let response = app.clone().oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
+            .header("x-fractal-internal-receive-budget-ms", supplied)
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
     let chunk = Bytes::from(vec![0; 1024 * 1024]);
     let chunks = (0..65).map(|_| Ok::<_, std::io::Error>(chunk.clone())).collect::<Vec<_>>();
     let response = app.oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
@@ -6943,4 +7166,28 @@ async fn an_unreadable_network_body_is_not_a_terminal_size_rejection() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     assert!(!String::from_utf8_lossy(&body).contains("replication-ingress/raw-oversize"));
+}
+
+#[tokio::test]
+async fn network_decode_distinguishes_inflated_oversize_from_malformed_deflate() {
+    let auth = FleetAuth::test("network-inflate-fixture", &[7; 32]);
+    let state = PeerState::new(
+        Local(Arc::new(plain_memory("cedar").unwrap())), "cedar".into(), auth,
+        FleetContext::legacy(BTreeSet::new()),
+    );
+    let app = peer_router(state, Router::new());
+    for (body, status, code) in [
+        (b"not deflate".to_vec(), StatusCode::BAD_REQUEST, "replication-ingress/malformed-deflate"),
+        (deflate(&vec![0; MAX_EXCHANGE_BYTES + 1]).unwrap(), StatusCode::PAYLOAD_TOO_LARGE,
+            "replication-ingress/inflated-oversize"),
+    ] {
+        let response = app.clone().oneshot(Request::builder().method("POST").uri(EXCHANGE_PATH)
+            .header("content-encoding", "deflate")
+            .body(Body::from(body)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), status);
+        assert!(!response.headers().contains_key(HEADER_SIGNATURE),
+            "pre-authentication decode refusals must not pretend to authenticate a sent unit");
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], code);
+    }
 }

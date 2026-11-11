@@ -364,12 +364,23 @@ mod tests {
     impl Backend for Answering {
         async fn export(
             &self,
+            peer: &str,
             fleet_id: &str,
             inventory: &ReplicationInventory,
             summary_only: bool,
             signature_requests: &[crate::claim::ReplicaEnvelopeId],
         ) -> Result<crate::replication::ReplicationExportResponse> {
-            self.0.export(fleet_id, inventory, summary_only, signature_requests).await
+            self.0.export(peer, fleet_id, inventory, summary_only, signature_requests).await
+        }
+
+        async fn park_outbound(
+            &self,
+            peer: &str,
+            hashes: &[String],
+            code: &str,
+            episode: Option<&str>,
+        ) -> Result<()> {
+            self.0.park_outbound(peer, hashes, code, episode).await
         }
 
         async fn receive(

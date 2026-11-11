@@ -280,8 +280,18 @@ pub async fn repair_replication_record(
     Ok(Json(claim))
 }
 
+fn local_export_peer(
+    transport: Option<Extension<ClientTransportBoundary>>,
+    peer: Option<String>,
+) -> Option<String> {
+    matches!(transport, Some(Extension(ClientTransportBoundary::Unix)))
+        .then_some(peer).flatten()
+}
+
 pub async fn replication_export(
     State(state): State<AppState>,
+    transport: Option<Extension<ClientTransportBoundary>>,
+    budget: Option<Extension<smallclaims::sync::ReceiveBudget>>,
     Json(request): Json<ReplicationExportRequest>,
 ) -> Result<Json<ReplicationExportResponse>, ApiError> {
     #[cfg(feature = "test-support")]
@@ -292,8 +302,19 @@ pub async fn replication_export(
         tokio::time::sleep(Duration::from_millis(millis)).await;
     }
     let store = state.store.clone();
+    let peer = local_export_peer(transport, request.peer);
     blocking_store(move || {
-        let exchange = if request.summary_only {
+        let exchange = if let Some(Extension(budget)) = budget {
+            budget.check()?;
+            if request.summary_only {
+                store.export_replication_summary_until(&request.fleet_id, budget.deadline())?
+            } else {
+                store.export_replication_exchange_answering_until(
+                    peer.as_deref(), &request.fleet_id, &request.inventory,
+                    &request.signature_requests, budget.deadline(),
+                )?
+            }
+        } else if request.summary_only {
             record_replication_summary(request.authority_guard, || {
                 if request.authority_guard && request.authority_digest_only {
                     store.export_replication_authority_guard(&request.fleet_id)
@@ -301,11 +322,16 @@ pub async fn replication_export(
                     store.export_replication_summary(&request.fleet_id)
                 }
             })?
-        } else {
-            store.export_replication_exchange_answering(
+        } else if let Some(peer) = peer {
+            store.export_replication_exchange_answering_for_peer(
+                &peer,
                 &request.fleet_id,
                 &request.inventory,
                 &request.signature_requests,
+            )?
+        } else {
+            store.export_replication_exchange_answering(
+                &request.fleet_id, &request.inventory, &request.signature_requests,
             )?
         };
         Ok(Json(ReplicationExportResponse {
@@ -649,17 +675,35 @@ pub async fn shard_replication_peers(
 pub async fn shard_replication_export(
     State(state): State<AppState>,
     AxumPath(shard): AxumPath<String>,
+    transport: Option<Extension<ClientTransportBoundary>>,
+    budget: Option<Extension<smallclaims::sync::ReceiveBudget>>,
     Json(request): Json<ReplicationExportRequest>,
 ) -> Result<Json<ReplicationExportResponse>, ApiError> {
     let store = replication_shard(&state, &shard)?;
+    let peer = local_export_peer(transport, request.peer);
     blocking_store(move || {
-        let exchange = if request.summary_only {
+        let exchange = if let Some(Extension(budget)) = budget {
+            budget.check()?;
+            if request.summary_only {
+                store.export_replication_summary_until(&request.fleet_id, budget.deadline())?
+            } else {
+                store.export_replication_exchange_answering_until(
+                    peer.as_deref(), &request.fleet_id, &request.inventory,
+                    &request.signature_requests, budget.deadline(),
+                )?
+            }
+        } else if request.summary_only {
             store.export_replication_summary(&request.fleet_id)?
-        } else {
-            store.export_replication_exchange_answering(
+        } else if let Some(peer) = peer {
+            store.export_replication_exchange_answering_for_peer(
+                &peer,
                 &request.fleet_id,
                 &request.inventory,
                 &request.signature_requests,
+            )?
+        } else {
+            store.export_replication_exchange_answering(
+                &request.fleet_id, &request.inventory, &request.signature_requests,
             )?
         };
         Ok(Json(ReplicationExportResponse {
@@ -668,6 +712,45 @@ pub async fn shard_replication_export(
         }))
     })
     .await
+}
+
+/// Durably exclude a peer-rejected page before the worker's terminal transition.
+pub async fn replication_outbound_park(
+    State(state): State<AppState>,
+    transport: Extension<ClientTransportBoundary>,
+    Json(request): Json<smallclaims::replication::ReplicationOutboundParkRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if !matches!(transport.0, ClientTransportBoundary::Unix) {
+        return Err(ApiError::bad(FractalError::new(
+            "replication-internal-only", "outbound parks require the local Unix listener",
+        )));
+    }
+    let store = state.store.clone();
+    blocking_action(move || store.park_outbound_with_failure(
+        &store, &request.peer, &request.hashes, &request.code,
+    )).await?;
+    signal_changed(&state);
+    Ok(Json(serde_json::json!({})))
+}
+
+pub async fn shard_replication_outbound_park(
+    State(state): State<AppState>,
+    AxumPath(shard): AxumPath<String>,
+    transport: Extension<ClientTransportBoundary>,
+    Json(request): Json<smallclaims::replication::ReplicationOutboundParkRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if !matches!(transport.0, ClientTransportBoundary::Unix) {
+        return Err(ApiError::bad(FractalError::new(
+            "replication-internal-only", "outbound parks require the local Unix listener",
+        )));
+    }
+    let store = replication_shard(&state, &shard)?;
+    let graph = state.store.clone();
+    blocking_action(move || graph.park_outbound_with_failure(
+        &store, &request.peer, &request.hashes, &request.code,
+    )).await?;
+    signal_changed(&state);
+    Ok(Json(serde_json::json!({})))
 }
 
 /// After the messages shard admitted items: note where in this member's graph order they arrived,
@@ -747,9 +830,6 @@ pub async fn shard_replication_receive(
         }
     })
     .await?;
-    if response.changed {
-        stream_admitted(&state).await;
-    }
     Ok(Json(response))
 }
 
@@ -781,9 +861,9 @@ pub async fn shard_replication_wake(
         Ok(projected && (admission.changed || repairs != 0))
     })
     .await?;
-    if changed {
-        stream_admitted(&state).await;
-    }
+    // Receipt may already have admitted/projected these items. The existing wake owns
+    // their idempotent arrival recording so ingress never starts another graph commit.
+    stream_admitted(&state).await;
     Ok(Json(json!({ "changed": changed })))
 }
 
@@ -900,5 +980,75 @@ mod ingress_tests {
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(error.code, "replication-ingress/receive-deadline");
         }
+    }
+
+    #[tokio::test]
+    async fn graph_and_shard_stream_limits_do_not_misclassify_io_failures() {
+        for path in ["/v1/internal/replication/receive", "/v1/internal/replication/shard/messages/receive"] {
+            let chunk = axum::body::Bytes::from(vec![0; 1024 * 1024]);
+            let chunks = (0..65).map(|_| Ok::<_, std::io::Error>(chunk.clone())).collect::<Vec<_>>();
+            let request = Request::builder().method("POST").uri(path)
+                .body(Body::from_stream(futures_util::stream::iter(chunks))).unwrap();
+            let error = prepare_receive_at(request, ClientTransportBoundary::Unix, Instant::now())
+                .await.unwrap_err();
+            assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(error.code, "replication-ingress/raw-oversize");
+            let body = Body::from_stream(futures_util::stream::iter([
+                Err::<axum::body::Bytes, _>(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "fixture")),
+            ]));
+            let request = Request::builder().method("POST").uri(path).body(body).unwrap();
+            let error = prepare_receive_at(request, ClientTransportBoundary::Unix, Instant::now())
+                .await.unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_ne!(error.code, "replication-ingress/raw-oversize");
+        }
+    }
+
+    #[tokio::test]
+    async fn shard_receive_admits_then_existing_wake_records_arrival_exactly_once() {
+        let target_root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(target_root.path());
+        let fleet = "shard-stream-ingress-fixture";
+        state.store.bind_fleet(fleet).unwrap();
+        let target = crate::store::messages_shard::open(&state.store, target_root.path()).unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let source_graph = Arc::new(crate::store::Store::open(
+            &source_root.path().join("claims.sqlite3"), "birch",
+        ).unwrap());
+        source_graph.bind_fleet(fleet).unwrap();
+        let source = crate::store::messages_shard::open(&source_graph, source_root.path()).unwrap();
+        source.append_claim(&smallclaims::claim::ClaimInput {
+            subject: "message/0123456789abcdef".into(), kind: "message.sent".into(),
+            actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": "late stream",
+                "status": "sent",
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = source.export_replication_exchange(
+            fleet, &smallclaims::replication::ReplicationInventory::default(),
+        ).unwrap();
+        let Json(received) = shard_replication_receive(
+            State(state.clone()), AxumPath("messages".into()),
+            axum::Extension(smallclaims::sync::ReceiveBudget {
+                accepted: smallclaims::sync::ReceiveBudget::now(),
+            }),
+            Ok(Json(ReplicationReceiveRequest {
+                peer: "birch".into(), fleet_id: fleet.into(), exchange,
+                round_trip_ms: None, carrier: Default::default(),
+            })),
+        ).await.unwrap();
+        assert!(received.changed);
+        assert!(received.receipt.received > 0);
+        assert_eq!(target.claims_for("message/0123456789abcdef", Some("message.sent")).unwrap().len(), 1);
+        let arrivals = || target.readers.get().query_row(
+            "SELECT COUNT(*) FROM stream_arrivals", [], |row| row.get::<_, usize>(0),
+        ).unwrap();
+        assert_eq!(arrivals(), 0, "ingress must not start the graph arrival-recording commit");
+        shard_replication_wake(State(state.clone()), AxumPath("messages".into())).await.unwrap();
+        assert_eq!(arrivals(), 1, "the existing post-receive wake records the admitted item");
+        shard_replication_wake(State(state), AxumPath("messages".into())).await.unwrap();
+        assert_eq!(arrivals(), 1, "repeated existing wakes must not double-record an arrival");
     }
 }

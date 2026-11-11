@@ -565,7 +565,7 @@ CREATE INDEX IF NOT EXISTS claims_kind_index ON claims(kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
-"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-h48ab0ffcf698 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
+"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-hb2fdea467e9a owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
 -- Heals once compared claim identities through this index; nothing reads it any more.
 DROP INDEX IF EXISTS claims_batch_claim_id;
@@ -710,6 +710,19 @@ CREATE TABLE IF NOT EXISTS replication_refusals (
     reason TEXT NOT NULL,
     updated_at_unix_ms TEXT NOT NULL
 );
+
+-- Local destination-specific exclusion authority; failure episodes only link repair/alerts.
+CREATE TABLE IF NOT EXISTS outbound_parks (
+    origin TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    peer TEXT NOT NULL,
+    envelope_hash TEXT NOT NULL,
+    code TEXT NOT NULL,
+    episode TEXT,
+    PRIMARY KEY(origin, scope, peer, envelope_hash)
+);
+CREATE INDEX IF NOT EXISTS outbound_parks_peer_envelope
+    ON outbound_parks(peer, envelope_hash);
 
 CREATE TABLE IF NOT EXISTS graph_generation (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -5066,6 +5079,19 @@ pub fn compact_replication_difference_turn(
     listing_limit: usize,
     turn: usize,
 ) -> (Vec<ReplicaEnvelopeId>, Vec<ReplicaEnvelopeId>) {
+    compact_replication_difference_filtered(
+        inventory, buckets, remote, listing_limit, turn, |_| Ok(true),
+    ).expect("an infallible outbound filter")
+}
+
+fn compact_replication_difference_filtered(
+    inventory: &CompactReplicationInventory,
+    buckets: &[ReplicationInventoryBucket],
+    remote: &ReplicationInventory,
+    listing_limit: usize,
+    turn: usize,
+    mut eligible: impl FnMut(&str) -> Result<bool>,
+) -> Result<(Vec<ReplicaEnvelopeId>, Vec<ReplicaEnvelopeId>)> {
     let remote_buckets = remote
         .buckets
         .iter()
@@ -5088,16 +5114,17 @@ pub fn compact_replication_difference_turn(
     for bucket in buckets {
         let key = (bucket.writer.as_str(), bucket.start);
         let local = inventory.range(&bucket.writer, bucket.start);
-        let room = page_limit.saturating_sub(missing.len());
         let Some(theirs) = remote_buckets.get(&key) else {
             // The peer holds nothing in this range.
-            missing.extend(
-                local
-                    .iter()
-                    .filter(|envelope| inventory.has_payload(envelope))
-                    .take(room)
-                    .map(|envelope| inventory.identity(envelope)),
-            );
+            for envelope in local.iter().filter(|envelope| inventory.has_payload(envelope)) {
+                if missing.len() == page_limit {
+                    break;
+                }
+                let identity = inventory.identity(envelope);
+                if eligible(&identity.hash)? {
+                    missing.push(identity);
+                }
+            }
             continue;
         };
         if theirs.digest == bucket.digest {
@@ -5120,16 +5147,17 @@ pub fn compact_replication_difference_turn(
         {
             continue;
         }
-        missing.extend(
-            local
-                .iter()
-                .zip(inventory.identities(local))
-                .filter(|(envelope, identity)| {
-                    inventory.has_payload(envelope) && known.binary_search(&identity).is_err()
-                })
-                .map(|(_, identity)| identity)
-                .take(room),
-        );
+        for (envelope, identity) in local.iter().zip(inventory.identities(local)) {
+            if missing.len() == page_limit {
+                break;
+            }
+            if inventory.has_payload(envelope)
+                && known.binary_search(&&identity).is_err()
+                && eligible(&identity.hash)?
+            {
+                missing.push(identity);
+            }
+        }
     }
     for group in [&mut live, &mut payloadless] {
         let start = listing_turn_start(turn, group.len());
@@ -5143,7 +5171,7 @@ pub fn compact_replication_difference_turn(
         }
         listed.extend(inventory.identities(range));
     }
-    (missing, listed)
+    Ok((missing, listed))
 }
 
 /// The range a listing of `len` differing ranges starts from on answer `turn`: the fractional part
@@ -7556,6 +7584,99 @@ impl Store {
         })
     }
 
+    /// Commit local exclusions before the caller treats an authenticated refusal as terminal.
+    /// Episode links are reserved for the existing failure/repair path, not exclusion authority.
+    pub fn park_outbound(
+        &self, peer: &str, hashes: &[String], code: &str, episode: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(matches!(code,
+            "replication-ingress/raw-oversize" | "replication-ingress/inflated-oversize"
+            | "replication-ingress/malformed-deflate" | "replication-ingress/malformed-json"),
+            "only terminal ingress refusals may park outbound envelopes");
+        let scope = self.bound_shard()?.unwrap_or_default();
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        if hashes.is_empty() { return Ok(()); }
+        let episode = match episode {
+            Some(episode) => episode.to_owned(),
+            None => {
+                // One open episode per destination/code prevents rejected alert envelopes
+                // from recursively creating more alerts. Exclusion remains per envelope.
+                let signature = canonical_hash(&(&self.origin, &scope, peer, code))?;
+                let subject = format!("daemon/{}", self.origin);
+                let open = transaction.query_row(
+                    "SELECT json_extract(f.body,'$.fields.episode') FROM claims f
+                     WHERE f.subject=?1 AND f.kind='operational.failure'
+                       AND json_extract(f.body,'$.fields.condition')='replication-outbound-parked'
+                       AND json_extract(f.body,'$.fields.reproduction.signature')=?2
+                       AND NOT EXISTS(SELECT 1 FROM claims r WHERE r.subject=f.subject
+                         AND r.kind='operational.recovered'
+                         AND json_extract(r.body,'$.fields.failure')=f.id)
+                     ORDER BY f.store_index DESC LIMIT 1",
+                    params![subject, signature], |row| row.get::<_, String>(0),
+                ).optional()?;
+                match open {
+                    Some(episode) => episode,
+                    None => {
+                        let episode = format!("replication-outbound-parked/{signature}/{}", current_index(&transaction)?);
+                        self.runtime.append_claim_tx(&transaction, &self.origin, &subject,
+                            "operational.failure", Some("daemon/runtime"), &json!({"fields": {
+                                "episode": episode, "condition": "replication-outbound-parked",
+                                "reviewer": "person/operator", "severity": "error",
+                                "title": format!("outbound replication to {peer} parked after {code}"),
+                                "reason": "Fix the authenticated rejection cause, then explicitly approve operational repair to retry this current failure episode. Restart and wake do not unpark it.",
+                                "targets": [subject],
+                                "reproduction": {"signature": signature, "origin": self.origin,
+                                    "scope": scope, "peer": peer, "hashes": hashes, "code": code}
+                            }}), &[], None)?;
+                        episode
+                    }
+                }
+            }
+        };
+        for hash in hashes {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h99dc1d597e62 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO outbound_parks(origin,scope,peer,envelope_hash,code,episode)
+                 VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(origin,scope,peer,envelope_hash) DO UPDATE
+                   SET episode=excluded.episode, code=excluded.code
+                   WHERE outbound_parks.episode IS NULL",
+                params![self.origin, scope, peer, hash, code, episode],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn outbound_eligible(&self, peer: Option<&str>, hash: &str) -> Result<bool> {
+        let Some(peer) = peer else { return Ok(true); };
+        Ok(!self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM outbound_parks
+             WHERE peer=?1 AND envelope_hash=?2 AND origin=?3 AND scope=?4 LIMIT 1)",
+            params![peer, hash, self.origin, self.bound_shard()?.unwrap_or_default()],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    pub fn export_replication_exchange_answering_for_peer(
+        &self, peer: &str, fleet_id: &str, remote: &ReplicationInventory,
+        signature_requests: &[ReplicaEnvelopeId],
+    ) -> Result<ReplicationExchange> {
+        self.export_replication_exchange_within_for_peer(
+            Some(peer), fleet_id, remote, signature_requests, REPLICATION_EXCHANGE_BODY_BUDGET, None,
+        )
+    }
+
+    /// Existing reply export with receive-only acquisition deadlines, not a separate read path.
+    pub fn export_replication_exchange_answering_until(
+        &self, peer: Option<&str>, fleet_id: &str, remote: &ReplicationInventory,
+        signature_requests: &[ReplicaEnvelopeId], deadline: std::time::Instant,
+    ) -> Result<ReplicationExchange> {
+        self.export_replication_exchange_within_for_peer(
+            peer, fleet_id, remote, signature_requests, REPLICATION_EXCHANGE_BODY_BUDGET, Some(deadline),
+        )
+    }
+
     pub fn export_replication_exchange(
         &self,
         fleet_id: &str,
@@ -7588,7 +7709,17 @@ impl Store {
         signature_requests: &[ReplicaEnvelopeId],
         budget: usize,
     ) -> Result<ReplicationExchange> {
-        let mut exchange = self.export_replication_difference(fleet_id, remote)?;
+        self.export_replication_exchange_within_for_peer(
+            None, fleet_id, remote, signature_requests, budget, None,
+        )
+    }
+
+    fn export_replication_exchange_within_for_peer(
+        &self, peer: Option<&str>, fleet_id: &str, remote: &ReplicationInventory,
+        signature_requests: &[ReplicaEnvelopeId], budget: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ReplicationExchange> {
+        let mut exchange = self.export_replication_difference_filtered(peer, fleet_id, remote, deadline)?;
         let _timing = time_stage(&self.replication_timers.export);
         // Claims the peer found it lacks travel in their ordinary envelopes, after the
         // envelopes the inventory difference already sends.
@@ -7598,11 +7729,17 @@ impl Store {
                 .iter()
                 .map(|envelope| (envelope.writer.clone(), envelope.sequence, envelope.hash.clone()))
                 .collect();
-            let wanted = self
-                .envelopes_carrying_claims(&query.claims)?
-                .into_iter()
-                .filter(|id| !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone())))
-                .collect();
+            let mut wanted = Vec::new();
+            for id in self.envelopes_carrying_claims(&query.claims)? {
+                if wanted.len() + exchange.envelopes.len() >= replication_page_limit(remote) {
+                    break;
+                }
+                if !sent.contains(&(id.writer.clone(), id.sequence, id.hash.clone()))
+                    && self.outbound_eligible(peer, &id.hash)?
+                {
+                    wanted.push(id);
+                }
+            }
             exchange.envelopes.extend(self.replica_envelopes(wanted)?);
         }
         {
@@ -7622,7 +7759,20 @@ impl Store {
         fleet_id: &str,
         remote: &ReplicationInventory,
     ) -> Result<ReplicationExchange> {
-        let snapshot = self.replication_snapshot()?;
+        self.export_replication_difference_filtered(None, fleet_id, remote, None)
+    }
+
+    pub fn export_replication_difference_for_peer(
+        &self, peer: &str, fleet_id: &str, remote: &ReplicationInventory,
+    ) -> Result<ReplicationExchange> {
+        self.export_replication_difference_filtered(Some(peer), fleet_id, remote, None)
+    }
+
+    fn export_replication_difference_filtered(
+        &self, peer: Option<&str>, fleet_id: &str, remote: &ReplicationInventory,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ReplicationExchange> {
+        let snapshot = self.replication_snapshot_with_deadline(deadline)?;
         let digests = {
             let _span = crate::profile::span("replication.digests");
             self.exported_digests(&snapshot)?
@@ -7634,13 +7784,14 @@ impl Store {
             // answer lists from the next differing range, so every one is listed in turn.
             let (missing, listed) = {
                 let _span = crate::profile::span("replication.difference");
-                compact_replication_difference_turn(
+                compact_replication_difference_filtered(
                     &snapshot.inventory,
                     &snapshot.buckets,
                     remote,
                     REPLICATION_EXCHANGE_ENVELOPE_LIMIT,
                     self.replication_listing_turn.fetch_add(1, Ordering::Relaxed),
-                )
+                    |hash| self.outbound_eligible(peer, hash),
+                )?
             };
             let envelopes = {
                 let _span = crate::profile::span("replication.envelopes");
@@ -7692,14 +7843,17 @@ impl Store {
             // duplicating the remote's entire inventory on every divergent sync.
             let known = remote.envelopes.iter().collect::<BTreeSet<_>>();
             let inventory = &snapshot.inventory;
-            inventory
-                .envelopes
-                .iter()
-                .filter(|envelope| inventory.has_payload(envelope))
-                .map(|envelope| inventory.identity(envelope))
-                .filter(|identity| !known.contains(identity))
-                .take(replication_page_limit(remote))
-                .collect::<Vec<_>>()
+            let mut missing = Vec::new();
+            for envelope in inventory.envelopes.iter().filter(|envelope| inventory.has_payload(envelope)) {
+                if missing.len() == replication_page_limit(remote) {
+                    break;
+                }
+                let identity = inventory.identity(envelope);
+                if !known.contains(&identity) && self.outbound_eligible(peer, &identity.hash)? {
+                    missing.push(identity);
+                }
+            }
+            missing
         };
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
@@ -7802,14 +7956,21 @@ impl Store {
                 "replication receive expired before the next writer loan"));
         }
         match deadline {
-            Some(deadline) => self.connection.write_receive_until(deadline).map_err(|error| {
+            Some(deadline) => {
+                let loan = if background {
+                    self.connection.write_background_receive_until(deadline)
+                } else {
+                    self.connection.write_receive_until(deadline)
+                };
+                loan.map_err(|error| {
                 let code = match error {
                     crate::sqlite::WriterLoanError::Expired => "replication-ingress/receive-deadline",
                     crate::sqlite::WriterLoanError::AdmissionClosed
                     | crate::sqlite::WriterLoanError::Disconnected => "replication-ingress/writer-unavailable",
                 };
                 FractalError::new(code, error.to_string())
-            }),
+                })
+            }
             None if background => Ok(self.connection.write_background()),
             None => Ok(self.connection.write()),
         }

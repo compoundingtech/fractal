@@ -33,6 +33,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
     /// This node's exchange for a peer that holds `inventory`, or only its summary.
     fn export(
         &self,
+        peer: &str,
         fleet_id: &str,
         inventory: &ReplicationInventory,
         summary_only: bool,
@@ -46,7 +47,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         fleet_id: &str,
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
         async move {
-            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
+            self.export("", fleet_id, &ReplicationInventory::default(), true, &[]).await
         }
     }
 
@@ -97,6 +98,15 @@ pub trait Backend: Clone + Send + Sync + 'static {
     fn redeem(&self, request: &JoinRequest) -> impl Future<Output = Result<Value>> + Send;
 
     fn fleet_view(&self) -> impl Future<Output = Result<FleetView>> + Send;
+
+    /// Persist authenticated terminal rejections before changing sender state.
+    fn park_outbound(
+        &self,
+        peer: &str,
+        hashes: &[String],
+        code: &str,
+        episode: Option<&str>,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     fn record_failure(
         &self,
@@ -194,21 +204,34 @@ where
 {
     async fn export(
         &self,
+        peer: &str,
         fleet_id: &str,
         inventory: &ReplicationInventory,
         summary_only: bool,
         signature_requests: &[ReplicaEnvelopeId],
     ) -> Result<ReplicationExportResponse> {
         let backend = self.clone();
+        let peer = peer.to_owned();
         let fleet_id = fleet_id.to_owned();
         let inventory = inventory.clone();
         let signature_requests = signature_requests.to_vec();
+        let budget = super::receive_budget();
         tokio::task::spawn_blocking(move || crate::task_cpu::blocking("replication.export", || {
             let store = backend.store();
-            let exchange = if summary_only {
+            let exchange = if let Some(budget) = budget {
+                budget.check()?;
+                if summary_only {
+                    store.export_replication_summary_until(&fleet_id, budget.deadline())?
+                } else {
+                    store.export_replication_exchange_answering_until(
+                        Some(&peer), &fleet_id, &inventory, &signature_requests, budget.deadline(),
+                    )?
+                }
+            } else if summary_only {
                 store.export_replication_summary(&fleet_id)?
             } else {
-                store.export_replication_exchange_answering(
+                store.export_replication_exchange_answering_for_peer(
+                    &peer,
                     &fleet_id,
                     &inventory,
                     &signature_requests,
@@ -220,6 +243,23 @@ where
             })
         }))
         .await?
+    }
+
+    async fn park_outbound(
+        &self,
+        peer: &str,
+        hashes: &[String],
+        code: &str,
+        episode: Option<&str>,
+    ) -> Result<()> {
+        let backend = self.clone();
+        let peer = peer.to_owned();
+        let hashes = hashes.to_vec();
+        let code = code.to_owned();
+        let episode = episode.map(str::to_owned);
+        tokio::task::spawn_blocking(move || {
+            backend.store().park_outbound(&peer, &hashes, &code, episode.as_deref())
+        }).await?
     }
 
     async fn receive(

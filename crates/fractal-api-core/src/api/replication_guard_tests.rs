@@ -9,6 +9,7 @@ const SUMMARY: &str = "replication/summary";
 
 fn request(summary_only: bool, authority_guard: bool) -> ReplicationExportRequest {
     ReplicationExportRequest {
+        peer: None,
         fleet_id: FLEET.into(),
         inventory: Default::default(),
         summary_only,
@@ -41,27 +42,27 @@ async fn guard_summary_accounting_preserves_responses_counts_errors_and_unreache
         store_index: state.store.index().unwrap(),
     };
     assert_eq!(count(GUARD), 0);
-    let ordinary = replication_export(State(state.clone()), Json(request(true, false)))
+    let ordinary = replication_export(State(state.clone()), None, None, Json(request(true, false)))
         .await.unwrap().0;
     assert_eq!(serde_json::to_vec(&ordinary).unwrap(), serde_json::to_vec(&expected).unwrap());
     assert_eq!(count(GUARD), 0, "ordinary peer summary did not reach the guard");
     assert_eq!(count(SUMMARY), 1);
-    let guarded = replication_export(State(state.clone()), Json(request(true, true)))
+    let guarded = replication_export(State(state.clone()), None, None, Json(request(true, true)))
         .await.unwrap().0;
     assert_eq!(serde_json::to_vec(&guarded).unwrap(), serde_json::to_vec(&ordinary).unwrap());
     assert_eq!(count(GUARD), 1);
     assert_eq!(count(SUMMARY), 1);
     // The marker cannot change a full exchange into a summary or enter its recorder.
-    let full = replication_export(State(state.clone()), Json(request(false, false)))
+    let full = replication_export(State(state.clone()), None, None, Json(request(false, false)))
         .await.unwrap().0;
-    let marked_full = replication_export(State(state.clone()), Json(request(false, true)))
+    let marked_full = replication_export(State(state.clone()), None, None, Json(request(false, true)))
         .await.unwrap().0;
     assert_eq!(serde_json::to_vec(&marked_full).unwrap(), serde_json::to_vec(&full).unwrap());
     assert_eq!(count(GUARD), 1);
     assert_eq!(count(SUMMARY), 1);
     // A genuine store refusal is still returned, and its reached guard call is counted.
     state.store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-ha2066549b853 owner=fractal_api_core::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "DROP TABLE replica_envelopes").unwrap();
-    assert!(replication_export(State(state), Json(request(true, true))).await.is_err());
+    assert!(replication_export(State(state), None, None, Json(request(true, true))).await.is_err());
     assert_eq!(count(GUARD), 2);
     let report = crate::performance::snapshot();
     let row = report["requests"].as_array().unwrap().iter()
@@ -132,7 +133,7 @@ async fn guard_summary_uses_unchanged_default_backend_and_old_local_handler() {
     let local = smallclaims::sync::Local(Arc::new(
         smallclaims::store::Store::open_memory("legacy", Arc::new(smallclaims::store::runtime::Plain)).unwrap()
     ));
-    let normal = local.export(FLEET, &Default::default(), true, &[]).await.unwrap();
+    let normal = local.export("", FLEET, &Default::default(), true, &[]).await.unwrap();
     let guard = local.guard_summary(FLEET).await.unwrap();
     assert_eq!(serde_json::to_vec(&guard).unwrap(), serde_json::to_vec(&normal).unwrap());
     let expected = ReplicationExportResponse {
@@ -187,7 +188,7 @@ async fn reduced_mode_requires_all_three_local_flags_and_omits_only_buckets() {
         /* sqlite-large-value: allow-for-now lv-h85ba6985cde2 owner=fractal_api_core::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,payload,relay,receipt_state,received_at_unix_ms)
          VALUES('fixture',1,?1,'0',X'','fixture','pending','0')", ["a".repeat(64)],
     ).unwrap();
-    let full_summary = replication_export(State(state.clone()), Json(request(true, false)))
+    let full_summary = replication_export(State(state.clone()), None, None, Json(request(true, false)))
         .await
         .unwrap()
         .0;
@@ -195,7 +196,7 @@ async fn reduced_mode_requires_all_three_local_flags_and_omits_only_buckets() {
         !full_summary.exchange.inventory.buckets.is_empty(),
         "negative control needs real buckets"
     );
-    let full_exchange = replication_export(State(state.clone()), Json(request(false, false)))
+    let full_exchange = replication_export(State(state.clone()), None, None, Json(request(false, false)))
         .await
         .unwrap()
         .0;
@@ -204,7 +205,7 @@ async fn reduced_mode_requires_all_three_local_flags_and_omits_only_buckets() {
             for digest_only in [false, true] {
                 let mut input = request(summary, guard);
                 input.authority_digest_only = digest_only;
-                let response = replication_export(State(state.clone()), Json(input))
+                let response = replication_export(State(state.clone()), None, None, Json(input))
                     .await
                     .unwrap()
                     .0;
@@ -275,10 +276,10 @@ async fn reduced_mode_preserves_reached_store_errors_and_guard_accounting() {
         .execute_batch(/* sqlite-large-value: allow-for-now lv-h18084a82300f owner=fractal_api_core::api::replication_guard_tests TODO=chunk-or-reference-exact-wire-values */ "DROP TABLE replica_envelope_holds")
         .unwrap();
     let before = count(GUARD);
-    let old = replication_export(State(state.clone()), Json(request(true, true))).await;
+    let old = replication_export(State(state.clone()), None, None, Json(request(true, true))).await;
     let mut input = request(true, true);
     input.authority_digest_only = true;
-    let new = replication_export(State(state), Json(input)).await;
+    let new = replication_export(State(state), None, None, Json(input)).await;
     assert!(old.is_err());
     assert!(new.is_err());
     assert_eq!(
@@ -310,7 +311,7 @@ async fn main_backend_scalar_uses_only_new_local_mode_and_reads_a_later_change()
                     input.authority_guard,
                     input.authority_digest_only,
                 );
-                let result = replication_export(State(state), Json(input))
+                let result = replication_export(State(state), None, None, Json(input))
                     .await
                     .unwrap()
                     .0;
@@ -338,7 +339,7 @@ async fn main_backend_scalar_uses_only_new_local_mode_and_reads_a_later_change()
         .unwrap();
     let main = crate::peer::MainBackend::new(socket);
     let ordinary = main
-        .export(FLEET, &Default::default(), true, &[])
+        .export("", FLEET, &Default::default(), true, &[])
         .await
         .unwrap();
     let old_guard = main.guard_summary(FLEET).await.unwrap();
@@ -382,4 +383,74 @@ async fn main_backend_scalar_uses_only_new_local_mode_and_reads_a_later_change()
     assert_eq!(observed.lock().unwrap()[3].1, 0);
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn export_destination_is_unix_only_and_absent_old_worker_requests_remain_unfiltered() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    state.store.bind_fleet(FLEET).unwrap();
+    state.store.append_claim(&smallclaims::claim::ClaimInput {
+        subject: "example/park-trust".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: Default::default(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let initial = state.store.export_replication_exchange_answering(
+        FLEET, &ReplicationInventory::default(), &[],
+    ).unwrap();
+    let hashes = initial.envelopes.iter().map(|envelope| envelope.hash.clone()).collect::<Vec<_>>();
+    assert!(!hashes.is_empty(), "negative control must contain an actual envelope");
+    state.store.park_outbound(
+        "destination", &hashes, "replication-ingress/raw-oversize", Some("trust-fixture"),
+    ).unwrap();
+
+    // Decode an actual old-worker JSON request, not a newly constructed optional field.
+    let mut old_json = serde_json::to_value(request(false, false)).unwrap();
+    old_json.as_object_mut().unwrap().remove("peer");
+    let old: ReplicationExportRequest = serde_json::from_value(old_json).unwrap();
+    assert!(old.peer.is_none());
+    let old_response = replication_export(State(state.clone()), Some(Extension(ClientTransportBoundary::Unix)), None, Json(old)).await.unwrap().0;
+    assert_eq!(old_response.exchange.envelopes.len(), initial.envelopes.len());
+
+    let mut injected = request(false, false);
+    injected.peer = Some("destination".into());
+    for boundary in [None, Some(Extension(ClientTransportBoundary::FabricLoopback))] {
+        let response = replication_export(State(state.clone()), boundary, None, Json(injected.clone())).await.unwrap().0;
+        assert_eq!(response.exchange.envelopes.len(), initial.envelopes.len(),
+            "a non-Unix caller cannot inject the internal export destination");
+    }
+    let trusted = replication_export(State(state), Some(Extension(ClientTransportBoundary::Unix)), None, Json(injected)).await.unwrap().0;
+    assert!(trusted.exchange.envelopes.iter().all(|envelope| !hashes.contains(&envelope.hash)));
+}
+
+#[tokio::test]
+async fn reply_export_budget_is_opt_in_and_ordinary_exports_stay_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    state.store.bind_fleet(FLEET).unwrap();
+    let now = smallclaims::sync::ReceiveBudget::now();
+    let expired = smallclaims::sync::ReceiveBudget {
+        accepted: now - Duration::from_secs(28),
+    };
+    let response = replication_export(
+        State(state.clone()), Some(Extension(ClientTransportBoundary::Unix)),
+        Some(Extension(expired)), Json(request(false, false)),
+    ).await.unwrap_err().into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE,
+        "a trusted zero remaining budget must not begin reply preparation");
+    let full_budget = smallclaims::sync::ReceiveBudget { accepted: now };
+    replication_export(
+        State(state.clone()), Some(Extension(ClientTransportBoundary::Unix)),
+        Some(Extension(full_budget)), Json(request(false, false)),
+    ).await.unwrap();
+    // A stripped Fabric header and an old-worker request both reach this no-budget path.
+    for boundary in [ClientTransportBoundary::Unix, ClientTransportBoundary::FabricLoopback] {
+        replication_export(
+            State(state.clone()), Some(Extension(boundary)), None, Json(request(false, false)),
+        ).await.unwrap();
+    }
 }

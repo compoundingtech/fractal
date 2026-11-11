@@ -268,6 +268,7 @@ pub mod limits;
 pub mod database_size;
 pub mod answers_check;
 pub mod local_trim_fault;
+mod outbound_park_fault;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
