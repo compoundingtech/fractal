@@ -261,7 +261,7 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
     let child = fixture.child(&parent.step, "publish", 1).unwrap();
     // The child is linked to the program step under the key's idempotency key.
     assert_eq!(fixture.store.mission_run_subject_for_idempotency_key(&format!("program:{}:1:publish", parent.step)), child);
-    assert_eq!(fixture.children(&parent.step).iter().map(|run| run.subject.clone()).collect::<Vec<_>>(), [child.clone()]);
+    assert_eq!(fixture.children(&parent.step).iter().map(|run| run.subject.clone()).collect::<Vec<_>>(), std::slice::from_ref(&child));
     // A new host resumes the program, which asks for the same key again: the daemon adopts the
     // child it started instead of starting another.
     let host = fixture.kill_host();
@@ -336,7 +336,7 @@ fn a_child_of_a_full_mission_waits_and_starts_when_the_holder_ends() {
     fixture.store.request_mission_run_cancellation(&holder, "make room").unwrap();
     fixture.reconciler.evaluate_changed_mission_runs().unwrap();
     let child = fixture.child(&parent.step, "publish", 1).expect("the child starts once the holder ended");
-    assert_eq!(fixture.children(&parent.step).iter().map(|run| run.subject.clone()).collect::<Vec<_>>(), [child.clone()]);
+    assert_eq!(fixture.children(&parent.step).iter().map(|run| run.subject.clone()).collect::<Vec<_>>(), std::slice::from_ref(&child));
     fixture.complete_child(&child);
     std::fs::write(&parent.gate, "").unwrap();
     fixture.until("the program completes", || fixture.status(&parent.step) == "completed");
