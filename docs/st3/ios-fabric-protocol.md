@@ -120,6 +120,41 @@ Fractal only changes peers named `st-device-…` that it added, never a grant ma
 it never grants anything but the one client gateway service. Each member grants only
 the phones paired with it: each member is paired on its own.
 
+The reserved `client-control-fixture` instance is separate: its `devices fabric enable`
+selects only the exact `client-control-fixture` service and its own instance-derived
+`run/fractal-client.sock`, never arbitrary configured sockets, privileged sockets or
+production's legacy socket discovery. Its state and SQLite directory/database must
+also be the instance-derived paths: outside-root overrides and symlink aliases fail
+with `local-only-fixture-path-refused` before identity/store effects, at bind and at
+exposure. The active instance root comes from HOME, not a state-dir override; an
+explicit reserved state path is only a fallback when that instance is not active.
+The privileged operator listener is likewise fixed to `<instance-root>/run/fractal.sock`;
+both that pathname and its actual legacy binding pathname reject symlink aliases.
+It refuses production service names; other instances refuse the reserved fixture service. Fixture
+pairings use distinct `st-fixture-device-…` inbound-only peers with only that service.
+Status, revoke and disable scope cleanup to the instance's peer names, leaving normal
+`st-device-…` peers and `st3-client-v0` unchanged. Use fresh test-app Fabric identities:
+an already-trusted identity under another peer name is left untouched. Native Rust and
+Node clients address the dedicated Fabric NodeID as `fabric://NODE_ID/client-control-fixture`; the iOS bridge
+already accepts an exact node/service target. Source support grants no setup, exposure,
+pairing or enrollment authority: those effects require their separate approved gates.
+
+The fixture has a **dedicated Fabric node**, not another exposure on production's node.
+Its immutable execution context derives `<instance-root>/fabric` and
+`<instance-root>/fabric/run/control.sock`; exposure, grant, revoke and status always pin
+both `FABRIC_HOME` and global `--home`. Other homes/control paths and symlink aliases
+(including identity/peer/config files) fail before Fabric executes. Ordinary callers
+retain their ambient Fabric defaults. Fabric `19e7f896` supports global `--home`
+([CLI](https://github.com/compoundingtech/fabric/blob/19e7f896/src/main.rs#L37-L38)),
+which wins over `FABRIC_HOME` and derives the control socket without an independent
+control selector ([home](https://github.com/compoundingtech/fabric/blob/19e7f896/crates/fabric-config/src/home.rs#L20-L24),
+[control](https://github.com/compoundingtech/fabric/blob/19e7f896/crates/fabric-config/src/home.rs#L162-L164)).
+The separately approved packet must cover dedicated daemon start (`up --foreground`)
+and stop (`down`) in its Fabric-mesh scope, using this same explicit home for both.
+Record its actual `status --json` `node_id` separately from the Fractal daemon identity;
+`id` is not read-only when identity files are missing. Do not use production daemon
+restart, normal peers, or default-home exposure commands as fixture setup or rollback.
+
 What this does not cover yet:
 
 - **The first pairing cannot use Fabric.** Until it is paired, the phone has no grant,

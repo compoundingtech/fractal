@@ -46,7 +46,7 @@ test('native Fabric parsing, roundtrip and pre-dial routing guards', async () =>
     for (const target of ['DEVBOX', 'dev-box.local', 'a'.repeat(64)]) {
         assert.equal(FabricEndpoint.parse(`fabric://${target}/fractal-client-v0`).toString(), `fabric://${target}/st3-client-v0`);
     }
-    for (const service of ['st3-client-v0', 'fractal-client-v0']) {
+    for (const service of ['st3-client-v0', 'fractal-client-v0', 'client-control-fixture']) {
         for (const suffix of ['/', '?x', '#fragment', '\n', '\r\n', '/extra']) {
             assert.throws(() => FabricEndpoint.parse(`fabric://box/${service}${suffix}`));
         }
@@ -115,6 +115,24 @@ test('both URI names dial the same exposed gateway service for names and NodeIDs
             ]);
         }
     }
+});
+
+test('fixture endpoints preserve the exact isolated service on dial', async () => {
+    const node = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+    const socket = path.join(root, 'fixture-client.sock');
+    for (const target of ['Box', node]) {
+        const gateway = fixture(`fixture-service-${target}`, [{ node, name: 'Box' }], socket);
+        const value = `fabric://${target}/client-control-fixture`;
+        const endpoint = native.FabricEndpoint.parse(value);
+        assert.equal(endpoint.toString(), value);
+        assert.equal(await endpoint.dial(gateway), socket);
+        const calls = fs.readFileSync(gateway.calls, 'utf8').trim().split('\n').map(JSON.parse);
+        assert.deepEqual(calls, [
+            ...(target === 'Box' ? [['peers', '--json']] : []),
+            ['dial', node, 'client-control-fixture', '--json'],
+        ]);
+    }
+    assert.throws(() => native.FabricEndpoint.parse(`fabric://${node}/client-control-fixture-admin`));
 });
 
 test('fake Fabric carries authenticated HTTP and every client WebSocket stream', { timeout: 10000 }, async t => {

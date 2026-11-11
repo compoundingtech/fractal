@@ -76,7 +76,7 @@ impl NetworkPolicy {
         })
     }
 
-    pub fn validate_config(self, config: &Config) -> Result<(), LocalOnlyRefusal> {
+    pub fn validate_config(self, config: &Config) -> anyhow::Result<()> {
         if config.fleet_id.is_some() || config.fleet.is_some() {
             self.require(NetworkOperation::FleetJoin)?;
         }
@@ -86,6 +86,7 @@ impl NetworkPolicy {
         if !config.peers.is_empty() {
             self.require(NetworkOperation::PeerRelay)?;
         }
+        config.validate_fixture_paths()?;
         Ok(())
     }
 }
@@ -129,15 +130,22 @@ mod tests {
 
     #[test]
     fn stale_or_injected_network_configuration_is_refused() {
-        let mut config = Config::default();
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join(".st-instance/client-control-fixture");
+        let mut config = Config {
+            state_dir: root.join("state/st3"),
+            socket: root.join("run/fractal.sock"),
+            client_gateway_socket: root.join("run/fractal-client.sock"),
+            ..Config::default()
+        };
         assert!(NetworkPolicy::LocalOnly.validate_config(&config).is_ok());
         config.fleet_id = Some("personal-fleet".into());
-        assert_eq!(NetworkPolicy::LocalOnly.validate_config(&config).unwrap_err().operation, NetworkOperation::FleetJoin);
+        assert_eq!(NetworkPolicy::LocalOnly.validate_config(&config).unwrap_err().downcast_ref::<LocalOnlyRefusal>().unwrap().operation, NetworkOperation::FleetJoin);
         config.fleet_id = None;
         config.peer_listen = Some("127.0.0.1:31313".into());
-        assert_eq!(NetworkPolicy::LocalOnly.validate_config(&config).unwrap_err().operation, NetworkOperation::Replication);
+        assert_eq!(NetworkPolicy::LocalOnly.validate_config(&config).unwrap_err().downcast_ref::<LocalOnlyRefusal>().unwrap().operation, NetworkOperation::Replication);
         config.peer_listen = None;
         config.peers.push(super::super::PeerConfig { name: "personal".into(), url: "http://127.0.0.1:31313".into() });
-        assert_eq!(NetworkPolicy::LocalOnly.validate_config(&config).unwrap_err().operation, NetworkOperation::PeerRelay);
+        assert_eq!(NetworkPolicy::LocalOnly.validate_config(&config).unwrap_err().downcast_ref::<LocalOnlyRefusal>().unwrap().operation, NetworkOperation::PeerRelay);
     }
 }

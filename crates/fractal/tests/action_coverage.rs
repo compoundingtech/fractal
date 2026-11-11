@@ -7307,3 +7307,142 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
         format!("expose st3-client-v0 --socket {}\n", legacy.canonicalize().unwrap().display())
     );
 }
+
+#[test]
+fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = root.path().join("calls");
+    let contexts = root.path().join("contexts");
+    let program = bin.join("fabric");
+    std::fs::write(&program, format!(
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$FABRIC_HOME\" \"$*\" >> '{}'\n[ \"$1\" = --home ] || exit 1\n[ \"$2\" = \"$FABRIC_HOME\" ] || exit 1\nshift 2\necho \"$@\" >> '{}'\ncase \"$1\" in peers) echo '{{\"peers\":[{{\"node\":\"{}\",\"name\":\"st-device-0123456789ab\",\"allow\":[\"st3-client-v0\"]}},{{\"node\":\"{}\",\"name\":\"st-fixture-device-fedcba987654\",\"allow\":[\"client-control-fixture\"]}}]}}';; esac\n",
+        contexts.display(), calls.display(), "0123456789abcdef".repeat(4), "fedcba9876543210".repeat(4)
+    )).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let config = root.path().join("config.toml");
+    let instance = fractal_daemon::instance::Instance::new(
+        &root.path().join("home"), "client-control-fixture",
+    ).unwrap();
+    let state = instance.state_home().join("st3");
+    let paired = instance.run_dir().join("fractal-client.sock");
+    let privileged = instance.run_dir().join("fractal.sock");
+    let write_config = |socket: &std::path::Path| {
+        std::fs::write(&config, format!(
+            "state_dir = '{}'\nsocket = '{}'\nclient_gateway_socket = '{}'\n",
+            state.display(), privileged.display(), socket.display()
+        )).unwrap();
+    };
+    write_config(&paired);
+    let run = |instance: bool, arguments: &[&str]| {
+        let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+        command.env_remove("ST_AGENT").env_remove("ST_MISSION_RUN").env_remove("ST_INSTANCE")
+            .env("HOME", root.path().join("home"))
+            .env("FABRIC_HOME", root.path().join("ambient-production-fabric"))
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("xdg-state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run")).env("PATH", &bin);
+        if instance { command.args(["--instance", "client-control-fixture"]); }
+        command.arg("--config").arg(&config).args(["--json", "devices", "fabric"]).args(arguments).output().unwrap()
+    };
+    assert!(!run(true, &["enable", "--service", "st3-client-v0"]).status.success());
+    assert!(!run(false, &["enable", "--service", "st3-client-v0"]).status.success());
+    assert!(!calls.exists(), "rejected service changes never invoke Fabric");
+    assert_eq!(cli_value(run(true, &["enable"])), json!({"service":"client-control-fixture","enabled":true}));
+    let expose = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(expose, format!("expose client-control-fixture --socket {}\n", paired.display()));
+    assert!(!expose.contains(privileged.to_str().unwrap()));
+    assert_eq!(cli_value(run(true, &["status"])), json!({
+        "service":"client-control-fixture","enabled":true,"granted":["st-fixture-device-fedcba987654"]
+    }));
+    assert_eq!(cli_value(run(true, &["disable"])), json!({
+        "service":"client-control-fixture","enabled":false,"removed":["st-fixture-device-fedcba987654"]
+    }));
+    let recorded = std::fs::read_to_string(&calls).unwrap();
+    assert!(recorded.ends_with("remove st-fixture-device-fedcba987654\nunexpose client-control-fixture\n"));
+    assert!(!recorded.contains("remove st-device-"));
+    let context_log = std::fs::read_to_string(&contexts).unwrap();
+    let fabric_home = instance.root().join("fabric");
+    let expected_prefix = format!("{}|--home {} ", fabric_home.display(), fabric_home.display());
+    assert_eq!(context_log.lines().count(), 5);
+    assert!(context_log.lines().all(|line| line.starts_with(&expected_prefix)));
+    write_config(&privileged);
+    assert!(!run(true, &["enable"]).status.success());
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), recorded, "privileged sockets are never exposed");
+    write_config(&paired);
+    let production = root.path().join("ambient-production-fabric");
+    std::fs::create_dir(&production).unwrap();
+    std::os::unix::fs::symlink(&production, &fabric_home).unwrap();
+    let refused = run(true, &["enable"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("local-only-fixture-path-refused"));
+    std::fs::remove_file(&fabric_home).unwrap();
+    std::fs::create_dir_all(fabric_home.join("run")).unwrap();
+    std::os::unix::fs::symlink(production.join("control.sock"), fabric_home.join("run/control.sock")).unwrap();
+    assert!(!run(true, &["enable"]).status.success());
+    assert_eq!(std::fs::read_to_string(&contexts).unwrap(), context_log, "aliases are refused before Fabric runs");
+}
+
+#[test]
+fn cli_fixture_path_overrides_refused_before_identity_store_or_bind() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let fixture = fractal_daemon::instance::Instance::new(&home, "client-control-fixture").unwrap();
+    let other = root.path().join("other-instance");
+    std::fs::create_dir_all(&other).unwrap();
+    let database = other.join("claims.sqlite3");
+    std::fs::write(&database, "untouched other-instance database").unwrap();
+    let own_socket = fixture.run_dir().join("fractal-client.sock");
+    let run = |flag: &str, path: &std::path::Path| {
+        let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+        command.env_remove("ST_AGENT").env_remove("ST_MISSION_RUN").env_remove("ST_INSTANCE")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .args(["--instance", "client-control-fixture", "up", "--web-listen", "off"]);
+        if flag != "--client-gateway-socket" {
+            command.arg("--client-gateway-socket").arg(&own_socket);
+        }
+        let output = command.arg(flag).arg(path).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("local-only-fixture-path-refused"),
+            "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(std::fs::read_to_string(&database).unwrap(), "untouched other-instance database");
+        assert!(!fixture.state_home().exists(), "refusal precedes identity and database effects");
+    };
+    for (flag, path) in [
+        ("--state-dir", other.clone()),
+        ("--store-dir", other.clone()),
+        ("--socket", root.path().join("run/fractal.sock")),
+        ("--socket", other.join("fractal.sock")),
+        ("--client-gateway-socket", root.path().join("run/fractal.sock")),
+        ("--client-gateway-socket", root.path().join("run/fractal-client.sock")),
+        ("--client-gateway-socket", other.join("fractal.sock")),
+        ("--client-gateway-socket", other.join("fractal-client.sock")),
+    ] {
+        run(flag, &path);
+        assert!(!fixture.root().exists());
+    }
+    std::fs::create_dir_all(fixture.run_dir()).unwrap();
+    std::os::unix::fs::symlink(&database, &own_socket).unwrap();
+    run("--client-gateway-socket", &own_socket);
+    assert!(std::fs::symlink_metadata(&own_socket).unwrap().file_type().is_symlink());
+    std::fs::remove_file(&own_socket).unwrap();
+    let operator = fixture.run_dir().join("fractal.sock");
+    std::os::unix::fs::symlink(&database, &operator).unwrap();
+    run("--socket", &operator);
+    assert!(std::fs::symlink_metadata(&operator).unwrap().file_type().is_symlink());
+    std::fs::remove_file(&operator).unwrap();
+    std::fs::remove_dir(fixture.run_dir()).unwrap();
+    std::os::unix::fs::symlink(&other, fixture.run_dir()).unwrap();
+    run("--socket", &operator);
+}

@@ -16,7 +16,49 @@ use crate::fleet::transport::Fabric;
 /// The service name `enable` uses when none is given. Both native client URI
 /// spellings dial this service; accepting `fractal-client-v0` does not change exposure.
 pub const DEFAULT_SERVICE: &str = "st3-client-v0";
+/// D-10's isolated instance and its exact paired-client Fabric service.
+pub const FIXTURE_SERVICE: &str = crate::config::CLIENT_CONTROL_FIXTURE;
 const PEER_PREFIX: &str = "st-device-";
+const FIXTURE_PEER_PREFIX: &str = "st-fixture-device-";
+
+/// Resolve the exposure without allowing the fixture to replace production's service.
+pub fn service_for_instance(instance: Option<&str>, requested: Option<&str>) -> Result<String> {
+    let fixture = instance == Some(FIXTURE_SERVICE);
+    let service = requested.unwrap_or(if fixture { FIXTURE_SERVICE } else { DEFAULT_SERVICE });
+    anyhow::ensure!(!service.trim().is_empty(), "the Fabric service name must not be empty");
+    anyhow::ensure!(
+        if fixture { service == FIXTURE_SERVICE } else { service != FIXTURE_SERVICE },
+        "client-control-fixture must use its own Fabric service, never the production service"
+    );
+    Ok(service.to_owned())
+}
+
+/// Select only the paired gateway, preserving production's legacy-name discovery.
+pub fn client_socket(config: &crate::config::Config) -> Result<PathBuf> {
+    config.validate()?;
+    let socket = if config.local_only() {
+        config.client_gateway_socket.clone()
+    } else {
+        fractal_socket_discovery::default_unix_socket(
+            &config.client_gateway_socket,
+            &config.client_gateway_socket,
+        )
+    };
+    let resolve = |path: &Path| fs::canonicalize(path).or_else(|_| std::path::absolute(path));
+    let resolved = resolve(&socket)?;
+    for privileged in [&config.socket, &config.state_dir.join("run/fractal.sock")] {
+        anyhow::ensure!(resolved != resolve(privileged)?, "Fabric must never expose a privileged socket");
+    }
+    Ok(socket)
+}
+
+/// Fixture operations never consult the ambient or production Fabric daemon.
+pub fn fabric_for_state_dir(program: PathBuf, state_dir: &Path) -> Result<Fabric> {
+    Ok(match crate::config::fixture_fabric_context(state_dir)? {
+        Some(context) => Fabric::with_context(program, context),
+        None => Fabric::new(program),
+    })
+}
 
 /// `STATE/fabric-gateway.toml`, written by `st devices fabric enable`. Its presence is the switch.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,9 +78,13 @@ impl GatewayExposure {
     pub fn load(state_dir: &Path) -> Result<Option<Self>> {
         let path = Self::path(state_dir);
         match fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text)
-                .map(Some)
-                .with_context(|| format!("parse {}", path.display())),
+            Ok(text) => {
+                let exposure: Self = toml::from_str(&text)
+                    .with_context(|| format!("parse {}", path.display()))?;
+                let fixture = crate::config::NetworkPolicy::for_state_dir(state_dir).is_local_only();
+                service_for_instance(fixture.then_some(FIXTURE_SERVICE), Some(&exposure.service))?;
+                Ok(Some(exposure))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
         }
@@ -69,8 +115,8 @@ impl GatewayExposure {
         }
     }
 
-    fn fabric(&self) -> Fabric {
-        Fabric::new(self.fabric.clone())
+    pub fn fabric(&self, state_dir: &Path) -> Result<Fabric> {
+        fabric_for_state_dir(self.fabric.clone(), state_dir)
     }
 }
 
@@ -86,6 +132,14 @@ pub fn valid_node_id(node: &str) -> bool {
 /// updates its one entry.
 pub fn peer_name(node: &str) -> String {
     format!("{PEER_PREFIX}{}", &node[..12])
+}
+
+fn service_peer_name(service: &str, node: &str) -> String {
+    if service == FIXTURE_SERVICE {
+        format!("{FIXTURE_PEER_PREFIX}{}", &node[..12])
+    } else {
+        peer_name(node)
+    }
 }
 
 /// What pairing did about the device's Fabric grant, as the paired session reports it.
@@ -143,8 +197,11 @@ pub async fn grant(state_dir: &Path, node: &str) -> Grant {
         Ok(None) => return Grant::NotEnabled,
         Err(error) => return failed(error),
     };
-    let fabric = exposure.fabric();
-    let name = peer_name(node);
+    let fabric = match exposure.fabric(state_dir) {
+        Ok(fabric) => fabric,
+        Err(error) => return failed(error),
+    };
+    let name = service_peer_name(&exposure.service, node);
     let peers = match fabric.peers().await {
         Ok(peers) => peers,
         Err(error) => return failed(error),
@@ -181,14 +238,21 @@ pub async fn grant(state_dir: &Path, node: &str) -> Grant {
 /// Remove the grant st made for `node`. Leaves any peer st did not add. `Ok(None)` when there
 /// was nothing of st's to remove.
 pub async fn revoke(state_dir: &Path, node: &str) -> Result<Option<String>> {
-    let fabric = match GatewayExposure::load(state_dir)? {
-        Some(exposure) => exposure.fabric(),
+    let exposure = GatewayExposure::load(state_dir)?;
+    let fabric = match &exposure {
+        Some(exposure) => exposure.fabric(state_dir)?,
         None => match crate::fleet::transport::resolve_tool(None, "fabric") {
-            Some(program) => Fabric::new(program),
+            Some(program) => fabric_for_state_dir(program, state_dir)?,
             None => return Ok(None),
         },
     };
-    let name = peer_name(node);
+    let fallback = if crate::config::NetworkPolicy::for_state_dir(state_dir).is_local_only() {
+        FIXTURE_SERVICE
+    } else {
+        DEFAULT_SERVICE
+    };
+    let service = exposure.as_ref().map_or(fallback, |exposure| exposure.service.as_str());
+    let name = service_peer_name(service, node);
     if !fabric
         .peers()
         .await?
@@ -201,13 +265,13 @@ pub async fn revoke(state_dir: &Path, node: &str) -> Result<Option<String>> {
     Ok(Some(name))
 }
 
-/// Every peer st added for a device, by name.
-pub async fn granted_peers(fabric: &Fabric) -> Result<Vec<String>> {
+/// Every peer st added for this gateway's devices, never another instance's.
+pub async fn granted_peers(fabric: &Fabric, service: &str) -> Result<Vec<String>> {
     Ok(fabric
         .peers()
         .await?
         .into_iter()
-        .filter(|(node, name)| valid_node_id(node) && *name == peer_name(node))
+        .filter(|(node, name)| valid_node_id(node) && *name == service_peer_name(service, node))
         .map(|(_, name)| name)
         .collect())
 }
@@ -219,6 +283,80 @@ mod tests {
 
     const PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+    #[test]
+    fn fixture_and_production_services_cannot_replace_each_other() {
+        assert_eq!(service_for_instance(None, None).unwrap(), DEFAULT_SERVICE);
+        assert_eq!(service_for_instance(Some(FIXTURE_SERVICE), None).unwrap(), FIXTURE_SERVICE);
+        assert_eq!(service_for_instance(Some(FIXTURE_SERVICE), Some(FIXTURE_SERVICE)).unwrap(), FIXTURE_SERVICE);
+        assert!(service_for_instance(Some(FIXTURE_SERVICE), Some(DEFAULT_SERVICE)).is_err());
+        assert!(service_for_instance(Some(FIXTURE_SERVICE), Some("fractal-client-v0")).is_err());
+        assert!(service_for_instance(None, Some(FIXTURE_SERVICE)).is_err());
+        assert!(service_for_instance(Some("other"), Some(FIXTURE_SERVICE)).is_err());
+    }
+
+    #[test]
+    fn fixture_exposure_rejects_privileged_socket_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        let fixture_root = root.path().join(".st-instance/client-control-fixture");
+        config.state_dir = fixture_root.join("state/st3");
+        config.socket = fixture_root.join("run/fractal.sock");
+        config.client_gateway_socket = fixture_root.join("run/fractal-client.sock");
+        assert_eq!(client_socket(&config).unwrap(), config.client_gateway_socket);
+        fs::create_dir_all(config.socket.parent().unwrap()).unwrap();
+        fs::write(&config.socket, "").unwrap();
+        std::os::unix::fs::symlink(&config.socket, &config.client_gateway_socket).unwrap();
+        assert!(client_socket(&config).is_err());
+        fs::remove_file(&config.client_gateway_socket).unwrap();
+        fs::create_dir_all(&config.state_dir).unwrap();
+        let state_socket = config.state_dir.join("run/fractal.sock");
+        fs::create_dir_all(state_socket.parent().unwrap()).unwrap();
+        fs::write(&state_socket, "").unwrap();
+        std::os::unix::fs::symlink(&state_socket, &config.client_gateway_socket).unwrap();
+        assert!(client_socket(&config).is_err());
+    }
+
+    #[test]
+    fn fixture_settings_cannot_load_a_production_exposure() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join(".st-instance/client-control-fixture/state/st3");
+        GatewayExposure { service: DEFAULT_SERVICE.into(), fabric: "/unused/fabric".into() }.save(&state).unwrap();
+        assert!(GatewayExposure::load(&state).is_err());
+    }
+
+    #[tokio::test]
+    async fn fixture_grants_and_cleanup_never_modify_normal_device_peers() {
+        let root = tempfile::tempdir().unwrap();
+        let log = enable(root.path(), &[(OTHER, "st-device-fedcba987654")]);
+        let mut exposure = GatewayExposure::load(root.path()).unwrap().unwrap();
+        exposure.service = FIXTURE_SERVICE.into();
+        let fixture_state = root.path().join(".st-instance/client-control-fixture/state/st3");
+        exposure.save(&fixture_state).unwrap();
+        assert_eq!(grant(&fixture_state, PHONE).await, Grant::Granted {
+            service: FIXTURE_SERVICE.into(),
+            peer: "st-fixture-device-0123456789ab".into(),
+        });
+        assert!(calls(&log).ends_with(&format!(
+            "add {PHONE} st-fixture-device-0123456789ab --inbound-only --allow {FIXTURE_SERVICE}\n"
+        )));
+        assert_eq!(revoke(&fixture_state, OTHER).await.unwrap(), None);
+        let fixture_fabric = exposure.fabric(&fixture_state).unwrap();
+        assert!(granted_peers(&fixture_fabric, FIXTURE_SERVICE).await.unwrap().is_empty());
+        assert_eq!(granted_peers(&fixture_fabric, DEFAULT_SERVICE).await.unwrap(), ["st-device-fedcba987654"]);
+        assert_eq!(grant(&fixture_state, OTHER).await, Grant::AlreadyTrusted {
+            peer: "st-device-fedcba987654".into(),
+        });
+        assert!(!calls(&log).contains("remove "));
+        let log = enable(root.path(), &[
+            (PHONE, "st-fixture-device-0123456789ab"),
+            (OTHER, "st-device-fedcba987654"),
+        ]);
+        assert_eq!(granted_peers(&fixture_fabric, DEFAULT_SERVICE).await.unwrap(), ["st-device-fedcba987654"]);
+        assert_eq!(revoke(&fixture_state, PHONE).await.unwrap().as_deref(), Some("st-fixture-device-0123456789ab"));
+        assert!(calls(&log).ends_with("remove st-fixture-device-0123456789ab\n"));
+        assert!(!calls(&log).contains("remove st-device-"));
+    }
 
     /// A fake `fabric` whose `peers --json` lists `peers`, as NodeID and name, and which logs
     /// every call.
@@ -234,7 +372,7 @@ mod tests {
         fs::write(
             &program,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$1\" in peers) echo '{peers}';; esac\n",
+                "#!/bin/sh\nif [ \"$1\" = --home ]; then [ \"$2\" = \"$FABRIC_HOME\" ] || exit 1; shift 2; fi\necho \"$@\" >> {log}\ncase \"$1\" in peers) echo '{peers}';; esac\n",
                 log = log.display()
             ),
         )

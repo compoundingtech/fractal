@@ -8,28 +8,30 @@ use crate::ClientError;
 
 const PROTOCOL: &str = "st3-client-v0";
 const FRACTAL_PROTOCOL: &str = "fractal-client-v0";
+const FIXTURE_PROTOCOL: &str = "client-control-fixture";
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A peer's native client protocol, never a proxy URL or arbitrary Fabric protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FabricEndpoint {
     target: String,
+    protocol: &'static str,
     #[cfg(test)]
     program: Option<PathBuf>,
 }
 
 impl fmt::Display for FabricEndpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fabric://{}/{PROTOCOL}", self.target)
+        write!(f, "fabric://{}/{}", self.target, self.protocol)
     }
 }
 
 impl FabricEndpoint {
     pub fn parse(value: &str) -> Result<Self, ClientError> {
-        let invalid = || ClientError::Protocol(format!("invalid Fabric client endpoint; expected fabric://<NodeID-or-name>/{PROTOCOL} or fabric://<NodeID-or-name>/{FRACTAL_PROTOCOL}"));
+        let invalid = || ClientError::Protocol(format!("invalid Fabric client endpoint; expected fabric://<NodeID-or-name>/{PROTOCOL}, fabric://<NodeID-or-name>/{FRACTAL_PROTOCOL} or fabric://<NodeID-or-name>/{FIXTURE_PROTOCOL}"));
         let rest = value.strip_prefix("fabric://").ok_or_else(invalid)?;
         let (target, protocol) = rest.split_once('/').ok_or_else(invalid)?;
-        if ![PROTOCOL, FRACTAL_PROTOCOL].contains(&protocol)
+        if ![PROTOCOL, FRACTAL_PROTOCOL, FIXTURE_PROTOCOL].contains(&protocol)
             || target.is_empty()
             || !target.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
@@ -41,6 +43,7 @@ impl FabricEndpoint {
         }
         Ok(Self {
             target: target.to_owned(),
+            protocol: if protocol == FIXTURE_PROTOCOL { FIXTURE_PROTOCOL } else { PROTOCOL },
             #[cfg(test)]
             program: None,
         })
@@ -119,10 +122,9 @@ impl FabricEndpoint {
                 })?;
                 resolve_peer(&self.target, &peers)?.to_owned()
             };
-            // Both accepted URI names address the gateway's exposed service.
-            // Keep the legacy dial name while DEFAULT_SERVICE is st3-client-v0.
+            // The production alias retains its legacy target; the fixture is exact.
             fabric
-                .dial_socket(&node, PROTOCOL)
+                .dial_socket(&node, self.protocol)
                 .await
                 .map_err(|error| ClientError::Transport(format!("dial {self}: {error:#}")))
         })
@@ -167,7 +169,7 @@ mod tests {
             let endpoint = FabricEndpoint::parse(&format!("fabric://{target}/fractal-client-v0")).unwrap();
             assert_eq!(endpoint.to_string(), format!("fabric://{target}/st3-client-v0"));
         }
-        for service in [PROTOCOL, FRACTAL_PROTOCOL] {
+        for service in [PROTOCOL, FRACTAL_PROTOCOL, FIXTURE_PROTOCOL] {
             for suffix in ["/", "?x", "#fragment", "\n", "\r\n", "/extra"] {
                 let value = format!("fabric://box/{service}{suffix}");
                 assert!(FabricEndpoint::parse(&value).is_err(), "{value:?}");
@@ -233,6 +235,20 @@ mod tests {
                 assert_eq!(endpoint.dial_with(&fabric).await.unwrap(), PathBuf::from("/native-tunnel.sock"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn fixture_uri_dials_only_the_exact_fixture_service() {
+        let root = tempfile::tempdir().unwrap();
+        let fabric = fake_fabric(root.path(), &format!(
+            "case \"$*\" in\n'dial {NODE_ID} client-control-fixture --json') echo '{{\"socket\":\"/fixture-client.sock\"}}';;\n*) exit 1;;\nesac"
+        ));
+        let endpoint = FabricEndpoint::parse(&format!("fabric://{NODE_ID}/{FIXTURE_PROTOCOL}")).unwrap();
+        assert_eq!(endpoint.to_string(), format!("fabric://{NODE_ID}/{FIXTURE_PROTOCOL}"));
+        assert_eq!(endpoint.dial_with(&fabric).await.unwrap(), PathBuf::from("/fixture-client.sock"));
+        let normal = FabricEndpoint::parse(&format!("fabric://{NODE_ID}/{PROTOCOL}")).unwrap();
+        assert!(normal.dial_with(&fabric).await.is_err());
+        assert!(FabricEndpoint::parse(&format!("fabric://{NODE_ID}/client-control-fixture-admin")).is_err());
     }
 
     #[tokio::test]

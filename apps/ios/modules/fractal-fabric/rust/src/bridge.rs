@@ -326,6 +326,91 @@ mod tests {
         }
     }
 
+    /// Real wire admission, not command-output doubles. All identities, exposures
+    /// and the daemon are temporary; the host Fabric home is never consulted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires FABRIC_BIN and FABRIC_EXPECTED_VERSION; run with --test-threads=1"]
+    async fn fixture_service_isolated_from_production_and_privileged_socket() -> Result<()> {
+        use tokio::net::UnixListener;
+        let binary = std::env::var("FABRIC_BIN").context("set FABRIC_BIN")?;
+        let expected = std::env::var("FABRIC_EXPECTED_VERSION").context("set FABRIC_EXPECTED_VERSION")?;
+        assert_eq!(String::from_utf8(Command::new(&binary).arg("--version").output()?.stdout)?.trim(), expected);
+        let home = tempfile::Builder::new().prefix("fabric-fixture-isolation-").tempdir_in("/tmp")?;
+        let command = |arguments: &[&str]| -> Result<String> {
+            let output = Command::new(&binary).arg("--home").arg(home.path()).args(arguments).output()?;
+            if !output.status.success() {
+                bail!("isolated fabric command failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+            Ok(String::from_utf8(output.stdout)?)
+        };
+        command(&["id"])?;
+        let fixture = SecretKey::generate();
+        let normal = SecretKey::generate();
+        for (key, name, service) in [
+            (&fixture, "fixture-client", "client-control-fixture"),
+            (&normal, "normal-client", "st3-client-v0"),
+        ] {
+            command(&["add", &key.public().to_string(), name, "--inbound-only", "--allow", service])?;
+        }
+        let _daemon = Daemon(Command::new(&binary).arg("--home").arg(home.path())
+            .args(["up", "--foreground"]).env("FABRIC_PEER_HEALTH_SECS", "0")
+            .stdout(Stdio::null()).stderr(Stdio::null()).spawn()?);
+        let mut addr = None;
+        for _ in 0..100 {
+            if let Ok(value) = command(&["addr"]) {
+                addr = Some(serde_json::from_str::<EndpointAddr>(&value)?);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let addr = addr.context("isolated fabric did not start")?;
+        let fixture_socket = home.path().join("fixture-client.sock");
+        let normal_socket = home.path().join("normal-client.sock");
+        let private_socket = home.path().join("privileged.sock");
+        let fixture_listener = UnixListener::bind(&fixture_socket)?;
+        let normal_listener = UnixListener::bind(&normal_socket)?;
+        let private_listener = UnixListener::bind(&private_socket)?;
+        for (service, socket) in [
+            ("client-control-fixture", &fixture_socket),
+            ("st3-client-v0", &normal_socket),
+        ] {
+            command(&["expose", service, "--socket", socket.to_str().context("socket path")?, "--ephemeral"])?;
+        }
+        // Exercise both allow paths and both cross-service denials. A refusal must
+        // be Fabric's typed admission denial, not a closed application socket.
+        for (key, service, listener, allowed) in [
+            (fixture.clone(), "client-control-fixture", &fixture_listener, true),
+            (fixture.clone(), "st3-client-v0", &normal_listener, false),
+            (normal.clone(), "st3-client-v0", &normal_listener, true),
+            (normal.clone(), "client-control-fixture", &fixture_listener, false),
+        ] {
+            let bridge = Bridge::start(key, addr.clone(), service.into()).await?;
+            let mut local = TcpStream::connect(bridge.url.trim_start_matches("http://")).await?;
+            local.write_all(b"fixture-isolation").await?;
+            if allowed {
+                let (mut accepted, _) = tokio::time::timeout(Duration::from_secs(8), listener.accept()).await??;
+                let mut bytes = [0; 17];
+                tokio::time::timeout(Duration::from_secs(8), accepted.read_exact(&mut bytes)).await??;
+                assert_eq!(&bytes, b"fixture-isolation");
+                accepted.write_all(b"paired-client-only").await?;
+                let mut response = [0; 18];
+                tokio::time::timeout(Duration::from_secs(8), local.read_exact(&mut response)).await??;
+                assert_eq!(&response, b"paired-client-only");
+            } else {
+                let mut response = Vec::new();
+                let _ = tokio::time::timeout(Duration::from_secs(8), local.read_to_end(&mut response)).await?;
+                assert!(response.is_empty());
+                let attempt = settled_attempt().await;
+                assert_eq!(attempt["result"], "refused", "{attempt}");
+                assert_eq!(attempt["code"], "peer_not_permitted_for_service", "{attempt}");
+                assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(100), private_listener.accept()).await.is_err());
+            bridge.stop().await;
+        }
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires FABRIC_BIN and an explicit pinned member version"]
     async fn pinned_daemon_grants_flow_control_and_half_close() -> Result<()> {

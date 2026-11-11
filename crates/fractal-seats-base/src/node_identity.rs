@@ -416,6 +416,7 @@ fn apply_node(config: &mut Config, node: String) -> Result<()> {
 /// An explicit path is an operator-selected existing directory, never a mkdir request.
 /// Inspect both locations before opening SQLite or persisting a node pin.
 fn validate_store_location(config: &Config) -> Result<bool> {
+    config.validate_fixture_paths()?;
     let directory = store_dir(config);
     if config.store_dir.is_none() {
         reject_store_database_symlinks(&directory)?;
