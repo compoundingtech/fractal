@@ -1978,7 +1978,7 @@ const _: () = assert!(NEVER_TRIMS.len() <= 3);
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v21 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v22 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }

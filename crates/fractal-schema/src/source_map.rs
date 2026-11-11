@@ -381,7 +381,7 @@ mod tests {
         bad.files[0].path = "../x".into();
         assert!(bad.validate(0).is_err());
         let mut bad = map();
-        bad.subjects.insert("person/x".into(), bad.subjects["agent/a"].clone());
+        bad.subjects.insert("person/example".into(), bad.subjects["agent/a"].clone());
         assert!(bad.validate(0).is_err());
     }
 }
