@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add explicitly owned, cancellable keeper supervision (unit 7f-2)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema or shared writer changes."},
+  "rules": {"status": "none", "detail": "INACTIVE: no startup or production caller before 4c-2 and explicit activation. No policy values or numeric polling defaults."},
+  "compatibility": {"status": "changed", "detail": "KeeperWatcher owns a running idle/cgroup.events watcher, cancellation and completion descriptors, and a joined thread. Empty idle is re-seeded in the same delegated scope. Daemon-local mutation serialization prevents concurrent ensure/watch repair from publishing duplicate replacements; cross-daemon ownership remains activation's responsibility."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Fixtures cover cancellation, join/drop, watcher errors, concurrent ensure/repair and failed replacement cleanup. No cargo, native execution or gate-slot proof run."},
+  "recovery": {"status": "changed", "detail": "The watcher never launches a job or replaces its scope. Holder pidfd observation can surface watcher failure while work is running; the next part integrates this explicit supervisor beside the inactive concrete launcher."}
+}
