@@ -107,8 +107,9 @@ mod tests {
     #[test]
     fn reserved_instance_cannot_escape_with_an_explicit_state_directory() {
         assert_eq!(NetworkPolicy::for_instance(Some(CLIENT_CONTROL_FIXTURE), Path::new("/tmp/elsewhere")), NetworkPolicy::LocalOnly);
+        let home = tempfile::tempdir().unwrap();
         for root in [".st-instance", ".fractal-instance"] {
-            assert_eq!(NetworkPolicy::for_instance(None, &Path::new("/home/operator").join(root).join(CLIENT_CONTROL_FIXTURE).join("state/fractal")), NetworkPolicy::LocalOnly);
+            assert_eq!(NetworkPolicy::for_instance(None, &home.path().join(root).join(CLIENT_CONTROL_FIXTURE).join("state/fractal")), NetworkPolicy::LocalOnly);
         }
         assert_eq!(NetworkPolicy::for_instance(Some("other"), Path::new("/tmp/state")), NetworkPolicy::FleetCapable);
         assert_eq!(NetworkPolicy::for_instance(None, Path::new("/tmp/client-control-fixture/state")), NetworkPolicy::FleetCapable);

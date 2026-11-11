@@ -51,7 +51,6 @@ pub(super) async fn enforce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower::ServiceExt as _;
 
     #[tokio::test]
     async fn fixture_refuses_join_replication_and_peer_relay_before_body_or_store_effects() {
