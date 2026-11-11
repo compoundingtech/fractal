@@ -6809,7 +6809,7 @@ impl Store {
         let connection = self.readers.get();
         connection
             .prepare_cached(
-                "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE(h.unavailable,
+                "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'),h.unavailable,
                     (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=COALESCE(names.identity,requested.value) AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
@@ -8779,7 +8779,7 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
     let row = connection
         .prepare_cached(
             "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
-                 CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE(h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                 CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
              FROM (SELECT COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1) AS identity) requested
@@ -17764,6 +17764,7 @@ fn try_project_simple_replication_tx_with_discovery(
     let mut aggregate_conflicts = BTreeMap::<Aggregate, Vec<usize>>::new();
     let mut planning_conflicts = BTreeMap::<String, Vec<usize>>::new();
     let mut reconciled_operations = BTreeSet::new();
+    let mut naming_conflict = None;
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
@@ -17872,6 +17873,9 @@ fn try_project_simple_replication_tx_with_discovery(
                     serde_json::to_string(&diagnostic.details).map_err(internal)?, now_ms().to_string()],
             ).map_err(internal)?;
             let index = conflict_diagnostics.len();
+            if identities::operation_touches_naming(transaction, operation_id).map_err(internal)? {
+                naming_conflict = Some(index);
+            }
             if let Some(session) = claim.subject.strip_prefix("planning-session/") {
                 planning_conflicts.entry(session.to_owned()).or_default().push(index);
             } else if replay_projects_kind(&claim.kind)
@@ -17886,6 +17890,13 @@ fn try_project_simple_replication_tx_with_discovery(
         register_operation_tx(transaction, claim).map_err(|error| {
             incremental_claim_error(internal(error), claim, "operation-registry")
         })?;
+    }
+    if let Some(index) = naming_conflict
+        && !identities::refold_operation_conflict(transaction, &conflict_diagnostics[index].error.details)
+            .map_err(internal)? {
+        let details = &mut conflict_diagnostics[index].error.details;
+        details.insert("projection_degraded".into(), json!(true));
+        details.insert("refold_error_code".into(), json!("operation-conflict-naming-refold-limit"));
     }
     let mut latest_work_by_subject = BTreeMap::new();
     for claim in &work_claims {

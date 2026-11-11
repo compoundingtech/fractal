@@ -85,10 +85,14 @@ fn validate_name(kind: IdentityKind, id: &str) -> Result<(), FractalError> {
 pub fn resolve_identity_conn(connection: &Connection, kind: IdentityKind, id: &str) -> Result<ResolvedIdentity, FractalError> {
     validate_name(kind, id)?;
     let row: Option<(String, String, Option<String>, Option<String>)> = connection.query_row(
-        "SELECT h.identity,h.canonical_id,h.naming_revision,h.unavailable FROM identity_names n JOIN identity_heads h ON h.identity=n.identity WHERE n.name=?1 AND h.kind=?2",
+        "SELECT h.identity,h.canonical_id,h.naming_revision,COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'),h.unavailable) FROM identity_names n JOIN identity_heads h ON h.identity=n.identity WHERE n.name=?1 AND h.kind=?2",
         params![id,kind.label()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
     ).optional().map_err(internal)?;
     let (identity, canonical_id, naming_revision, blocked) = if let Some(row) = row { row } else {
+        if connection.query_row("SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:naming-operation-conflict')",
+            [], |row| row.get::<_, bool>(0)).map_err(internal)? {
+            return Err(unavailable(id, "operation-conflict-naming-refold-limit"));
+        }
         if let Some(reason) = pending(connection, id)? { return Err(unavailable(id, &reason)); }
         if declaration_token(connection, kind, id)?.is_none() {
             return Err(FractalError::new("identity-unknown", format!("identity `{id}` is unknown")).with_detail("subject", id));
@@ -107,7 +111,7 @@ pub fn resolve_reference_conn(connection: &Connection, id: &str) -> Result<Strin
     // Reference readers also encounter historical storage keys that predate today's
     // declaration grammar. Admission validates new names; reading an old key must not.
     let (identity, blocked, pending): (String, Option<String>, Option<String>) = connection.query_row(
-        "SELECT COALESCE(n.identity,?1),h.unavailable,
+        "SELECT COALESCE(n.identity,?1),COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'),h.unavailable),
             (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1
                 THEN 'conflict' ELSE 'pending-replication' END FROM replica_records
              WHERE subject_hint=COALESCE(n.identity,?1) AND state IN ('unknown','invalid')
@@ -442,7 +446,73 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     rebuild(transaction)
 }
 
+// The naming domain includes cross-identity name reservations. Operation conflicts use its
+// canonical reducer only below this measured claim-history cap, never an unbounded flush.
+// The ignored writer-hold benchmark (100 samples after 10 warmups, unoptimized) measured
+// 4096 claims at p50/p99 575.031/802.102 ms. 64 was the largest sampled history below the
+// 50 ms p99 budget: 15.324/42.054 ms. These are sampled fold times, not a latency guarantee.
+pub(super) const OPERATION_CONFLICT_NAMING_CLAIMS: usize = 64;
+
+#[cfg(test)]
+thread_local! {
+    static OMIT_OPERATION_CONFLICT_DIRTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn mark_operation_conflict_dirty(transaction: &Transaction<'_>) -> Result<()> {
+    // The mutation probe omits exactly the production invalidation, not the fold or guard.
+    #[cfg(test)]
+    if OMIT_OPERATION_CONFLICT_DIRTY.get() { return Ok(()); }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h4a0e92262358 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO identity_dirty VALUES(1)", [])?;
+    Ok(())
+}
+
+pub(super) fn operation_touches_naming(connection: &Connection, operation: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+         WHERE json_extract(body,'$._operation.id')=?1
+           AND kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published'))
+         OR EXISTS(SELECT 1 FROM checkpoint_claims WHERE operation_id=?1
+           AND kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published'))",
+        [operation], |row| row.get(0),
+    )?)
+}
+
+pub(super) fn refold_operation_conflict(transaction: &Transaction<'_>, details: &serde_json::Map<String, Value>) -> Result<bool> {
+    mark_operation_conflict_dirty(transaction)?;
+    let count: usize = transaction.query_row(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM claims INDEXED BY claims_kind_index
+         WHERE kind IN ('agent.renamed','mission.renamed','intent.desired','mission.published') LIMIT ?1)",
+        [OPERATION_CONFLICT_NAMING_CLAIMS + 1], |row| row.get(0),
+    )?;
+    if count > OPERATION_CONFLICT_NAMING_CLAIMS {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hf50ecf2614c0 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES('projection:naming-operation-conflict','stale','operation-conflict-naming-refold-limit',?1,?2)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+            params![serde_json::to_string(details)?,now_ms().to_string()],
+        )?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-hac2615d40a38 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
+             VALUES('projection:deferred-replay','stale','operation-conflict-replay-deferred','naming conflict requires explicit repair',?1)
+             ON CONFLICT(aggregate) DO UPDATE SET error_message=excluded.error_message,updated_at_unix_ms=excluded.updated_at_unix_ms",
+            [now_ms().to_string()],
+        )?;
+        return Ok(false);
+    }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h2f8124d35909 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:naming-operation-conflict'", [])?;
+    holds::rebuilt(count);
+    holds::fold_progress(0, count);
+    flush(transaction)?;
+    holds::fold_progress(count, count);
+    Ok(true)
+}
+
 pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
+    // Above-cap operation invalidations must not re-enter the unbounded lifecycle flush.
+    if transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:naming-operation-conflict')",
+        [], |row| row.get::<_, bool>(0),
+    )? { return Ok(()); }
     if transaction.query_row("SELECT EXISTS(SELECT 1 FROM identity_dirty)", [], |row| row.get::<_,bool>(0))? {
         reduce(transaction, false)?;
     }
@@ -454,7 +524,9 @@ use smallclaims::naming::{Fact, Head, reduce as reduce_naming};
 /// Reduce the naming subgraph, independent of canonical-time or replication arrival order.
 /// Only naming/declaration lifecycle changes invoke this fold; unrelated work never does.
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
-    reduce(transaction, true)
+    reduce(transaction, true)?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h5b8d52acffb1 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:naming-operation-conflict'", [])?;
+    Ok(())
 }
 
 fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {

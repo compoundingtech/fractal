@@ -662,3 +662,18 @@ operation conflicts do not suppress an unrelated legitimate replay.
 The same owner's `lv-h792cc1f9b935` models an interrupted generation rediscovery
 page using only a synthetic integer watermark/generation and existing health
 metadata; no production value population is added.
+
+Naming invalidations use the existing canonical domain reducer only through 64
+naming/declaration claims. The ignored writer-held benchmark measured p50/p99
+15.324/42.054 ms at 64 claims versus 575.031/802.102 ms at 4096 (100 samples after
+10 warmups, unoptimized); this is sampled work, not a latency guarantee.
+`fractal_store::store::identities` owns `lv-h4a0e92262358`
+(the integer dirty mark), `lv-hf50ecf2614c0` and `lv-hac2615d40a38` (typed naming
+degradation and deferred-repair health), and `lv-h2f8124d35909` and
+`lv-h5b8d52acffb1` (cleanup after bounded or explicit repair). Health details retain
+operation/claim identifiers, not payloads; their variable identifier representation
+remains the owner's `bound-or-reference-values-and-reclamation` debt. Degraded naming
+reads fail closed until repair, and ordinary flushes cannot bypass the cap.
+`fractal_store::store::identities_tests` owns `lv-h18f8ad5b42e2`, the ignored
+writer-held fold measurement's synthetic operation-state update; it adds no production
+data population or size proof.

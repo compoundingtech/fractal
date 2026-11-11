@@ -466,3 +466,111 @@ fn mixed_structural_and_neutral_operation_history_requires_graph_repair_in_both_
         assert_eq!(store.replication_snapshot().unwrap().projection_digests, digests);
     }
 }
+
+#[test]
+fn naming_operation_conflict_above_bound_defers_and_explicit_repair_recovers() {
+    let store = node("node-a", None, None);
+    let declaration = declare(&store, ORIGINAL);
+    let receipt = store.rename_identity(
+        IdentityKind::Agent, &request(ORIGINAL, RENAMED, "large-naming-conflict"), &[],
+    ).unwrap();
+    let rename = store.claim_by_id(&receipt.claim_id).unwrap().unwrap();
+    let (operation, _) = operation_parts(&rename.body).unwrap();
+    let declaration = store.claim_by_id(&declaration).unwrap().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for _ in 0..OPERATION_CONFLICT_NAMING_CLAIMS {
+            append_claim_record_tx(&tx, store.origin(), ORIGINAL, "intent.desired",
+                declaration.actor.as_deref(), &declaration.body, &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap().canonical_id, RENAMED);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, store.origin(), "github-event/github/acme/garden/issue/7/closed",
+            "github.event", None, &json!({"fields":{},"_operation":{"id":operation,"request_digest":"different"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(store.replication_projection_needs_recovery().unwrap());
+    let health = store.replication_status(false, None, &[]).unwrap();
+    let degraded = health.unhealthy.iter().find(|row|
+        row.aggregate == "projection:naming-operation-conflict").unwrap();
+    assert_eq!(degraded.error_code.as_deref(), Some("operation-conflict-naming-refold-limit"));
+    let details: Value = serde_json::from_str(degraded.error_message.as_ref().unwrap()).unwrap();
+    assert_eq!(details["projection_operation_id"], operation);
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err().code, "lifecycle-unavailable");
+    assert!(resolve_reference_conn(&store.readers.get(), RENAMED).is_err());
+    assert!(store.selected_desired_tokens(&[ORIGINAL]).is_err());
+    assert!(store.selected_desired_token(ORIGINAL).is_err());
+    store.replay_replication_graph().unwrap();
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+        .any(|row| row.aggregate == "projection:naming-operation-conflict"));
+    let error = store.resolve_identity(IdentityKind::Agent, ORIGINAL).unwrap_err();
+    assert_eq!(error.details["reason"], "conflict");
+    let digest = store.replication_snapshot().unwrap().projection_digests.clone();
+    store.replay_replication_graph().unwrap();
+    assert_eq!(digest, store.replication_snapshot().unwrap().projection_digests);
+}
+
+#[test]
+#[ignore = "explicit dirty-mark mutation probe; intentionally catches the parity assertion failure"]
+fn naming_operation_conflict_dirty_mark_mutation_is_detected() {
+    OMIT_OPERATION_CONFLICT_DIRTY.set(true);
+    let mutant = std::panic::catch_unwind(
+        mixed_structural_and_neutral_operation_history_requires_graph_repair_in_both_orders);
+    OMIT_OPERATION_CONFLICT_DIRTY.set(false);
+    assert!(mutant.is_err(), "removing the dirty mark must fail the mixed-history regression");
+    eprintln!("NAMING_DIRTY_MUTATION: mixed-history regression failed with the dirty mark omitted");
+}
+
+#[test]
+#[ignore = "writer-held naming refold measurement; run explicitly under a build ticket"]
+fn naming_operation_conflict_writer_hold_measurement() {
+    for count in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+        let store = Store::open_memory("naming-bench").unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for number in 0..count / 2 {
+                let identity = format!("mission/bench-{number}");
+                let declaration = append_claim_record_tx(&tx, store.origin(), &identity,
+                    "mission.published", None, &json!({}), &[], None).unwrap();
+                let rename = append_claim_record_tx(&tx, store.origin(), &identity, "mission.renamed",
+                    None, &json!({"fields":{"from":identity,"to":format!("mission/renamed-{number}"),
+                        "declaration":declaration.id,"owner_host":store.origin()},
+                        "_operation":{"id":format!("op/bench-{number}"),"request_digest":"benchmark"}}),
+                    &[], None).unwrap();
+                register_operation_tx(&tx, &rename).unwrap();
+            }
+            rebuild(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        let mut samples = Vec::new();
+        for iteration in 0..110 {
+            let started = std::time::Instant::now();
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h18f8ad5b42e2 owner=fractal_store::store::identities_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id='op/bench-0'", []).unwrap();
+                mark_operation_conflict_dirty(&tx).unwrap();
+                // Explicit benchmark of the canonical fold even if a measured lower cap
+                // later makes this history too large for automatic receipt repair.
+                reduce(&tx, false).unwrap();
+                tx.rollback().unwrap();
+            }
+            if iteration >= 10 { samples.push(started.elapsed().as_micros()); }
+        }
+        samples.sort_unstable();
+        eprintln!("NAMING_REFOLD_BENCH claims={count} samples=100 p50_us={} p99_us={}",
+            samples[49], samples[98]);
+    }
+}
