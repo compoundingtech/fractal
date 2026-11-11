@@ -204,7 +204,7 @@ fn middle_snake(old: &[usize], old_range: Range<usize>, new: &[usize], new_range
                 x += prefix_len(old, old_range.start + x..old_range.end, new, new_range.start + y..new_range.end);
             }
             forward[k] = x;
-            if odd && (k - delta).abs() <= d - 1 && forward[k] + backward[-(k - delta)] >= n {
+            if odd && (k - delta).abs() < d && forward[k] + backward[-(k - delta)] >= n {
                 return (x0 + old_range.start, y0 + new_range.start);
             }
         }
