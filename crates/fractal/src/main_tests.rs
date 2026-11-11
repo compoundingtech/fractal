@@ -1845,6 +1845,28 @@ fn a_run_is_a_mission_publication_actor() {
     assert!(Cli::try_parse_from(["st", "apply", "notes.kdl"]).is_ok());
 }
 
+/// A run's authority grants mission publication, never an owned set: `apply --set` as a run is
+/// refused before anything is read or written, while a person still publishes the set.
+#[test]
+fn a_run_cannot_publish_an_owned_set() {
+    let apply = |actor: &str| {
+        let Command::Apply(args) = Cli::try_parse_from([
+            "st", "apply", "missing.kdl", "--set", "garden", "--repository", "fixture/garden",
+            "--ref", "main", "--sha", "abc", "--source-sequence", "1", "--expect-set", "absent",
+            "--as", actor,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected apply")
+        };
+        apply_actor(&args)
+    };
+    let refusal = apply("mission-run/abc").unwrap_err().to_string();
+    assert!(refusal.contains("fractal apply --set cannot publish as `mission-run/abc`"), "{refusal}");
+    assert_eq!(apply("person/operator").unwrap(), "person/operator");
+}
+
 #[test]
 fn execution_actor_options_parse_and_fail_closed() {
     for (path, tail) in [

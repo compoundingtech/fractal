@@ -113,7 +113,8 @@ async fn a_run_credential_binds_requests_to_its_run() {
     assert_eq!(state.store.index().unwrap(), before);
 }
 
-/// A program effect's `fractal apply` publishes a mission as its run, and as no other actor.
+/// A program effect's `fractal apply` publishes a mission as its run, and as no other actor; its
+/// mission's `authority { publish ... }` decides which missions it may publish.
 #[tokio::test]
 async fn a_run_bound_request_publishes_as_its_run() {
     let root = tempfile::tempdir().unwrap();
@@ -121,9 +122,9 @@ async fn a_run_bound_request_publishes_as_its_run() {
     let step = state.store.start_program_step_for_tests();
     let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
     let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
-    let source = "version 2\nmission \"x/notes\" state=\"ready\" {\n  goal \"Take notes.\"\n  step \"work\" { }\n}\n";
-    let apply = |actor: &str| {
-        let body = serde_json::to_string(&apply_request(&state, source, actor, actor)).unwrap();
+    let apply = |mission: &str, actor: &str| {
+        let source = format!("version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Take notes.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = serde_json::to_string(&apply_request(&state, &source, actor, &format!("{mission}:{actor}"))).unwrap();
         let request = Request::builder().method("POST").uri("/v1/intent/apply")
             .header("content-type", "application/json")
             .extension(RunCredential::new(secret.clone()))
@@ -137,13 +138,20 @@ async fn a_run_bound_request_publishes_as_its_run() {
         }
     };
     for actor in ["person/operator", "agent/example/worker"] {
-        let (status, refused) = apply(actor).await;
+        let (status, refused) = apply("example/notes", actor).await;
         assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("foreign-agent-actor")), "{actor} {refused}");
     }
+    assert!(state.store.latest_claim("mission/example/notes", Some("mission.published")).unwrap().is_none());
+    // Outside its mission's `publish "example/*"`: refused, and nothing is written.
+    let before = state.store.index().unwrap();
+    let (status, refused) = apply("x/notes", &step.run).await;
+    assert_eq!((status, refused["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("run-authority-denied")), "{refused}");
+    assert_eq!(state.store.index().unwrap(), before);
     assert!(state.store.latest_claim("mission/x/notes", Some("mission.published")).unwrap().is_none());
-    let (status, published) = apply(&step.run).await;
+    // Inside it: published as the run.
+    let (status, published) = apply("example/notes", &step.run).await;
     assert_eq!(status, StatusCode::OK, "{published}");
-    let claim = state.store.latest_claim("mission/x/notes", Some("mission.published")).unwrap().unwrap();
+    let claim = state.store.latest_claim("mission/example/notes", Some("mission.published")).unwrap().unwrap();
     assert_eq!(claim.actor.as_deref(), Some(step.run.as_str()));
 }
 
