@@ -3,6 +3,7 @@ use fractal_jobs::{Coverage, launch::{ExecutionGeneration, LaunchIntent, LaunchR
 use fractal_jobs::scope::{JobScopePlan, observation::{RawScopeUsage, ScopeLimit, ScopeReadback}};
 use fractal_runtime::{ExecRuntime, job_launch::*, job_scope};
 use std::{cell::RefCell, collections::BTreeMap, fs, num::NonZeroU64, path::{Path, PathBuf}, rc::Rc};
+use std::os::unix::fs::PermissionsExt as _;
 
 type Order = Rc<RefCell<Vec<&'static str>>>;
 struct Journal {
@@ -75,6 +76,8 @@ impl JobLaunchEffects for Effects {
     }
     fn create_group(&mut self, _: &JobLaunch<'_>) -> Result<PathBuf> {
         assert_eq!(*self.order.borrow(), ["intent"]);
+        assert_eq!(self.outcome.metadata()?.len(), 0, "reservation must precede J");
+        assert_eq!(self.outcome.parent().unwrap().metadata()?.permissions().mode() & 0o7777, 0o700);
         ensure!(!self.collision, LaunchRefusal::CgroupCollision);
         fs::create_dir_all(&self.directory)?;
         fs::write(self.directory.join("cpu.stat"), "usage_usec 10\n")?;
@@ -148,6 +151,7 @@ impl JobLaunchEffects for Effects {
 enum Extra {
     None, RelativeOutcome, ReleaseFailure, ReleaseFailureVanished, JournalReleaseFailure,
     MissingDeadline, MissingCeiling, ExpiredDeadline, WaitFailure,
+    MissingReceiptDirectory, ReceiptCollision,
 }
 
 #[test]
@@ -190,6 +194,12 @@ fn deadline_configuration_is_required_before_j_and_watcher_failure_retains_usage
     }
 }
 
+#[test]
+fn configured_receipt_reservation_is_required_before_j() {
+    exercise(None, false, false, false, Extra::MissingReceiptDirectory);
+    exercise(None, false, false, false, Extra::ReceiptCollision);
+}
+
 fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, cleanup_fails: bool, extra: Extra) {
     let directory = tempfile::tempdir().unwrap();
     let job_directory = directory.path().join("keeper/job-generation-7");
@@ -207,12 +217,17 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
     let order = Order::default();
     let mut journal = Journal { connection: connection.clone(), binding: binding.clone(),
         order: order.clone(), release_checkpoint_fails: extra == Extra::JournalReleaseFailure };
-    let outcome = if extra == Extra::RelativeOutcome { PathBuf::from("outcome.json") }
-        else { directory.path().join("outcome.json") };
-    let intent = LaunchIntent {
-        generation: ExecutionGeneration(NonZeroU64::new(7).unwrap()),
-        outcome_file: outcome.to_str().unwrap().into(),
+    let receipt_directory = directory.path().join("receipts");
+    let mut intent = LaunchIntent {
+        generation: ExecutionGeneration(NonZeroU64::new(7).unwrap()), outcome_file: String::new(),
     };
+    let outcome = if extra == Extra::RelativeOutcome { PathBuf::from("outcome.json") }
+        else { receipts::outcome_path(&receipt_directory, &id, &intent).unwrap() };
+    intent.outcome_file = outcome.to_str().unwrap().into();
+    if extra == Extra::ReceiptCollision {
+        // Existing generation reservation is fixture input, never overwritten.
+        receipts::reserve(Some(&receipt_directory), &id, &intent).unwrap();
+    }
     let plan = JobScopePlan::new(4096, 8192, 8, 4096, 8192, 4096).unwrap();
     let launcher = vec!["fixture-launcher".into()];
     let environment = BTreeMap::new();
@@ -220,7 +235,7 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
         job_id: &id, intent: &intent, plan: &plan,
         heavy_slice: (!missing_slice).then_some("app-capped-heavy.slice"), host: "fixture-host",
         launcher: &launcher, cwd: directory.path(), environment: &environment,
-        receipt_directory: Some(directory.path()),
+        receipt_directory: (extra != Extra::MissingReceiptDirectory).then_some(receipt_directory.as_path()),
         deadline: if extra == Extra::MissingDeadline { None }
             else if extra == Extra::ExpiredDeadline { Some(std::time::UNIX_EPOCH) }
             else { Some(std::time::SystemTime::now() + std::time::Duration::from_secs(60)) },
@@ -278,7 +293,8 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
     } else {
         assert!(result.is_err());
         assert!(!order.borrow().contains(&"holder"));
-        if matches!(extra, Extra::RelativeOutcome | Extra::MissingDeadline | Extra::MissingCeiling | Extra::ExpiredDeadline) {
+        if matches!(extra, Extra::RelativeOutcome | Extra::MissingDeadline | Extra::MissingCeiling
+            | Extra::ExpiredDeadline | Extra::MissingReceiptDirectory | Extra::ReceiptCollision) {
             assert!(!order.borrow().contains(&"group"));
             assert!(!job_directory.exists());
         }
@@ -303,6 +319,8 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
                 else if extra == Extra::MissingDeadline { LaunchRefusal::MissingDeadline }
                 else if extra == Extra::MissingCeiling { LaunchRefusal::MissingMaxHoldCeiling }
                 else if extra == Extra::ExpiredDeadline { LaunchRefusal::DeadlineExpired }
+                else if extra == Extra::MissingReceiptDirectory { LaunchRefusal::MissingReceiptDirectory }
+                else if extra == Extra::ReceiptCollision { LaunchRefusal::ReceiptCollision }
                 else { LaunchRefusal::CapReadback { index: bad.unwrap().0 } };
             assert_eq!(refusal, expected);
         }

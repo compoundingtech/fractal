@@ -7,6 +7,7 @@ pub mod gated;
 pub mod keeper;
 mod keeper_systemd;
 pub mod keeper_watcher;
+pub mod receipts;
 mod sequence;
 
 pub use cgroup::{ExitUsage, sample_exit};
