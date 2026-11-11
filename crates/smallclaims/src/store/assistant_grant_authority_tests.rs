@@ -15,6 +15,7 @@ const OWNER: &str = "human/owner";
 #[test]
 fn current_authority_install_and_idle_maintenance_do_not_write() {
     let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+    store.persist_assistant_grant_membership_for_test().unwrap();
     let connection = store.connection.write();
     let before = (
         connection.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0)).unwrap(),
@@ -440,7 +441,12 @@ fn raw_signature_only_insert_survives_reopen_and_promotes_grant_policy_and_revok
         receive_pre_projection_unsigned_history(&target, &exchange);
         assert!(raw_claims(&target).iter().any(|record| record.id == claim.id));
         assert!(!authority::contains(&target.readers.get(), &claim.id).unwrap());
-        while !target.advance_assistant_grant_authority_backfill().unwrap() {}
+        let mut slices = 0;
+        while !target.advance_assistant_grant_authority_backfill().unwrap() {
+            slices += 1;
+            assert!(slices < 10_000,
+                "raw_signature_only_insert_survives_reopen_and_promotes_grant_policy_and_revoke_without_rescan drain exceeded 10000 slices");
+        }
         let markers = backfill_markers(&target.readers.get());
         authority::ready(&target.readers.get()).unwrap();
         drop(target);
@@ -498,7 +504,12 @@ fn malformed_raw_signature_row_is_drained_without_authenticating_a_pending_revok
     let revoke = append(&source, SUBJECT, REVOKED, fields());
     let exchange = export(&source, &target);
     receive_pre_projection_unsigned_history(&target, &exchange);
-    while !target.advance_assistant_grant_authority_backfill().unwrap() {}
+    let mut slices = 0;
+    while !target.advance_assistant_grant_authority_backfill().unwrap() {
+        slices += 1;
+        assert!(slices < 10_000,
+            "malformed_raw_signature_row_is_drained_without_authenticating_a_pending_revoke drain exceeded 10000 slices");
+    }
     let markers = backfill_markers(&target.readers.get());
     {
         let mut connection = target.connection.write();
@@ -671,7 +682,11 @@ fn reset_projection(connection: &Connection) {
 }
 
 fn drain_authority(store: &Store) {
-    while !store.advance_assistant_grant_authority_backfill().unwrap() {}
+    let mut slices = 0;
+    while !store.advance_assistant_grant_authority_backfill().unwrap() {
+        slices += 1;
+        assert!(slices < 10_000, "drain_authority exceeded 10000 slices");
+    }
     // Raw SQL slice drivers need the durable generation, even when Store's
     // empty-membership fast path can answer from its in-memory snapshot.
     store.persist_assistant_grant_membership_for_test().unwrap();
@@ -914,7 +929,8 @@ fn committed_backfill_slice_resumes_after_reopen_and_is_idempotent() {
             transaction.commit().unwrap();
             slices += 1;
             if complete { break; }
-            assert!(slices < 8*(70*3+3), "backfill failed to make durable forward progress");
+            assert!(slices < 8*(70*3+3),
+                "committed_backfill_slice_resumes_after_reopen_and_is_idempotent failed to make durable forward progress");
         }
         assert!(slices > 1);
         assert_eq!(snapshot(&connection), expected);

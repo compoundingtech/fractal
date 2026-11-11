@@ -247,11 +247,14 @@ fn assistant_grant_authority_measure_real_store() {
     let mut first_ready = timing.first_ready;
     let mut slices = 1_u64;
     let mut background_slices = 0_u64;
+    const MAX_BACKGROUND_SLICES: u64 = 1_000_000;
     let mut max_slice = timing.startup_slice;
     let mut slice_sum = timing.startup_slice;
     // Always enter maintenance at least once: startup has not prepared the sealed
     // membership snapshot, even if its version/readiness marker already exists.
     loop {
+        assert!(background_slices < MAX_BACKGROUND_SLICES,
+            "assistant_grant_authority_measure_real_store exceeded {MAX_BACKGROUND_SLICES} background slices");
         let slice_started = Instant::now();
         let done = store.advance_assistant_grant_authority_backfill().unwrap();
         let elapsed = slice_started.elapsed();
@@ -508,7 +511,10 @@ fn measure_backfill(config: Config) {
     let mut slices = 2_u64;
     let mut max_slice = startup_slice_elapsed.max(resume_probe_elapsed);
     let mut slice_elapsed = startup_slice_elapsed + resume_probe_elapsed;
+    let max_slices = config.rows.checked_add(1).unwrap().checked_mul(64).unwrap();
     while !done {
+        assert!(slices < max_slices,
+            "measure_backfill exceeded {max_slices} slices");
         let (finished, elapsed) = slice(&mut connection, Duration::from_millis(config.slice_ms));
         done = finished;
         slices += 1;

@@ -369,16 +369,46 @@ async fn authority_projection_resumes_after_daemon_is_killed_with_committed_part
     let mut connection = rusqlite::Connection::open(&database).unwrap();
     fractal_daemon::store::configure_projection_writer(&connection).unwrap();
     authority::install(&connection, &node.name).unwrap();
+    // Install alone leaves applied_generation=-1. Resolve real sealed membership
+    // before copying so both interrupted and reference runs use the same proof
+    // snapshot, rather than retrying Legacy authentication as pending forever.
+    const MAX_AUTHORITY_SLICES: usize = 128;
+    let mut membership_prepared = false;
+    for _ in 0..MAX_AUTHORITY_SLICES {
+        if authority::prepare_membership_for_test(&connection).unwrap() {
+            membership_prepared = true;
+            break;
+        }
+    }
+    assert!(membership_prepared,
+        "interrupted-backfill membership preparation did not complete within {MAX_AUTHORITY_SLICES} pages");
     let reference_path = root.path().join("uninterrupted.sqlite3");
     connection.execute("VACUUM INTO ?1", [reference_path.to_str().unwrap()]).unwrap();
     let mut reference = rusqlite::Connection::open(&reference_path).unwrap();
     fractal_daemon::store::configure_projection_writer(&reference).unwrap();
-    loop {
+    let mut reference_complete = false;
+    for _ in 0..MAX_AUTHORITY_SLICES {
         let transaction = reference.transaction().unwrap();
         let done = authority::backfill_slice(&transaction, Duration::from_secs(2)).unwrap();
         transaction.commit().unwrap();
-        if done { break; }
+        if done { reference_complete = true; break; }
     }
+    assert!(reference_complete,
+        "uninterrupted reference backfill did not complete within {MAX_AUTHORITY_SLICES} slices");
+    authority::ready(&reference).unwrap();
+    let unauthenticated: usize = reference.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_pending WHERE authenticated=0",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(unauthenticated,history.len(),
+        "all five valid Legacy claims must settle as unauthenticated, not pending verification");
+    let unfinished: bool = reference.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)
+            OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor)
+            OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(!unfinished,"reference must finish authentication, not merely expose an empty authority table");
     let expected = authority_projection_snapshot(&reference);
     assert!(expected.0.is_empty(), "pre-marker Legacy grants lack authenticated writer provenance");
     assert!(expected.1.is_empty());
