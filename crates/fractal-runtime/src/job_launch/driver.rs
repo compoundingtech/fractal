@@ -1,9 +1,10 @@
 use super::{ExitUsage, gated::GatedChild, keeper::*, keeper_systemd::SystemdKeeper};
+use super::keeper_watcher::KeeperWatcher;
 use super::cgroup::{stop_and_sample, verify_dedicated};
 use crate::job_scope;
 use anyhow::{Context, Result, ensure};
 use fractal_jobs::{launch::{LaunchIntent, LaunchOutcome, LaunchRefusal, cgroup_name}, scope::{JobScopePlan, observation::{RawScopeUsage, ScopeReadback}}};
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, process::{Child, Command, Stdio}};
+use std::{collections::BTreeMap, fs, num::NonZeroU64, path::{Path, PathBuf}, process::{Child, Command, Stdio}, time::SystemTime};
 pub struct JobLaunch<'a> {
     pub job_id: &'a str,
     pub intent: &'a LaunchIntent,
@@ -13,6 +14,9 @@ pub struct JobLaunch<'a> {
     pub launcher: &'a [String],
     pub cwd: &'a Path,
     pub environment: &'a BTreeMap<String, String>,
+    pub receipt_directory: Option<&'a Path>,
+    pub deadline: Option<SystemTime>,
+    pub max_hold_ceiling_seconds: Option<NonZeroU64>,
 }
 
 
@@ -57,10 +61,12 @@ pub struct CgroupJobLaunch {
     directory: Option<PathBuf>,
     gated: Option<GatedChild>,
     holder: Option<Child>,
+    watcher: Option<KeeperWatcher>,
 }
 impl CgroupJobLaunch {
     pub fn new(cgroup_root: PathBuf) -> Self {
-        Self { manager: SystemdKeeper::new(cgroup_root), directory: None, gated: None, holder: None }
+        Self { manager: SystemdKeeper::new(cgroup_root), directory: None, gated: None,
+            holder: None, watcher: None }
     }
 }
 impl JobLaunchEffects for CgroupJobLaunch {
@@ -81,11 +87,13 @@ impl JobLaunchEffects for CgroupJobLaunch {
             Err(error) => return Err(error.into()),
         }
         self.directory = Some(directory.clone());
+        self.watcher = Some(KeeperWatcher::start(self.manager.clone(), keeper)
+            .context(LaunchRefusal::KeeperUnavailable)?);
         Ok(directory)
     }
     fn gate_holder(&mut self, request: &JobLaunch<'_>) -> Result<()> {
         crate::procfs::require_matching_procfs()?;
-        self.gated = Some(GatedChild::spawn(holder_command(request))?);
+        self.gated = Some(GatedChild::spawn(holder_command(request, SystemTime::now())?)?);
         Ok(())
     }
     fn attach_holder(&mut self, directory: &Path) -> Result<()> {
@@ -101,24 +109,44 @@ impl JobLaunchEffects for CgroupJobLaunch {
         Ok(pid)
     }
     fn wait_for_exit(&mut self) -> Result<()> {
-        let _status = self.holder.as_mut().context("holder was not released")?.wait()?;
-        Ok(())
+        self.watcher.as_mut().context("keeper is not watched")?
+            .wait_for_exit(self.holder.as_mut().context("holder was not released")?)
     }
     fn stop_and_sample(&mut self, host: &str) -> Result<ExitUsage> {
-        if let Some(gated) = &mut self.gated { gated.abort()?; }
-        match &self.directory {
-            Some(directory) => stop_and_sample(directory, host),
-            None => Ok(ExitUsage::CountersUnavailable(
-                fractal_jobs::launch::CountersUnavailable::CgroupVanished)),
+        // Always clean J even if the watcher failed; never kill the shared keeper.
+        let cleanup = (|| {
+            if let Some(gated) = &mut self.gated { gated.abort()?; }
+            match &self.directory {
+                Some(directory) => stop_and_sample(directory, host),
+                None => Ok(ExitUsage::CountersUnavailable(
+                    fractal_jobs::launch::CountersUnavailable::CgroupVanished)),
+            }
+        })();
+        let watched = self.watcher.as_mut().map_or(Ok(()), KeeperWatcher::stop);
+        let usage = cleanup?;
+        if let Some(mut holder) = self.holder.take() { let _status = holder.wait()?; }
+        if let Err(error) = watched {
+            return Err(super::UncertainRelease { exit_usage: usage, release_error: error }.into());
         }
+        Ok(usage)
     }
 }
 
-fn holder_command(request: &JobLaunch<'_>) -> Command {
+pub(super) fn max_hold_seconds(request: &JobLaunch<'_>, now: SystemTime) -> Result<NonZeroU64> {
+    let deadline = request.deadline.context(LaunchRefusal::MissingDeadline)?;
+    let ceiling = request.max_hold_ceiling_seconds.context(LaunchRefusal::MissingMaxHoldCeiling)?;
+    let remaining = deadline.duration_since(now).ok()
+        .and_then(|duration| NonZeroU64::new(duration.as_secs()))
+        .context(LaunchRefusal::DeadlineExpired)?;
+    Ok(remaining.min(ceiling))
+}
+
+fn holder_command(request: &JobLaunch<'_>, now: SystemTime) -> Result<Command> {
+    let max_hold = max_hold_seconds(request, now)?.to_string();
     let mut command = Command::new("gate-slot");
     command
-        .args(["--class", "heavy", "--no-scope", "--job", request.job_id,
-            "--outcome-file", &request.intent.outcome_file, "--"])
+        .args(["--class", "heavy", "--no-scope", "--max-hold", &max_hold,
+            "--job", request.job_id, "--outcome-file", &request.intent.outcome_file, "--"])
         .args(request.launcher)
         .current_dir(request.cwd)
         .env_clear()
@@ -126,14 +154,14 @@ fn holder_command(request: &JobLaunch<'_>) -> Command {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    command
+    Ok(command)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use fractal_jobs::launch::ExecutionGeneration;
-    use std::num::NonZeroU64;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn holder_argv_obeys_b6_without_a_nested_scope() {
@@ -144,15 +172,52 @@ mod tests {
         let plan = JobScopePlan::new(4096, 8192, 4, 4096, 8192, 4096).unwrap();
         let launcher = vec!["launcher".into(), "argument".into()];
         let environment = BTreeMap::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
         let request = JobLaunch {
             job_id: "job/fixture", intent: &intent, plan: &plan,
             heavy_slice: Some("app-heavy.slice"), host: "fixture",
             launcher: &launcher, cwd: Path::new("/fixture"), environment: &environment,
+            receipt_directory: Some(Path::new("/fixture/receipts")),
+            deadline: Some(now + Duration::from_secs(60)),
+            max_hold_ceiling_seconds: NonZeroU64::new(90),
         };
-        let command = holder_command(&request);
+        let command = holder_command(&request, now).unwrap();
         assert_eq!(command.get_program(), "gate-slot");
         assert_eq!(command.get_args().map(|arg| arg.to_str().unwrap()).collect::<Vec<_>>(),
-            ["--class", "heavy", "--no-scope", "--job", "job/fixture",
+            ["--class", "heavy", "--no-scope", "--max-hold", "60", "--job", "job/fixture",
              "--outcome-file", "/fixture/outcome-1", "--", "launcher", "argument"]);
     }
+
+    #[test]
+    fn max_hold_requires_configuration_and_floors_deadline_under_ceiling() {
+        let intent = LaunchIntent { generation: ExecutionGeneration(NonZeroU64::new(1).unwrap()),
+            outcome_file: "/fixture/outcome".into() };
+        let plan = JobScopePlan::new(4096, 8192, 4, 4096, 8192, 4096).unwrap();
+        let environment = BTreeMap::new();
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let mut request = JobLaunch {
+            job_id: "fixture", intent: &intent, plan: &plan, heavy_slice: Some("heavy.slice"),
+            host: "fixture", launcher: &[], cwd: Path::new("/fixture"), environment: &environment,
+            receipt_directory: Some(Path::new("/fixture/receipts")),
+            deadline: None, max_hold_ceiling_seconds: None,
+        };
+        assert_eq!(max_hold_seconds(&request, now).unwrap_err().downcast::<LaunchRefusal>().unwrap(),
+            LaunchRefusal::MissingDeadline);
+        request.deadline = Some(now + Duration::from_millis(2999));
+        assert_eq!(max_hold_seconds(&request, now).unwrap_err().downcast::<LaunchRefusal>().unwrap(),
+            LaunchRefusal::MissingMaxHoldCeiling);
+        request.max_hold_ceiling_seconds = NonZeroU64::new(10);
+        assert_eq!(max_hold_seconds(&request, now).unwrap().get(), 2);
+        request.max_hold_ceiling_seconds = NonZeroU64::new(1);
+        assert_eq!(max_hold_seconds(&request, now).unwrap().get(), 1);
+        for deadline in [now - Duration::from_secs(1), now, now + Duration::from_millis(999)] {
+            request.deadline = Some(deadline);
+            assert_eq!(max_hold_seconds(&request, now).unwrap_err().downcast::<LaunchRefusal>().unwrap(),
+                LaunchRefusal::DeadlineExpired);
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "driver_kernel_tests.rs"]
+mod kernel_tests;

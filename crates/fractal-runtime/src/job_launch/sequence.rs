@@ -37,6 +37,7 @@ impl ExecRuntime {
             ensure!(request.heavy_slice.is_some_and(|s| !s.is_empty()),
                 LaunchRefusal::MissingHeavySlice);
             ensure!(!request.launcher.is_empty(), LaunchRefusal::Preparation);
+            super::driver::max_hold_seconds(request, std::time::SystemTime::now())?;
             ensure!(Path::new(&request.intent.outcome_file).is_absolute(),
                 LaunchRefusal::InvalidOutcomePath);
             ensure!(!Path::new(&request.intent.outcome_file).exists(), LaunchRefusal::Preparation);
@@ -73,7 +74,10 @@ impl ExecRuntime {
             let exit_usage = effects.stop_and_sample(request.host)?;
             return Err(UncertainRelease { exit_usage, release_error: error }.into());
         }
-        effects.wait_for_exit()?;
+        if let Err(error) = effects.wait_for_exit() {
+            let exit_usage = effects.stop_and_sample(request.host)?;
+            return Err(UncertainRelease { exit_usage, release_error: error }.into());
+        }
         let receipt = std::fs::read(&request.intent.outcome_file)
             .map_err(anyhow::Error::from)
             .and_then(|bytes| Ok(serde_json::from_slice::<Receipt>(&bytes)?));

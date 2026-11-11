@@ -62,6 +62,7 @@ struct Effects {
     cleanup_fails: bool,
     release_fails: bool,
     vanish_on_sample: bool,
+    wait_fails: bool,
 }
 impl JobLaunchEffects for Effects {
     fn hierarchy_path(&self, directory: &Path) -> Result<PathBuf> {
@@ -133,6 +134,10 @@ impl JobLaunchEffects for Effects {
         Ok(usage)
     }
     fn wait_for_exit(&mut self) -> Result<()> {
+        if self.wait_fails {
+            self.order.borrow_mut().push("watcher-error");
+            anyhow::bail!("keeper watcher failed");
+        }
         self.order.borrow_mut().push("holder-exit");
         fs::write(self.directory.join("cpu.stat"), "usage_usec 20\n")?;
         Ok(())
@@ -140,7 +145,10 @@ impl JobLaunchEffects for Effects {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Extra { None, RelativeOutcome, ReleaseFailure, ReleaseFailureVanished, JournalReleaseFailure }
+enum Extra {
+    None, RelativeOutcome, ReleaseFailure, ReleaseFailureVanished, JournalReleaseFailure,
+    MissingDeadline, MissingCeiling, ExpiredDeadline, WaitFailure,
+}
 
 #[test]
 fn real_projection_and_fake_holder_observe_launch_and_exit_order() {
@@ -175,6 +183,13 @@ fn relative_outcome_is_refused_before_j_exists() {
     exercise(None, false, false, false, Extra::RelativeOutcome);
 }
 
+#[test]
+fn deadline_configuration_is_required_before_j_and_watcher_failure_retains_usage() {
+    for extra in [Extra::MissingDeadline, Extra::MissingCeiling, Extra::ExpiredDeadline, Extra::WaitFailure] {
+        exercise(None, false, false, false, extra);
+    }
+}
+
 fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, cleanup_fails: bool, extra: Extra) {
     let directory = tempfile::tempdir().unwrap();
     let job_directory = directory.path().join("keeper/job-generation-7");
@@ -205,12 +220,18 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
         job_id: &id, intent: &intent, plan: &plan,
         heavy_slice: (!missing_slice).then_some("app-capped-heavy.slice"), host: "fixture-host",
         launcher: &launcher, cwd: directory.path(), environment: &environment,
+        receipt_directory: Some(directory.path()),
+        deadline: if extra == Extra::MissingDeadline { None }
+            else if extra == Extra::ExpiredDeadline { Some(std::time::UNIX_EPOCH) }
+            else { Some(std::time::SystemTime::now() + std::time::Duration::from_secs(60)) },
+        max_hold_ceiling_seconds: if extra == Extra::MissingCeiling { None } else { NonZeroU64::new(60) },
     };
     let mut effects = Effects {
         directory: job_directory.clone(), cgroup_root: directory.path().into(),
         outcome, job_id: id.clone(), order: order.clone(), bad, collision, cleanup_fails,
         release_fails: matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished),
         vanish_on_sample: extra == Extra::ReleaseFailureVanished,
+        wait_fails: extra == Extra::WaitFailure,
     };
     let runtime = ExecRuntime::new(directory.path().join("exec"), directory.path().join("logs"));
     let result = runtime.launch_job(&request, &mut journal, &mut effects);
@@ -227,9 +248,9 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
         assert_eq!(result.outcome, fractal_jobs::launch::LaunchOutcome::Exited(fractal_jobs::ExitOutcome::Code(75)));
         assert_eq!(state, JobState::Running); // durable release remains history, not authority
         assert!(!job_directory.exists());
-    } else if matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished | Extra::JournalReleaseFailure) {
+    } else if matches!(extra, Extra::ReleaseFailure | Extra::ReleaseFailureVanished | Extra::JournalReleaseFailure | Extra::WaitFailure) {
         let error = result.err().unwrap();
-        assert_eq!(state, JobState::Launching);
+        assert_eq!(state, if extra == Extra::WaitFailure { JobState::Running } else { JobState::Launching });
         assert!(!order.borrow().contains(&"refusal"));
         assert_eq!(job_directory.exists(), cleanup_fails);
         if cleanup_fails {
@@ -247,15 +268,17 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
                 assert_eq!(sample.cpu_usage_usec.reading.value, Some(20));
             }
             let expected = if extra == Extra::JournalReleaseFailure { "release journal checkpoint failed" }
-                else { "exec denied" };
+                else if extra == Extra::WaitFailure { "keeper watcher failed" } else { "exec denied" };
             assert!(uncertain.release_error.to_string().contains(expected));
-            assert_eq!(*order.borrow(), ["intent", "group", "caps", "launch-usage",
-                "gated", "attach", "holder", "kill", "empty", "exit-usage", "remove"]);
+            let mut expected_order = vec!["intent", "group", "caps", "launch-usage", "gated", "attach", "holder"];
+            if extra == Extra::WaitFailure { expected_order.push("watcher-error"); }
+            expected_order.extend(["kill", "empty", "exit-usage", "remove"]);
+            assert_eq!(*order.borrow(), expected_order);
         }
     } else {
         assert!(result.is_err());
         assert!(!order.borrow().contains(&"holder"));
-        if extra == Extra::RelativeOutcome {
+        if matches!(extra, Extra::RelativeOutcome | Extra::MissingDeadline | Extra::MissingCeiling | Extra::ExpiredDeadline) {
             assert!(!order.borrow().contains(&"group"));
             assert!(!job_directory.exists());
         }
@@ -277,6 +300,9 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
             let expected = if missing_slice { LaunchRefusal::MissingHeavySlice }
                 else if collision { LaunchRefusal::CgroupCollision }
                 else if extra == Extra::RelativeOutcome { LaunchRefusal::InvalidOutcomePath }
+                else if extra == Extra::MissingDeadline { LaunchRefusal::MissingDeadline }
+                else if extra == Extra::MissingCeiling { LaunchRefusal::MissingMaxHoldCeiling }
+                else if extra == Extra::ExpiredDeadline { LaunchRefusal::DeadlineExpired }
                 else { LaunchRefusal::CapReadback { index: bad.unwrap().0 } };
             assert_eq!(refusal, expected);
         }
