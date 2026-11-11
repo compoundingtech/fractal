@@ -1,8 +1,7 @@
 use super::{ExitUsage, JobLaunch, JobLaunchEffects, JobLaunchResult, LaunchJournal};
 use crate::ExecRuntime;
 use anyhow::{Result, ensure};
-use fractal_jobs::launch::{HolderOutcome, LaunchRefusal, require_caps};
-use serde::Deserialize;
+use fractal_jobs::{launch::{LaunchRefusal, require_caps}, recovery::Receipt};
 use std::path::Path;
 
 /// Release may have executed the payload. Cleanup succeeded, but the intent is
@@ -23,17 +22,6 @@ impl std::error::Error for UncertainRelease {
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Receipt {
-    mode: String,
-    job_label: String,
-    holder_pid: u32,
-    job_cgroup: String,
-    launched: bool,
-    #[serde(flatten)]
-    outcome: HolderOutcome,
-}
 impl ExecRuntime {
     /// INACTIVE, no production caller. Unit 8 must never release or relaunch an
     /// uncertain intent after restart. A reboot loses J; absent outcome is unknown
@@ -88,15 +76,9 @@ impl ExecRuntime {
         // Success and abort use the same kill/empty/sample/remove path.
         let exit_usage = effects.stop_and_sample(request.host)?;
         let receipt = receipt?;
-        ensure!(receipt.mode == "scope-none" && receipt.job_label == request.job_id
-            && receipt.holder_pid == holder_pid
-            && Path::new(&receipt.job_cgroup) == hierarchy, "B6 receipt identity mismatch");
-        let consistent = match &receipt.outcome {
-            HolderOutcome::Refused { .. } | HolderOutcome::Withdrawn => !receipt.launched,
-            HolderOutcome::MaxHold | HolderOutcome::ChildExit { .. } => receipt.launched,
-            HolderOutcome::HolderLost => true,
-        };
-        ensure!(consistent, "B6 receipt launched/outcome mismatch");
+        ensure!(receipt.matches(request.job_id, holder_pid,
+            hierarchy.to_str().ok_or_else(|| anyhow::anyhow!("non-UTF8 cgroup identity"))?),
+            "B6 receipt identity/outcome mismatch");
         Ok(JobLaunchResult {
             holder_pid, outcome: receipt.outcome.into(), launch_usage, exit_usage,
         })

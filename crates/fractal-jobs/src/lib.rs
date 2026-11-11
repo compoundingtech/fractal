@@ -8,6 +8,7 @@ use std::{error::Error, fmt, num::NonZeroU32};
 pub mod host_authority;
 pub mod identity;
 pub mod launch;
+pub mod recovery;
 
 /// A declaration only: background sorts before normal; neither grants admission or preemption.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -144,7 +145,7 @@ pub fn transition(state: State, event: Event) -> Result<State, TransitionError> 
         (S::Launching | S::Running, E::Recover) => S::Recovering,
         (S::CancelRequested, E::Recover) => S::RecoveringCancelRequested,
         (S::Launching | S::Running | S::Recovering, E::CancelRequest) => S::CancelRequested,
-        (S::Launching | S::Running | S::Recovering, E::HostLost) => S::UnknownAfterHostLoss { cancel_requested: false },
+        (S::Queued | S::Preparing | S::Prepared | S::Launching | S::Running | S::Recovering, E::HostLost) => S::UnknownAfterHostLoss { cancel_requested: false },
         (S::CancelRequested | S::RecoveringCancelRequested, E::HostLost) => S::UnknownAfterHostLoss { cancel_requested: true },
         (S::UnknownAfterHostLoss { cancel_requested: false }, E::Recover) => S::Recovering,
         (S::UnknownAfterHostLoss { cancel_requested: true }, E::Recover) => S::RecoveringCancelRequested,
