@@ -1912,6 +1912,8 @@ agentless
 
 An agentless step hands off without waiting for a reconcile pass. When its exec's `driver exec` wrapper reports the exit, the daemon evaluates the run from that change, and evaluates it again at once while each evaluation writes (at most eight in a row): the step completes, the next step becomes ready, and the evaluation that declares the next step's exec also starts it. An exec that renders files, has run before or is under a rollout still starts in the next pass.
 
+A new run starts the same way. Its creation is the change the daemon evaluates it from, on the host that originates it, so its first step becomes ready and starts its exec or program without waiting for a reconcile pass.
+
 A local selector replaces the inherited selector. It does not add to it.
 
 The inheritance order is the step, its mission, its parent step, and its parent mission. The nearest selector wins.

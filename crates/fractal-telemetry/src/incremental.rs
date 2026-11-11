@@ -476,16 +476,19 @@ impl Incremental {
     }
 
     /// The items named with `prefix` that read something the feed has after `cursor`, in name
-    /// order, and the cursor to pass next time. With no cursor it starts where the passes' own
-    /// reading of the feed is. Unlike [`Self::observe`], it marks nothing and leaves the passes'
-    /// place in the feed alone: an evaluation clears its item's mark, so a mark set from another
-    /// thread while a pass evaluates that item would be lost until the next full pass.
+    /// order; the subjects named with `prefix` that the feed changed and no evaluation has
+    /// recorded yet, such as a mission run just created, in name order; and the cursor to pass
+    /// next time. An unseen subject can belong to another host, so the caller decides which to
+    /// evaluate. With no cursor it starts where the passes' own reading of the feed is. Unlike
+    /// [`Self::observe`], it marks nothing and leaves the passes' place in the feed alone: an
+    /// evaluation clears its item's mark, so a mark set from another thread while a pass
+    /// evaluates that item would be lost until the next full pass.
     pub fn readers_since<S: ChangeSource + ?Sized>(
         &self,
         store: &S,
         cursor: Option<(u64, i64)>,
         prefix: &str,
-    ) -> Result<((u64, i64), Vec<String>)> {
+    ) -> Result<((u64, i64), Vec<String>, Vec<String>)> {
         let watermark = self
             .state
             .lock()
@@ -493,7 +496,7 @@ impl Incremental {
             .watermark;
         let Some((index, local)) = cursor.or(watermark) else {
             let feed = store.changes_since(i64::MAX as u64, i64::MAX)?;
-            return Ok(((feed.index, feed.local), Vec::new()));
+            return Ok(((feed.index, feed.local), Vec::new(), Vec::new()));
         };
         let feed = store.changes_since(index, local)?;
         let state = self
@@ -508,7 +511,18 @@ impl Incremental {
             .filter(|item| item.starts_with(prefix))
             .cloned()
             .collect::<BTreeSet<_>>();
-        Ok(((feed.index, feed.local), readers.into_iter().collect()))
+        let unseen = feed
+            .changes
+            .iter()
+            .map(|change| &change.subject)
+            .filter(|subject| subject.starts_with(prefix) && !state.items.contains_key(*subject))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok((
+            (feed.index, feed.local),
+            readers.into_iter().collect(),
+            unseen.into_iter().collect(),
+        ))
     }
 
     pub fn evaluated(&self, item: &str, reads: BTreeSet<String>, due: Option<u128>) {
@@ -699,10 +713,20 @@ mod tests {
         incremental.evaluated("stop/c", reads(&["resource/x"]), None);
         feed.0.lock().unwrap().push(change("resource/x", "resource.observed", None, "{}"));
 
-        let (cursor, readers) = incremental.readers_since(&feed, None, "mission-run/").unwrap();
+        let (cursor, readers, unseen) = incremental.readers_since(&feed, None, "mission-run/").unwrap();
         assert_eq!(readers, ["mission-run/a"]);
-        let (_, again) = incremental.readers_since(&feed, Some(cursor), "mission-run/").unwrap();
+        assert!(unseen.is_empty());
+        let (cursor, again, _) = incremental.readers_since(&feed, Some(cursor), "mission-run/").unwrap();
         assert!(again.is_empty());
+
+        // A change to a subject no evaluation recorded yet names it unseen, not a reader; a
+        // known item's own change is not unseen.
+        feed.0.lock().unwrap().push(change("mission-run/new", "mission-run.created", None, "{}"));
+        feed.0.lock().unwrap().push(change("mission-run/a", "mission-run.state", None, "{}"));
+        feed.0.lock().unwrap().push(change("stop/new", "stop.created", None, "{}"));
+        let (_, readers, unseen) = incremental.readers_since(&feed, Some(cursor), "mission-run/").unwrap();
+        assert!(readers.is_empty());
+        assert_eq!(unseen, ["mission-run/new"]);
 
         // It marked nothing, and the passes still read the change from where they were.
         assert!(!incremental.needs("stop/c", 0));
