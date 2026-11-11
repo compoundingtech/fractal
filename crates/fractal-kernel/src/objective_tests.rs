@@ -65,6 +65,16 @@ fn an_interval_reads_every_role() {
 }
 
 #[test]
+fn the_expect_kind_may_also_start_the_sample() {
+    let objective = one(&INTERVAL.replace("start \"custom.acme.change-ready\" at=\"ready_at\"", "start \"custom.acme.change-merged\" at=\"merged_at\"")).unwrap();
+    let Indicator::Interval(interval) = &objective.indicator else { panic!() };
+    assert_eq!(
+        interval.kinds(),
+        ["custom.acme.change-merged", "custom.acme.change-applied", "custom.acme.change-abandoned", "custom.acme.change-paused", "custom.acme.change-resumed"]
+    );
+}
+
+#[test]
 fn a_nonsensical_objective_is_refused_never_defaulted() {
     let refused = |text: &str| one(text).unwrap_err().message;
     let interval = |replace: &str, with: &str| INTERVAL.replace(replace, with);
