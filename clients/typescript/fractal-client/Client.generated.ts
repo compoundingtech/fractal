@@ -12,6 +12,7 @@ import type {
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
     MissionDeclaration,
+    GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
@@ -717,6 +718,13 @@ export class FractalClient {
     async sloHistory(id: string, options: { since_ms?: number; until_ms?: number; steps?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloHistory>> { return this.get('/v1/client/slo/history' + query({ id, ...options }), undefined, requestOptions); }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
     async usageHubQuota(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsageHubQuota>> { return this.get('/v1/client/usage/quota', undefined, requestOptions) }
+    async githubPluginPullRequest(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubPullRequestRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`, undefined, requestOptions); }
+    async githubPluginIssue(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubIssueRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${number}`, undefined, requestOptions); }
+    async githubPluginConversation(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubConversationRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/conversation`, undefined, requestOptions); }
+    async githubPluginChecks(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubChecksRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/checks`, undefined, requestOptions); }
+    async githubPluginFiles(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubFilesRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/files`, undefined, requestOptions); }
+    async githubPluginComment(owner: string, repo: string, commentId: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubCommentRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/comments/${commentId}`, undefined, requestOptions); }
+    async githubPluginRun(owner: string, repo: string, runId: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubRunRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/runs/${runId}`, undefined, requestOptions); }
     async clientsList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ClientConnections>> { return this.get('/v1/client/clients', undefined, requestOptions); }
     async nowList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/now' + query(options), undefined, requestOptions); }
     async machinesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/machines' + query(options), undefined, requestOptions); }
