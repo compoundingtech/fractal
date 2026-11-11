@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 macro_rules! fixture {
     ($name:literal) => {
-        serde_json::from_str::<Value>(include_str!(concat!("../../../../../../docs/st3/client-v0/fixtures/github-plugin-", $name, ".json"))).unwrap()
+        serde_json::from_str::<Value>(/* sqlite-large-value: allow-for-now lv-ha3a3bb1e957c owner=fractal_api_client_v0::api::client_v0::github_plugin_reads::tests TODO=trace-statement-and-value-representation */ include_str!(concat!("../../../../../../docs/st3/client-v0/fixtures/github-plugin-", $name, ".json"))).unwrap()
     };
 }
 
@@ -663,7 +663,7 @@ async fn files_negotiate_the_client_limit_and_bound_multipage_escaped_patches_an
     assert!(files.files.iter().any(|file| file.patch.is_none()));
     assert!(files.files.iter().any(|file| file.patch.is_some()));
     assert!(files.files.len() < 201, "metadata must also fit, not only patches");
-    let mut capabilities: Value = serde_json::from_str(include_str!("../../../../../../docs/st3/client-v0/fixtures/capabilities.json")).unwrap();
+    let mut capabilities: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h8fa94b508404 owner=fractal_api_client_v0::api::client_v0::github_plugin_reads::tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../../docs/st3/client-v0/fixtures/capabilities.json")).unwrap();
     capabilities["value"]["limits"]["max_response_bytes"] = json!(CLIENT_MAX_RESPONSE_BYTES);
     let mut envelope = capabilities.clone();
     envelope["value"] = found(files, false);
