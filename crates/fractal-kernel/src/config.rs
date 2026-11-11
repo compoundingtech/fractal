@@ -1475,6 +1475,7 @@ mod tests {
         assert_eq!(configured.jobs, Some(super::JobsConfig {
             enabled: true,
             allowed_classes: vec!["heavy".into()],
+            keeper_cgroups: Vec::new(),
         }));
         let restored: super::Config =
             toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
