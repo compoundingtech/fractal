@@ -30,9 +30,12 @@ const QUEUE_EXIT_STATE_SQL: &str = "SELECT json_extract(body, '$.fields'), accep
              ORDER BY length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC,store_index DESC
              LIMIT ?2";
 
-/// When a thread's `merge-queue-left` events were written: one subject per exit.
+/// One canonical first observation per exit: another poller's observation is not a new exit.
 const QUEUE_EXIT_EVENT_SQL: &str = "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_kind_accepted_index
-             WHERE subject>=?1 AND subject<?2 AND kind='github.event'";
+             WHERE subject>=?1 AND subject<?2 AND kind='github.event'
+               AND id=(SELECT request.id FROM claims request
+                       WHERE request.subject=claims.subject AND request.kind='github.event'
+                       ORDER BY CANONICAL_ASC(request) LIMIT 1)";
 
 // Each mailbox alias contributes at most one row; the aggregate never sorts retained wakes.
 const LAST_WAKE_SQL: &str = "SELECT MAX(sent_at) FROM (
@@ -198,7 +201,7 @@ impl IdleHoldsStore for Store {
         let exited = fractal_schema::github_plugin::event_subject(&item, "merge-queue-left")
             .map(|subject| -> Result<Option<u128>> {
                 let upper = format!("{subject}0");
-                let mut events = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h13f5ed40c752 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_EVENT_SQL)?;
+                let mut events = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-haa1264e7b371 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ &smallclaims::store::canonical::canonical_sql(QUEUE_EXIT_EVENT_SQL))?;
                 let times = events
                     .query_map(params![subject, upper], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -409,6 +412,28 @@ mod tests {
             "at": "2026-10-30T12:00:00.000Z"}));
         assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), Some(event), "the newest exit event");
         assert_eq!(store.thread_left_merge_queue(&thread, event).unwrap(), None);
+        // A second observation can arrive by replication despite local Once admission.
+        // Simulate that raw history with the append primitive, preserving the old payload.
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            smallclaims::store::append_claim_record_tx(
+                &transaction, &store.origin,
+                "github-event/github/acme/garden/pull-request/12/merge-queue-left/2",
+                "github.event", None,
+                &json!({"fields": {
+                    "version": 1, "item": item, "event": "merge-queue-left",
+                    "observer": "observer/another-poller", "at": "2026-11-11T10:00:00Z",
+                    "head_sha": "another-head", "detail": {}
+                }}),
+                &[], None,
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), Some(event),
+            "another observation must not move the canonical exit");
+        assert_eq!(store.thread_left_merge_queue(&thread, event).unwrap(), None,
+            "another observation must not wake an idle holder again");
         append(&store, item, "vcs.item.state", compact(json!({"state": "closed", "merged": true})));
         assert_eq!(store.thread_left_merge_queue(&thread, 0).unwrap(), None, "a merged thread did not stall");
     }
