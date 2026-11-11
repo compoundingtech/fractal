@@ -86,7 +86,7 @@ fn kill_and_wait_empty_until(directory: &Path, deadline: Option<Instant>) -> Res
 
 /// Round up for poll's millisecond API; long durations are observed in chunks.
 pub(crate) fn poll_milliseconds(duration: Duration) -> i32 {
-    i32::try_from(duration.as_millis() + u128::from(duration.subsec_nanos() % 1_000_000 != 0))
+    i32::try_from(duration.as_millis() + u128::from(!duration.subsec_nanos().is_multiple_of(1_000_000)))
         .unwrap_or(i32::MAX)
 }
 
