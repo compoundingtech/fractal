@@ -51,6 +51,29 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Conversation relay reads
+
+`st.conversation.relay_read.duration` is one histogram in seconds, recorded for successful
+and failed conversation relays (not dependent on trace sampling). Its only labels are
+`st.conversation.owner` (the provenance's `host/<configured-peer>`, `local`, or `unknown`)
+and `st.conversation.operation` (`timeline`, `session_detail`, `changes`, `first_snapshot`).
+`first_snapshot` means a changes request without an `after` cursor; long-poll durations
+include intentional waiting. Discovered, unconfigured owners collapse to `unknown`.
+No session or agent id becomes a metric label.
+
+Sampled owner timeline requests carry `st.conversation.*` attributes on the existing
+request span: `reader_admission_ms` (SQLite reader acquisition and snapshot establishment),
+`graph_sql_ms` (graph runtime/message query calls, including their reader admission),
+`fold_mutex_wait_ms`, `native_admission_ms` (bounded native-reader permit wait),
+`native_fold_ms`, `display_preparation_ms`, and `header_overlay_ms`. The graph timing
+includes row decoding but excludes session filtering and display conversion; it overlaps
+SQLite reader admission, so these attributes are not an additive partition.
+Repeated native refills and header/overlay work accumulate within the request.
+Counts are `requested_limit` (effective clamped page request), `native_read_limit`
+(sum of requested native slice sizes), `native_prepared_items` (before page truncation),
+and `graph_rows` (returned graph message rows before session filtering).
+Stages not reached are absent, not synthetic zero-duration work.
+
 ## Background task CPU
 
 The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
