@@ -302,6 +302,75 @@ impl PtyRuntime {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn startup_fixture(runtime: &PtyRuntime, operation: &str, pid: u32, token: u64) -> PathBuf {
+        let directory = runtime.producer_directory("worker", operation);
+        std::fs::create_dir_all(&directory).unwrap();
+        durable_json(&directory.join("owner.json"), &ProducerOwnership {
+            version: 1, runtime_id: "worker".into(), operation: operation.into(),
+            scope: crate::scope_unit("st3", operation),
+            launcher_acknowledged: true, publication_pending: true,
+        }).unwrap();
+        durable_json(&directory.join(format!("server-{pid}.json")), &ServerOwnership {
+            version: 1, unit: crate::server_unit("worker", pid), pid, start_token: token,
+            boot_id: pty_core::registry::read_boot_id().unwrap(),
+        }).unwrap();
+        directory
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_finalizes_a_vanished_producer_end_to_end() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("requires real systemd user scope support");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("registry"));
+        let mut child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let token = crate::process_start_token(pid).unwrap();
+        child.wait().unwrap();
+        let directory = startup_fixture(&runtime, "vanished-start", pid, token);
+        assert!(!directory.join("closure.json").exists());
+        let _restarted = PtyRuntime::new(root.path().join("registry"));
+        let closure: serde_json::Value = serde_json::from_reader(
+            File::open(directory.join("closure.json")).expect("startup must finalize the vanished producer")).unwrap();
+        assert_eq!(closure["reason"], "runtime-vanished");
+        assert_eq!(closure["publication_pending"], false);
+        let owner: ProducerOwnership =
+            serde_json::from_reader(File::open(directory.join("owner.json")).unwrap()).unwrap();
+        assert!(!owner.publication_pending);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_closes_only_the_vanished_generation_of_a_reused_session_pid() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("requires real systemd user scope support");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("registry"));
+        let pid = std::process::id();
+        let token = crate::process_start_token(pid).unwrap();
+        assert!(token > 1);
+        // The same session name and reused PID now belong to another start.
+        let old = startup_fixture(&runtime, "older-start", pid, token - 1);
+        let newer = startup_fixture(&runtime, "newer-start", pid, token);
+        let newer_owner = std::fs::read(newer.join("owner.json")).unwrap();
+        let newer_server = std::fs::read(newer.join(format!("server-{pid}.json"))).unwrap();
+        let _restarted = PtyRuntime::new(root.path().join("registry"));
+        assert!(old.join("closure.json").exists(), "the old generation must be finalized");
+        let owner: ProducerOwnership =
+            serde_json::from_reader(File::open(old.join("owner.json")).unwrap()).unwrap();
+        assert!(!owner.publication_pending);
+        assert!(!newer.join("closure.json").exists(), "the live generation must remain open");
+        assert_eq!(std::fs::read(newer.join("owner.json")).unwrap(), newer_owner);
+        assert_eq!(std::fs::read(newer.join(format!("server-{pid}.json"))).unwrap(), newer_server);
+        assert!(crate::process_generation_alive(pid, token).unwrap());
+    }
+
     #[test]
     fn startup_refuses_partial_or_corrupt_ownership_without_effects() {
         for name in ["owner.json", "owner.next"] {
