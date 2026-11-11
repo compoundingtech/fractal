@@ -6,6 +6,12 @@ pub const GRANTED: &str = "custom.client.assistant.v1.granted";
 pub const POLICY: &str = "custom.client.assistant.v1.policy";
 pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 const VERSION: &str = "1";
+/// Any authority DDL change (tables, indexes or triggers) must bump this version
+/// and provide any required migration; update the versioned DDL digest as well.
+const SCHEMA_VERSION: &str = "1";
+#[cfg(test)]
+pub(super) const SCHEMA_DDL_FINGERPRINT: (&str, &str) =
+    ("1", "1bee597c13dc75e97e29c66e14c129baa93d3c048bd92e9b2e58e6c4e618846f");
 const KINDS: [&str; 3] = [GRANTED, POLICY, REVOKED];
 pub const CLAIMS_PER_SLICE: usize = 64;
 pub const MEMBERSHIP_KEYS_PER_REFRESH: usize = 16;
@@ -99,8 +105,23 @@ pub fn transition_valid(grant: &ClaimRecord, transition: &ClaimRecord) -> bool {
 pub fn expiry_key(value: u64) -> String { format!("{value:020}") }
 
 pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
+    // Schema installation is distinct from the resumable authority backfill.
+    // Replacing an unchanged trigger invalidates durable consumer bindings, and
+    // even replacing the same meta value needlessly writes the database header.
+    if fleet_meta(connection, "assistant_grant_authority_schema_version")?.as_deref() == Some(SCHEMA_VERSION) {
+        migrate_legacy_state(connection)?;
+        if fleet_meta(connection, "assistant_grant_authority_local_origin")?.as_deref() != Some(local_origin) {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-hbbdcd60c3dad owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
+                "UPDATE meta SET value=?1 WHERE key='assistant_grant_authority_local_origin'",
+                [local_origin],
+            )?;
+        }
+        return Ok(());
+    }
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hff2d1c2b03b3 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_upgrade")?;
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h01e62b989d49 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-hcda5071d3120 owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
             claim_id TEXT NOT NULL, base_claim_id TEXT NOT NULL,
             grant_subject TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
@@ -168,8 +189,9 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             ON assistant_grant_pending(origin,claim_id) WHERE authenticated=0;
          CREATE INDEX IF NOT EXISTS assistant_grant_auth_work_claim_index
             ON assistant_grant_auth_work(claim_id);
-         CREATE INDEX IF NOT EXISTS replica_records_grant_proof_index
-            ON replica_records(claim_id,writer,sequence,envelope_hash,position);
+         DROP INDEX IF EXISTS replica_records_grant_proof_index;
+         CREATE INDEX IF NOT EXISTS replica_records_writer_grant_proof_index
+            ON replica_records(writer,claim_id,sequence,envelope_hash,position);
          CREATE TABLE IF NOT EXISTS assistant_grant_retractions (
             id INTEGER PRIMARY KEY, writer TEXT NOT NULL, member_key TEXT NOT NULL,
             lower_sequence INTEGER NOT NULL, upper_sequence INTEGER NOT NULL,
@@ -230,21 +252,43 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE INDEX IF NOT EXISTS assistant_grant_membership_windows_seek
             ON assistant_grant_membership_windows(writer,start,member_key);"
     )?;
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hff2d1c2b03b3 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_upgrade")?;
-    install_auth_cursor(connection)?;
     install_proof_invalidation_triggers(connection)?;
     install_auth_work(connection)?;
+    migrate_legacy_state(connection)?;
     install_queue_owners(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f117dab1bdd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_local_origin',?1)", [local_origin])?;
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h31877443d557 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_schema_version',?1)",
+        [SCHEMA_VERSION],
+    )?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h57db182d0631 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "RELEASE assistant_grant_upgrade")?;
     Ok(())
 }
 
-fn install_auth_cursor(connection: &Connection) -> Result<()> {
+// Older builds may leave legacy work even after this schema version was
+// installed. Detect it read-only; unchanged reopens never recreate DDL or write.
+fn migrate_legacy_state(connection: &Connection) -> Result<()> {
     let has_start: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('assistant_grant_auth_cursor') WHERE name='membership_start')",
         [], |row| row.get(0),
     )?;
+    let old_additions: bool = connection.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info('assistant_grant_additions') WHERE name='claim_id')",
+        [], |row| row.get(0),
+    )?;
+    let installed: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='assistant_grant_auth_work_installed')",
+        [], |row| row.get(0),
+    )?;
+    let legacy: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='assistant_grant_membership_dirty')",
+        [], |row| row.get(0),
+    )?;
+    if has_start && !old_additions && installed && !legacy {
+        return Ok(());
+    }
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hbad5073042d8 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "SAVEPOINT assistant_grant_legacy_upgrade")?;
     if !has_start {
         // The unreleased key-only cursor cannot describe the new window order.
         // Requeue every interrupted claim rather than trusting its stale position.
@@ -254,6 +298,40 @@ fn install_auth_cursor(connection: &Connection) -> Result<()> {
              ALTER TABLE assistant_grant_auth_cursor ADD COLUMN membership_start INTEGER NOT NULL DEFAULT -1;"
         )?;
     }
+    if old_additions {
+        // Retain key/range obligations, but replace history-wide progress with
+        // a fresh grant-work cursor. No committed obligation is discarded.
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hed00daccc56e owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "ALTER TABLE assistant_grant_additions ADD COLUMN claim_id TEXT NOT NULL DEFAULT '';
+             ALTER TABLE assistant_grant_additions ADD COLUMN active_claim TEXT NOT NULL DEFAULT '';
+             UPDATE assistant_grant_additions SET sequence=-1,envelope_hash='',position=-1;"
+        )?;
+    }
+    if !installed {
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hda7f8f715d53 owner=smallclaims::store::assistant_grant_authority TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO assistant_grant_auth_work
+               SELECT origin,claim_id FROM assistant_grant_pending
+               INDEXED BY assistant_grant_pending_unauthenticated_index WHERE authenticated=0;
+             INSERT OR IGNORE INTO assistant_grant_auth_work
+               SELECT claims.origin,cursor.claim_id FROM assistant_grant_auth_cursor AS cursor
+               JOIN claims ON claims.id=cursor.claim_id;
+             INSERT OR IGNORE INTO assistant_grant_auth_work
+               SELECT pending.origin,work.claim_id FROM assistant_grant_proof_rechecks AS work
+               JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id;
+             INSERT INTO meta(key,value) VALUES('assistant_grant_auth_work_installed','1');"
+        )?;
+    }
+    if legacy {
+        connection.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hda9098901f71 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks
+             SELECT pending.claim_id FROM assistant_grant_membership_dirty AS work
+             JOIN assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_writer_index
+               ON pending.origin=work.writer AND pending.authenticated=0
+             WHERE (pending.sequence,pending.claim_id)>(work.sequence,work.claim_id);
+             DROP TABLE assistant_grant_membership_dirty;"
+        )?;
+    }
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2bc6720e295e owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ "RELEASE assistant_grant_legacy_upgrade")?;
     Ok(())
 }
 
@@ -342,10 +420,13 @@ fn queue_owner(connection: &Connection, queue: &str) -> Result<Option<(String,St
                 "SELECT sequence FROM assistant_grant_queue_sequences WHERE queue=?1",
                 [queue], |row| row.get(0),
             )?;
-            connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
-            )?;
-            seek(0,upper)?
+            let candidate = seek(0,upper)?;
+            if candidate.is_some() {
+                connection.execute(
+                    /* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![upper_key,upper],
+                )?;
+            }
+            candidate
         }
     };
     let Some((owner,subowner,sequence)) = candidate else { return Ok(None); };
@@ -358,19 +439,6 @@ fn queue_owner(connection: &Connection, queue: &str) -> Result<Option<(String,St
 }
 
 fn install_auth_work(connection: &Connection) -> Result<()> {
-    let old_additions: bool = connection.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM pragma_table_info('assistant_grant_additions') WHERE name='claim_id')",
-        [], |row| row.get(0),
-    )?;
-    if old_additions {
-        // Retain key/range obligations, but replace history-wide progress with
-        // a fresh grant-work cursor. No committed obligation is discarded.
-        connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hed00daccc56e owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-exact-wire-values */ "ALTER TABLE assistant_grant_additions ADD COLUMN claim_id TEXT NOT NULL DEFAULT '';
-             ALTER TABLE assistant_grant_additions ADD COLUMN active_claim TEXT NOT NULL DEFAULT '';
-             UPDATE assistant_grant_additions SET sequence=-1,envelope_hash='',position=-1;"
-        )?;
-    }
     // The outer statement's conflict policy can override a trigger's OR IGNORE.
     // Work is set membership, so explicitly avoid inserting an existing claim;
     // this remains idempotent under cursor/pending UPSERTs as well as plain writes.
@@ -396,38 +464,6 @@ fn install_auth_work(connection: &Connection) -> Result<()> {
                  END;"
             ))?;
         }
-    }
-    let installed: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='assistant_grant_auth_work_installed')",
-        [], |row| row.get(0),
-    )?;
-    if !installed {
-        connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hda7f8f715d53 owner=smallclaims::store::assistant_grant_authority TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO assistant_grant_auth_work
-               SELECT origin,claim_id FROM assistant_grant_pending
-               INDEXED BY assistant_grant_pending_unauthenticated_index WHERE authenticated=0;
-             INSERT OR IGNORE INTO assistant_grant_auth_work
-               SELECT claims.origin,cursor.claim_id FROM assistant_grant_auth_cursor AS cursor
-               JOIN claims ON claims.id=cursor.claim_id;
-             INSERT OR IGNORE INTO assistant_grant_auth_work
-               SELECT pending.origin,work.claim_id FROM assistant_grant_proof_rechecks AS work
-               JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id;
-             INSERT INTO meta(key,value) VALUES('assistant_grant_auth_work_installed','1');"
-        )?;
-    }
-    let legacy: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='assistant_grant_membership_dirty')",
-        [], |row| row.get(0),
-    )?;
-    if legacy {
-        connection.execute_batch(
-            /* sqlite-large-value: allow-for-now lv-hda9098901f71 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks
-             SELECT pending.claim_id FROM assistant_grant_membership_dirty AS work
-             JOIN assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_writer_index
-               ON pending.origin=work.writer AND pending.authenticated=0
-             WHERE (pending.sequence,pending.claim_id)>(work.sequence,work.claim_id);
-             DROP TABLE assistant_grant_membership_dirty;"
-        )?;
     }
     Ok(())
 }
@@ -754,6 +790,10 @@ fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
 
 fn attachment_one(connection: &Connection) -> Result<bool> {
     let Some((owner,partition)) = queue_owner(connection,"attachment")? else { return Ok(false); };
+    attachment_task_one(connection, &owner, &partition)
+}
+
+fn attachment_task_one(connection: &Connection, owner: &str, partition: &str) -> Result<bool> {
     let task: Option<(String,String,String,String,String,String,String)> = connection.query_row(
         "SELECT claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id
          FROM assistant_grant_attachments WHERE claim_id=?1 AND candidate_kind=?2", params![owner,partition],
@@ -804,6 +844,36 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+// A local transition has only the GRANTED partition. Visit one candidate, then
+// probe only for completion: never consume a second candidate in this request.
+// The earlier newest-base fast path plus this unit insert at most two pairs.
+fn finish_local_transition(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
+    attachment_task_one(connection, &claim.id, GRANTED)?;
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h45c096d84c6c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachments
+         WHERE claim_id=?1 AND candidate_kind=?2
+           AND NOT EXISTS(SELECT 1 FROM assistant_grant_pending AS candidate
+               INDEXED BY assistant_grant_pending_attachment_index
+               WHERE candidate.grant_subject=assistant_grant_attachments.grant_subject
+                 AND candidate.authenticated=1 AND candidate.origin=assistant_grant_attachments.origin
+                 AND candidate.actor=assistant_grant_attachments.actor AND candidate.kind=?2
+                 AND candidate.claim_id>assistant_grant_attachments.after_claim_id
+                 AND candidate.claim_id<=assistant_grant_attachments.upper_claim_id)",
+        params![claim.id, GRANTED],
+    )?;
+    // At most two base witnesses were touched above. Only finished subjects
+    // permit cleanup; unrelated tasks and proof/dirty fences are never removed.
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h133b802d1e9c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id IN (
+             SELECT base_claim_id FROM assistant_grant_attachment_witnesses
+             WHERE grant_subject=?1
+               AND NOT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=?1)
+             LIMIT 2)",
+        [&claim.subject],
+    )?;
+    Ok(())
+}
+
 fn attachment_witness_one(connection: &Connection) -> Result<bool> {
     let Some((base,_)) = queue_owner(connection,"witness")? else { return Ok(false); };
     let subject: String = connection.query_row(
@@ -825,13 +895,19 @@ fn local_origin(connection: &Connection) -> Result<String> {
 /// Admission pays structural/authentication cost once. Invalid rows never enter
 /// the authority or the pending-authentication writer/window index.
 pub fn refresh_claim(connection: &Connection, id: &str) -> Result<()> {
-    // Receipt/local append boundary: only durable local admission is immediate.
-    // Remote first-authentication runs in maintenance after generation validation.
+    // Receipt boundary: remote first-authentication runs in maintenance after
+    // generation validation; this path has no local request work allowance.
     refresh_claim_inner(connection, id, false)
 }
 
+/// Only the actual append transaction may spend the separate bounded request
+/// allowance; maintenance refreshes retain their one-unit slice accounting.
+pub fn refresh_local_append(connection: &Connection, id: &str) -> Result<()> {
+    refresh_claim_with_authentication(connection,id,false,None,true)
+}
+
 fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bool) -> Result<()> {
-    refresh_claim_with_authentication(connection,id,membership_current,None)
+    refresh_claim_with_authentication(connection,id,membership_current,None,false)
 }
 
 #[derive(Default)]
@@ -844,7 +920,7 @@ struct PreviousAuthentication {
 }
 
 fn refresh_claim_with_authentication(connection: &Connection, id: &str,
-    membership_current: bool, verified: Option<Authentication>) -> Result<()> {
+    membership_current: bool, verified: Option<Authentication>, local_append_transaction: bool) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
         format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1"));
     let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1665a4a8cfdf owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h5520ddeb5d20 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional()?;
@@ -917,10 +993,10 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
                OR assistant_grant_pending.auth_envelope_hash IS NOT excluded.auth_envelope_hash
                OR assistant_grant_pending.auth_record_position IS NOT excluded.auth_record_position",
             params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?,proof_key,proof_sequence,proof_hash,proof_position])? != 0;
-        // One local transition may materialize only its newest base pair for
-        // owner management. All other pairs stay queued, and bearer fences stay
-        // intact. No base/transition product is visited in the append request.
-        if changed && !admitted && authenticated && local_append && claim.kind!=GRANTED
+        // One local transition materializes its newest base pair for management.
+        // Its own bounded attachment unit below also completes the usual
+        // single-base case without imposing a needless bearer fence.
+        if changed && !admitted && authenticated && local_append_transaction && local_append && claim.kind!=GRANTED
             && let Some(base) = management_latest(connection,&claim.subject,GRANTED)?
             && transition_valid(&base,&claim) {
             connection.execute(
@@ -932,7 +1008,12 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
                 recompute_base(connection,&base.id)?;
             }
         }
-        if changed && !admitted && authenticated { attach_claim(connection,&claim)?; }
+        if changed && !admitted && authenticated {
+            attach_claim(connection,&claim)?;
+            if local_append_transaction && local_append && claim.kind!=GRANTED {
+                finish_local_transition(connection,&claim)?;
+            }
+        }
         if admitted && !authenticated { rebuild_authenticated_subject(connection,&claim)?; }
         if matches!(authentication, Authentication::Pending) {
             connection.execute(/* sqlite-large-value: allow-for-now lv-he3fa452add20 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [id])?;
@@ -1348,7 +1429,7 @@ fn addition_one(connection: &Connection) -> Result<bool> {
         return Ok(true);
     }
     let record: Option<(u64,String,i64,bool)> = connection.query_row(
-        "SELECT sequence,envelope_hash,position,state='valid' FROM replica_records INDEXED BY replica_records_grant_proof_index
+        "SELECT sequence,envelope_hash,position,state='valid' FROM replica_records INDEXED BY replica_records_writer_grant_proof_index
          WHERE claim_id=?1 AND writer=?2 AND sequence BETWEEN ?3 AND ?4
            AND (sequence,envelope_hash,position)>(?5,?6,?7)
            AND EXISTS(SELECT 1 FROM assistant_grant_auth_work WHERE writer=?2 AND claim_id=?1)
@@ -1385,7 +1466,7 @@ fn addition_one(connection: &Connection) -> Result<bool> {
             if fleet_id.as_deref().is_some_and(|fleet_id|
                 VerifiedEnvelopeSignature::verify(shard.as_deref(),fleet_id,&writer,sequence,&hash,&key,&signature).is_some()) {
                 refresh_claim_with_authentication(connection,&claim,true,
-                    Some(Authentication::Authenticated(Some((key,sequence,hash.clone(),position)))))?;
+                    Some(Authentication::Authenticated(Some((key,sequence,hash.clone(),position)))),false)?;
                 connection.execute(/* sqlite-large-value: allow-for-now lv-h4e1ea146a20c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
                 connection.execute(/* sqlite-large-value: allow-for-now lv-h1e384e782172 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
             }
@@ -1548,7 +1629,9 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
              OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)", [], |row| row.get(0))?;
     if dirty { return Ok(false); }
-    connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
+    if fleet_meta(connection, "assistant_grant_authority_version")?.as_deref() != Some(VERSION) {
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
+    }
     Ok(true)
 }
 

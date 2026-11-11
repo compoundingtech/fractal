@@ -54,6 +54,7 @@ pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
 pub mod quota;
+mod usage_hub;
 pub mod read_positions;
 mod runtime_start_diagnostics;
 pub mod search;
@@ -124,6 +125,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/usage", get(usage_period))
         .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
+        .route("/v1/client/usage/quota", get(usage_hub::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))

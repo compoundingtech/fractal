@@ -194,6 +194,30 @@ opening a writer transaction or resetting authentication work. No parallel
 membership-invalidation revision or trigger set is maintained. An identical
 signature is also a no-op.
 
+Authority schema installation has its own durable version, separate from backfill
+readiness. An unchanged reopen neither replaces triggers nor rewrites metadata;
+idle maintenance likewise leaves queue frontiers and completed backfill markers
+untouched. This preserves SQLite's schema cookie and durable consumer bindings.
+Any change to authority tables, indexes or triggers must bump `SCHEMA_VERSION` and provide any required migration; update the recorded versioned DDL digest alongside it.
+The schema-version fast path still detects legacy cursor/work state read-only:
+key-only authentication cursors, older addition cursors, missing auth-work
+initialization and legacy membership-dirty obligations migrate in a conditional
+savepoint even when the schema marker is current. Completed migrations and
+already-current pending work do not rewrite schema or metadata on reopen.
+The `assistant_grant_*` tables are member-local derived authentication state,
+including effective snapshots: they depend on local verified receipts, arrival
+order and maintenance progress, not only canonical claims. Shared grant, policy
+and revocation evidence remains covered by the canonical claim digest; these
+local tables do not enter shared projection ordering or digest comparisons.
+Proof maintenance seeks `(writer, claim_id, sequence, envelope_hash, position)`,
+leaving claim-only checkpoint membership lookups on their existing claim index.
+The authority schema producer's transitional large-value entry is
+`lv-hcda5071d3120` (formerly `lv-h01e62b989d49`); its existing
+`chunk-or-reference-variable-columns` debt remains. The same producer owns
+`lv-hbbdcd60c3dad` and `lv-h31877443d557` for conditional local-origin and schema
+version metadata writes, retaining `bound-or-reference-values-and-reclamation`
+review debt rather than claiming value-size proof.
+
 Global not-ready applies only during initial/version backfill. Thereafter dirty
 or pending authentication fences only that grant subject, including a pending
 revoke; established credentials for unrelated subjects remain usable. The last
@@ -295,14 +319,21 @@ opposite history. A first local base with no opposite history remains immediatel
 usable. Late opposite claims create their own tasks, including pairs beyond an
 older task's high-water mark.
 Owner mutation responses are separate from bearer readiness. A genuine local
-policy or revocation append validates and materializes at most one pair against
-the indexed newest base, with constant-size witness/recompute work; remaining
-pairs are still background work. The configured authoritative owner can inspect
-that committed management result and retry immediately without using bearer
-authorization. Revoke retries preserve the original revocation; policy and
-read-trust retries each append one new revision, as before. These routes do not
-offer keyed replay. Their successful responses never lift the subject's bearer
-fence.
+policy or revocation append validates its indexed newest-base pair, then runs
+one candidate unit from its own attachment task, one indexed completion-only
+probe, and at most two witness deletions if the subject has no attachment tasks.
+This materializes at most two transition/base pairs (plus one repaired base's
+self-pair), with at most two constant-size effective-row recomputations. No
+other task runs synchronously. The usual single-base case completes immediately:
+the next bearer request sees the committed policy or pin without a maintenance
+drain. Unfinished multi-base attachment work and all unrelated authentication
+obligations still fence bearer access until they finish. This separate constant
+request allowance is used only by the local append transaction, never by a
+maintenance refresh, preserving the shared 64-unit and zero-duration bounds.
+The configured authoritative owner can inspect the committed result and retry
+immediately without using bearer authorization. Revoke retries preserve the
+original revocation; policy and read-trust retries each append one new revision,
+as before. These routes do not offer keyed replay.
 Management selects the newest applicable authenticated transition by an indexed
 seek scoped to subject, kind, origin, actor and immutable grant identity. All
 identity predicates precede the descending store index, so unrelated local

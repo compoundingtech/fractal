@@ -642,6 +642,23 @@ in an in-memory store; they add no production writer. The maintainer retains the
 listed body/predecessor and exact-wire representation TODOs for these fixture
 copies; this exception is not a byte-size or execution-cost proof.
 
+### Conditional legacy-state migration inventory
+
+`smallclaims::store::assistant_grant_authority` owns conservative transaction
+sinks `lv-hbad5073042d8` and `lv-h2bc6720e295e`, enclosing conditional legacy
+cursor/addition/auth-work migrations. Current-schema reopens inspect legacy
+state read-only and skip the savepoint when no migration is needed. Existing
+representation TODOs still cover requeued claim IDs, exact key/range obligations
+and rebuilt authentication work; moving migration out of trigger installation
+does not establish byte or upgrade-work bounds.
+
+`smallclaims::store::assistant_grant_authority_tests` owns `lv-h2693491dc162`,
+`lv-h39e4aa452548` and `lv-h6142d0df5172`. They restore legacy addition columns
+and exact proof/range values, insert a current resumable cursor and clear
+authentication work in an isolated fixture. The exact-wire and reclamation TODOs
+must preserve obligation retention and no-write repeat-install assertions through
+representation changes. These exceptions add no production writer or size proof.
+
 ### Indexed owner-management transition inventory
 
 `smallclaims::store::assistant_grant_authority` owns management read sinks
@@ -672,12 +689,24 @@ Pending-row and witness indexes retain these variable TEXT keys inline.
 Reference/chunk conversion must preserve exact authenticated pairs and
 conservative conflict visibility until resumable attachment work finishes.
 
-The same producer owns `lv-h41fad2bc67c1`: a genuine authenticated local
-transition copies one newest base grant's effective record and variable identity
-keys into a conservative attachment witness before materializing that validated
-pair for owner management. Other pairs remain queued and bearer fences remain
-intact. Its `bound-or-reference-values-and-reclamation` TODO must preserve
-conservative visibility and witness cleanup; a one-row copy is not a byte bound.
+The same producer owns witness-copy site `lv-h41fad2bc67c1` and local completion
+sites `lv-h45c096d84c6c` and `lv-h133b802d1e9c`. Only the actual local-append
+transaction receives this allowance: its authenticated transition can materialize
+the newest management pair and consume one attachment candidate, for at most two
+transition pairs plus one optional repaired-base self-pair. The candidate's exact
+record/identity and conservative effective-grant witness remain inline.
+A subsequent completion-only probe may delete the exhausted task but never
+consume another candidate; witness cleanup deletes at most two base witnesses
+only after the subject's attachment tasks finish. Unrelated proof/dirty fences
+remain intact, and maintenance refreshes retain their ordinary one-unit budget.
+The producer's `bound-or-reference-values-and-reclamation` TODO must preserve
+candidate accounting, conservative visibility and keyed cleanup through
+representation changes; bounded row counts do not bound encoded bytes.
+
+The reviewed `smallclaims::store::insert_claim` flow retains
+`flow-h8ff255a3c271` and its body/predecessor preparation TODO. Its fingerprint
+now includes the dedicated `refresh_local_append` hook after stamping the local
+append witness, rather than granting this allowance to historical maintenance.
 
 The seven maintenance queues register owner/subowner TEXT identities with local
 integer admission sequences. Insert/delete triggers maintain that registry;

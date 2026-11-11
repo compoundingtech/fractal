@@ -12,6 +12,56 @@ const FLEET: &str = "assistant-authority-maintenance";
 const SUBJECT: &str = "custom/client/assistant-v1-0123456789abcdef01234567";
 const OWNER: &str = "human/owner";
 
+#[test]
+fn current_authority_install_and_idle_maintenance_do_not_write() {
+    let store = Store::open_memory("anchor", Arc::new(Plain)).unwrap();
+    let connection = store.connection.write();
+    let before = (
+        connection.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0)).unwrap(),
+    );
+    authority::install(&connection, "anchor").unwrap();
+    assert!(authority::backfill_slice(&connection, Duration::from_secs(2)).unwrap());
+    let after = (
+        connection.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0)).unwrap(),
+    );
+    assert_eq!(after, before, "unchanged install and empty queues must be read-only");
+}
+
+#[test]
+fn authority_ddl_digest_matches_recorded_schema_version() {
+    use sha2::{Digest as _, Sha256};
+    let store = Store::open_memory("ddl-digest", Arc::new(Plain)).unwrap();
+    let connection = store.connection.write();
+    authority::install(&connection, "ddl-digest").unwrap();
+    let version: String = connection.query_row(
+        "SELECT value FROM meta WHERE key='assistant_grant_authority_schema_version'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut statement = connection.prepare(
+        "SELECT type,name,sql FROM sqlite_master
+         WHERE type IN ('table','index','trigger') AND sql IS NOT NULL
+           AND (name GLOB 'assistant_grant_*' OR name='replica_records_writer_grant_proof_index')
+         ORDER BY type COLLATE BINARY,name COLLATE BINARY",
+    ).unwrap();
+    let objects = statement.query_map([], |row| Ok([
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,
+    ])).unwrap();
+    let mut digest = Sha256::new();
+    for object in objects {
+        // Length-prefix each UTF-8 field; object boundaries and SQL whitespace
+        // are significant, without depending on JSON serialization behavior.
+        for field in object.unwrap() {
+            digest.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+    }
+    let digest = hex::encode(digest.finalize());
+    assert_eq!((version.as_str(),digest.as_str()),authority::SCHEMA_DDL_FINGERPRINT,
+        "authority DDL changed: bump SCHEMA_VERSION, provide any required migration, and update SCHEMA_DDL_FINGERPRINT with the new version and digest");
+}
+
 fn node(name: &str, anchor: Option<&str>) -> Store {
     let store = Store::open_memory(name, Arc::new(Plain)).unwrap();
     store.bind_fleet(FLEET).unwrap();
@@ -1193,12 +1243,63 @@ fn key_only_authentication_cursor_migration_requeues_without_trusting_old_positi
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-hba715e11f267 owner=smallclaims::store::assistant_grant_authority_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO assistant_grant_auth_cursor VALUES(?1,7,9,'new-checkpoint',3)",
         [&grant.id]).unwrap();
+    let before = (
+        connection.pragma_query_value(None,"schema_version",|row| row.get::<_,i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()",[],|row| row.get::<_,i64>(0)).unwrap(),
+    );
     authority::install(&connection,"issuer").unwrap();
     let cursor: (i64,i64,String,i64) = connection.query_row(
         "SELECT position,record_rowid,member_key,membership_start FROM assistant_grant_auth_cursor WHERE claim_id=?1",
         [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
     assert_eq!(cursor,(7,9,"new-checkpoint".into(),3),
         "installing the current schema must preserve resumable work");
+    assert_eq!((
+        connection.pragma_query_value(None,"schema_version",|row| row.get::<_,i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()",[],|row| row.get::<_,i64>(0)).unwrap(),
+    ),before,"current resumable work must not make a repeated install write");
+}
+
+#[test]
+fn marked_schema_migrates_legacy_addition_and_missing_auth_work_without_reinstalling_triggers() {
+    let store = node("issuer",None);
+    let grant = append(&store,SUBJECT,GRANTED,fields());
+    drain_authority(&store);
+    let connection = store.connection.write();
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h2693491dc162 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "ALTER TABLE assistant_grant_additions DROP COLUMN claim_id;
+         ALTER TABLE assistant_grant_additions DROP COLUMN active_claim;
+         INSERT INTO assistant_grant_additions
+             (writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position)
+             VALUES('legacy-writer','legacy-key',3,9,7,'stale-envelope',99);
+         DELETE FROM meta WHERE key='assistant_grant_auth_work_installed';"
+    ).unwrap();
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h39e4aa452548 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor
+             (claim_id,position,record_rowid,member_key,membership_start) VALUES(?1,7,9,'current-key',3)",
+        [&grant.id],
+    ).unwrap();
+    connection.execute(/* sqlite-large-value: allow-for-now lv-h6142d0df5172 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_work",[]).unwrap();
+    authority::install(&connection,"issuer").unwrap();
+    let addition: (String,String,i64,i64,i64,String,i64,String,String) = connection.query_row(
+        "SELECT writer,member_key,lower_sequence,upper_sequence,sequence,envelope_hash,position,claim_id,active_claim
+         FROM assistant_grant_additions",[],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
+            row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?)),
+    ).unwrap();
+    assert_eq!(addition,("legacy-writer".into(),"legacy-key".into(),3,9,-1,"".into(),-1,"".into(),"".into()));
+    assert!(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_work WHERE writer=?1 AND claim_id=?2)",
+        params![grant.origin,grant.id],|row| row.get::<_,bool>(0),
+    ).unwrap(),"missing initialization must restore current cursor obligations");
+    let before = (
+        connection.pragma_query_value(None,"schema_version",|row| row.get::<_,i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()",[],|row| row.get::<_,i64>(0)).unwrap(),
+    );
+    authority::install(&connection,"issuer").unwrap();
+    assert_eq!((
+        connection.pragma_query_value(None,"schema_version",|row| row.get::<_,i64>(0)).unwrap(),
+        connection.query_row("SELECT total_changes()",[],|row| row.get::<_,i64>(0)).unwrap(),
+    ),before,"completed legacy migrations must not write on reopen");
 }
 
 #[test]
@@ -1562,7 +1663,11 @@ fn legacy_membership_dirty_obligations_migrate_idempotently_to_verifier_rechecks
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h8ae28328b54c owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_dirty VALUES(?1,-1,'')", [&grant.origin],
     ).unwrap();
-    for _ in 0..2 {
+    for attempt in 0..2 {
+        let before = (
+            connection.pragma_query_value(None,"schema_version",|row| row.get::<_,i64>(0)).unwrap(),
+            connection.query_row("SELECT total_changes()",[],|row| row.get::<_,i64>(0)).unwrap(),
+        );
         authority::install(&connection,"reader").unwrap();
         assert!(!connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='assistant_grant_membership_dirty')",
@@ -1577,6 +1682,12 @@ fn legacy_membership_dirty_obligations_migrate_idempotently_to_verifier_rechecks
             params![grant.origin,grant.id], |row| row.get::<_,bool>(0),
         ).unwrap());
         assert!(authority::subject_ready(&connection,SUBJECT).is_err());
+        if attempt==1 {
+            assert_eq!((
+                connection.pragma_query_value(None,"schema_version",|row| row.get::<_,i64>(0)).unwrap(),
+                connection.query_row("SELECT total_changes()",[],|row| row.get::<_,i64>(0)).unwrap(),
+            ),before,"migrated pending obligations must not make a repeated install write");
+        }
     }
 }
 

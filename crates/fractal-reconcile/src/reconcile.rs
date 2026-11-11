@@ -63,6 +63,7 @@ pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
 pub mod program;
+mod program_faults;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
@@ -10595,7 +10596,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "mission-run" | FIRST_READINESS_FAULT_SCOPE | run_report::REPORT_FAULT_SCOPE => {
                     !active.contains(subject)
                 }
-                "step" => !active_steps.contains(subject),
+                "step" | crate::program_journal::STALLED_FAULT_SCOPE | crate::program_journal::HOST_FAULT_SCOPE => {
+                    !active_steps.contains(subject)
+                }
                 _ => false,
             })
             .map(|((subject, scope), _)| (subject.clone(), scope.clone()))
@@ -11650,6 +11653,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     Ok(changed)
                 });
             changed |= step_changed.unwrap_or(false);
+            // After the step's evaluation, so a dispatch whose host could not start is seen now.
+            if let Some(program) = &step.spec.program
+                && let Err(error) = self.reconcile_program_faults(view, program, now_ms())
+            {
+                eprintln!("st3: program faults for {}: {error:#}", view.subject);
+            }
             // Finally work gets its ordinary evaluation first, including starting its gates
             // and declarations. Once it only waits on evidence, cancellation must not hold
             // the mission's active-run slot until the step's execution budget expires.
@@ -14459,11 +14468,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         match self.program_engine().dispatch(dispatch)? {
             // A step that left this attempt already says why in its state.
             program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => Ok(false),
-            // The step keeps its state; `ProgramEngine::host_fault` names the reason.
-            program::Dispatched::HostDown(reason) => {
-                eprintln!("fractal: program {}: {reason}", view.subject);
-                Ok(false)
-            }
+            // The step keeps its state; `reconcile_program_faults` raises `program/host` from
+            // `ProgramEngine::host_fault` and dispatches it again at a deadline.
+            program::Dispatched::HostDown(_) => Ok(false),
             program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason)),
         }
     }
@@ -21493,6 +21500,7 @@ pub mod tests {
     mod seat_admission_queue;
     mod terminal_step_guard;
     mod program_engine;
+    mod program_faults;
     mod program_children;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {

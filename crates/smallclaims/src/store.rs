@@ -1112,6 +1112,7 @@ impl Store {
             // frame the initialization wrote, before open returns.
             connection.pragma_update(None, "synchronous", "FULL")?;
         }
+        Self::install_assistant_authority_schema(&connection, &origin)?;
         let readers = if let Some(admitted) = &admitted {
             ReadPool::new_admitted(admitted.clone())?
         } else {
@@ -1163,6 +1164,7 @@ impl Store {
         }
         runtime.finish_open_projections(&mut connection)?;
         seed_empty_projection_health(&connection)?;
+        Self::install_assistant_authority_schema(&connection, &origin)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -1260,6 +1262,21 @@ impl Store {
         Ok(fresh)
     }
 
+    // Finish DDL before constructing any readers: otherwise the first query on
+    // each preinitialized reader must discover the changed schema and reprepare.
+    fn install_assistant_authority_schema(connection: &Connection, origin: &str) -> Result<()> {
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            connection, assistant_grant_authority_bench::OpenAuthorityPhase::BeforeInstall,
+        );
+        assistant_grant_authority::install(connection, origin)?;
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            connection, assistant_grant_authority_bench::OpenAuthorityPhase::Installed,
+        );
+        Ok(())
+    }
+
     /// Wrap an opened, initialized writer connection and its read pool.
     pub fn from_connection(
         connection: Connection,
@@ -1277,15 +1294,6 @@ impl Store {
         anyhow::ensure!(
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
-        );
-        #[cfg(test)]
-        assistant_grant_authority_bench::observe_open_authority(
-            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::BeforeInstall,
-        );
-        assistant_grant_authority::install(&connection, &origin)?;
-        #[cfg(test)]
-        assistant_grant_authority_bench::observe_open_authority(
-            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::Installed,
         );
         {
             let transaction = connection.unchecked_transaction()?;
@@ -2240,7 +2248,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h52b61956c36c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
         )?;
-        assistant_grant_authority::refresh_claim(transaction, id)?;
+        assistant_grant_authority::refresh_local_append(transaction, id)?;
     }
     Ok(store_index)
 }
@@ -8511,12 +8519,19 @@ impl Store {
         &self,
         authority: AdmissionAuthority,
     ) -> Result<ReplicationAdmission> {
+        let prelude = crate::receive_metrics::Timer::start(
+            crate::receive_metrics::Stage::AdmissionPrelude,
+        );
         // Seed and sign local batches first, so local membership claims decide admission.
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it, and
         // neither waits for the recovery search.
         self.seal_local_batches_after_frontier()?;
         self.judge_claims_slice(false)?;
+        drop(prelude);
+        let _admission = crate::receive_metrics::Timer::start(
+            crate::receive_metrics::Stage::Admission,
+        );
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self

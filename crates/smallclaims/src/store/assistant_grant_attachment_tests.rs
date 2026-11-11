@@ -131,14 +131,23 @@ fn attachment_budget_product(remote: bool, bases_first: bool, budget: Duration) 
     drain_authority(&issuer);
     if remote { receive(&target, &export(&issuer, &target)); }
     let old_witnesses = if bases_first { BASES } else { 0 };
-    attachment_install_counter(&store.connection.write());
+    if !remote {
+        attachment_install_counter(&store.connection.write());
+    }
     let second = attachment_append_group(&issuer, !bases_first, if bases_first { TRANSITIONS } else { BASES });
     if remote {
         let exchange = export(&issuer, &target);
-        // Admit raw claims before their proofs. No signed maintenance work is
-        // hidden inside receive(), which intentionally drains its caller's work.
+        // The historical fixture first admits signed transport and drains it,
+        // then removes the new proofs and rebuilds unsigned history. Finish
+        // that setup before measuring the work caused by restoring the proofs.
         receive_pre_projection_unsigned_history(&target, &exchange);
         let connection = target.connection.write();
+        let pairs: usize = connection.query_row(
+            "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id<>base_claim_id",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pairs, 0, "unsigned fixture must leave every cross-pair for measured authentication");
+        attachment_install_counter(&connection);
         for signature in signatures(&exchange).signatures {
             insert_raw_signature(&connection, &signature);
         }
@@ -149,12 +158,13 @@ fn attachment_budget_product(remote: bool, bases_first: bool, budget: Duration) 
         attachment_assert_fenced(store, grants, old_witnesses);
     }
     let mut slices = 0;
-    let mut pairs: usize = store.readers.get().query_row(
-        "SELECT pair_inserts FROM attachment_slice_work", [], |row| row.get(0),
+    let (mut pairs, mut candidates, mut completions): (usize, usize, usize) = store.connection.write().query_row(
+        "SELECT pair_inserts,candidates,completions FROM attachment_slice_work", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).unwrap();
-    assert!(pairs<=TRANSITIONS,"local management must materialize at most one pair per transition append");
-    let mut candidates = 0;
-    let mut completions = 0;
+    assert!(pairs<=2*TRANSITIONS,"local management must materialize at most two pairs per transition append");
+    assert!(candidates<=TRANSITIONS,"each local append may visit at most one attachment candidate");
+    let initial_candidates = candidates;
     // Includes authentication/cursor bookkeeping as well as every possible pair
     // and partition completion; ZERO must still terminate without wall-clock aid.
     let finite_bound = 32*(BASES+TRANSITIONS+BASES*TRANSITIONS+1);
@@ -172,7 +182,7 @@ fn attachment_budget_product(remote: bool, bases_first: bool, budget: Duration) 
     assert!(candidates>=BASES*TRANSITIONS, "pair writes escaped candidate accounting");
     assert!(completions>0, "partition completion must consume a unit");
     let per_slice = if budget.is_zero() { 1 } else { authority::CLAIMS_PER_SLICE };
-    assert!(slices>=(BASES*TRANSITIONS).div_ceil(per_slice), "Cartesian attachment work escaped the slice budget");
+    assert!(slices>=(BASES*TRANSITIONS-initial_candidates).div_ceil(per_slice), "Cartesian attachment work escaped the slice budget");
     let connection = store.readers.get();
     assert_eq!(attachment_tasks(&connection), 0);
     authority::subject_ready(&connection, SUBJECT).unwrap();
@@ -206,32 +216,49 @@ fn local_attachment_zero_duration_is_one_unit_and_finishes_in_both_directions() 
 }
 
 #[test]
-fn local_owner_transition_materializes_only_one_pair_and_keeps_bearer_fenced() {
-    for bases in [1, 19, 129] {
-        let store = node("owner-management-bound",None);
-        let grants = attachment_append_group(&store,true,bases);
-        drain_authority(&store);
-        attachment_install_counter(&store.connection.write());
-        let policy = append(&store,SUBJECT,POLICY,fields());
-        let connection = store.readers.get();
-        let pairs: usize = connection.query_row(
-            "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id=?1",
-            [&policy.id],|row| row.get(0),
-        ).unwrap();
-        assert_eq!(pairs,1,"local request expanded its {bases}-base history");
-        let newest = authority::management_latest(&connection,SUBJECT,GRANTED).unwrap().unwrap();
-        assert!(grants.iter().any(|grant| grant.id==newest.id));
-        assert_eq!(authority::management_transition(&connection,&newest,POLICY)
-            .unwrap().unwrap().id,policy.id);
-        assert!(authority::subject_ready(&connection,SUBJECT).is_err());
-        assert!(authority::transition(&connection,&newest,POLICY).is_err());
-        drop(connection);
-        drain_authority(&store);
-        let pairs: usize = store.readers.get().query_row(
-            "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id=?1",
-            [&policy.id],|row| row.get(0),
-        ).unwrap();
-        assert_eq!(pairs,bases,"background work must finish all remaining pairs");
+fn local_owner_transition_completes_one_base_and_bounds_multibase_request_work() {
+    for kind in [POLICY, REVOKED] {
+        for bases in [1, 19, 129] {
+            let store = node("owner-management-bound",None);
+            let grants = attachment_append_group(&store,true,bases);
+            drain_authority(&store);
+            attachment_install_counter(&store.connection.write());
+            let transition = append(&store,SUBJECT,kind,fields());
+            let connection = store.connection.write();
+            let pairs: usize = connection.query_row(
+                "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id=?1",
+                [&transition.id],|row| row.get(0),
+            ).unwrap();
+            assert!((1..=2).contains(&pairs),"local request expanded its {bases}-base history");
+            let (candidates, completions, cleanups): (usize,usize,usize) = connection.query_row(
+                "SELECT candidates,completions,witness_cleanups FROM attachment_slice_work", [],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).unwrap();
+            assert_eq!(candidates,1,"only the local task's first candidate may run");
+            assert!(completions<=1);
+            assert!(cleanups<=2,"request cleanup must not enumerate subject witnesses");
+            let newest = authority::management_latest(&connection,SUBJECT,GRANTED).unwrap().unwrap();
+            assert!(grants.iter().any(|grant| grant.id==newest.id));
+            assert_eq!(authority::management_transition(&connection,&newest,kind)
+                .unwrap().unwrap().id,transition.id);
+            if bases==1 {
+                assert_eq!(pairs,1);
+                assert_eq!(attachment_tasks(&connection),0);
+                authority::subject_ready(&connection,SUBJECT).unwrap();
+                assert_eq!(authority::transition(&connection,&newest,kind)
+                    .unwrap().unwrap().id,transition.id);
+            } else {
+                assert!(authority::subject_ready(&connection,SUBJECT).is_err());
+                assert!(authority::transition(&connection,&newest,kind).is_err());
+            }
+            drop(connection);
+            drain_authority(&store);
+            let pairs: usize = store.readers.get().query_row(
+                "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id=?1",
+                [&transition.id],|row| row.get(0),
+            ).unwrap();
+            assert_eq!(pairs,bases,"background work must finish all remaining pairs");
+        }
     }
 }
 
@@ -453,8 +480,11 @@ fn invalid_attachment_candidates_each_consume_a_zero_duration_unit() {
     let baseline = snapshot(&store.readers.get());
     attachment_install_counter(&store.connection.write());
     append(&store, SUBJECT, POLICY, fields());
-    let mut candidates = 0;
-    let mut completions = 0;
+    let (mut candidates, mut completions): (usize,usize) = store.connection.write().query_row(
+        "SELECT candidates,completions FROM attachment_slice_work", [],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(candidates,1,"the local append consumes exactly one incompatible candidate");
     let mut done = false;
     for _ in 0..128 {
         let (complete, work) = attachment_slice(&store, Duration::ZERO);
@@ -576,6 +606,11 @@ fn first_local_base_without_opposite_history_is_immediately_usable_without_attac
 fn completed_subject_cleanup_lifts_fence_despite_unrelated_continuous_attachment_arrivals() {
     let store = node("attachment-cleanup-fairness", None);
     let grant = append(&store, SUBJECT, GRANTED, fields());
+    // A second, incompatible base leaves genuine candidate work after the
+    // bounded local unit, but only the original base needs a policy witness.
+    let mut incompatible = fields();
+    incompatible["profile"] = json!("service");
+    append(&store, SUBJECT, GRANTED, incompatible);
     drain_authority(&store);
     attachment_install_counter(&store.connection.write());
     let mut policy = fields();
@@ -730,10 +765,19 @@ fn attachment_owner_turn_survives_reopen_and_lower_and_between_id_arrivals() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("attachment-owner-fairness.sqlite3");
     let grant;
+    let base_ids;
     let policy;
     {
         let store = Store::open(&path, "attachment-owner-fairness", Arc::new(Plain)).unwrap();
         grant = append(&store, SUBJECT, GRANTED, fields());
+        let mut bases = vec![grant.id.clone()];
+        for expiry in [11000, 12000] {
+            let mut value = fields();
+            value["expires_at_unix_ms"] = json!(expiry);
+            bases.push(append(&store, SUBJECT, GRANTED, value).id);
+        }
+        bases.sort();
+        base_ids = bases;
         drain_authority(&store);
         // Only queue fixtures have controlled IDs. The victim and its base are
         // real local appends, with their ordinary content-derived claim IDs.
@@ -773,7 +817,7 @@ fn attachment_owner_turn_survives_reopen_and_lower_and_between_id_arrivals() {
                  WHERE claim_id=?1 AND candidate_kind=?2",
                 params![policy.id,GRANTED], |row| row.get(0),
             ).unwrap();
-            assert_eq!(after, grant.id);
+            assert_eq!(after, base_ids[1], "the append already consumed only the first candidate");
             assert!(authority::subject_ready(&connection, SUBJECT).is_err());
             // Reopening Store would itself perform maintenance. A raw reopen
             // isolates the durable owner turn/frontier and the unfinished page.
