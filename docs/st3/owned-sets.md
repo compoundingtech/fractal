@@ -46,6 +46,17 @@ Mission runs, mission-owned seats, resources, observers and subscriptions cannot
 Publish those through their existing routes. A mission definition may contain its normal
 run-owned declarations; changing its definition preserves active runs and their pinned revisions.
 
+An agent's nested `exec` and `pty` tasks (`exec/NAMESPACE/AGENT/TASK`) are members carried with
+their agent: they are published, adopted and retired together with it, and the agent's `under`
+grouping is unchanged. A changed task launch restarts the task; `--rollout when-idle` applies to
+agents only. Standalone top-level `exec` and `pty` declarations cannot be set members.
+
+A schedule or subscription in the bundle can pin a mission of the same bundle with
+`mission "NAME@ST_REVISION[NAME]"`. The daemon resolves each token to the revision this
+publication stores before validating the bundle, so one publication carries both the mission and
+its pinned schedule. A token naming a mission outside the bundle, or tokens pinning each other in
+a cycle, refuse the publication.
+
 ## Declaration diffs and readback
 
 `fractal apply --set NAME ... --dry-run` includes an additive `declaration_diffs` map keyed by
@@ -86,7 +97,8 @@ The existing redacted agent `subject.definition` operation remains available.
 
 Omitting a seat declares a stop while keeping its conversations and history. Omitting a mission
 prevents new runs, including starts pinned to an older revision, while retaining active runs.
-Omitting a schedule stops future occurrences and retains work already created.
+Omitting a schedule stops future occurrences and retains work already created. Omitting a
+top-level subscription stops its deliveries and retains messages it already delivered.
 
 A seat declared `one-shot` also permits its runtime host to retire that exact member after the
 process exits. The daemon records a stop while retaining set ownership and the source bundle.
@@ -129,6 +141,8 @@ exclusive leadership during a partition. Keep the existing serial applier.
 
 Before activating owned sets, upgrade every active fleet member. Publication refuses activation
 unless each admitted member's latest own `daemon.started` advertises `features.owned_sets=1`.
+A set with agent `exec` or `pty` task members additionally requires `features.owned_set_tasks=1`,
+because older daemons refuse replicated revisions that carry such members.
 Ordinary publication and existing clients remain usable during the upgrade. An older daemon must
 not be introduced into a fleet after set activation.
 
@@ -167,3 +181,76 @@ clients expose the additive `owned-set` resource and set list/detail operations.
 An optional [`when-idle` rollout policy](owned-seat-cutover.md) drains changed and retiring native seats
 and verifies their original conversation on the replacement. Without it, automatic seats retain their
 immediate runtime behavior. Manual seats defer cutover with or without the set policy.
+
+## Source enforcement
+
+A set's revision may carry a source policy. The publisher declares it and `--expect-set` fences it
+with the rest of the revision. A publication that omits it keeps the selected policy:
+
+```sh
+fractal apply --set garden ... --enforce enforce --publisher agent/dotfiles/factory-publisher \
+  --namespace 'agent/garden/*' --unmanaged-allow 'agent/garden/scratch-*'
+fractal apply --set garden ... --source-policy policy.json
+```
+
+`policy.json` holds `{"enforce": "off"|"audit"|"enforce", "publisher": [...], "namespaces": [...],
+"unmanaged_allow": [...]}`. Each omitted field keeps the selected value, and explicit flags override
+the file. A policy equal to `off` with empty lists is stored as absent. Namespace and allow globs
+claim top-level `agent/`, `schedule/`, `subscription/` or `mission/` subjects only: an agent's
+`exec`/`pty` tasks ride with their agent, and other `exec/` and `pty/` subjects are runtime
+(mission-run tasks, owned terminals), so such a glob is refused with `invalid-source-policy`.
+
+- `off`, or no policy, is the behaviour above: a plain declaration of a member is refused with
+  `set-managed-subject`, and nothing else is checked. There is no force path.
+- `enforce` refuses every ad hoc desired-state write to a live member: plain `fractal apply`
+  (definitions, schedules and subscriptions), `agents stop`, `agents start`, mission publication,
+  `missions retire`, `agents hold`, `agents suspend` and `agents resume`. It also refuses creation of
+  a new subject matching `namespaces` but not `unmanaged_allow`. The refusal names the verb, the set,
+  its source, and the escape.
+- `audit` refuses nothing that `off` accepts. Each write that `enforce` would refuse proceeds and
+  appends `source.audited` (verb, actor, set revision and the refusal) in the same transaction. A
+  plain declaration of a member remains refused because it cannot take effect over the set's own
+  member reference.
+
+Terminal `agents retire` of a live member of an `enforce` set is refused with `set-managed-subject`
+through every path, including client-v0. It cannot be forced: omit the member from the set
+publication, then retire it.
+
+`--force --reason TEXT` accepts the write on an `audit` or `enforce` set. The reason must be
+nonempty. Persons and agents may force (`fractal apply`, `agents stop|start|hold|suspend|resume`,
+`missions retire`). The write takes effect, and `source.debt.recorded` on the member names the set
+revision, its source, the verb, the reason, the forced claim (or, for a hold, suspend or resume, the
+runtime request) and the changed pointers. The debt, like a `source.audited` record, is appended in
+the transaction that makes the change: a write whose debt cannot be recorded does not happen. A
+forced declaration (including a mission) overrides the set's member reference until the set
+publishes again.
+
+The next publication with a new source sequence converges every member and closes all of the set's
+open debt. Its preview lists `reverted_debts`, and apply returns `source_debts_reverted`. Each entry
+has the outcome `reverted` (the source differs, or a forced hold or suspension is still in place),
+`adopted` (the source now declares the forced value or created subject), or `closed` (a runtime
+change that no longer stands, such as a forced resume or a hold someone replaced). A reverted change
+shows the effect `revert ad hoc change by ACTOR: REASON`. In its own transaction the publication
+writes one `source.debt.closed` per debt (debt claim, outcome, closing set revision, publisher),
+releases a forced delivery hold that is still the seat's latest, and resumes a forced suspension
+that is still the seat's latest suspend or resume: it appends the resume request `agents resume`
+would, on the seat's current host, as the publisher. A forced creation that the source still omits
+is stopped and kept as a retired member.
+
+```sh
+fractal source status            # policies, open debt, debt each current revision closed
+fractal source status --audit    # also the newest 200 audit records
+```
+
+When the selected or requested policy names `publisher`, only those actors may publish the set
+(`source-publisher-refused`). Replicated admission does not re-check this because writers are not
+signed yet. Treat the publisher list as a local guard, not authority against a compromised peer.
+
+A revision carrying a policy, or a set with subscription members, requires every active fleet
+member to advertise `features.source_enforcement=1`. Older daemons reject such revisions and
+ignore debt overrides.
+
+Not routed through source: messages, asks and answers, work claim and completion, run cancel,
+mission run starts, a seat's own `restart-when-idle`, and restarting another agent (a runtime
+action with no desired value). Fractal has no native `startable-by` grant yet, so grant-based
+starts are not enforced.

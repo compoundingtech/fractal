@@ -177,12 +177,17 @@ pub fn message_view(graph: &super::Store, subject: &str) -> anyhow::Result<Optio
         return Ok(None);
     }
     let mut actual = sent.body.get("fields").cloned().unwrap_or_else(|| json!({}));
-    for (_, fields) in lifecycle_records(&shard, subject)? {
+    let mut consumed = false;
+    for (kind, fields) in lifecycle_records(&shard, subject)? {
+        consumed |= matches!(kind.as_str(), "message.delivered" | "message.read");
         if let (Some(actual), Value::Object(fields)) = (actual.as_object_mut(), fields) {
             actual.extend(fields);
         }
     }
     let connection = graph.graph.readers.get();
+    if !consumed && let Some(status) = super::message_expiry::status(&connection, subject)? {
+        actual["status"] = json!(status);
+    }
     super::message_view_from(&connection, subject, STREAM_INDEX_BASE + index, actual, None).map(Some)
 }
 
@@ -263,7 +268,9 @@ pub fn any_after(graph: &super::Store, filter: Filter<'_>, mut after: u64) -> an
     loop {
         let rows = page(graph, filter, after, ANY_AFTER_BATCH)?;
         for (subject, index) in &rows {
-            if !graph_sent(graph, subject)? {
+            if !graph_sent(graph, subject)?
+                && (!filter.open_only || graph.message_expiry(subject)?.is_none_or(|expiry| expiry.superseded))
+            {
                 return Ok(true);
             }
             after = *index;

@@ -1296,7 +1296,7 @@ episode stays open; that projection opens its own episode. The same pair and pro
 diverging again reopens the same episode. Comparisons are held in memory, so after a restart an
 open fault stays open until the next comparison that agrees.
 
-The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
+The `projection-divergence` objective in `slo/objectives.kdl` counts open divergence faults
 fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
 read, so `fractal doctor` (as `slo/projection-divergence`), `fractal slo` and the SLO history read no claims
 for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any

@@ -97,6 +97,8 @@ Use these documents for implementation details:
 - [Gate evidence](gate-evidence.md) explains signed test and review records, local checks and CI verification.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
+- [Objectives](objectives.md) explains the `objective` kind: the objectives Fractal ships in
+  `slo/objectives.kdl`, the ones a fleet declares, their indicators, targets and breach response.
 - [What a run waits on](waiting-on.md) explains `fractal missions waiting-on RUN` and `fractal missions blocked`:
   each open step's wait, a run's stalled verdict, and the fleet's blocked runs by cause, read in
   milliseconds from published state.

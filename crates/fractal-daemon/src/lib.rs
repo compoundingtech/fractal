@@ -13,6 +13,8 @@ mod ci_test_paths;
 pub use fractal_kernel::accounts;
 pub mod api;
 pub mod web;
+/// Verified GitHub webhook deliveries ask the observers of their repository to poll now.
+pub mod github_webhook;
 pub use fractal_kernel::archive;
 pub mod attach_image;
 pub use fractal_store::backup;
@@ -71,6 +73,7 @@ pub use fractal_store::native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub use fractal_reconcile::native_seed;
 pub use fractal_store::node_identity;
+pub use fractal_api_mailbox::declared_objectives;
 pub use fractal_api_mailbox::objective_faults;
 pub use fractal_api_mailbox::objectives;
 pub use fractal_api_mailbox::readiness_slo;
@@ -135,6 +138,7 @@ mod telemetry_tests;
 /// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
 pub mod terminal_fabric;
 pub use fractal_kernel::terminal_binding;
+pub use fractal_kernel::program_journal;
 pub use fractal_kernel::waiting_on;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
 pub use fractal_store::tile_registry;

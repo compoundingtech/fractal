@@ -133,6 +133,9 @@ impl RetirementsStore for Store {
                 "retirement needs a reason",
             ));
         }
+        // A live member of an `enforce` set is never retired ad hoc, not even forced; an `audit`
+        // set records the retirement it would refuse.
+        self.source_gate(subject, fractal_store::store::owned_sets::Verb::Retire, None)?;
         let mut fields = BTreeMap::from([
             ("reason".into(), json!(reason)),
             ("retired_by".into(), json!(actor)),
@@ -234,6 +237,7 @@ impl RetirementsStore for Store {
             )?;
             validate_claim_input(&input)
         };
+        let source = self.source_follow_up(subject, fractal_store::store::owned_sets::Verb::Retire, Some(actor), None);
         append_claim_with_commit_context(
             &self.graph,
             &input,
@@ -246,6 +250,7 @@ impl RetirementsStore for Store {
                 signature: None,
                 retirement_writer: true,
                 assistant: None,
+                then: Some(&source),
                 ..Default::default()
             },
         )

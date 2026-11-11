@@ -210,7 +210,8 @@ repeated block or rule, an empty block, an unknown verb and any other `*`. There
 form: a mission without the block grants its runs nothing. The block is a field of the mission
 spec, kept in canonical order and absent when undeclared, so existing revisions hash unchanged and
 changing it is a mission revision. Publication holds a revision that declares it until every
-member advertises `mission_authority=1`, as for `capacity`.
+member advertises `mission_authority=1`, as for `capacity`. `cancel` is reserved: it parses and
+grants nothing yet, because setting another run's outcome takes a person or agent actor.
 
 **Starter.** A run's starter is the actor of its `mission-run.created`: its requester, or, for a
 child a program starts (§6), the parent run, `mission-run/PARENT`. The requester stays the human.
@@ -234,20 +235,29 @@ beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds n
 binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
 live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
 binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
-routes, no person headers, and `actor`/`requester` must be the run. The CLI defaults its actor to
-the run when the credential is present. The same-UID boundary is cooperative, as for agents.
+routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
+that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
+name. The CLI defaults its actor to the run when the credential is present and names it on the
+trusted Unix client, which the daemon accepts only from a request its credential binds to that
+same run. The same-UID boundary is cooperative, as for agents.
 
 **Journal.** The engine writes `program.step` claims as `mission-run/RUN`; a run may always journal
 on its own step runs, whatever it declares.
 
 **Enforcement** is one decision at the store's write admission, beside the rules gate, for every
-claim whose actor is a run. The claim names the grant it needs: `mission.published` on `mission/ID`
-needs `publish ID`; a run's creation and its initial generation need `start ID`; a later generation
-needs `revise ID`; any other claim needs `write SUBJECT`. Setting another run's outcome takes a
-person or agent actor, so a run cannot cancel one. The daemon's `[programs] authority` says what
-a write outside the authority does: `enforce` refuses it with `run-authority-denied`; `audit`
-lets it through and records `rule.audited` on `rule/run-authority`, so a new program can discover
-the grants it needs.
+claim whose actor is a run and every document a run binds. A run's message send stays on the graph
+append, where the decision applies, rather than the messages stream. The claim names the grant it
+needs, from fields its writer cannot choose: `mission.published` on `mission/ID` needs
+`publish ID`; a run's creation and a generation without a predecessor need `start ID`; a
+generation with a predecessor needs `revise ID`, and so does everything a revision writes on the
+runs it changes (its proposal, carried and terminalized steps, the superseded generation, the
+run's and its descendants' states), each on the mission of the run it changes; any other claim
+needs `write SUBJECT`. A refusal reaches its caller as `run-authority-denied`. The daemon's
+`[programs] authority` says what a write outside the authority does: `enforce` refuses it;
+`audit` lets it through and records `rule.audited` on `rule/run-authority`, so a new program can
+discover the grants it needs. Each decision reads only each revision's `authority` member along
+the starter chain.
 
 ### 4. Versioning
 
@@ -387,9 +397,18 @@ evaluation the active run's end triggers.
 
 ### 8. Visibility and stall detection
 
-- `missions show` and the run view project `program.step` claims under the program step: each key
-  with its latest status, duration and failure, and child runs linked by key.
-- `missions waiting-on` names the innermost open key: a running effect, a child run or an ask.
+- `missions show` (text and `--json`, field `programs`) projects the current attempt's
+  `program.step` claims under the program step: each key with its latest status, start and end,
+  duration (`ms`), typed failure, and the child run or ask it waits on (`child`). The view folds a
+  step's newest 200 entries and marks older ones `truncated`; the text lists the newest 12 keys.
+  The innermost open key is the most recently started key without a result. The run view (client
+  v0 mission detail, `run_details[].steps[].program`) carries the same journal with the step's
+  open program fault, which the run's `blocker` names when no scheduler fault does.
+- `missions waiting-on` gives a program step the kind `program` (never `watching`) and names its
+  innermost open key: a running effect with how long it runs, or the child run or ask it waits on.
+  The published work row carries that key (`program`, `gate_kind: program`), read from the step's
+  newest 64 entries when the row is folded. A program step whose journal has no new entry within
+  its `stalled-after` (default 30 minutes) is `no-progress`, so its run is stalled.
 - Stalls: a program step whose journal shows no new entry within its `stalled-after` raises the
   run fault with scope `program/stalled`, naming the open key. A dead host that the engine cannot
   restart raises `program/host` on every program step it held, and so does a program worker the
@@ -447,6 +466,15 @@ value. The success value is encoded with `intent.output` and journaled under the
 
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.
+
+**Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
+bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun`, from the tree
+root so the bytes do not depend on where the tree is checked out, and writes it to
+`<bundleDir>/<sha256>.mjs` after checking that its default export carries the entry. The mission
+loads as its declaration: the header from the intent (`timeout`, `concurrentRuns`, `authority`),
+one text `input` per field of `intent.input`, and one step `program` pinning the bundle by path and
+sha256 (`stalledAfter` becomes its `stalled-after`). Rendering it and running `fractal apply` on the
+KDL publishes the mission and carries the bundle (§4).
 
 ## Design questions
 

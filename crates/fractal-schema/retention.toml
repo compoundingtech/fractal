@@ -195,6 +195,9 @@
 "sekret.changed" = { class = "transition", window = "7d", log = "local" }
 "sekret.exited" = { class = "transition", window = "7d", log = "local" }
 "sekret.refused" = { class = "transition", window = "7d", log = "local" }
+"source.audited" = { class = "durable" }
+"source.debt.closed" = { class = "durable" }
+"source.debt.recorded" = { class = "durable" }
 "step-run.carried" = { class = "durable" }
 "step-run.retried" = { class = "durable" }
 "step-run.state" = { class = "durable" }
