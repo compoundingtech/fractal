@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Box runtime exit-usage samples at their original definition and producer.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "Only the in-memory sample representation changes. Keep measured counters intact while avoiding an oversized enum; later recovery uses the same boxed payload."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
