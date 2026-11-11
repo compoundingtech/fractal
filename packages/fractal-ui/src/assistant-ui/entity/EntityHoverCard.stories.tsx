@@ -8,7 +8,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Button, Link } from 'react-aria-components'
+import { Button, Dialog, DialogTrigger, Link, Modal } from 'react-aria-components'
 import { AgentHoverCard } from '../sidebar/DeferredRowActions.tsx'
 import type { SidebarAgentRow as Row, SidebarOtherMission } from '../sidebar/model'
 import { borderVars as border, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
@@ -109,6 +109,7 @@ type Story = StoryObj<typeof meta>
 export const scenarioExemptions: readonly string[] = [
   'Gallery:contract-fixture',
   'KeyboardFocusOpens:primitive',
+  'ModalEscapePriority:primitive',
   'NullContentStaysShut:primitive',
   'OneCardAtATime:contract-fixture',
   'SameEntitySameCard:contract-fixture',
@@ -159,6 +160,36 @@ export const KeyboardFocusOpens: Story = {
     await expect(trigger).not.toHaveAttribute('aria-describedby')
     await userEvent.tab()
     await settleClosed()
+  },
+}
+
+/** A passive preview consumes the first Escape even when the focused textbox belongs to an enclosing modal. */
+export const ModalEscapePriority: Story = {
+  tags: ['critical'],
+  parameters: { scenario: { _tag: 'primitive', reason: 'A dismissible modal with a separate textbox and pointer-opened hover card verifies that the first Escape closes only the passive card and preserves focus, while a second Escape dismisses the modal.' } },
+  render: () => <DialogTrigger>
+    <Button>Open preview modal</Button>
+    <Modal isDismissable><Dialog aria-label="Preview modal">
+      <label>Modal composer<input aria-label="Modal composer" /></label>
+      <HoverCard content={<p>Reported preview facts</p>}><Button>Preview entity</Button></HoverCard>
+    </Dialog></Modal>
+  </DialogTrigger>,
+  play: async ({ canvasElement }) => {
+    const trigger = within(canvasElement).getByRole('button', { name: 'Open preview modal' })
+    await userEvent.click(trigger)
+    const modal = await within(document.body).findByRole('dialog', { name: 'Preview modal' })
+    const composer = within(modal).getByRole('textbox', { name: 'Modal composer' })
+    await userEvent.click(composer)
+    await userEvent.hover(within(modal).getByRole('button', { name: 'Preview entity' }))
+    await waitFor(() => expect(document.querySelector('[data-hover-card]')).not.toBeNull())
+    await expect(composer).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(document.querySelector('[data-hover-card]')).toBeNull())
+    await expect(modal).toBeVisible()
+    await expect(composer).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(within(document.body).queryByRole('dialog', { name: 'Preview modal' })).toBeNull())
+    await expect(trigger).toHaveFocus()
   },
 }
 

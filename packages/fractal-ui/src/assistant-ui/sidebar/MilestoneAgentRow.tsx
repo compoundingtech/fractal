@@ -106,8 +106,14 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     ? <span data-row-column="attention" role="img" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenNeeds)} />
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null
   const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
+  // A row's interactive overlays supersede its passive preview, including keyboard and virtual activation.
+  const dismissPreviewForOverlay = (target: EventTarget) => {
+    if (target instanceof Element && target.closest('[aria-haspopup="menu"], [aria-haspopup="dialog"]') !== null) card.setOpen(false)
+  }
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if ((event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); card.intend(false) }}
+    onFocusCapture={event => dismissPreviewForOverlay(event.target)}
+    onClickCapture={event => dismissPreviewForOverlay(event.target)}
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}

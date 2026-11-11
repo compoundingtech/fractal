@@ -349,12 +349,13 @@ const queuedPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
     await expect(document.querySelector('[role="tooltip"] [data-queued-mission]')).toBeNull()
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   } while (performance.now() - started < 700)
-  // Keep the passive card open behind the queue to exercise overlay Escape priority.
+  // Opening the queue must dismiss the pointer-open passive card before the dialog owns Escape.
   if (!window.matchMedia(touchPointerQuery).matches) {
     await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).not.toBeNull())
   }
   await userEvent.click(trigger)
   const dialog = await waitFor(() => { const element = queuedDialog(); expect(element).not.toBeNull(); expect(element).toBeVisible(); return element! })
+  await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
   await expect([...dialog.querySelectorAll('[data-queued-mission]')].map(item => item.getAttribute('data-queued-mission'))).toEqual(['docs-refresh', 'rename-users-api'])
   await waitFor(() => {
