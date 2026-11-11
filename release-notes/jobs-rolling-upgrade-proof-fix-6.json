@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose the declared real pty executable through private multi-shell proof startup files and reject overlong proof socket paths early.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "Daemon account-shell selection and executable checks remain unchanged."},
+  "compatibility": {"status": "none", "detail": "The isolated fixture symlinks its declared real pty binary into a private bin directory and prefixes that directory in private POSIX, zsh and fish startup files for both daemons. Durable user shell state is untouched."},
+  "downtime": {"status": "none", "detail": "Manual proof tooling only."},
+  "manual": {"status": "changed", "detail": "Before allocating the proof keeper or launching daemons, reject prospective legacy API and required client-gateway socket paths exceeding Linux's 107-byte limit, with an actionable shorter output-directory limit. Longer canonical aliases may still use their existing fallback."},
+  "recovery": {"status": "none", "detail": "Existing guardian and fixture cleanup behavior is unchanged."}
+}

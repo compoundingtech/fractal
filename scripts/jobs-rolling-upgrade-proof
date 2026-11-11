@@ -23,6 +23,28 @@ done
 for tool in curl jq python3 sha256sum realpath setsid pty; do
   command -v "$tool" >/dev/null || { echo "Missing prerequisite: $tool" >&2; exit 2; }
 done
+pty=$(realpath "$(command -v pty)")
+[[ -f $pty && -x $pty ]] || { echo 'Declared pty must resolve to a real executable file' >&2; exit 2; }
+# Check the API path this proof uses and the required client gateway binding.
+# Both builds retain these legacy names; longer canonical names can fall back.
+# The mktemp suffix has the same byte length as this prospective fleet root.
+python3 - "$output" <<'PY'
+import os
+import sys
+
+output = os.path.realpath(sys.argv[1])
+for node in ("a", "b"):
+    for name in ("st3.sock", "st3-client.sock"):
+        suffix = f"/fleet.XXXXXXXX/{node}/run/{name}"
+        path = output + suffix
+        length = len(os.fsencode(path))
+        if length > 107:
+            allowance = 107 - len(os.fsencode(suffix))
+            print(f"Proof socket path is {length} bytes (Linux maximum 107): {path}\n"
+                  f"Choose a fresh shorter --output-dir; its canonical absolute path "
+                  f"must be at most {allowance} bytes.", file=sys.stderr)
+            raise SystemExit(2)
+PY
 released=$(realpath "$released"); head=$(realpath "$head")
 [[ -x $released && -x $head && $released != "$head" ]] || exit 2
 cgroup_parent=$(realpath "$cgroup_parent")
@@ -135,12 +157,27 @@ printf "Verify no proof cgroup remains: find %q -maxdepth 1 -name 'jobs-proof-*'
 # outside it. This exercises the real SO_PEERPIDFD + /proc guard, never a test bypass.
 [[ -f $keeper/cgroup.events ]]
 root=$(mktemp -d "$output/fleet.XXXXXXXX")
-pty=$(command -v pty)
+mkdir "$root/bin"
+ln -s "$pty" "$root/bin/pty"
 for node in a b; do
   mkdir -p "$root/$node"/{home,config/st3,state,data,run}
   printf 'node = "%s"\nperson = "person/fleet-tester"\n' "$node" > "$root/$node/config/st3/config.toml"
-  # A release resolves pty through its captured login environment (as in Node).
-  printf 'export PATH=%q\n' "$PATH" > "$root/$node/home/.bash_profile"
+  # Capture still uses the real account shell, not necessarily SHELL=/bin/bash.
+  # Keep all startup state private, following the fleet Node fixture.
+  python3 - "$root/$node/home" "$root/$node/config" "$root/bin" <<'PY'
+import pathlib
+import shlex
+import sys
+
+home, config, binary_dir = map(pathlib.Path, sys.argv[1:])
+profile = 'export PATH=' + shlex.quote(str(binary_dir)) + ':"$PATH"\n'
+for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshenv", ".zshrc"):
+    (home / name).write_text(profile)
+fish_dir = config / "fish"
+fish_dir.mkdir()
+fish_path = str(binary_dir).replace("\\", "\\\\").replace("'", "\\'")
+(fish_dir / "config.fish").write_text("set -gx PATH '" + fish_path + "' $PATH\n")
+PY
 done
 binary[a]=$released; binary[b]=$head
 # Port allocation follows the fixture's loopback-only transport; a concurrent bind
