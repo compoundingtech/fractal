@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive job history schema and bounded subject-local projection; seal host authority evidence.",
+  "replay": {"status": "changed", "detail": "Jobs alone use the canonical claim order and refold only their affected subject (4096-claim ceiling). Empty jobs rebuild/replay writes nothing; non-job replication does no jobs work. Illegal edges and binding conflicts are refused history. No automatic full-replay trigger is added."},
+  "schema": {"status": "changed", "detail": "Add job.recorded and job subjects, durable retention, additive jobs/queue/history/receipt/pending tables and partial jobs-claim index."},
+  "rules": {"status": "changed", "detail": "Authority evidence fields become private with no production constructor pending separately approved admission adapters. Projection rows and replicated facts NEVER authorize execution. Gate-slot remains admission."},
+  "compatibility": {"status": "changed", "detail": "Inactive job histories are registered across append, replication, flush, rebuild and graph replay. No host activation or endpoint is introduced. Admission gates are NOT implemented by this projection."},
+  "downtime": {"status": "none", "detail": "Additive schema only; no fleet activation."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "changed", "detail": "Explicit rebuild reconstructs bounded job histories from retained claims. Oversized subjects refuse before changing heads; no whole-log fallback."}
+}

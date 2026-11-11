@@ -1063,6 +1063,12 @@ fn build_registry() -> Registry {
             true,
         ),
         (
+            "job",
+            "job/ID",
+            "An inactive durable job history, not execution authority.",
+            true,
+        ),
+        (
             "checkpoint",
             "checkpoint/DAY",
             "A checkpoint that trims replicated history dated before a UTC day.",
@@ -1592,6 +1598,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::AuthorizedParticipant,
             Cardinality::Once,
             Some("attention"),
+            false,
+            &[],
+        ),
+        (
+            "job.recorded",
+            &["job"],
+            WritePolicy::AuthorizedParticipant,
+            Cardinality::StateTransition,
+            Some("jobs"),
             false,
             &[],
         ),
@@ -3202,6 +3217,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("person_id", required_string()),
         ],
         "person.delegation-set" => &[("actions", required_array())],
+        "job.recorded" => &[("record", required_object())],
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
             ("expires_at", string()),

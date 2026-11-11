@@ -1,7 +1,4 @@
-use fractal_jobs::host_authority::{
-    AuthenticatedJobBinding, HostAuthority, HostAuthorityDecision, HostAuthorityEvidence,
-    JobHostBinding, decide_host_authority,
-};
+use super::*;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -29,7 +26,7 @@ fn host_authority_fixture_table() {
         authority_declaration: "claim/membership-one".into(),
     };
     let table: serde_json::Value =
-        serde_json::from_str(include_str!("host_authority.json")).unwrap();
+        serde_json::from_str(include_str!("../../tests/host_authority.json")).unwrap();
     for case in table["cases"].as_array().unwrap() {
         let mut fields = table["base"].as_object().unwrap().clone();
         fields.extend(case.as_object().unwrap().clone());
