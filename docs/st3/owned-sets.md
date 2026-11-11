@@ -25,7 +25,11 @@ fractal apply --set garden seats.kdl missions.kdl schedules.kdl \
 Remove `--dry-run` to publish. A dry run prints blockers and exits with failure when any
 are present. Add `--check` to execute gates during the preview, with `--workspace DIR` and
 `--input NAME=VALUE` as needed; gate answers appear on stderr. Publication checks for broken
-mission and step exec gates by default; `--no-gate-check` skips them. Loop `until` scripts
+mission and step exec gates by default; `--no-gate-check` skips them. Both checks cover only
+the missions the preview lists under `gate_check`: those whose exact revision this daemon has
+not published yet. An unchanged or adopted member was checked when it was published, so a large
+set's publication does not rerun its gates. Use `fractal missions check FILE` to check every
+gate again. Loop `until` scripts
 are listed as "not checked, they run after each round", including in dry-run checks.
 Per-round step scripts still preflight; runtime `until` evaluation remains at each round boundary.
 
