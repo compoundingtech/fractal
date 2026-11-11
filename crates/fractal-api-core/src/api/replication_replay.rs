@@ -47,7 +47,7 @@ pub async fn replay(
     // Admit before any writer-worker or SQLite wait. The worker owns the guard even if the
     // requesting CLI disconnects: another call must never queue behind a running replay.
     let guard = ReplayGuard::acquire(state.state_dir.clone())?;
-    blocking_external(move || -> Result<Json<Value>, ApiError> {
+    let operation = blocking_external(move || -> Result<Json<Value>, ApiError> {
         let _guard = guard;
         let path = state.state_dir.join("replication-replay-audit.jsonl");
         let previous = match File::open(&path) {
@@ -84,7 +84,16 @@ pub async fn replay(
         result.map_err(ApiError::internal)?;
         signal_changed(&state);
         Ok(Json(record))
-    }).await?
+    });
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            result = &mut operation => return result?,
+            () = tokio::time::sleep(Duration::from_secs(30)) => {
+                tracing::warn!("replication replay is still running; do not restart the daemon");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
