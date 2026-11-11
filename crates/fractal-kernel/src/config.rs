@@ -82,6 +82,9 @@ pub struct Config {
     /// Tailnet login admitted for browser pairing; absent disables browser pairing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_pairing_login: Option<String>,
+    /// Inactive jobs recording API; absent configuration disables every jobs route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<JobsConfig>,
     /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
@@ -626,6 +629,14 @@ impl Default for IdleNudgeSettings {
     }
 }
 
+
+/// Explicit classes are declarations only, never admission or preemption authority.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JobsConfig {
+    pub enabled: bool,
+    pub allowed_classes: Vec<String>,
+}
 /// The config file the running daemon was started with, so its `[limits]` can be read again.
 static DAEMON_CONFIG: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
@@ -804,6 +815,7 @@ impl Default for Config {
             person: None,
             browser_pairing_login: None,
             pairing_legacy_allowances: Vec::new(),
+            jobs: None,
             fleet_id: None,
             shared_secret_file: None,
             state_dir,
@@ -1449,6 +1461,26 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jobs_configuration_defaults_and_roundtrips() {
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.jobs.is_none());
+        assert!(!toml::to_string(&absent).unwrap().contains("[jobs]"));
+        let empty: super::Config = toml::from_str("[jobs]").unwrap();
+        assert_eq!(empty.jobs, Some(super::JobsConfig::default()));
+        let configured: super::Config =
+            toml::from_str("[jobs]\nenabled=true\nallowed_classes=['heavy']").unwrap();
+        assert_eq!(configured.jobs, Some(super::JobsConfig {
+            enabled: true,
+            allowed_classes: vec!["heavy".into()],
+        }));
+        let restored: super::Config =
+            toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(restored.jobs, configured.jobs);
+        assert_eq!(restored, configured);
+        assert!(toml::from_str::<super::Config>("[jobs]\nunknown=true").is_err());
+    }
+
     #[test]
     fn run_authority_is_enforced_unless_the_config_asks_for_audit() {
         use super::RunAuthorityMode;

@@ -90,6 +90,22 @@ pub enum SeatPriority {
     Normal,
 }
 
+impl From<fractal_jobs::JobPriority> for SeatPriority {
+    fn from(priority: fractal_jobs::JobPriority) -> Self {
+        match priority {
+            fractal_jobs::JobPriority::Background => Self::Background,
+            fractal_jobs::JobPriority::Normal => Self::Normal,
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn job_priorities_convert_losslessly() {
+    assert_eq!(SeatPriority::from(fractal_jobs::JobPriority::Background), SeatPriority::Background);
+    assert_eq!(SeatPriority::from(fractal_jobs::JobPriority::Normal), SeatPriority::Normal);
+}
+
 impl SeatPriority {
     pub fn as_str(self) -> &'static str {
         match self {

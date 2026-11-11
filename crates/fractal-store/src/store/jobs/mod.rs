@@ -27,6 +27,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         updated_at TEXT NOT NULL, queue_order BLOB NOT NULL
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(execution_host, queued, queue_order, id);
+    CREATE INDEX IF NOT EXISTS jobs_requester ON jobs(requester, queue_order, id);
     CREATE TABLE IF NOT EXISTS job_history (
         job_id TEXT NOT NULL, ordinal INTEGER NOT NULL, claim_id TEXT NOT NULL,
         event TEXT NOT NULL, state TEXT, refusal TEXT, at TEXT NOT NULL,
@@ -177,7 +178,7 @@ fn apply(
 mod receipts;
 mod queries;
 pub use receipts::{job_id, receipt_for_key};
-pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, queue_for_host};
+pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, jobs_for_requester, queue_for_host};
 
 
 #[cfg(test)]

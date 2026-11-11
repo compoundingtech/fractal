@@ -20,7 +20,7 @@ pub(super) fn submission(id: &str, key: &str) -> JobRecord {
         "command":{"argv":["fixture"],"cwd":"."},
         "resources":{"cpu_millicores":1,"memory_bytes":1,"io_weight":1,
             "tasks_max":1,"expected_duration_ms":1,"run_timeout_ms":null,
-            "priority":0,"requested_class":"fixture","storage_request":null,"delegated_reservations":null}
+            "priority":"background","requested_class":"fixture","storage_request":null,"delegated_reservations":null}
     })).unwrap();
     JobRecord::Submitted {
         binding: JobHostBinding { job_id: id.into(), execution_host: "fixture-host".into(),

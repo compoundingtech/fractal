@@ -166,6 +166,7 @@ pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
+pub mod jobs;
 #[cfg(target_os = "linux")]
 pub use tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
@@ -649,6 +650,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route("/v1/client/jobs", get(jobs::list).post(jobs::submit))
+        .route("/v1/client/jobs/{*id}", get(jobs::show))
         .route(
             "/v1/client/diagnostics",
             post(client_diagnostics::ingest)
@@ -2045,6 +2048,16 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "jobs-disabled"
+        | "jobs-projection-stale"
+        | "idempotency-digest-mismatch"
+        | "job-class-not-allowed"
+        | "job-priority-unknown"
+        | "invalid-request"
+        | "unknown-host"
+        | "conflicting-host"
+        | "stale-authority"
+        | "origin-mismatch"
         | "invalid-answer"
         | "not-answerable"
         | "idempotency-key-expired"
@@ -8345,6 +8358,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
     let path = request.uri().path();
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
         || path.starts_with(INTERNAL_ROUTE_PREFIX)
+        || jobs::requester_scoped_path(path)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
         || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {
