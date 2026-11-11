@@ -123,7 +123,7 @@ fn partial_late_owned_members_keep_running_seats_held_without_runtime_replacemen
             sha: format!("{:040x}", 10), sequence: 10,
         },
         rollout: None, adopt: Default::default(), allow_empty: false,
-        confirm_retire: None, expected_subjects: Default::default(),
+        confirm_retire: None, policy: None, expected_subjects: Default::default(),
     };
     let preview = store.owned_set_preview(&input, &options).unwrap();
     options.expected_subjects = preview.expected_subjects;
