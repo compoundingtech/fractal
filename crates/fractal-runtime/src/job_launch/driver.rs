@@ -1,5 +1,5 @@
-use super::{ExitUsage, sample_exit, gated::GatedChild, keeper::*, keeper_systemd::SystemdKeeper};
-use super::cgroup::{kill_and_wait_empty, remove_empty_tree, verify_dedicated};
+use super::{ExitUsage, gated::GatedChild, keeper::*, keeper_systemd::SystemdKeeper};
+use super::cgroup::{stop_and_sample, verify_dedicated};
 use crate::job_scope;
 use anyhow::{Context, Result, ensure};
 use fractal_jobs::{launch::{LaunchIntent, LaunchOutcome, LaunchRefusal, cgroup_name}, scope::{JobScopePlan, observation::{RawScopeUsage, ScopeReadback}}};
@@ -23,8 +23,8 @@ pub trait LaunchJournal {
     fn refusal(&mut self, intent: &LaunchIntent, refusal: LaunchRefusal) -> Result<()>;
 }
 
-/// Side effects own ONLY this generation's J. Abort kills its gated child and J,
-/// proves populated=0, and removes J before reporting success. Never stop the keeper.
+/// Side effects own ONLY this generation's J. Stop kills its gated child and J,
+/// proves populated=0, samples usage, then removes J. Never stop the keeper.
 pub trait JobLaunchEffects {
     fn create_group(&mut self, request: &JobLaunch<'_>) -> Result<PathBuf>;
     /// Kernel hierarchy identity, not the cgroupfs mount-prefixed pathname.
@@ -40,11 +40,7 @@ pub trait JobLaunchEffects {
     fn release(&mut self) -> Result<u32>;
     /// Reap the holder, but NEVER use its exit status as its outcome.
     fn wait_for_exit(&mut self) -> Result<()>;
-    fn exit_usage(&mut self, directory: &Path, host: &str) -> ExitUsage {
-        sample_exit(directory, host)
-    }
-    fn remove_group(&mut self) -> Result<()>;
-    fn abort_and_confirm_empty(&mut self) -> Result<()>;
+    fn stop_and_sample(&mut self, host: &str) -> Result<ExitUsage>;
 }
 pub struct JobLaunchResult {
     pub holder_pid: u32,
@@ -105,21 +101,13 @@ impl JobLaunchEffects for CgroupJobLaunch {
         let _status = self.holder.as_mut().context("holder was not released")?.wait()?;
         Ok(())
     }
-    fn remove_group(&mut self) -> Result<()> {
-        if let Some(directory) = &self.directory {
-            if directory.exists() {
-                ensure!(!populated(directory)?, "J is not empty");
-                remove_empty_tree(directory)?;
-            }
-        }
-        Ok(())
-    }
-    fn abort_and_confirm_empty(&mut self) -> Result<()> {
+    fn stop_and_sample(&mut self, host: &str) -> Result<ExitUsage> {
         if let Some(gated) = &mut self.gated { gated.abort()?; }
-        if let Some(directory) = &self.directory {
-            if directory.exists() { kill_and_wait_empty(directory)?; }
+        match &self.directory {
+            Some(directory) => stop_and_sample(directory, host),
+            None => Ok(ExitUsage::CountersUnavailable(
+                fractal_jobs::launch::CountersUnavailable::CgroupVanished)),
         }
-        self.remove_group()
     }
 }
 
