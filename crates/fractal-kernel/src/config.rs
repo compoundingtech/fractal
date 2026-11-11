@@ -469,7 +469,8 @@ impl LimitsConfig {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProgramsConfig {
-    /// `audit` lets a write outside a run's authority proceed and records it; `enforce` refuses it.
+    /// `enforce` (the default) refuses a write outside a run's authority; `audit` lets it proceed
+    /// and records it.
     pub authority: RunAuthorityMode,
 }
 
@@ -480,8 +481,8 @@ impl ProgramsConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunAuthorityMode {
-    #[default]
     Audit,
+    #[default]
     Enforce,
 }
 
@@ -1414,6 +1415,16 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_authority_is_enforced_unless_the_config_asks_for_audit() {
+        use super::RunAuthorityMode;
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert_eq!(absent.programs.authority, RunAuthorityMode::Enforce);
+        let audit: super::Config = toml::from_str("[programs]\nauthority = \"audit\"\n").unwrap();
+        assert_eq!(audit.programs.authority, RunAuthorityMode::Audit);
+        assert!(toml::from_str::<super::Config>("[programs]\nauthority = \"off\"\n").is_err());
+    }
+
     #[test]
     fn usage_writer_configuration_is_explicit_and_agent_only() {
         let absent: super::Config = toml::from_str("").unwrap();
