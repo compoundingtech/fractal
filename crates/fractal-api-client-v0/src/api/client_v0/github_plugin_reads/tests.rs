@@ -1,0 +1,408 @@
+//! Contract: canned GitHub documents serialize to exactly `docs/st3/client-v0/fixtures/github-plugin-*.json`.
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+macro_rules! fixture {
+    ($name:literal) => {
+        serde_json::from_str::<Value>(include_str!(concat!("../../../../../../docs/st3/client-v0/fixtures/github-plugin-", $name, ".json"))).unwrap()
+    };
+}
+
+const AT: &str = "2026-11-07T06:40:00Z";
+const SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+fn garden() -> Repo {
+    Repo { owner: "acme".into(), repo: "garden".into() }
+}
+
+fn found<T: serde::Serialize>(item: T, stale: bool) -> Value {
+    serde_json::to_value(GithubRead::Found { fetched_at: AT.into(), stale, item }).unwrap()
+}
+
+fn read_of<T: serde::Serialize>(failure: Failure) -> Value {
+    serde_json::to_value(failure.into_read::<T>()).unwrap()
+}
+
+fn rest_user(login: &str) -> Value {
+    json!({ "login": login, "id": 1, "url": format!("https://api.github.com/users/{login}"), "html_url": format!("https://github.com/{login}"), "avatar_url": "https://avatars.githubusercontent.com/u/1" })
+}
+
+fn graph_user(login: &str) -> Value {
+    json!({ "login": login, "url": format!("https://github.com/{login}") })
+}
+
+fn rest_pull(expected: &Value) -> Value {
+    json!({
+        "url": "https://api.github.com/repos/acme/garden/pulls/7",
+        "html_url": "https://github.com/acme/garden/pull/7",
+        "number": 7,
+        "title": expected["title"],
+        "body": expected["body"],
+        "state": if expected["state"] == "open" { "open" } else { "closed" },
+        "draft": false,
+        "user": rest_user("ada"),
+        "base": { "ref": "main", "sha": "0000000000000000000000000000000000000000" },
+        "head": { "ref": "ada/water-schedule", "sha": SHA },
+        "additions": 214, "deletions": 37, "changed_files": 3, "commits": 4, "comments": 2, "review_comments": 3,
+        "created_at": "2026-11-05T09:12:00Z", "updated_at": "2026-11-07T05:58:00Z",
+        "merged_at": expected["merged_at"], "closed_at": expected["closed_at"],
+        "labels": [
+            { "id": 1, "name": "enhancement", "color": "a2eeef", "default": true },
+            { "id": 2, "name": "needs-review", "color": "fbca04", "default": false }
+        ],
+        "requested_reviewers": [rest_user("grace")],
+        "requested_teams": []
+    })
+}
+
+fn graph_pull(merge_state: Value) -> Value {
+    json!({ "data": { "repository": { "pullRequest": {
+        "mergeStateStatus": merge_state,
+        "reviewDecision": "CHANGES_REQUESTED",
+        "closingIssuesReferences": { "nodes": [
+            { "number": 9, "title": "Beds dry out over the weekend", "state": "OPEN", "repository": { "name": "garden", "owner": { "login": "acme" } } }
+        ] }
+    } } } })
+}
+
+#[test]
+fn pull_request_serializes_to_the_fixture() {
+    let expected = fixture!("pull-request");
+    let item = map::pull(&garden(), 7, &rest_pull(&expected["item"]), &graph_pull(json!("BLOCKED"))).unwrap();
+    assert_eq!(found(item, false), expected);
+}
+
+#[test]
+fn stale_merged_pull_request_serializes_to_the_fixture() {
+    let expected = fixture!("stale");
+    let item = map::pull(&garden(), 7, &rest_pull(&expected["item"]), &graph_pull(Value::Null)).unwrap();
+    assert_eq!(found(item, true), expected);
+}
+
+#[test]
+fn issue_serializes_to_the_fixture() {
+    let expected = fixture!("issue");
+    let rest = json!({
+        "url": "https://api.github.com/repos/acme/garden/issues/9",
+        "html_url": "https://github.com/acme/garden/issues/9",
+        "number": 9,
+        "title": expected["item"]["title"],
+        "body": expected["item"]["body"],
+        "state": "open", "state_reason": null,
+        "user": rest_user("grace"),
+        "assignees": [rest_user("ada")],
+        "labels": [{ "name": "bug", "color": "d73a4a" }],
+        "milestone": { "title": "Spring", "number": 1 },
+        "comments": 3,
+        "created_at": "2026-11-01T08:00:00Z", "updated_at": "2026-11-06T17:30:00Z", "closed_at": null
+    });
+    assert_eq!(found(map::issue(&garden(), 9, &rest).unwrap(), false), expected);
+    let mut pull = rest;
+    pull["pull_request"] = json!({ "url": "https://api.github.com/repos/acme/garden/pulls/9" });
+    assert!(map::issue(&garden(), 9, &pull).unwrap().is_pull_request);
+}
+
+fn rest_comment(id: u64, login: &str, association: &str, body: &str, at: &str, reactions: Value) -> Value {
+    let mut counts = json!({ "url": "https://api.github.com/x", "total_count": 0, "+1": 0, "-1": 0, "laugh": 0, "hooray": 0, "confused": 0, "heart": 0, "rocket": 0, "eyes": 0 });
+    for (key, value) in reactions.as_object().unwrap() {
+        counts[key] = value.clone();
+    }
+    json!({
+        "id": id,
+        "url": format!("https://api.github.com/repos/acme/garden/issues/comments/{id}"),
+        "html_url": format!("https://github.com/acme/garden/pull/7#issuecomment-{id}"),
+        "issue_url": "https://api.github.com/repos/acme/garden/issues/7",
+        "user": rest_user(login),
+        "author_association": association,
+        "body": body,
+        "created_at": at, "updated_at": at,
+        "reactions": counts
+    })
+}
+
+fn grace_comment() -> Value {
+    rest_comment(
+        1832451234,
+        "grace",
+        "MEMBER",
+        "Looks close. Can the scheduler skip beds after rain? See the forecast in `weather.rs`.",
+        "2026-11-06T10:02:00Z",
+        json!({ "+1": 2, "eyes": 1, "total_count": 3 }),
+    )
+}
+
+#[test]
+fn comment_serializes_to_the_fixture() {
+    assert_eq!(found(map::comment(&garden(), &grace_comment()).unwrap(), false), fixture!("comment"));
+}
+
+#[test]
+fn conversation_serializes_to_the_fixture() {
+    let graph = json!({ "data": { "repository": { "pullRequest": {
+        "latestOpinionatedReviews": { "totalCount": 2, "nodes": [
+            { "id": "PRR_kwDOA2", "state": "APPROVED", "body": "", "submittedAt": "2026-11-06T12:40:00Z", "url": "https://github.com/acme/garden/pull/7#pullrequestreview-2002", "author": graph_user("linus") },
+            { "id": "PRR_kwDOA1", "state": "CHANGES_REQUESTED", "body": "The skip for dormant beds needs a test.", "submittedAt": "2026-11-06T10:05:00Z", "url": "https://github.com/acme/garden/pull/7#pullrequestreview-2001", "author": graph_user("grace") }
+        ] },
+        "reviewThreads": { "totalCount": 2, "nodes": [
+            { "id": "PRRT_kwDOB1", "path": "src/scheduler.rs", "line": 42, "isResolved": false, "isOutdated": false, "comments": { "totalCount": 2, "nodes": [
+                { "id": "PRRC_1", "body": "Should this read moisture once per bed, not once per run?", "createdAt": "2026-11-06T10:04:00Z", "url": "https://github.com/acme/garden/pull/7#discussion_r1001", "author": graph_user("grace") },
+                { "id": "PRRC_2", "body": "Yes, fixed in the next push.", "createdAt": "2026-11-06T11:00:00Z", "url": "https://github.com/acme/garden/pull/7#discussion_r1002", "author": graph_user("ada") }
+            ] } },
+            { "id": "PRRT_kwDOB2", "path": "README.md", "line": null, "isResolved": true, "isOutdated": true, "comments": { "totalCount": 1, "nodes": [
+                { "id": "PRRC_3", "body": "Typo: *wtaer*.", "createdAt": "2026-11-06T12:30:00Z", "url": "https://github.com/acme/garden/pull/7#discussion_r1003", "author": graph_user("linus") }
+            ] } }
+        ] }
+    } } } });
+    let comments = json!([
+        grace_comment(),
+        rest_comment(1832459999, "ada", "CONTRIBUTOR", "Added rain skip.", "2026-11-06T15:00:00Z", json!({}))
+    ]);
+    let item = map::conversation(&garden(), &graph, &comments, false).unwrap();
+    assert_eq!(found(item, false), fixture!("conversation"));
+    // More than the bound of any kind is marked.
+    let mut more = graph.clone();
+    more["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"][0]["comments"]["totalCount"] = json!(101);
+    assert!(map::conversation(&garden(), &more, &comments, false).unwrap().truncated);
+    assert!(map::conversation(&garden(), &graph, &comments, true).unwrap().truncated);
+}
+
+#[test]
+fn checks_serialize_to_the_fixture() {
+    let actions = json!({ "app": { "name": "GitHub Actions" }, "workflowRun": { "workflow": { "name": "CI" } } });
+    let run = |name: &str, job: u64, status: &str, conclusion: Value, started: Value, completed: Value, summary: Value, suite: &Value| json!({
+        "__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
+        "startedAt": started, "completedAt": completed,
+        "detailsUrl": format!("https://github.com/acme/garden/actions/runs/9001/job/{job}"),
+        "url": format!("https://github.com/acme/garden/runs/{job}"),
+        "summary": summary, "checkSuite": suite
+    });
+    let graph = json!({ "data": { "repository": { "pullRequest": {
+        "headRefOid": SHA,
+        "commits": { "nodes": [{ "commit": { "oid": SHA, "statusCheckRollup": { "contexts": { "totalCount": 5, "nodes": [
+            run("build", 1, "COMPLETED", json!("SUCCESS"), json!("2026-11-07T05:59:10Z"), json!("2026-11-07T06:03:42Z"), json!(""), &actions),
+            run("test (ubuntu)", 2, "COMPLETED", json!("FAILURE"), json!("2026-11-07T05:59:12Z"), json!("2026-11-07T06:08:05Z"), json!("2 tests failed: scheduler::skips_dormant, scheduler::rain"), &actions),
+            run("lint", 3, "COMPLETED", json!("SKIPPED"), Value::Null, Value::Null, Value::Null, &actions),
+            run("e2e", 4, "IN_PROGRESS", Value::Null, json!("2026-11-07T06:01:00Z"), Value::Null, Value::Null, &actions),
+            run("deploy-preview", 5, "QUEUED", Value::Null, Value::Null, Value::Null, Value::Null, &json!({ "app": null, "workflowRun": null }))
+        ] } } } }] }
+    } } } });
+    assert_eq!(found(map::checks(&graph).unwrap(), false), fixture!("checks"));
+}
+
+#[test]
+fn files_serialize_to_the_fixture() {
+    let expected = fixture!("files");
+    let files = &expected["item"]["files"];
+    let page = json!([
+        { "sha": "a", "filename": "src/scheduler.rs", "status": "added", "additions": 180, "deletions": 0, "changes": 180, "patch": files[0]["patch"] },
+        { "sha": "b", "filename": "src/beds.rs", "previous_filename": "src/bed.rs", "status": "renamed", "additions": 34, "deletions": 37, "changes": 71, "patch": files[1]["patch"] },
+        { "sha": "c", "filename": "assets/beds.png", "status": "added", "additions": 0, "deletions": 0, "changes": 0 }
+    ]);
+    assert_eq!(found(map::files(3, &[Arc::new(page.clone())], false).unwrap(), false), expected);
+    // Fewer listed than GitHub counts, or a page that could not be read, is truncated.
+    assert!(map::files(4, &[Arc::new(page.clone())], false).unwrap().truncated);
+    assert!(map::files(3, &[Arc::new(page)], true).unwrap().truncated);
+    // Patch text past the byte bound is dropped and marked.
+    let big = "x".repeat(MAX_PATCH_BYTES);
+    let page = json!([
+        { "filename": "a", "status": "modified", "additions": 1, "deletions": 0, "patch": big },
+        { "filename": "b", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@" }
+    ]);
+    let bounded = map::files(2, &[Arc::new(page)], false).unwrap();
+    assert!(bounded.truncated);
+    assert!(bounded.files[0].patch.is_some() && bounded.files[1].patch.is_none());
+}
+
+#[test]
+fn run_serializes_to_the_fixture() {
+    let job = |id: u64, name: &str, conclusion: &str, started: Value, completed: Value| json!({
+        "id": id, "name": name, "status": "completed", "conclusion": conclusion,
+        "started_at": started, "completed_at": completed,
+        "html_url": format!("https://github.com/acme/garden/actions/runs/9001/job/{id}")
+    });
+    let run = json!({
+        "id": 9001, "name": "CI", "display_title": "Water the beds on a schedule", "event": "pull_request",
+        "status": "completed", "conclusion": "failure",
+        "head_branch": "ada/water-schedule", "head_sha": SHA,
+        "url": "https://api.github.com/repos/acme/garden/actions/runs/9001",
+        "html_url": "https://github.com/acme/garden/actions/runs/9001",
+        "run_attempt": 1,
+        "run_started_at": "2026-11-07T05:59:00Z",
+        "created_at": "2026-11-07T05:58:50Z", "updated_at": "2026-11-07T06:08:05Z",
+        "pull_requests": [{ "id": 77, "number": 7, "url": "https://api.github.com/repos/acme/garden/pulls/7" }]
+    });
+    let jobs = json!({ "total_count": 3, "jobs": [
+        job(1, "build", "success", json!("2026-11-07T05:59:10Z"), json!("2026-11-07T06:03:42Z")),
+        job(2, "test (ubuntu)", "failure", json!("2026-11-07T05:59:12Z"), json!("2026-11-07T06:08:05Z")),
+        job(3, "lint", "skipped", Value::Null, Value::Null)
+    ] });
+    assert_eq!(found(map::run(&garden(), &run, &jobs).unwrap(), false), fixture!("run"));
+}
+
+#[test]
+fn moved_gone_not_found_and_unavailable_serialize_to_the_fixtures() {
+    let moved = Raw { status: 301, location: Some("https://api.github.com/repos/acme-garden/garden/pulls/7".into()), ..Raw::default() };
+    let Err(failure) = classify(moved, false) else { panic!("a 301 is not a document") };
+    assert_eq!(read_of::<GithubPullRequest>(failure), fixture!("moved"));
+    let Err(failure) = classify(Raw { status: 410, ..Raw::default() }, false) else { panic!() };
+    assert_eq!(read_of::<GithubIssue>(failure), fixture!("gone"));
+    let Err(failure) = classify(Raw { status: 404, ..Raw::default() }, false) else { panic!() };
+    assert_eq!(read_of::<GithubIssue>(failure), fixture!("not-found"));
+    let limited = Raw {
+        status: 403,
+        rate_limited: true,
+        retry_after_s: Some(120),
+        body: br#"{"message":"GitHub API rate limit exceeded for this installation","documentation_url":"https://docs.github.com/rest"}"#.to_vec(),
+        ..Raw::default()
+    };
+    let Err(failure) = classify(limited, false) else { panic!() };
+    assert_eq!(read_of::<GithubIssue>(failure), fixture!("unavailable"));
+}
+
+#[test]
+fn a_redirect_is_reported_only_when_it_names_a_typed_github_item() {
+    assert_eq!(moved_to("https://api.github.com/repos/o/r"), Some(GithubMovedTo { owner: "o".into(), repo: "r".into(), number: None }));
+    assert_eq!(moved_to("https://api.github.com/repos/o/r/issues/3/comments").unwrap().number, Some(3));
+    for location in [
+        "https://api.github.com/repositories/1234/pulls/7",
+        "https://evil.example/repos/o/r/pulls/7",
+        "http://api.github.com/repos/o/r/pulls/7",
+        "https://api.github.com:8443/repos/o/r/pulls/7",
+        "https://user@api.github.com/repos/o/r/pulls/7",
+        "https://api.github.com/repos/-o/r/pulls/7",
+        "https://api.github.com/repos/o/../pulls/7",
+        "https://api.github.com/repos/o/./r/pulls/7",
+        "https://API.github.com/repos/o/r/pulls/7",
+        "https://api.github.com/repos/o/r/pulls/7#x",
+        "https://api.github.com/repos/o/r/pulls/0",
+        "/repos/o/r/pulls/7",
+    ] {
+        assert_eq!(moved_to(location), None, "{location}");
+    }
+    let Err(Failure::Unavailable { .. }) = classify(Raw { status: 301, location: Some("https://api.github.com/repositories/1/pulls/7".into()), ..Raw::default() }, false) else {
+        panic!("an untyped redirect is unavailable")
+    };
+    for status in [302, 307, 308, 500, 502, 401] {
+        assert!(matches!(classify(Raw { status, ..Raw::default() }, false), Err(Failure::Unavailable { .. })), "{status}");
+    }
+    // A 304 without a conditional request is not a refresh.
+    assert!(matches!(classify(Raw { status: 304, ..Raw::default() }, false), Err(Failure::Unavailable { .. })));
+}
+
+#[test]
+fn graphql_errors_are_not_documents() {
+    let body = |errors: Value| Raw { status: 200, body: serde_json::to_vec(&json!({ "data": null, "errors": errors })).unwrap(), ..Raw::default() };
+    assert!(matches!(classify(body(json!([{ "type": "NOT_FOUND", "message": "Could not resolve" }])), false), Err(Failure::NotFound)));
+    assert!(matches!(classify(body(json!([{ "type": "RATE_LIMITED", "message": "API rate limit exceeded" }])), false), Err(Failure::Unavailable { .. })));
+    assert!(matches!(map::pull(&garden(), 7, &json!({"html_url": "x"}), &json!({ "data": { "repository": { "pullRequest": null } } })), Err(Failure::NotFound)));
+}
+
+#[test]
+fn path_values_are_typed() {
+    for owner in ["a", "acme", "acme-garden", "A1", &"a".repeat(39)] {
+        assert!(valid_owner(owner), "{owner}");
+    }
+    for owner in ["", "-acme", "acme_garden", "acme.garden", "a/b", &"a".repeat(40), "ácme"] {
+        assert!(!valid_owner(owner), "{owner}");
+    }
+    for repo in ["garden", "garden.rs", ".github", "a_b-c", &"r".repeat(100)] {
+        assert!(valid_repo(repo), "{repo}");
+    }
+    for repo in ["", ".", "..", "a/b", "a b", "a%2f", &"r".repeat(101)] {
+        assert!(!valid_repo(repo), "{repo}");
+    }
+    assert_eq!(parse_id("7", 10), Some(7));
+    for id in ["0", "07", "-1", "+1", "1e3", "11", "", "https://github.com/acme/garden/pull/7"] {
+        assert_eq!(parse_id(id, 10), None, "{id}");
+    }
+}
+
+fn ok(body: Value, etag: Option<&str>) -> Result<Raw, Failure> {
+    Ok(Raw { status: 200, etag: etag.map(str::to_owned), cacheable: true, body: serde_json::to_vec(&body).unwrap(), ..Raw::default() })
+}
+
+#[tokio::test]
+async fn the_cache_revalidates_with_etags_and_serves_stale_only_for_upstream_failures() {
+    let cache = std::sync::Mutex::new(Cache::default());
+    let sends = AtomicUsize::new(0);
+    let first = cached(&cache, "k", true, |etag| {
+        sends.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(etag, None);
+        async { ok(json!({ "n": 1 }), Some("\"v1\"")) }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*first.value, json!({ "n": 1 }));
+    // Fresh: no request.
+    let again = cached(&cache, "k", true, |_| async { panic!("a fresh entry is not fetched") }).await.unwrap();
+    assert!(!again.stale);
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    cache.lock().unwrap().entries.get_mut("k").unwrap().fresh_until = Instant::now();
+    // Expired: revalidated with the ETag; 304 refreshes.
+    let refreshed = cached(&cache, "k", true, |etag| async move {
+        assert_eq!(etag.as_deref(), Some("\"v1\""));
+        Ok(Raw { status: 304, ..Raw::default() })
+    })
+    .await
+    .unwrap();
+    assert_eq!(*refreshed.value, json!({ "n": 1 }));
+    assert!(!refreshed.stale);
+    cache.lock().unwrap().entries.get_mut("k").unwrap().fresh_until = Instant::now();
+    // An upstream failure answers from the cache, stale.
+    let stale = cached(&cache, "k", true, |_| async { Ok(Raw { status: 502, ..Raw::default() }) }).await.unwrap();
+    assert!(stale.stale);
+    assert_eq!(*stale.value, json!({ "n": 1 }));
+    // GitHub's 404 is an answer: it is not hidden by the cache, and it evicts.
+    assert!(matches!(cached(&cache, "k", true, |_| async { Ok(Raw { status: 404, ..Raw::default() }) }).await, Err(Failure::NotFound)));
+    assert_eq!(cache.lock().unwrap().len(), 0);
+    // Without a cached value an upstream failure is reported as such.
+    assert!(matches!(cached(&cache, "k", true, |_| async { Ok(Raw { status: 502, ..Raw::default() }) }).await, Err(Failure::Unavailable { .. })));
+    // TTL-only keys (GraphQL) never send an ETag.
+    cached(&cache, "g", false, |_| async { ok(json!({ "data": {} }), Some("\"x\"")) }).await.unwrap();
+    cache.lock().unwrap().entries.get_mut("g").unwrap().fresh_until = Instant::now();
+    cached(&cache, "g", false, |etag| async move {
+        assert_eq!(etag, None);
+        ok(json!({ "data": {} }), None)
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_cache_keeps_its_own_entry_cap_and_skips_ineligible_answers() {
+    let cache = std::sync::Mutex::new(Cache::default());
+    for index in 0..CACHE_ENTRIES + 10 {
+        cached(&cache, &format!("k{index}"), true, |_| async { ok(json!(index), None) }).await.unwrap();
+    }
+    assert_eq!(cache.lock().unwrap().len(), CACHE_ENTRIES);
+    let ineligible = cached(&cache, "fallback", true, |_| async {
+        Ok(Raw { status: 200, cacheable: false, body: b"{}".to_vec(), ..Raw::default() })
+    })
+    .await
+    .unwrap();
+    assert!(!ineligible.stale);
+    assert!(!cache.lock().unwrap().entries.contains_key("fallback"));
+}
+
+#[tokio::test]
+async fn routes_require_the_projection_scope_and_typed_paths() {
+    use tower::ServiceExt as _;
+    let app = |session: ClientSession| {
+        Router::new()
+            .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(pull))
+            .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(comment))
+            .layer(Extension(session))
+    };
+    let request = |uri: &str| axum::http::Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap();
+    let paired = ClientSession::for_tests("device/example", "person/operator", "paired");
+    for uri in [
+        "/v1/client/plugins/github/-acme/garden/pulls/7",
+        "/v1/client/plugins/github/acme/../pulls/7",
+        "/v1/client/plugins/github/acme/garden/pulls/0",
+        "/v1/client/plugins/github/acme/garden/pulls/https%3A%2F%2Fexample.com",
+        "/v1/client/plugins/github/acme/garden/comments/x",
+    ] {
+        let status = app(paired.clone()).oneshot(request(uri)).await.unwrap().status();
+        assert!(status.is_client_error(), "{uri}: {status}");
+    }
+}
