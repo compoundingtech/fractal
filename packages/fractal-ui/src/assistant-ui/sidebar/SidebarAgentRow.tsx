@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Icon } from '../composition/Icons'
-import { Button, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { Highlight, sidebarRowTitle, sidebarSubagentObservationText, usageText, tokenCount, spendCount, openRow } from './rowPresentation.tsx'
@@ -13,6 +13,7 @@ import { SidebarDuration } from './SidebarDuration'
 import { formatDuration } from '../../time/human-time'
 import { SidebarRowSignals, attachSidebarLine1Fit } from './SidebarRowSignals'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
+import { HoverCardSurface } from '../entity/HoverCard'
 import { useTouchLayout } from './useTouchLayout'
 
 export type RowVariant = 'SR-1' | 'SR-2' | 'SR-3'
@@ -64,7 +65,7 @@ export function sidebarRowDescription(row: Row, reportedStatusOnly = false): str
     if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
     if (step._tag === 'Step') parts.push(`Step: ${step.name}`)
     if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
-    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.slug).join(', ')}`)
+    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.title ?? mission.slug).join(', ')}`)
   }
   parts.push(row.subagentObservation?._tag === 'Reported' ? `Subagents: ${row.children.length}` : sidebarSubagentObservationText(row.subagentObservation))
   parts.push(`ID: ${row.ref}`)
@@ -137,7 +138,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       <div {...stylex.props(styles.actions)}>
         <AgentRowActions row={item} reportedStatusOnly={reportedStatusOnly} {...clock} actions={callbacks} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={tooltipAnchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHoverOpen(false)} onMenuOpenChange={isOpen => { menuOpen.current = isOpen; setHoverOpen(false) }}
           menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle]}
-          wrapDetailsTrigger={trigger => <TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}>{trigger}<Tooltip aria-label={`Reported details for ${title}`} triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard, styles.passiveHovercard)}><AgentHoverCard row={item} reportedStatusOnly={reportedStatusOnly} {...clock} /></Tooltip></TooltipTrigger>} />
+          wrapDetailsTrigger={trigger => <>{trigger}<HoverCardSurface isOpen={hoverOpen} onOpenChange={setHoverOpen} triggerRef={tooltipAnchor} placement="right" label={`Reported details for ${title}`}><AgentHoverCard row={item} reportedStatusOnly={reportedStatusOnly} {...clock} /></HoverCardSurface></>} />
         {item.children.length > 0 && <Button data-row-column="children" slot={inTree ? 'chevron' : undefined} isDisabled={!inTree && onToggleChildren === undefined} aria-labelledby="" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${item.children.length} subagents`} aria-expanded={expanded} onPress={inTree ? undefined : () => onToggleChildren?.(item.ref)} {...stylex.props(styles.iconButton, styles.childrenToggle, variant === 'SR-2' && styles.childrenTop, variant === 'SR-1' && styles.childrenSingle, touch && styles.childrenNarrow)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} />{extraSignals.includes('X-subs') && <span data-row-signal="X-subs" data-line1-drop="subs">{item.children.length}</span>}</Button>}
       </div>
     </div>
@@ -180,8 +181,5 @@ const styles = stylex.create({
   needsYou: { flexShrink: 0, color: tone.attention, fontSize: t.denseSize, fontWeight: t.weightSemibold },
   hasChildren: { paddingInlineEnd: g.icon },
   trailingSignals: { gridColumn: '5', gridRow: '1', display: 'inline-flex', alignItems: 'center', justifyContent: 'end', gap: s.xs, width: `var(--sidebar-signal-track, ${g.status})`, marginInlineStart: s.xs, minWidth: g.status },
-  hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, width: g.specimenAside, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', maxHeight: g.commandMaxHeight, overflowY: 'auto', boxShadow: elevation.popover, zIndex: 30 },
-  // The informational tooltip never owns the divider underneath; explicit details popovers remain interactive.
-  passiveHovercard: { pointerEvents: 'none' },
   children: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
 })
