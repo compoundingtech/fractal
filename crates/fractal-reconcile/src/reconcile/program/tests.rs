@@ -105,18 +105,18 @@ fn messages_for_another_attempt_or_host_change_nothing() {
         env: BTreeMap::new(),
         cwd: "/".into(),
     };
-    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1 });
+    engine.lock().running.insert(step.into(), Running { dispatch, generation: 1, requests: BTreeMap::new() });
     let message = |attempt: u32, t: &str| {
         json!({"t": t, "step": step, "attempt": attempt, "seq": 1, "key": "merge", "status": "completed", "value": 1,
-            "exit": {"_tag": "Success", "value": 1}, "ms": 5})
+            "exit": {"_tag": "Success", "value": 1}, "ms": 5, "mission": "publish", "input": {}, "for": "person/owner", "title": "Go?"})
     };
-    for t in ["journal", "done", "unresponsive"] {
+    for t in ["journal", "run", "ask", "done", "unresponsive"] {
         // An earlier attempt of the step, then the right attempt from a replaced host.
         engine.handle(&message(1, t), 1).unwrap();
         engine.handle(&message(2, t), 2).unwrap();
     }
     assert_eq!(journal_claims(&engine, step), 0);
-    assert!(engine.lock().running.contains_key(step));
+    assert!(engine.lock().running.get(step).is_some_and(|running| running.requests.is_empty()));
     assert_eq!(engine.host_fault(step, 2), None);
     // A late message for the earlier attempt never removes the attempt that replaced it, and a
     // refused entry is answered rather than left waiting (no host here, so nothing is sent).
@@ -124,6 +124,50 @@ fn messages_for_another_attempt_or_host_change_nothing() {
     engine.unresponsive(step, 1, 1, &message(1, "unresponsive")).unwrap();
     assert!(engine.lock().running.contains_key(step));
     assert_eq!(engine.host_fault(step, 1), None);
+}
+
+/// A pass may hand the engine a view read before an attempt ended. An attempt this engine is
+/// ending never starts again, even while the store still says it runs, and neither does one its
+/// step left; the fault that stopped it stays. The engine holds an attempt as ended only until
+/// the step's state is written or the write fails, and the next attempt still starts.
+#[test]
+fn a_dispatch_for_an_attempt_that_ended_starts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let step = engine.store.start_program_step_for_tests();
+    let hash = engine.store.put_blob(b"export default 1").unwrap();
+    let dispatch = |attempt: u32| Dispatch {
+        step: step.subject.clone(),
+        attempt,
+        run: step.run.clone(),
+        program: ProgramSpec { bundle: "/b.mjs".into(), bundle_hash: hash.clone(), stalled_after_ms: None },
+        payload: BTreeMap::new(),
+        env: BTreeMap::new(),
+        cwd: "/".into(),
+    };
+    engine.lock().running.insert(step.subject.clone(), Running { dispatch: dispatch(1), generation: 1, requests: BTreeMap::new() });
+    engine.unresponsive(&step.subject, 1, 1, &json!({"ms": 1000})).unwrap();
+    let reason = "the program's worker missed its 1000 ms liveness deadline and was terminated";
+    assert_eq!(engine.store.step_run(&step.subject).unwrap().unwrap().status, "failed");
+    assert_eq!(engine.host_fault(&step.subject, 1).as_deref(), Some(reason));
+    assert!(engine.lock().ended.is_empty(), "the written state, not the engine, now says it ended");
+    // While the engine is ending attempt 1, a pass's view read before the failure is written.
+    engine.store.set_step_run_state_for_tests(&step.subject, "working", 1);
+    engine.lock().ended.insert(step.subject.clone(), 1);
+    assert_eq!(engine.dispatch(dispatch(1)).unwrap(), Dispatched::Left("the program of attempt 1 already ended".into()));
+    // A write that fails leaves the attempt to the next pass, as before.
+    let failed = engine.settle(&step.subject, 1, || -> Result<()> { Err(anyhow!("database is locked")) });
+    assert!(failed.is_err());
+    assert!(engine.lock().ended.is_empty());
+    assert_eq!(engine.ended_or_left(&engine.lock(), &step.subject, 1).unwrap(), None);
+    // An attempt its step left, here failed by the reconciler, does not start either.
+    engine.store.set_step_run_state_for_tests(&step.subject, "failed", 2);
+    assert_eq!(engine.dispatch(dispatch(2)).unwrap(), Dispatched::Left("the step is failed at attempt 2".into()));
+    // The retry's attempt starts.
+    engine.store.set_step_run_state_for_tests(&step.subject, "working", 3);
+    assert_eq!(engine.ended_or_left(&engine.lock(), &step.subject, 3).unwrap(), None);
+    let inner = engine.lock();
+    assert!(inner.host.is_none() && inner.running.is_empty());
 }
 
 #[test]

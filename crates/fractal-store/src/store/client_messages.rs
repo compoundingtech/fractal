@@ -1814,6 +1814,9 @@ mod tests {
     #[test]
     fn single_send_selector_is_visible_immediately_after_commit() {
         let store = Store::open_memory("node").unwrap();
+        // Exercise commit publication, not whether a loaded host fits the 10 ms allowance.
+        // The largest representable test budget leaves the row/subject bounds intact.
+        store.set_client_message_fold_budget(std::time::Duration::from_micros(u64::MAX)).unwrap();
         send(&store, "message/immediate", "agent/sender", "1");
         assert!(!store.client_message_selectors_pending().unwrap());
         assert_eq!(assert_commit_budget(&store).subjects, 1);

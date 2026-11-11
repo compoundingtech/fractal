@@ -108,6 +108,17 @@ metadata. Both are dynamic SQL readers, not size proofs. Their maintainers retai
 `trace-statement-and-value-representation` task; representation changes must not count repeated
 observations as new events or move a queue-exit time.
 
+### Agent prose seek indexes
+
+`fractal_store::store` owns the `claims_timeline_prose_time_index` and
+`local_observations_timeline_prose_index` prose-only partial indexes. They reuse the existing subject,
+incarnation and acceptance-time TEXT values, plus integer arrival/snapshot/time columns.
+They add no payload copies or logical input limits, but their variable keys remain inline:
+indexed seeks bound non-prose-history work, not encoded key size. The existing
+`chunk-or-reference-variable-columns` TODO must preserve subject/incarnation equality,
+numeric accepted-time ordering, local arrival order and snapshot fences during reference
+conversion. The indexes add no new value representation.
+
 ### Client operation admission inventory (PR #5921)
 
 The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,
@@ -588,10 +599,14 @@ historical identities into Service bearer credentials. Issuance and bearer
 authentication retain the strict profile-specific principal parser; Service
 credentials require a `plugin/<host>/<service>` principal.
 
-The merged `fractal_store::store` schema is `lv-h6e39e16546c7`, replacing
-`lv-h22c8c670811c` and `lv-h6088551c41aa`. It retains the desired-kind/subject
+The merged `fractal_store::store` schema is `lv-h23dec68723c3`, replacing
+`lv-h6e39e16546c7` and `lv-h1ae4f9ad11c9`. It retains the desired-kind/subject
 index and local desired-write witness while removing the obsolete raw principal
-index. Variable columns and index keys still require reference/chunk conversion.
+index. It also retains incoming assistant-prose indexes on replicated claims and
+local observations: subject/incarnation, canonical time/order and local frontier
+keys remain inline. Reference/chunk conversion must preserve their assistant-role
+and message/content predicates and indexed empty-result semantics; these variable
+columns and index keys remain size-unproven.
 
 The merged inventory additionally reviews the authority producer's pending proof
 identities, membership-window additions/retractions, resumable authentication

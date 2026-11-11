@@ -373,7 +373,7 @@
         "ignores_actor": false
       },
       "st apply": {
-        "actor": "required",
+        "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",
