@@ -133,6 +133,23 @@ own key table, so a key another poller already wrote is never reused.
 - **`github.event` v1**, once per event subject: `version`, `item`, `event`, `observer`, `at`,
   `head_sha`, and a small `detail`. Bound: 1 KiB.
 
+The event subject is global; its operation identifies one observation, not the event itself.
+The idempotency key is `github-event-observation:v1:DIGEST`, where `DIGEST` is
+`smallclaims::hash::canonical_hash` of `("github-event-observation.v1", subject, fields)`,
+with every field value recursively canonicalized. This includes `observer`, `at`, `head_sha`
+when present, and all of `detail`: even two pollers of the same observer can differ. Exact
+retries share a key; distinct observations keep their provenance without an operation conflict.
+Generic claim request hashing is unchanged.
+
+Local admission remains once per subject. Concurrent pollers can nevertheless replicate several
+observations of the same event. Graph event listings and the idle hold's queue-exit reader select
+the canonical first claim per subject, including older claims with the global
+`github-event:SUBJECT` operation key and node-local fields. No history is rewritten. Subscriptions
+and watches still deliver from item facts, semantic event keys and existing delivery receipts,
+not these observation operations, so another event observation is not another delivery.
+New and old operation keys cannot collide; two unmodified old pollers can still conflict with
+each other and need the separate operation-conflict recovery path.
+
 Readers on this build take an item's newest state. A `vcs.item.state` accepted no earlier than the
 item's newest `resource.observed` lays its compact facts over the observed ones; facts it does not
 carry, such as the title or recent comments, stay. This holds for the local resource projection
