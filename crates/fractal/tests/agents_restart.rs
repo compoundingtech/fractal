@@ -257,7 +257,7 @@ impl Fixture {
                 source: Source { repository: "acme/example".into(), r#ref: "refs/heads/main".into(), sha: "a".repeat(40), sequence: 1 },
                 expected_set: "absent".into(), rollout: None,
                 adopt: std::collections::BTreeSet::from(["agent/example/worker".into()]),
-                allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+                allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
             };
             options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
             store.apply_owned_set(&intent, &options, "own-fixture", "person/avery").unwrap();
@@ -944,6 +944,7 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
         adopt: std::collections::BTreeSet::from([subject.clone()]),
         allow_empty: false,
         confirm_retire: None,
+        policy: None,
         expected_subjects: Default::default(),
     };
     options.expected_subjects = fixture

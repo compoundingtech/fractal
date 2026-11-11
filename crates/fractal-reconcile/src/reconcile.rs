@@ -62,6 +62,7 @@ pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
+pub mod program;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
@@ -1421,6 +1422,8 @@ pub struct Reconciler<R = NativeRuntime> {
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     file_watch_revision: Arc<std::sync::atomic::AtomicU64>,
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
+    program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1637,6 +1640,7 @@ impl Reconciler<NativeRuntime> {
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
+            program_engine: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1857,6 +1861,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_observations: Arc::new(Mutex::new(HashMap::new())),
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
+            program_engine: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1901,6 +1906,11 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn incoming_resumes(&self, desired: &[DesiredSubject]) -> Result<()> {
         let targets = self.store.cross_host_resume_targets(&self.host)?;
         for subject in desired.iter().filter(|subject| targets.contains(&subject.subject)) {
+            if let Some(run) = &subject.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                continue;
+            }
             let Some(member) = &subject.member else {
                 continue;
             };
@@ -3060,6 +3070,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let gate_runners = self.gate_runners()?;
         _runners_span.items(gate_runners.len());
         for runner in &gate_runners {
+            if self.store.run_projection_pending(&runner.owner_run)? {
+                continue;
+            }
             if runner.retired && runner.host == self.host {
                 let _ = self.isolate("gate", &runner.subject, || {
                     let runtime_id = runner.subject.replace('/', ".");
@@ -3092,6 +3105,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
+        let mut pending_subjects = BTreeSet::new();
+        for declaration in &desired {
+            if let Some(run) = &declaration.owner_run
+                && self.store.run_projection_pending(run)?
+            {
+                pending_subjects.insert(declaration.subject.clone());
+            }
+        }
         if crate::otel::export_enabled() {
             tracing::Span::current().record("st.reconcile.items", desired.len() as i64);
         }
@@ -3113,6 +3134,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| subject.kind == "stop" && subject.subject.starts_with("agent/"))
             .map(|subject| subject.subject.as_str())
             .collect::<BTreeSet<_>>();
@@ -3120,6 +3142,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut task_stops = BTreeSet::new();
         if !stopped_roots.is_empty() {
             for subject in &desired {
+                if pending_subjects.contains(&subject.subject) {
+                    continue;
+                }
                 let Some(member) = subject.member.as_ref().filter(|_| {
                     matches!(subject.kind.as_str(), "exec" | "pty")
                 }) else {
@@ -3202,10 +3227,12 @@ impl<R: RuntimeControl> Reconciler<R> {
 
         let task_stop_subjects = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
         let active = desired
             .iter()
+            .filter(|subject| !pending_subjects.contains(&subject.subject))
             .filter(|subject| !task_stops.contains(&subject.subject))
             .collect::<Vec<_>>();
         let eligible = match self.store.owned_desired_subjects(&desired) {
@@ -10510,9 +10537,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         let full = !self.skip_unneeded || self.incremental.take_full_pass("mission-run", now_ms());
         for id in &ids {
             let subject = format!("mission-run/{id}");
+            let pending = self.store.run_projection_pending(&subject)?;
+            if pending {
+                let mut reads = self.incremental.reads_of(&subject);
+                reads.insert(subject.clone());
+                self.incremental.evaluated(&subject, reads, None);
+            }
             let _clock = smallclaims::store::clock_snapshot();
             let needed = self.needs_item(&subject, full);
-            if !full && !needed {
+            if pending || (!full && !needed) {
                 // Nothing it read changed and nothing is due. It stays active: keep its caches,
                 // faults and file watchers as its last evaluation left them.
                 for key in self.incremental.reads_of(&subject) {
@@ -10600,7 +10633,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| {
                 self.isolate("mission-run", &subject, || {
+                    smallclaims::touched::note_read(|| subject.clone());
                     let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    // Eager cancellation (§6): a program step that left its attempt in this run's
+                    // latest transition stops now, before an inactive run returns below.
+                    if let Some(engine) = self.program_engine.get() {
+                        engine.release_left(&run);
+                    }
                     if active_only
                         && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
                     {
@@ -10766,6 +10805,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(id) = subject.strip_prefix("mission-run/") else {
                 continue;
             };
+            if self.store.run_projection_pending(subject)? {
+                continue;
+            }
             let _clock = smallclaims::store::clock_snapshot();
             changed |= self.evaluate_one_mission_run(
                 id,
@@ -11487,6 +11529,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     if !self.step_declarations_hold(run, &view.subject)? {
+                        return Ok(changed);
+                    }
+                    if let Some(program) = &step.spec.program {
+                        changed |= self.dispatch_program(run, &step, view, program)?;
                         return Ok(changed);
                     }
                     if !view.agentless && !view.worker_reported {
@@ -14360,6 +14406,53 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(true)
     }
 
+    /// The program engine, started with the first program step this daemon runs.
+    fn program_engine(&self) -> &Arc<program::ProgramEngine> {
+        self.program_engine.get_or_init(|| {
+            let incremental = self.incremental.clone();
+            let notify = self.notify.clone();
+            let event_notify = self.event_notify.clone();
+            program::ProgramEngine::new(
+                self.store.clone(),
+                Arc::new(move |step: &str| {
+                    incremental.touch(step);
+                    signal_changed(&notify, &event_notify);
+                }),
+                self.driver_state_dir.join("programs"),
+                program::Liveness::default(),
+            )
+        })
+    }
+
+    /// Hand an active program step to the program engine, which completes or fails it. A step
+    /// whose bundle this member does not hold fails here.
+    fn dispatch_program(
+        &self,
+        run: &MissionRunView,
+        step: &RuntimeStep<'_>,
+        view: &crate::model::StepRunView,
+        program: &crate::model::ProgramSpec,
+    ) -> Result<bool> {
+        let dispatch = program::Dispatch {
+            step: view.subject.clone(),
+            attempt: view.attempt,
+            run: run.subject.clone(),
+            program: program.clone(),
+            payload: run.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+            env: run_variables(run, step, view).into_iter().filter(|(name, _)| name.starts_with("ST_")).collect(),
+            cwd: run.workspace.clone(),
+        };
+        match self.program_engine().dispatch(dispatch)? {
+            program::Dispatched::Running | program::Dispatched::Started => Ok(false),
+            // The step keeps its state; `ProgramEngine::host_fault` names the reason.
+            program::Dispatched::HostDown(reason) => {
+                eprintln!("fractal: program {}: {reason}", view.subject);
+                Ok(false)
+            }
+            program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason)),
+        }
+    }
+
     fn materialize_step_declarations(
         &self,
         run: &MissionRunView,
@@ -15397,7 +15490,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         let step = self
             .store
-            .step_run(subject)?
+            .step_run_fenced(subject)?
             .context("the feedback step disappeared")?;
         if step.attempt != attempt {
             return Ok(());
@@ -17541,6 +17634,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let _look = look_lock.clone().lock_owned().await;
                 let look_deadline = tokio::time::Instant::now() + look_limit;
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                // The arm keeps the oldest pending attempt as its name, so a delivery while it
+                // looks does not retire it. Right before the reads, a webhook refresh takes the
+                // newest pending webhook refresh from the same member, whose answer answers them all.
+                let refresh_attempt = refresh_attempt.as_ref().map(|attempt| {
+                    store.coalesced_refresh_attempt(&observer_subject, attempt).unwrap_or_else(|_| attempt.clone())
+                });
                 if let Some(latest) = cursors.lock().unwrap_or_else(PoisonError::into_inner).get(&deadline_key).cloned() {
                     kept_cursor = Some(latest.clone());
                     cursor = latest;
@@ -17571,6 +17670,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     kept_cursor = Some(pending.clone());
                     cursor = pending;
                 }
+                // Refresh claims replicate, so a webhook delivery any member received covers the
+                // repository here, where it is polled. A covered repository's polls are a backstop.
+                let webhook_covered = spec.provider == "github.repository"
+                    && store.github_webhook_covered(&observer_subject, now_ms()).unwrap_or(false);
                 let request = ObservationRequest {
                     provider: spec.provider.clone(),
                     locator: spec.locator.clone(),
@@ -17579,6 +17682,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     previous_facts: previous_facts.clone(),
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
+                    webhook_covered,
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
                 let refreshed = github_plugin.observer_freshness(&observer_subject, now_ms());
@@ -17678,6 +17782,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 if standing {
                                     let interval = match standing_interval {
                                         _ if outcome.baseline || !outcome.changed_fields.is_empty() => 180_000,
+                                        _ if webhook_covered && !continuing => 600_000,
                                         None => 180_000,
                                         Some(interval) if continuing => interval,
                                         Some(180_000) => 360_000,
@@ -19404,6 +19509,7 @@ fn mirror_observation(
             .admit(subject, fractal_schema::github_plugin::EVENT, &fields)
             .map_err(anyhow::Error::new)
             .and_then(|()| {
+                let key = github_events::observation_key(subject, &fields)?;
                 store.append_claim(&ClaimInput {
                     subject: subject.to_owned(),
                     kind: fractal_schema::github_plugin::EVENT.into(),
@@ -19411,7 +19517,7 @@ fn mirror_observation(
                     fields,
                     evidence: Vec::new(),
                     expected_subject: None,
-                    idempotency_key: Some(format!("github-event:{subject}")),
+                    idempotency_key: Some(key),
                 }).map_err(|error| anyhow::anyhow!(error.message))
             });
         if let Err(error) = written {
@@ -19506,6 +19612,7 @@ async fn refill_mirror(
         previous_facts: None,
         every_ms: spec.every_ms,
         refresh: false,
+        webhook_covered: false,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
@@ -21179,6 +21286,7 @@ pub mod tests {
     mod start_preemption;
     mod seat_admission_queue;
     mod terminal_step_guard;
+    mod program_engine;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -23218,6 +23326,134 @@ mission "orchid/replay" state="ready" {
             "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":80,\"output_tokens\":30}}\n",
         );
         assert_eq!(structured_token_usage(log), Some(150));
+    }
+
+    #[test]
+    fn pending_run_projection_defers_dispatch_until_drain() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"pending-dispatch\" state=\"ready\" { goal \"Do work.\"; agent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }; step \"work\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\"; goal \"Do work.\" } }",
+            "publish-pending-dispatch",
+        );
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pending-dispatch".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "pending-dispatch".into(),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.evaluate_mission_runs().unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h5a2563345d4d owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+        ).unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.started_members.lock().unwrap().is_empty());
+        assert!(store.run_projection_pending(&run.subject).unwrap());
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert!(crate::store::finish_run_projection_tx(&transaction, &run.subject).unwrap());
+            transaction.commit().unwrap();
+        }
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert!(!runtime.started_members.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_run_projection_defers_evaluation_until_drain() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nmission \"pending\" state=\"ready\" { goal \"Finish.\"; completion { when \"all-steps-exhausted\" }; step \"work\" { agentless } }",
+            "publish-pending",
+        );
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "pending".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "pending-run".into(),
+        }).unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
+        store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hc927df7b03e5 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+        ).unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let index = store.index().unwrap();
+        reconciler.evaluate_mission_runs().unwrap();
+        assert!(store.run_projection_pending(&run.subject).unwrap());
+        assert_eq!(store.index().unwrap(), index, "a pending run appends no evaluation claims");
+        assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, run.status);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            assert!(crate::store::finish_run_projection_tx(&transaction, &run.subject).unwrap());
+            transaction.commit().unwrap();
+        }
+        let (evaluated, _) = reconciler.evaluate_changed_mission_runs().unwrap();
+        assert_eq!(evaluated, 1, "the drain wakes the skipped run through its read dependency");
+        for _ in 0..4 {
+            reconciler.evaluate_mission_runs().unwrap();
+        }
+        assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn work_start_drains_pending_projection_before_returning_existing_work() {
+        use crate::AdhocWorkStore as _;
+        let store = Store::open_memory("node").unwrap();
+        apply_source(
+            &store,
+            "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }",
+            "work-start-seat",
+        );
+        let actor = store.desired_subjects().unwrap().into_iter()
+            .find(|declaration| declaration.kind == "agent").unwrap().subject;
+        let request = crate::model::WorkStartRequest {
+            actor,
+            title: "The committed title".into(),
+            idempotency_key: "pending-work-start".into(),
+        };
+        let step = store.start_work(&request).unwrap();
+        let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(
+            step.run.trim_start_matches("mission-run/").to_owned(),
+        )).unwrap();
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hd5bab3d616a3 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET title='stale projection' WHERE subject=?1",
+                [&step.subject],
+            ).unwrap();
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he0d8cbf77f9b owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        let started = store.start_work(&request).unwrap();
+        assert_eq!(started.title.as_deref(), Some(request.title.as_str()));
+        assert_eq!(started.subject, step.subject);
+        assert!(!store.run_projection_pending(&step.run).unwrap());
     }
 
     #[test]
@@ -39840,6 +40076,7 @@ observer "repo" {
             calls: Arc<AtomicUsize>,
             changed: Arc<AtomicUsize>,
             continuation: Arc<AtomicBool>,
+            covered: Arc<AtomicBool>,
         }
         impl ResourceProvider for AdaptiveProvider {
             fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
@@ -39850,6 +40087,7 @@ observer "repo" {
                     assert_eq!(request.cursor.as_deref(), Some("etag-and-pagination-state"));
                 }
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                self.covered.store(request.webhook_covered, Ordering::SeqCst);
                 let change = self.changed.load(Ordering::SeqCst);
                 let continuing = self.continuation.load(Ordering::SeqCst);
                 let mut facts = serde_json::json!({"repository_id": 7});
@@ -39927,10 +40165,11 @@ observer "{subject}" {{
             let calls = Arc::new(AtomicUsize::new(0));
             let changed = Arc::new(AtomicUsize::new(0));
             let continuation = Arc::new(AtomicBool::new(false));
+            let covered = Arc::new(AtomicBool::new(false));
             let reconciler = Reconciler::new(
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
             ).with_resource_provider(Arc::new(AdaptiveProvider {
-                calls: calls.clone(), changed: changed.clone(), continuation: continuation.clone(),
+                calls: calls.clone(), changed: changed.clone(), continuation: continuation.clone(), covered: covered.clone(),
             }));
             // Legacy standing every=30s adapts, while an explicitly faster custom observer
             // stays at 30s through every quiet/change boundary.
@@ -39976,6 +40215,30 @@ observer "{subject}" {{
             apply_source(&store, &source.replace("30s", "31s"), "adaptive-watch-revision");
             poll(&reconciler, &calls, &subject_id, false,
                 if standing { 180_000 } else { 31_000 }).await;
+            assert!(!covered.load(Ordering::SeqCst), "a declared refresh is not webhook coverage");
+
+            // A webhook-requested refresh, from whichever member received the delivery, covers
+            // the repository: quiet polls take the ceiling at once and changes stay active.
+            let revision = store.selected_desired_revision(&subject_id).unwrap().unwrap();
+            store.append_claim(&ClaimInput {
+                subject: subject_id.clone(),
+                kind: "observer.refresh-requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String(crate::github_webhook::attempt("delivery", &subject_id))),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            poll(&reconciler, &calls, &subject_id, false,
+                if standing { 600_000 } else { 31_000 }).await;
+            assert!(covered.load(Ordering::SeqCst));
+            changed.store(0, Ordering::SeqCst);
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 180_000 } else { 31_000 }).await;
+            // The same facts again are quiet: straight to the ceiling, not through 360s.
+            poll(&reconciler, &calls, &subject_id, true,
+                if standing { 600_000 } else { 31_000 }).await;
         }
     }
 
@@ -43100,6 +43363,8 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
             }
         }
         let store = Arc::new(Store::open_memory("node").unwrap());
+        const EVENT_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        store.bind_fleet(EVENT_FLEET).unwrap();
         apply_source(
             &store,
             r#"version 2
@@ -43157,6 +43422,36 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         poll(plugin.clone(), listing("open", "Orchid", &[1]), "c2").await;
         assert_eq!(delivered(), 1);
         assert_eq!(count("resource.observed"), snapshots + 1, "a comment writes a snapshot");
+        // An older poller raced this look, before receiving its event. Its global operation
+        // and node-local payload must not cause another listing row or subscription delivery.
+        let old = Store::open_memory("old-poller").unwrap();
+        old.bind_fleet(EVENT_FLEET).unwrap();
+        let subject = "github-event/repo/issue/1/comment/1";
+        old.append_claim(&ClaimInput {
+            subject: subject.into(), kind: fractal_schema::github_plugin::EVENT.into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("version".into(), serde_json::json!(1)),
+                ("item".into(), serde_json::json!(item)),
+                ("event".into(), serde_json::json!("comment")),
+                ("observer".into(), serde_json::json!("observer/old")),
+                ("at".into(), serde_json::json!("2026-11-11T10:00:01Z")),
+                ("detail".into(), serde_json::json!({"author": "fern"})),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("github-event:{subject}")),
+        }).unwrap();
+        let exchange = old.export_replication_exchange_answering(
+            EVENT_FLEET, &store.replication_inventory().unwrap(),
+            &store.replication_signature_requests().unwrap(),
+        ).unwrap();
+        store.receive_replication_exchange(&old.origin, EVENT_FLEET, &exchange).unwrap();
+        store.validate_replication_backlog().unwrap();
+        store.project_replication_backlog().unwrap();
+        assert_eq!(store.claims_for(subject, None).unwrap().len(), 2);
+        assert_eq!(store.github_events("resource/repo", Some(1), 10).unwrap().len(), 1);
+        assert_eq!(store.idempotency_conflicts(10).unwrap().0, 0);
+        assert_eq!(delivered(), 1, "event provenance does not deliver mail");
         poll(plugin.clone(), listing("open", "Orchid", &[1]), "c3").await;
         assert_eq!(delivered(), 1, "a known comment is not delivered again");
 

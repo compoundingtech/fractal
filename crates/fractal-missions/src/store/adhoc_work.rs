@@ -260,7 +260,7 @@ impl AdhocWorkStore for Store {
             .cached_idempotency_response(&input.idempotency_key)
             .map_err(internal)?;
         if response.is_some() {
-            validate_retry(&self.readers.get(), subject, input)?;
+            self.with_run_fence(subject, |tx| validate_retry(tx, subject, input))?;
         }
         Ok(response)
     }
@@ -270,7 +270,7 @@ impl AdhocWorkStore for Store {
         if input.reason.trim().is_empty() || input.idempotency_key.trim().is_empty() {
             return Err(FractalError::new("invalid-handoff-return", "a reason and idempotency key are required"));
         }
-        self.connection.batched(|tx| {
+        self.with_run_fence(&subject, |tx| {
             let existing = tx.query_row(
                 "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='work.handoff-returned' AND json_extract(body,'$.fields.return_request.idempotency_key')=?1",
                 [&input.idempotency_key], claim_from_row).optional().map_err(internal)?;
@@ -305,7 +305,7 @@ impl AdhocWorkStore for Store {
                 &[handoff.id], None).map_err(claim_append_error)?;
             project_mission_run_update(tx, &claim)?;
             Ok(claim)
-        }).map_err(internal)?
+        })
     }
 
     fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, FractalError> {
@@ -334,7 +334,7 @@ impl AdhocWorkStore for Store {
             .missions
             .remove(&mission_id)
             .ok_or_else(|| FractalError::new("internal", "minimal work mission missing"))?;
-        self.connection.batched(|tx| {
+        self.with_run_fence(&run, |tx| {
             if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-h1a7eefa5184a owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [&run], claim_from_row).optional().map_err(internal)? {
                 if existing.body["fields"]["ad_hoc_title"] != input.title || existing.actor.as_deref() != Some(&input.actor) {
                     return Err(FractalError::new("idempotency-conflict", "this start key already names another task"));
@@ -356,7 +356,7 @@ impl AdhocWorkStore for Store {
             }}), &[], None).map_err(claim_append_error)?;
             project_start(tx, &claim)?;
             person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the work could not be projected"))
-        }).map_err(internal)?
+        })
     }
 
     fn acknowledge_work(
@@ -374,12 +374,14 @@ impl AdhocWorkStore for Store {
         // reader; the transaction below checks that again under the writer.
         let stream_receipt = match self.message(&input.message).map_err(internal)? {
             Some(note) if crate::store::messages_shard::mailbox_reads::is_stream_item(&note) => {
-                let current = names_current_handoff(&self.readers.get(), &subject, input)?;
+                let current = self.with_run_fence(&subject, |tx| {
+                    names_current_handoff(tx, &subject, input)
+                })?;
                 Some(current.then(|| stream_note_receipt(self, &input.message, &input.actor)).transpose()?)
             }
             _ => None,
         };
-        let view = self.connection.batched(|tx| {
+        let view = self.with_run_fence(&subject, |tx| {
             let mut view = person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the handed-off step is missing"))?;
             let handoff = latest_handoff(tx, &view, now_ms())?.ok_or_else(|| FractalError::new("missing-handoff", "this attempt has no handoff note"))?;
             if handoff.body["fields"]["handoff_message"] != input.message || handoff.body["fields"]["handoff_to"] != input.actor || view.assigned_to.as_deref() != Some(&input.actor) {
@@ -426,7 +428,7 @@ impl AdhocWorkStore for Store {
             project_mission_run_update(tx, &claim)?;
             enrich_step_queue(tx, &mut view).map_err(internal)?;
             Ok(view)
-        }).map_err(internal)??;
+        })?;
         // Acknowledged, now or before: the note is read. A read that fails here is recorded by
         // the repeated acknowledgment its error asks for.
         if let Some(Some(_)) = &stream_receipt {
