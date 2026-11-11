@@ -36,7 +36,7 @@ pub(super) fn submission(id: &str, key: &str) -> JobRecord {
         binding: JobHostBinding { job_id: id.into(), execution_host: "fixture-host".into(),
             authority_declaration: "claim/fixture-member".into() },
         identity: IdempotencyKey { requester: "person/fixture".into(), key: key.into(),
-            request_digest: request.digest() }, request,
+            request_digest: request.digest() }, request: Box::new(request),
     }
 }
 
@@ -44,6 +44,29 @@ pub(super) fn insert(tx: &Transaction<'_>, subject: &str, claim: &str, time: u64
     tx.execute("INSERT INTO claims VALUES(?1,?2,'batch',?3,?4,?5,?6)",
         params![claim, time, subject, KIND, json!({"fields":{"record":record}}).to_string(), time.to_string()]).unwrap();
     tx.execute("INSERT INTO claim_positions VALUES(?1,?2)", params![claim, time]).unwrap();
+}
+
+#[test]
+fn mixed_version_job_claims_wait_for_unknown_kind_or_reason_and_read_legacy_records() {
+    use crate::store::classify_replicated_claim_with_registry;
+    use smallclaims::store::ReplicatedClaimAdmission;
+
+    let current = fractal_schema::registry();
+    let mut before_jobs = current.clone();
+    before_jobs.claims.remove(KIND).unwrap();
+    before_jobs.subjects.remove("job").unwrap();
+    assert_ne!(before_jobs.digest(), current.digest());
+
+    // The existing submission fixture is an original unit-4a record: no reason.
+    let id = "job/mixed-version".to_string();
+    let record = submission(&id, "mixed-version");
+    let claim = ClaimRecord { id: "legacy-job".into(), store_index: 1, batch_id: "batch".into(),
+        subject: id.clone(), kind: KIND.into(), origin: "fixture-host".into(),
+        actor: Some("person/fixture".into()), operation_id: None, request_digest: None,
+        body: json!({"fields":{"record":record}}), predecessors: vec![],
+        accepted_at_unix_ms: 1 };
+    assert!(matches!(classify_replicated_claim_with_registry(&claim, &before_jobs).unwrap(),
+        ReplicatedClaimAdmission::UnknownKind));
 }
 
 #[test]
