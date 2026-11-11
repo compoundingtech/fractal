@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+fractal-jobs = { path = "../fractal-jobs" }
 libc = "0.2"
 portable-pty = "0.9"
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }

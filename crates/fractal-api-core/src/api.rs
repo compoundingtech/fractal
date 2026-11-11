@@ -166,6 +166,7 @@ pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
+pub mod jobs;
 #[cfg(target_os = "linux")]
 pub use tile_endpoint::{
     SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
@@ -640,6 +641,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route("/v1/client/jobs", get(jobs::list).post(jobs::submit))
+        .route("/v1/client/jobs/{*id}", get(jobs::show))
         .route(
             "/v1/client/diagnostics",
             post(client_diagnostics::ingest)
@@ -2033,6 +2036,16 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "jobs-disabled"
+        | "jobs-projection-stale"
+        | "idempotency-digest-mismatch"
+        | "job-class-not-allowed"
+        | "job-priority-unknown"
+        | "invalid-request"
+        | "unknown-host"
+        | "conflicting-host"
+        | "stale-authority"
+        | "origin-mismatch"
         | "invalid-answer"
         | "not-answerable"
         | "idempotency-key-expired"
