@@ -417,7 +417,7 @@ mod tests {
         {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
-            smallclaims::store::append_claim_tx(
+            smallclaims::store::append_claim_record_tx(
                 &transaction, &store.origin,
                 "github-event/github/acme/garden/pull-request/12/merge-queue-left/2",
                 "github.event", None,
