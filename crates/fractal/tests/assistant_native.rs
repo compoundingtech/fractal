@@ -64,7 +64,7 @@ impl Harness {
             owning_person: Some(OWNER.into()), store,
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0).0,
-            node: "assistant-native".into(), state_dir: root.path().into(),
+            node: "assistant-native".into(), api_socket: root.path().join("api.sock"),state_dir: root.path().into(),
             pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
             fleet_id: None, configured_peers: vec![], client_relay: None,
             native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),

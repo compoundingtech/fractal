@@ -15,6 +15,7 @@ fn state(root: &std::path::Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0u64).0,
         node: "push-test".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused"),

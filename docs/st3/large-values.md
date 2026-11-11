@@ -783,3 +783,21 @@ commit. Preserve these scenarios when the representation changes.
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+### GitHub plugin read fixture includes (PR #6396)
+
+The `fractal_api_client_v0::api::client_v0::github_plugin_reads::tests` maintainer
+owns `lv-ha3a3bb1e957c` and `lv-h8fa94b508404`, reviewed for
+[PR #6396](https://github.com/compoundingtech/fractal/pull/6396).
+The former includes the shared GitHub wire JSON fixtures; the latter includes
+the capabilities JSON used to negotiate the real client's response ceiling.
+They contain test-only paths, item bodies, patches and capability metadata,
+not SQL statements, database columns or index keys, and are parsed in memory.
+Keeping exact fixture bytes inline preserves the cross-client wire assertions;
+neither site writes those bytes to SQLite or changes a production representation.
+The lexical catalog conservatively inventories these includes. The owning module
+retains `trace-statement-and-value-representation`: trace any future fixture or
+consumer change before adding SQL execution or persistence, and review the
+resulting value/column representation rather than treating these markers as a
+permanent storage exemption.
+

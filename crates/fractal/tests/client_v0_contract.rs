@@ -1002,6 +1002,47 @@ fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
     assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
 }
 
+/// The GitHub plugin's reads: each fixture conforms to its read definition, and an envelope
+/// carrying it (as the client-v0 middleware serves it) conforms to `Envelope`.
+#[test]
+fn github_plugin_fixtures_conform_to_their_reads_and_the_envelope() {
+    let root = asset_root();
+    let manifest = json(root.join("fixtures/manifest.json"));
+    let envelope = contract_validator("Envelope");
+    let mut seen = 0;
+    for entry in manifest["fixtures"].as_array().unwrap() {
+        let file = entry["file"].as_str().unwrap();
+        if !file.starts_with("github-plugin-") {
+            continue;
+        }
+        seen += 1;
+        let value = json(root.join("fixtures").join(file));
+        let definition = entry["definition"].as_str().unwrap();
+        let errors = contract_validator(definition).iter_errors(&value).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} as {definition}: {errors:?}");
+        assert!(contract_validator("GithubPluginRead").is_valid(&value), "{file}");
+        let wrapped = serde_json::json!({
+            "api_version": "st3.client.v0",
+            "request_id": "request/example",
+            "snapshot": {
+                "id": "snapshot/example/1/0000000000000000",
+                "host_id": "host/example",
+                "store_index": 1,
+                "projection_version": "client-projection.v0",
+                "created_at": "2026-01-01T00:00:00.000Z"
+            },
+            "value": value,
+        });
+        let errors = envelope.iter_errors(&wrapped).map(|error| error.to_string()).collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{file} in an Envelope: {errors:?}");
+    }
+    assert_eq!(seen, 12);
+    // A URL is never an item: a found read whose item misses fields does not conform.
+    assert!(!contract_validator("GithubPullRequestRead").is_valid(&serde_json::json!({
+        "status": "found", "fetched_at": "2026-11-07T06:40:00Z", "stale": false, "item": { "url": "https://github.com/acme/garden/pull/7" }
+    })));
+}
+
 #[test]
 fn manifest_names_existing_json_fixtures_and_schema_definitions() {
     let root = asset_root();
@@ -1367,6 +1408,7 @@ fn test_state(root: &Path) -> AppState {
     notify: Arc::new(Notify::new()),
     event_notify: watch::channel(0_u64).0,
     node: "client-v0-baseline".into(),
+    api_socket: root.join("api.sock"),
     state_dir: root.to_path_buf(),
     pty_root: root.join("pty"),
     pty_binary: PathBuf::from("pty"),

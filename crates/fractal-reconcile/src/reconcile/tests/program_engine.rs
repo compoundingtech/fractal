@@ -186,6 +186,28 @@ fn a_program_resumes_from_its_journal_after_its_host_is_killed() {
     assert_eq!(result.body["fields"]["value"], json!({"first": {"attempt": 1}, "waited": "opened"}));
 }
 
+/// A program run that `missions start` just created journals its first inner step from the
+/// change feed alone (R14): the follower evaluates the new run, which readies and dispatches its
+/// program step, with no pass, which would first wait out `StartSpacing`.
+#[test]
+fn a_new_program_run_starts_its_first_step_without_a_pass() {
+    let fixture = fixture(Liveness::default());
+    // A running daemon's passes, and so its follower, have read the feed up to here.
+    fixture.reconciler.reconcile_once().unwrap();
+    let started = fixture.start("first", "wait");
+    // The follower's chain after the run's creation, as `follow_mission_reads` runs it: an
+    // evaluation that wrote is followed at once by another.
+    for _ in 0..=MISSION_READS_CONTINUATIONS {
+        if !fixture.reconciler.evaluate_changed_mission_runs().unwrap().1 {
+            break;
+        }
+    }
+    fixture.without_passes("the first inner step starts", || !fixture.journal(&started.step).is_empty());
+    assert_eq!(fixture.journal(&started.step)[0], ("first".to_owned(), "started".to_owned()));
+    std::fs::write(&started.gate, "").unwrap();
+    fixture.until("the program completes", || fixture.status(&started.step) == "completed");
+}
+
 #[test]
 fn a_step_that_leaves_its_attempt_stops_its_program_and_effects_at_once() {
     let fixture = fixture(Liveness::default());

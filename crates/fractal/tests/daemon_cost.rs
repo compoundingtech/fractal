@@ -481,6 +481,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/replication/repair",
         "repairs one replication record",
     ),
+    (
+        "POST /v1/replication/replay",
+        "explicit planned-window operator replay holds the writer; covered by replication_replay::tests",
+    ),
     ("POST /v1/rules/set", "sets an authority rule"),
     (
         "POST /v1/client/actions",
@@ -493,6 +497,34 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/client/blobs/{id}",
         "image bytes, outside the graph",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
+    ),
+    (
+        "GET /v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
+        "reads GitHub over the network, outside the graph; serialization is covered by the github_plugin_reads contract tests",
     ),
     (
         "GET /v1/client/conversations/{id}/content/{reference}/chunk",
@@ -1886,6 +1918,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -1999,6 +2032,7 @@ mission "cost/history" state="ready" {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.path().join("state").join("api.sock"),
         state_dir: root.path().join("state"),
         pty_root: root.path().join("pty"),
         pty_binary: stub_pty(root.path()),
@@ -3183,6 +3217,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.join("state").join("api.sock"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty,

@@ -39,6 +39,21 @@ fractal terminals peek agent/garden/worker
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
 
+## Planned graph replay
+
+Run `fractal replication replay` locally for the claim count, last measured replay
+duration (if known), and writer-lock warning. It is an estimate only: no replay runs
+without `fractal replication replay --confirm`. Schedule a planned window because the
+daemon holds its writer for the entire replay, delaying other writes. The daemon logs
+start and completion and keeps the operator, start time, duration and result in
+`replication-replay-audit.jsonl` in its state directory. A concurrent replay is refused,
+not queued. Do not restart the daemon to “fix” a replay; let the running replay finish.
+The estimate names any blocked owned sets. Canonical replay removes their retained
+physical `desired` and `mission_definitions` rows and cannot rebuild them while the
+sets remain blocked; authoritative claims and set receipts are not deleted. Resolve
+the blockers first if those retained rows must remain available. `--confirm` prints
+the same warning before starting; it does not add another confirmation flag.
+
 ## Writer queue waits
 
 When an interactive request is slow during replication, distinguish time queued

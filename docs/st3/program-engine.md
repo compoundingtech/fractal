@@ -265,6 +265,14 @@ needs `write SUBJECT`. A refusal reaches its caller as `run-authority-denied`. T
 discover the grants it needs. Each decision reads only each revision's `authority` member along
 the starter chain.
 
+**Reach.** Whatever it is granted, and in either mode, a run touches only itself and the runs it
+started, transitively: a run's parent is the run of the step it was started under, the tree a
+cancellation cascades down (§6). A claim on a run, its generations, step runs or revision
+proposals, a `mission-run` declaration a run applies (creation, revision, reset or cancellation),
+and a cancellation requested as the run, are refused as
+`run-authority-denied` for any other run, so `write "mission-run/*"` reaches no sibling, parent or
+unrelated run. A run starts runs only as the children its program starts, never by declaring one.
+
 ### 4. Versioning
 
 A program's revision is its bundle hash: `sha256` is part of the step definition, so it enters the
@@ -482,8 +490,9 @@ A program waiting on an ask or a child run stays loaded in the host. A replaced 
 program to the same wait.
 
 **Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
-bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun`, from the tree
-root so the bytes do not depend on where the tree is checked out, and writes it to
+bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun
+--minify-whitespace`, which drops Bun's per-module path comments so the bytes do not depend on where
+the tree or its dependencies are checked out, and writes it to
 `<bundleDir>/<sha256>.mjs` after checking that its default export carries the entry. The mission
 loads as its declaration: the header from the intent (`timeout`, `concurrentRuns`, `authority`),
 one text `input` per field of `intent.input`, and one step `program` pinning the bundle by path and

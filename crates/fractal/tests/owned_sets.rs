@@ -53,6 +53,7 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: name.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.clone(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),
@@ -2049,7 +2050,7 @@ async fn terminal_retire_of_a_live_member_is_refused_through_client_v0() {
 }
 
 /// An `audit` set refuses nothing beyond `off`: each write `enforce` would refuse proceeds and
-/// records `source.audited` with that refusal.
+/// records `source.audited` with that refusal. Only the terminal retirement also opens debt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_audit_set_records_what_enforce_would_refuse() {
     let root = tempfile::tempdir().unwrap();
@@ -2071,7 +2072,8 @@ async fn an_audit_set_records_what_enforce_would_refuse() {
     let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
     d.store.retire_agent(orchard, "person/operator", "done", &token, None, "audited-retire", &[]).unwrap();
     let status = source_status(&d, true).await;
-    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    let open: Vec<_> = status["open"].as_array().unwrap().iter().map(|debt| (&debt["subject"], &debt["verb"])).collect();
+    assert_eq!(open, [(&json!(orchard), &json!("retire"))], "{status}");
     let audited: Vec<(String, String)> = status["audited"]
         .as_array()
         .unwrap()
@@ -2086,6 +2088,95 @@ async fn an_audit_set_records_what_enforce_would_refuse() {
     assert_eq!(status["audited"][0]["actor"], "person/operator");
     assert_contains(status["audited"][0]["refusal"].as_str().unwrap(), &["retirement is terminal"]);
     assert!(source_status(&d, false).await.get("audited").is_none());
+}
+
+/// An ad hoc terminal retirement cannot be reverted, so it never wedges the set: a publication
+/// still declaring the member keeps it retired and says so. An `audit` set also records the
+/// retirement as source debt, open until the source drops the member and then adopted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ad_hoc_retirement_keeps_the_member_retired_until_the_source_drops_it() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, enforced_bundle(""), Some(enforce(Enforce::Audit))).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "audited-retire", &[]).unwrap();
+    let status = source_status(&d, false).await;
+    assert_eq!(status["open"].as_array().unwrap().len(), 1, "{status}");
+    assert_eq!(status["open"][0]["subject"], orchard);
+    assert_eq!(status["open"][0]["verb"], "retire");
+    assert_eq!(status["open"][0]["reason"], "done");
+
+    // Every publication still declaring the member succeeds, keeps it retired and reports it.
+    for sequence in [11, 12] {
+        let (planned, published) = publish_set(&d, sequence, enforced_bundle(LILY), None).await;
+        assert!(planned.blockers.is_empty(), "{:?}", planned.blockers);
+        assert!(!planned.mass_retirement);
+        assert_eq!(planned.changes[orchard], "retired");
+        assert_eq!(planned.effects[orchard], "keep terminally retired by person/operator: done; drop it from the source");
+        assert!(!planned.declaration_diffs.contains_key(orchard));
+        assert!(planned.reverted_debts.is_empty(), "{:?}", planned.reverted_debts);
+        assert!(published["publication"]["source_debts_reverted"].as_array().is_none_or(Vec::is_empty), "{published}");
+        let set = d.store.owned_sets().unwrap().remove(0);
+        assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+        assert!(set.receipt.retired.contains_key(orchard) && !set.receipt.members.contains_key(orchard));
+        assert!(set.receipt.members.contains_key("agent/garden/lily"));
+        assert!(d.store.agent_retirement(orchard).unwrap().is_some());
+        assert_eq!(source_status(&d, false).await["open"][0]["verb"], "retire");
+    }
+
+    // Dropping the member from the source adopts the retirement and closes its debt.
+    let (planned, _) = publish_set(&d, 13, format!("version 2\n{ROSE}{LILY}{HARVEST}"), None).await;
+    assert!(!planned.changes.contains_key(orchard), "{:?}", planned.changes);
+    assert_eq!(planned.reverted_debts.len(), 1, "{:?}", planned.reverted_debts);
+    assert_eq!(planned.reverted_debts[0].outcome.as_deref(), Some("adopted"));
+    let status = source_status(&d, false).await;
+    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    assert_eq!(status["closed"][0]["verb"], "retire", "{status}");
+    assert_eq!(status["closed"][0]["outcome"], "adopted", "{status}");
+}
+
+/// A set without a policy records no debt, but its publication still keeps an ad hoc retired
+/// member retired instead of failing with `recipient-retired`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_off_set_publication_keeps_an_ad_hoc_retired_member_retired() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, enforced_bundle(""), None).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "off-retire", &[]).unwrap();
+    let (planned, _) = publish_set(&d, 11, enforced_bundle(LILY), None).await;
+    assert!(planned.blockers.is_empty(), "{:?}", planned.blockers);
+    assert_eq!(planned.changes[orchard], "retired");
+    assert!(d.store.owned_sets().unwrap().remove(0).receipt.retired.contains_key(orchard));
+    assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
+}
+
+/// Dropping an agent retired ad hoc from the source is not a retirement by that publication, so
+/// it needs no mass-retirement confirmation, and it adopts the retire debt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_an_ad_hoc_retired_member_needs_no_retirement_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let orchard = "agent/garden/orchard";
+    publish_set(&d, 10, format!("{}{ROSE}", bundle("source", false)), Some(enforce(Enforce::Audit))).await;
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "dropped-retire", &[]).unwrap();
+    // Half of the previous membership is omitted, which would otherwise need confirmation.
+    let (planned, _) = publish_set(&d, 11, format!("version 2\n{ROSE}"), None).await;
+    assert!(!planned.mass_retirement);
+    assert_eq!(planned.changes[orchard], "retired");
+    assert_eq!(planned.effects[orchard], "keep terminally retired by person/operator: done");
+    assert_eq!(planned.reverted_debts.len(), 1, "{:?}", planned.reverted_debts);
+    assert_eq!(planned.reverted_debts[0].outcome.as_deref(), Some("adopted"));
+    let set = d.store.owned_sets().unwrap().remove(0);
+    assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+    assert!(set.receipt.retired.contains_key(orchard) && !set.receipt.members.contains_key(orchard));
+    assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
 }
 
 /// A policy needs every active member to advertise `source_enforcement`; a set naming its

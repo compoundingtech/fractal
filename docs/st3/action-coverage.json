@@ -1969,6 +1969,20 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st replication replay",
+      "description": "Estimate a local graph replay; --confirm runs it while holding the daemon writer",
+      "tests": [
+        "crates/fractal/src/replication_cli.rs::replication_replay_requires_explicit_confirm_flag",
+        "crates/fractal-api-core/src/api/replication_replay_tests.rs::replay_estimate_refuses_to_mutate_without_confirm_and_rejects_fabric",
+        "crates/fractal-api-core/src/api/replication_replay_tests.rs::replay_estimate_names_blocked_owned_sets_and_explains_projection_loss",
+        "crates/fractal-api-core/src/api/replication_replay_tests.rs::replay_concurrent_call_is_rejected_before_waiting_for_writer",
+        "crates/fractal-api-core/src/api/replication_replay_tests.rs::replay_clears_unhealthy_graph_and_durably_audits_operator",
+        "crates/fractal-api-core/src/api/replication_replay_tests.rs::replay_torn_audit_record_does_not_block_estimate_or_replay",
+        "crates/fractal-api-core/src/api/replication_replay_tests.rs::replay_unwind_guard_persists_aborted_terminal_audit"
+      ],
+      "verification": "CLI parser confirmation contract and real daemon handler with a disk-backed store; estimate, local transport, concurrent admission, graph repair and durable audit recovery"
+    },
+    {
       "command": "st replication signatures resume",
       "description": "Clear this member's persisted signature-state-corrupt fault and let the migration go on. If the defect it named is still there, the next page persists the same fault again",
       "tests": [

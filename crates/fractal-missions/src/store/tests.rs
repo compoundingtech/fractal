@@ -180,13 +180,13 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
     restore_pending_generation(&store, &first);
     let before = store.index().unwrap();
     let stale = store.request_mission_run_cancellation_at_generation(
-        &first.subject, "cancel current tree", Some(&first.generation),
+        &first.subject, "cancel current tree", Some(&first.generation), None,
     ).unwrap_err();
     assert_eq!(stale.code, "stale-fence");
     assert_eq!(store.index().unwrap(), before, "refusal writes no claims");
     assert!(!store.run_projection_pending(&first.subject).unwrap());
     assert!(store.request_mission_run_cancellation_at_generation(
-        &first.subject, "cancel current tree", Some(&second.generation),
+        &first.subject, "cancel current tree", Some(&second.generation), None,
     ).unwrap());
     assert!(!store.run_projection_pending(&first.subject).unwrap());
     let current = store.mission_run(&first.subject).unwrap().unwrap();
@@ -196,6 +196,36 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
         assert!(run.steps.iter().all(|step| matches!(step.status.as_str(), "completed" | "failed" | "cancelled")));
     }
     assert!(store.work(None, false).unwrap().is_empty());
+}
+
+/// A run requests the cancellation only of itself and the runs it started.
+#[test]
+fn a_run_requests_cancellation_only_within_its_subtree() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(&store, "version 2\nmission \"tree\" state=\"ready\" { goal \"Grow a tree.\"; concurrent-runs max=4; step \"work\" { goal \"Grow.\" } }", "reach-tree");
+    let request = |key: &str| MissionRunRequest {
+        mission: "tree".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/requester".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: key.into(),
+    };
+    let root = store.create_mission_run(&request("reach-root")).unwrap();
+    let child = store.create_child_mission_run(&request("reach-child"), &root, &root.steps[0].subject, None).unwrap();
+    let unrelated = store.create_mission_run(&request("reach-unrelated")).unwrap();
+    let before = store.index().unwrap();
+    for (actor, target) in [(&root, &unrelated), (&child, &root)] {
+        let refused = store.request_mission_run_cancellation_at_generation(
+            &target.subject, "out of reach", Some(&target.generation), Some(&actor.subject),
+        ).unwrap_err();
+        assert_eq!(refused.code, "run-authority-denied", "{} cancelling {}", actor.subject, target.subject);
+    }
+    assert_eq!(store.index().unwrap(), before, "a refusal writes nothing");
+    assert!(store.request_mission_run_cancellation_at_generation(
+        &child.subject, "its own child", Some(&child.generation), Some(&root.subject),
+    ).unwrap());
+    assert_ne!(store.mission_run(&child.subject).unwrap().unwrap().phase, "normal");
+    for run in [&root, &unrelated] {
+        assert_eq!(store.mission_run(&run.subject).unwrap().unwrap().phase, "normal");
+    }
 }
 
 #[test]

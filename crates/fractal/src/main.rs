@@ -2627,6 +2627,11 @@ enum BackupCommand {
 enum ReplicationCommand {
     /// Show fleet receipt, validation, projection, and peer health.
     Status,
+    /// Estimate a local graph replay; --confirm runs it while holding the daemon writer.
+    Replay {
+        #[arg(long)]
+        confirm: bool,
+    },
     /// List invalid and unknown replicated records.
     Invalid {
         #[arg(long)]
@@ -3376,8 +3381,9 @@ struct ApplyArgs {
     /// Print the resolved preview without publishing or running exec gates (unless --check).
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
-    /// Check mission and step exec gates during a dry run, as `fractal missions check` does.
-    /// Loop until scripts are not checked; they run after each round.
+    /// Check mission and step exec gates during a dry run, as `fractal missions check` does; with
+    /// --set only the missions whose revision the daemon does not hold yet. Loop until scripts are
+    /// not checked; they run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// The workspace a run would use, for exec gate checks.
@@ -3624,11 +3630,16 @@ async fn run_owned_set_apply(
         "owned set refused: {}",
         preview.blockers.join("; ")
     );
-    // Empty owned membership has no gates and is not a valid plain gate-check intent.
-    if !preview.empty && (args.check || (!args.dry_run && !args.no_gate_check)) {
+    // Check only the missions whose revision this daemon does not hold yet: an unchanged or
+    // adopted member is not checked again. An older daemon names none, so every mission is
+    // checked. Empty membership has no gates and is not a valid gate-check intent.
+    let missions = preview.gate_check.clone();
+    let any = !preview.empty && missions.as_ref().is_none_or(|missions| !missions.is_empty());
+    if any && (args.check || (!args.dry_run && !args.no_gate_check)) {
         check_before_publish(
             client,
             &request.intent,
+            missions,
             &args.workspace,
             &args.inputs,
             args.check,
@@ -7694,6 +7705,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: config.node.clone(),
+        api_socket: config.socket.clone(),
         state_dir: config.state_dir.clone(),
         pty_root: pty_root.clone(),
         pty_binary: pty_binary.clone(),
@@ -8193,6 +8205,7 @@ async fn publish_mission_intent(
         check_before_publish(
             client,
             &mission.resolved_intent,
+            None,
             &args.workspace,
             &args.inputs,
             args.check,
@@ -8231,12 +8244,13 @@ async fn publish_mission_intent(
 async fn check_before_publish(
     client: &Client,
     intent: &IntentInput,
+    missions: Option<BTreeSet<String>>,
     workspace: &Path,
     inputs: &[(String, String)],
     required: bool,
 ) -> Result<()> {
     let mut announced = false;
-    let checked = run_gate_check(client, intent, workspace, inputs, |view, item| {
+    let checked = run_gate_check(client, intent, missions, workspace, inputs, |view, item| {
         if !announced {
             eprintln!("{}", gate_check_heading(view));
             announced = true;
@@ -8277,10 +8291,12 @@ async fn check_before_publish(
 }
 
 /// Check the exec gates of `intent` on the daemon and wait for every answer, including deferred
-/// loop until scripts, handing each one to `report` as it arrives. `None` for older daemons.
+/// loop until scripts, handing each one to `report` as it arrives. `missions` limits the check to
+/// those mission subjects. `None` for older daemons.
 async fn run_gate_check(
     client: &Client,
     intent: &IntentInput,
+    missions: Option<BTreeSet<String>>,
     workspace: &Path,
     inputs: &[(String, String)],
     mut report: impl FnMut(&fractal_daemon::model::GateCheckView, &fractal_daemon::model::GateCheckItemView),
@@ -8291,6 +8307,7 @@ async fn run_gate_check(
         intent: intent.clone(),
         workspace: workspace.display().to_string(),
         inputs: inputs.iter().cloned().collect(),
+        missions,
     };
     let mut view: fractal_daemon::model::GateCheckView = match client.post("/v1/gate-checks", &request).await {
         Ok(view) => view,

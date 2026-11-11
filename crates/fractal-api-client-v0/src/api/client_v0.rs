@@ -47,6 +47,7 @@ pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+mod github_plugin_reads;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
@@ -78,6 +79,8 @@ mod conversation_follow_tests;
 mod launch_detail_tests;
 #[cfg(test)]
 mod mission_history_tests;
+#[cfg(test)]
+mod run_reach_tests;
 #[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
@@ -126,6 +129,13 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/usage/quota", get(usage_hub::read))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(github_plugin_reads::pull))
+        .route("/v1/client/plugins/github/{owner}/{repo}/issues/{number}", get(github_plugin_reads::issue))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation", get(github_plugin_reads::conversation))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks", get(github_plugin_reads::checks))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files", get(github_plugin_reads::files))
+        .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(github_plugin_reads::comment))
+        .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -8784,6 +8794,7 @@ async fn dispatch_action(
                     &current.subject,
                     reason,
                     Some(expected_generation),
+                    Some(authority_actor.as_str()),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
@@ -14077,6 +14088,7 @@ mission "differential" state="ready" {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: node.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.to_path_buf(),
             pty_root: root.join("pty"),
             pty_binary: root.join("unused-pty"),

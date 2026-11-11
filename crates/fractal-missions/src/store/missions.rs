@@ -1860,11 +1860,14 @@ pub trait MissionsStore {
             id: &str,
         ) -> Result<(MissionRunView, Option<MissionSpec>)>;
     fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>>;
+    /// Cancel `run` at `expected_generation`, requested by `actor`. A run as `actor` cancels
+    /// only itself and the runs it started.
     fn request_mission_run_cancellation_at_generation(
         &self,
         run: &str,
         reason: &str,
         expected_generation: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<bool, FractalError>;
     fn request_mission_run_cancellation(
             &self,
@@ -5194,7 +5197,7 @@ impl MissionsStore for Store {
             run: &str,
             reason: &str,
         ) -> Result<bool, FractalError> {
-        self.request_mission_run_cancellation_at_generation(run, reason, None)
+        self.request_mission_run_cancellation_at_generation(run, reason, None, None)
     }
 
     fn request_mission_run_cancellation_at_generation(
@@ -5202,6 +5205,7 @@ impl MissionsStore for Store {
         run: &str,
         reason: &str,
         expected_generation: Option<&str>,
+        actor: Option<&str>,
     ) -> Result<bool, FractalError> {
         let run = if run.starts_with("mission-run/") {
             run.to_owned()
@@ -5209,6 +5213,7 @@ impl MissionsStore for Store {
             format!("mission-run/{run}")
         };
         self.with_all_runs_fenced(|transaction| {
+                fractal_store::store::run_authority::admit_reach_tx(transaction, actor, &run, "cancel")?;
                 if let Some(expected) = expected_generation {
                     let generation: String = transaction.query_row(
                         "SELECT current_generation_id FROM mission_runs WHERE id=?1",

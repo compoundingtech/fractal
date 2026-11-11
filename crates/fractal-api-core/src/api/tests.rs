@@ -622,7 +622,7 @@ async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_inca
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     ).unwrap();
     let app = Router::new().route("/v1/internal/fleet/leave-state", get(move || {
         let fleet = fleet.clone();
@@ -652,7 +652,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     )
     .unwrap();
     let expected_public = public.clone();

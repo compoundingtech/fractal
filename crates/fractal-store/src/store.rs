@@ -3652,6 +3652,8 @@ impl Store {
                     }
                 }
                 for declaration in intent.mission_runs.values() {
+                    // A run declares only on itself and the runs it started.
+                    run_authority::admit_reach_tx(transaction, actor, &declaration.subject, "declare")?;
                     let actual = latest_claim_id_tx(transaction, &declaration.subject)
                         .map_err(internal)?
                         .into_iter()

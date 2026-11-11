@@ -1477,6 +1477,14 @@ pub struct Reconciler<R = NativeRuntime> {
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
 }
 
+/// Where an item's evaluation started: how many writes this thread had recorded and how far the
+/// passes had read the change feed. See [`Reconciler::missed_by_skipping`].
+#[derive(Clone, Copy)]
+struct EvaluationMark {
+    wrote: usize,
+    feed: Option<(u64, i64)>,
+}
+
 struct FileWatch {
     // Keep the subscription alive, including across replacements of the target file.
     _subscription: file_subscriptions::Lease,
@@ -3624,7 +3632,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let queued_before = work_message_agents.len();
             let cpu_started = crate::incremental::thread_cpu();
-            let wrote_mark = smallclaims::touched::wrote_len();
+            let mark = self.evaluation_mark();
             let ((result, due), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     caught(|| -> Result<()> {
@@ -4037,7 +4045,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
+                let wrote = self.missed_by_skipping(&item, mark, &reads, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -6024,7 +6032,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _clock = smallclaims::store::clock_snapshot();
         let needed = self.needs_item(item, !skip);
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let ((result, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| match guard() {
                 Ok(false) => ReconcileItemOutcome::Rejected,
@@ -6045,7 +6053,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(item, wrote_mark, due);
+            let wrote = self.missed_by_skipping(item, mark, &reads, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6618,7 +6626,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return;
         }
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let ((outcome, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| -> Result<Option<Result<()>>> {
                 // A stop's actual origin is read once here and reused by `reconcile_stop`.
@@ -6651,7 +6659,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(item, wrote_mark, due);
+            let wrote = self.missed_by_skipping(item, mark, &reads, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -10631,7 +10639,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> bool {
         let subject = format!("mission-run/{id}");
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let mut due = None;
         let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| {
@@ -10717,7 +10725,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
+            let wrote = self.missed_by_skipping(&subject, mark, &reads, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10789,12 +10797,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Evaluate the runs whose last evaluation read a subject that changed since, such as a
-    /// baseline's resource or a step they depend on, without waiting for a pass. A pass reaches
-    /// mission runs once, after its other stages, so on a slow host a run that a change makes
-    /// ready would wait for the rest of the pass running then and most of the next. It reads the
-    /// change feed with its own cursor and marks nothing, so a pass's evaluation running at the
-    /// same time cannot clear a mark it set. Leaves full passes, due times and runs no pass has
-    /// evaluated yet to the pass. Returns how many runs it evaluated and whether any wrote.
+    /// baseline's resource or a step they depend on, and the active runs this host originates
+    /// that changed but no evaluation has seen yet, such as a run `missions start` just created,
+    /// without waiting for a pass. A pass reaches mission runs once, after its other stages, and
+    /// waits out `StartSpacing`, so a new run's first step would wait up to a pass interval and a
+    /// run that a change makes ready would wait for the rest of the pass running then and most of
+    /// the next. It reads the change feed with its own cursor and marks nothing, so a pass's
+    /// evaluation running at the same time cannot clear a mark it set. Leaves full passes, due
+    /// times and runs that existed before this follower's cursor to the pass. Returns how many
+    /// runs it evaluated and whether any wrote.
     pub fn evaluate_changed_mission_runs(&self) -> Result<(usize, bool)> {
         let _evaluating = self
             .mission_evaluation
@@ -10804,9 +10815,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             .mission_reads_cursor
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (next, changed_runs) =
+        let crate::incremental::FeedReaders { cursor: next, readers: mut changed_runs, unseen } =
             self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
         *cursor = Some(next);
+        if !unseen.is_empty() {
+            // Another host's run, or one that already ended, is not this host's to evaluate.
+            let active = self
+                .store
+                .active_mission_run_ids_for_origin(&self.host)?
+                .into_iter()
+                .map(|id| format!("mission-run/{id}"))
+                .collect::<BTreeSet<_>>();
+            changed_runs.extend(unseen.into_iter().filter(|subject| active.contains(subject)));
+        }
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
         let mut changed = false;
@@ -10871,16 +10892,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// Where an item's evaluation starts, taken after [`Self::needs_item`] read the feed.
+    fn evaluation_mark(&self) -> EvaluationMark {
+        EvaluationMark { wrote: smallclaims::touched::wrote_len(), feed: self.incremental.watermark() }
+    }
+
     /// What an evaluation of `item` that nothing marked and nothing made due did, which an
-    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// incremental pass would have missed: the claims it wrote since `mark`, and a due time
     /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
-    /// limit it found, which no skipping pass would have woken for.
-    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
-        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+    /// limit it found, which no skipping pass would have woken for. Nothing when another writer,
+    /// such as the program engine settling a step, changed something its last evaluation also
+    /// read while it ran: a skipping pass is woken through those reads, so the next pass is
+    /// marked for it anyway. A key read for the first time wakes nothing and excuses nothing.
+    fn missed_by_skipping(
+        &self,
+        item: &str,
+        mark: EvaluationMark,
+        reads: &BTreeSet<String>,
+        due: Option<u128>,
+    ) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(mark.wrote);
+        let wrote = missed.len();
         if let Some(due) = due
             && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
         {
             missed.push(format!("due {item} at {due}"));
+        }
+        // A failed read of the feed keeps the correction.
+        if !missed.is_empty()
+            && mark.feed.is_some_and(|since| {
+                let woken: BTreeSet<String> =
+                    self.incremental.reads_of(item).intersection(reads).cloned().collect();
+                crate::incremental::changed_by_others(&self.store, since, &woken, &missed[..wrote])
+                    .unwrap_or(false)
+            })
+        {
+            missed.clear();
         }
         missed
     }
@@ -24072,6 +24119,77 @@ mission "relay" state="ready" {
             [("first", "completed"), ("second", "working")]
         );
         follower.abort();
+    }
+
+    /// `missions start` commits a new run and wakes the follower. The run's first step's exec
+    /// starts from that change alone: no pass, which would first wait out `StartSpacing`, has to
+    /// evaluate the run first. A host that does not originate the run leaves it alone.
+    #[test]
+    fn a_new_runs_first_step_starts_without_a_pass() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "single" state="ready" {
+  goal "Start one agentless exec."
+  step "first" {
+    agentless
+    exec "first" { host "node"; workspace "/tmp"; command "true"; restart "never" }
+    gate "first succeeded" { field "exit_code" "exec/${ST_MISSION_RUN}/first" is 0 }
+  }
+}
+"#,
+            "single",
+        );
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let elsewhere = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "elsewhere".into(),
+            Arc::new(Notify::new()),
+        );
+        // Each follower's cursor starts before the run exists, as it does in a running daemon.
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+        assert_eq!(elsewhere.evaluate_changed_mission_runs().unwrap(), (0, false));
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "single".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "single-run".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            elsewhere.evaluate_changed_mission_runs().unwrap(),
+            (0, false),
+            "another host's run is not its to evaluate"
+        );
+        let started = || {
+            store
+                .desired_subject_with_writer(&format!("exec/{}/first", run.id))
+                .unwrap()
+                .is_some_and(|(desired, _)| {
+                    let id = &desired.member.as_ref().unwrap().runtime_id;
+                    runtime.started_members.lock().unwrap().iter().any(|member| &member.runtime_id == id)
+                })
+        };
+        // The follower's chain of evaluations after the run's creation, as
+        // `follow_mission_reads` runs it: each evaluation moves the step one state.
+        for _ in 0..=MISSION_READS_CONTINUATIONS {
+            if started() {
+                break;
+            }
+            reconciler.evaluate_changed_mission_runs().unwrap();
+        }
+        assert!(started(), "the new run's first step's exec starts without a pass");
+        let steps = store.mission_run(&run.subject).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "working");
     }
 
     #[test]

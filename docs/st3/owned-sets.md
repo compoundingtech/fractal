@@ -25,7 +25,12 @@ fractal apply --set garden seats.kdl missions.kdl schedules.kdl \
 Remove `--dry-run` to publish. A dry run prints blockers and exits with failure when any
 are present. Add `--check` to execute gates during the preview, with `--workspace DIR` and
 `--input NAME=VALUE` as needed; gate answers appear on stderr. Publication checks for broken
-mission and step exec gates by default; `--no-gate-check` skips them. Loop `until` scripts
+mission and step exec gates by default; `--no-gate-check` skips them. Both checks cover only
+the missions the preview lists under `gate_check`: those whose exact revision this daemon does
+not hold yet. An unchanged or adopted member is not checked again, so a large set's publication
+does not rerun its gates; that includes a revision published with `--no-gate-check` or
+replicated from another daemon. Use `fractal missions check FILE` to check every gate again.
+Loop `until` scripts
 are listed as "not checked, they run after each round", including in dry-run checks.
 Per-round step scripts still preflight; runtime `until` evaluation remains at each round boundary.
 
@@ -214,7 +219,17 @@ claim top-level `agent/`, `schedule/`, `subscription/` or `mission/` subjects on
 
 Terminal `agents retire` of a live member of an `enforce` set is refused with `set-managed-subject`
 through every path, including client-v0. It cannot be forced: omit the member from the set
-publication, then retire it.
+publication, then retire it. An `audit` set accepts the retirement, records it as `source.audited`
+and also as `source.debt.recorded` with the verb `retire`.
+
+No publication can undo a terminal retirement. A publication that still declares a retired agent,
+whatever the set's policy, keeps it as a retired member instead of failing with
+`recipient-retired`: its preview reports the change `retired` with the effect `keep terminally
+retired by ACTOR: REASON; drop it from the source`, and the rest of the bundle applies. The retire
+debt stays open while the source declares the member. A publication that omits the member reports
+the same change with the effect `keep terminally retired by ACTOR: REASON`. That is not a retirement
+by the publication, so it does not count toward the `--confirm-retire` threshold. That publication
+closes the debt as `adopted`.
 
 `--force --reason TEXT` accepts the write on an `audit` or `enforce` set. The reason must be
 nonempty. Persons and agents may force (`fractal apply`, `agents stop|start|hold|suspend|resume`,
@@ -226,9 +241,10 @@ forced declaration (including a mission) overrides the set's member reference un
 publishes again.
 
 The next publication with a new source sequence converges every member and closes all of the set's
-open debt. Its preview lists `reverted_debts`, and apply returns `source_debts_reverted`. Each entry
-has the outcome `reverted` (the source differs, or a forced hold or suspension is still in place),
-`adopted` (the source now declares the forced value or created subject), or `closed` (a runtime
+open debt, except retire debt on a member it still declares. Its preview lists `reverted_debts`, and
+apply returns `source_debts_reverted`. Each entry has the outcome `reverted` (the source differs, or
+a forced hold or suspension is still in place), `adopted` (the source now declares the forced value
+or created subject, or no longer declares a retired member), or `closed` (a runtime
 change that no longer stands, such as a forced resume or a hold someone replaced). A reverted change
 shows the effect `revert ad hoc change by ACTOR: REASON`. In its own transaction the publication
 writes one `source.debt.closed` per debt (debt claim, outcome, closing set revision, publisher),

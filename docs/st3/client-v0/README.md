@@ -3180,10 +3180,16 @@ no current publication, a first page answers HTTP 503, retryable, with
 retryable, with `details.reason: "work-list-ended"`. With `fresh=true`, the daemon waits up to
 two seconds for a publication at or after the store index when the request arrived; if none
 comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fresh"` and the
-`wanted_cut` and `newest_cut`, and never older rows as fresh. On the wire these answers carry
-`code: "internal"`; `details.reason` tells them apart. `fractal work ls` asks for a fresh first page and
-asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
-attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
+`wanted_cut` and `newest_cut`, and never older rows as fresh. A retry can supply
+`min_cut=<wanted_cut>` to wait for that same host-local cut instead of sampling a newer head.
+`min_cut` also requests a wait without `fresh=true`; a cut above the current store index is
+invalid (HTTP 422). Without `min_cut`, each fresh request samples the head as before.
+On the wire these answers carry `code: "internal"`; `details.reason` tells them apart.
+`fractal work ls` asks for a fresh first page, pins the first not-fresh answer's `wanted_cut`,
+and asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across
+every attempt. Continuing writes do not move that command's target. Debug work-publication
+fold logs include the publication cut, store index, cut lag, fold duration and pending state.
+A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
 after each replay or trim and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
 
