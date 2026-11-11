@@ -642,6 +642,23 @@ in an in-memory store; they add no production writer. The maintainer retains the
 listed body/predecessor and exact-wire representation TODOs for these fixture
 copies; this exception is not a byte-size or execution-cost proof.
 
+### Conditional legacy-state migration inventory
+
+`smallclaims::store::assistant_grant_authority` owns conservative transaction
+sinks `lv-hbad5073042d8` and `lv-h2bc6720e295e`, enclosing conditional legacy
+cursor/addition/auth-work migrations. Current-schema reopens inspect legacy
+state read-only and skip the savepoint when no migration is needed. Existing
+representation TODOs still cover requeued claim IDs, exact key/range obligations
+and rebuilt authentication work; moving migration out of trigger installation
+does not establish byte or upgrade-work bounds.
+
+`smallclaims::store::assistant_grant_authority_tests` owns `lv-h2693491dc162`,
+`lv-h39e4aa452548` and `lv-h6142d0df5172`. They restore legacy addition columns
+and exact proof/range values, insert a current resumable cursor and clear
+authentication work in an isolated fixture. The exact-wire and reclamation TODOs
+must preserve obligation retention and no-write repeat-install assertions through
+representation changes. These exceptions add no production writer or size proof.
+
 ### Indexed owner-management transition inventory
 
 `smallclaims::store::assistant_grant_authority` owns management read sinks

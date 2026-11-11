@@ -992,6 +992,13 @@ mod schema_install_tests {
                         "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
                     ).unwrap();
                 }
+                // The modern constructor completed its empty projection. Model
+                // a pre-projection store instead of mistaking incremental,
+                // subject-fenced dirty work for a global initial backfill.
+                connection.execute(
+                    "DELETE FROM meta WHERE key='assistant_grant_authority_version'
+                        OR key LIKE 'assistant_grant_authority_cursor/%'", [],
+                ).unwrap();
                 let before = snapshot(&connection);
                 let indexes_before = claims_indexes(&connection);
                 drop(connection);

@@ -851,25 +851,34 @@ mod tests {
         for principal in [None, Some(PRINCIPAL)] {
             let root = tempfile::tempdir().unwrap();
             let state = state(root.path());
-            let paired = paired(&state).await;
-            let digest = credential_digest(paired["credential"].as_str().unwrap());
-            let granted = latest(&state, &subject(paired["grant"]["id"].as_str().unwrap()).unwrap(), GRANTED).unwrap().unwrap();
-            let mut value = fields(&granted).unwrap().clone();
+            let id = "0123456789abcdef01234567";
+            let grant_id = format!("assistant-grant/{id}");
+            let session_actor = format!("{PRINCIPAL}/session/{grant_id}");
+            let digest = credential_digest("legacy-assistant-credential");
+            let mut value = json!({
+                "version":1,"grant_id":grant_id,"session_actor":session_actor,
+                "issuer":ISSUER,"credential_hash":digest,"scopes":SCOPES[..4],
+                "expires_at_unix_ms":client_now_ms()+3_600_000,"policy_revision":1,
+                "minimal_read_mode":"approval-once","recipient_allowlist":[],
+                "disclosure_consent":true,"consent_evidence":"recorded owner consent"
+            });
             match principal {
                 Some(principal) => { value["principal"] = json!(principal); }
                 None => { value.as_object_mut().unwrap().remove("principal"); }
             }
-            let legacy = append(&state, granted.subject.clone(), GRANTED, ISSUER, value.clone(), Some(&granted)).unwrap();
+            // Seed the historical wire shape as the original issuance. Reissuing
+            // an already paired grant creates unrelated multi-base attachment work.
+            let legacy = append(&state, subject(id).unwrap(), GRANTED, ISSUER, value.clone(), None).unwrap();
             // Exercise both the original grant and an old policy with no principal.
             for previous in [None, Some(&legacy)] {
                 if let Some(previous) = previous {
                     value["policy_revision"] = json!(2);
-                    append(&state, granted.subject.clone(), POLICY, ISSUER, value.clone(), Some(previous)).unwrap();
+                    append(&state, legacy.subject.clone(), POLICY, ISSUER, value.clone(), Some(previous)).unwrap();
                 }
                 let reopened = self::state(root.path());
                 let session = authenticate(&reopened, &digest, "fabric-loopback").unwrap().unwrap();
                 assert_eq!(session.authority_actor, PRINCIPAL);
-                assert_eq!(session.actor, paired["session_actor"].as_str().unwrap());
+                assert_eq!(session.actor, session_actor);
                 assert_eq!(projection(&reopened, &legacy).unwrap()["principal"], PRINCIPAL);
             }
         }

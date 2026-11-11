@@ -131,14 +131,23 @@ fn attachment_budget_product(remote: bool, bases_first: bool, budget: Duration) 
     drain_authority(&issuer);
     if remote { receive(&target, &export(&issuer, &target)); }
     let old_witnesses = if bases_first { BASES } else { 0 };
-    attachment_install_counter(&store.connection.write());
+    if !remote {
+        attachment_install_counter(&store.connection.write());
+    }
     let second = attachment_append_group(&issuer, !bases_first, if bases_first { TRANSITIONS } else { BASES });
     if remote {
         let exchange = export(&issuer, &target);
-        // Admit raw claims before their proofs. No signed maintenance work is
-        // hidden inside receive(), which intentionally drains its caller's work.
+        // The historical fixture first admits signed transport and drains it,
+        // then removes the new proofs and rebuilds unsigned history. Finish
+        // that setup before measuring the work caused by restoring the proofs.
         receive_pre_projection_unsigned_history(&target, &exchange);
         let connection = target.connection.write();
+        let pairs: usize = connection.query_row(
+            "SELECT COUNT(*) FROM assistant_grant_authority WHERE claim_id<>base_claim_id",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pairs, 0, "unsigned fixture must leave every cross-pair for measured authentication");
+        attachment_install_counter(&connection);
         for signature in signatures(&exchange).signatures {
             insert_raw_signature(&connection, &signature);
         }
