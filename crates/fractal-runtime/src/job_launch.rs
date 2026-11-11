@@ -6,7 +6,9 @@ mod driver;
 pub mod gated;
 pub mod keeper;
 mod keeper_systemd;
+mod sequence;
 
 pub use cgroup::{ExitUsage, sample_exit};
 pub use driver::{CgroupJobLaunch, JobLaunch, JobLaunchEffects, JobLaunchResult, LaunchJournal};
 pub use keeper_systemd::SystemdKeeper;
+pub use sequence::UncertainRelease;

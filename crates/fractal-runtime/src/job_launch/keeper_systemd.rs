@@ -10,6 +10,10 @@ impl SystemdKeeper {
     pub fn new(cgroup_root: PathBuf) -> Self {
         Self { root: cgroup_root, child: None }
     }
+
+    pub(super) fn hierarchy_path(&self, directory: &std::path::Path) -> Result<PathBuf> {
+        Ok(std::path::Path::new("/").join(directory.strip_prefix(&self.root)?))
+    }
 }
 impl Drop for SystemdKeeper {
     fn drop(&mut self) {
@@ -108,6 +112,17 @@ impl KeeperManager for SystemdKeeper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_identity_strips_the_configured_mount_not_a_fixed_prefix() {
+        let manager = SystemdKeeper::new(PathBuf::from("/configured/cgroupfs"));
+        assert_eq!(
+            manager.hierarchy_path(std::path::Path::new("/configured/cgroupfs/keeper/job")).unwrap(),
+            PathBuf::from("/keeper/job"),
+        );
+        assert!(manager.hierarchy_path(std::path::Path::new("/another/mount/job")).is_err());
+    }
+
     #[test]
     fn keeper_properties_have_no_daemon_lifetime_dependency() {
         let sent = properties(42, "app-capped-heavy.slice", true);

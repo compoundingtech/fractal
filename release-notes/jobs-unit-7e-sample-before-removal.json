@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retain final usage on uncertain gate release (unit 7e)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission remains inactive; limits and the heavy slice remain configuration-only."},
+  "compatibility": {"status": "changed", "detail": "Successful completion, preparation abort and uncertain release use the same kill, populated=0, usage sample, rmdir effect. UncertainRelease retains the final sample or typed counters-unavailable and the original release error. Fake effects assert sampling precedes removal, including payload usage after an uncertain gate write."},
+  "downtime": {"status": "none", "detail": "No live behavior or deployment changes."},
+  "manual": {"status": "none", "detail": "No activation or configuration defaults."},
+  "recovery": {"status": "none", "detail": "Uncertain release never records refusal or retries. Cleanup failure still leaves the intent unresolved."}
+}
