@@ -3950,6 +3950,8 @@ impl Store {
                         );
                         continue;
                     }
+                    // A run declares only what its authority grants, as it writes any claim.
+                    run_authority::admit_tx(transaction, &self.origin, actor, "intent.desired", subject, &BTreeMap::new())?;
                     let predecessors = intent_leaves_tx(transaction, subject).map_err(internal)?;
                     let mut body = serde_json::to_value(desired).map_err(internal)?;
                     if let Some(plan) = &owned_plan
@@ -4033,6 +4035,8 @@ impl Store {
                         );
                         continue;
                     }
+                    // A run publishes only the missions its authority grants (`publish ID`).
+                    run_authority::admit_tx(transaction, &self.origin, actor, "mission.published", &mission.subject, &BTreeMap::new())?;
                     let predecessors =
                         mission_definition_token_tx(transaction, &mission.id).map_err(internal)?;
                     let mut body = serde_json::to_value(mission).map_err(internal)?;
