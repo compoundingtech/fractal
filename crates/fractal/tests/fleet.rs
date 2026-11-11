@@ -4889,13 +4889,15 @@ async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() 
         !a.notes().await.contains("custom/fleet-test/r-after"),
         "a admitted a removed member's write relayed through c"
     );
-    // c admitted it before it knew; doctor says so.
-    let doctor = c.st(&["--json", "doctor"]);
-    let report = String::from_utf8_lossy(&doctor.stdout);
-    assert!(
-        report.contains("beyond high water"),
-        "c's doctor does not report what it admitted from r: {report}"
-    );
+    // c admitted it before it knew; doctor says so once the daemon has counted. c's daemon counts
+    // 30 s after it starts, and again at most once a minute after doctor finds the removal arrived
+    // since the last count (fleet_admission_check).
+    wait_until("c's doctor reports what it admitted from r", 90, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        let counted = String::from_utf8_lossy(&doctor.stdout).contains("beyond high water");
+        async move { counted }
+    })
+    .await;
     // From now on c refuses r too.
     r.note("r-later").await;
     tokio::time::sleep(Duration::from_secs(3)).await;
