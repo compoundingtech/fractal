@@ -47,7 +47,7 @@ fn replay_pages_through_long_journals_in_order() {
     }
     let journal = engine.journal(step, 1).unwrap();
     assert_eq!(journal.len(), JOURNAL_PAGE + 3);
-    assert!(journal.iter().enumerate().all(|(index, entry)| entry["value"] == Value::from(index + 1)));
+    assert!(journal.iter().enumerate().all(|(index, entry)| entry["value"] == index + 1));
 }
 
 #[test]
