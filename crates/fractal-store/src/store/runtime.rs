@@ -546,7 +546,7 @@ impl Runtime for FractalRuntime {
         origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, FractalError> {
-        try_project_simple_replication_tx(transaction, origin, through)
+        try_project_simple_replication_tx_with_discovery(transaction, origin, through, true)
     }
 
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {

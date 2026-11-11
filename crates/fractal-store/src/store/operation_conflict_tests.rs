@@ -477,3 +477,58 @@ fn operation_conflict_neutral_history_does_not_fence_unrelated_replay() {
     store.replay_replication_graph().unwrap();
     assert_eq!(projected, (operation_rows(&store.readers.get()), graph_digest_of(&store)));
 }
+
+#[test]
+fn operation_conflict_partial_rediscovery_below_graph_frontier_keeps_receipt_moving() {
+    let store = Store::open_memory("fixture").unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for number in 0..smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append_claim_record_tx(&tx, "peer", "custom/baseline", "custom.test.observed", None,
+                &json!({"fields":{"number":number}}), &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    store.project_replication_backlog().unwrap();
+    let frontier = || store.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    assert!(frontier() > 1);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for number in 0..=smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            let subject = format!("exec/partial-proof-{number}");
+            append_claim_record_tx(&tx, "peer", &subject, "intent.desired", None,
+                &json!({"subject":subject,"kind":"exec","desired":{}}), &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let target = store.index().unwrap();
+    let interrupted = std::cell::Cell::new(false);
+    FULL_REPLAYS.with(|count| count.set(0));
+    assert!(store.project_replication_backlog_with_yield(|| {
+        if interrupted.replace(true) { return; }
+        assert!(frontier() > 1);
+        // Model rediscovery of a new checkpoint generation committing only its early page,
+        // below the graph frontier. That partial proof cannot authorize a whole-log replay.
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h792cc1f9b935 owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='operation_conflict_source_generation';
+             UPDATE projection_health SET last_good_store_index=1,
+               error_message=(SELECT value FROM meta WHERE key='operation_conflict_source_generation')
+             WHERE aggregate='projection:operation-conflict-scan';
+             UPDATE projection_health SET status='stale' WHERE aggregate='graph';",
+        ).unwrap();
+        tx.commit().unwrap();
+    }).unwrap());
+    assert!(interrupted.get());
+    assert_eq!(frontier(), target, "receipt must advance beyond the partial discovery watermark");
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(store.replication_projection_needs_recovery().unwrap());
+    assert!(store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+        .any(|row| row.aggregate == "projection:deferred-replay"));
+}

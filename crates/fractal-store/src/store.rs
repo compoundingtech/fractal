@@ -17338,18 +17338,15 @@ pub fn try_project_all_simple_replication_tx(
 // A whole-log replay is unsafe while this log contains conflicting operations. Keep the
 // independent replay requirement visible, but let bounded receipt move past it. Repair is
 // explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
-fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, through: u64, reason: &str) -> Result<bool, FractalError> {
+fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, require_discovery: bool, reason: &str) -> Result<bool, FractalError> {
     let conflict: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
         [], |row| row.get(0),
     ).map_err(internal)?;
-    // A direct low-level call may inspect an uncommitted, not-yet-scanned range. Keep its
-    // replay decision; the driver fences every unproven replay. Defer invalidated scans here.
-    let unproven: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:operation-conflict-scan'
-         AND last_good_store_index>=?1 AND error_message IS NOT
-           (SELECT value FROM meta WHERE key='operation_conflict_source_generation'))",
-        [through], |row| row.get(0),
+    // Receipt requires proof for the entire admitted replay range, not merely this chunk.
+    // An interrupted generation rescan can lie below an already-advanced graph frontier.
+    let unproven = require_discovery && !smallclaims::store::operation_conflict_discovery_valid(
+        tx, current_index_tx(tx).map_err(internal)?,
     ).map_err(internal)?;
     if conflict || unproven {
         tx.execute(
@@ -17367,6 +17364,17 @@ pub fn try_project_simple_replication_tx(
     origin: &str,
     through: u64,
 ) -> Result<IncrementalProjection, FractalError> {
+    // Direct callers inspect uncommitted ranges and retain their replay guard decisions.
+    // Only the Runtime adapter owns receipt's automatic fallback and requires discovery.
+    try_project_simple_replication_tx_with_discovery(transaction, origin, through, false)
+}
+
+fn try_project_simple_replication_tx_with_discovery(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    through: u64,
+    require_discovery: bool,
+) -> Result<IncrementalProjection, FractalError> {
     let health: Option<(String, u64)> = transaction
         .query_row(
             "SELECT status, last_good_store_index FROM projection_health WHERE aggregate='graph'",
@@ -17377,11 +17385,11 @@ pub fn try_project_simple_replication_tx(
         .map_err(internal)?;
     let (status, frontier) = match health {
         Some(health) => health,
-        None if defer_replay_for_operation_conflict(transaction, through, "missing-health")? => ("healthy".to_owned(), 0),
+        None if defer_replay_for_operation_conflict(transaction, require_discovery, "missing-health")? => ("healthy".to_owned(), 0),
         None => return Ok(replay_needed("missing-health")),
     };
     if status != "healthy"
-        && !defer_replay_for_operation_conflict(transaction, through, "unhealthy-projection")? {
+        && !defer_replay_for_operation_conflict(transaction, require_discovery, "unhealthy-projection")? {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17565,7 +17573,7 @@ pub fn try_project_simple_replication_tx(
                     continue;
                 }
             }
-            if defer_replay_for_operation_conflict(transaction, through, reason)? {
+            if defer_replay_for_operation_conflict(transaction, require_discovery, reason)? {
                 unsupported_conflict_subjects.insert(claim.subject.clone());
                 continue;
             }

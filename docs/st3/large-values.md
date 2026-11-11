@@ -643,3 +643,6 @@ are synthetic checkpoint-adoption/stale-health regression sites owned by
 `fractal_store::store::operation_conflict_tests`.
 `lv-h0cfeef50b49a` is the same owner's stale-health fixture proving that neutral
 operation conflicts do not suppress an unrelated legitimate replay.
+The same owner's `lv-h792cc1f9b935` models an interrupted generation rediscovery
+page using only a synthetic integer watermark/generation and existing health
+metadata; no production value population is added.
