@@ -29,6 +29,7 @@ fn test_state(root: &Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),

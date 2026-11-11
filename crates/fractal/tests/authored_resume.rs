@@ -117,6 +117,7 @@ agent "garden/worker" {{
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "resume-link-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
