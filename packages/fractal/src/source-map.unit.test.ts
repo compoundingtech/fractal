@@ -206,6 +206,7 @@ describe('sourceMap', () => {
         "      reviewStep('code', 'one'),",
         "      reviewStep('code', 'two'),",
         "      step({ id: ids.second, assignedTo: { id: 'team/owner' }, goal: 'Second.' }),",
+        "      reviewStep('code', ids.first),",
         '    ],',
         '  },',
         '})',
@@ -228,6 +229,12 @@ describe('sourceMap', () => {
     const second = node(document, mission, 'mission[team/twice]/step[second]')!
     expect(at(document, second.span)).toBe('team/twice/mission.ts:17:12')
     expect(roles(second.frames)).toContain('value')
+
+    // The key passed to a helper: the helper's `step({…})` spans it, bounded by that call.
+    const first = node(document, mission, 'mission[team/twice]/step[first]')!
+    expect(at(document, first.span)).toBe('team/steps.ts:5:3')
+    expect(lines('mission[team/twice]/step[first]')).toEqual(['team/twice/mission.ts:18', 'team/steps.ts:5'])
+    expect(lines('mission[team/twice]/step[first]/goal[0]')).toEqual(['team/twice/mission.ts:18', 'team/steps.ts:5', 'team/policy.ts:2'])
   })
 
   it('keys agents, missions, steps and gates by name and other nodes by sibling index', () => {

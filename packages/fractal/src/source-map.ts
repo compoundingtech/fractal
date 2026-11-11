@@ -779,15 +779,27 @@ export const sourceMap = ({
       }
       return groups.size === 1 ? [...groups.values()][0]! : []
     }
-    /** The innermost object literal in the declaration module around `point`. */
-    const objectAround = (point: SourcePoint): Span | undefined => {
+    /** The innermost node of `type` in the declaration module around `point`. */
+    const innermost = (type: string, point: SourcePoint): AstNode | undefined => {
       const offset = offsetAt(root.starts, point)
-      let object: AstNode | undefined
+      let found: AstNode | undefined
       walk(root.program, (node) => {
-        if (node.type !== 'ObjectExpression' || node.start > offset || offset > node.end) return
-        if (object === undefined || node.start >= object.start) object = node
+        if (node.type !== type || node.start > offset || offset > node.end) return
+        if (found === undefined || node.start >= found.start) found = node
       })
-      return object === undefined ? undefined : spanOf(root, object)
+      return found
+    }
+    /** The object literal whose own `id` property value holds `point` (`step({ id: ids.second })`). */
+    const keyedObjectAround = (point: SourcePoint): Span | undefined => {
+      const object = innermost('ObjectExpression', point)
+      if (object === undefined) return undefined
+      const offset = offsetAt(root.starts, point)
+      const id = list(object, 'properties').find((property) => {
+        const key = property === null ? undefined : field(property, 'key')
+        return key?.type === 'Identifier' && key.name === 'id'
+      })
+      const value = id === undefined || id === null ? undefined : field(id, 'value')
+      return value !== undefined && value.start <= offset && offset <= value.end ? spanOf(root, object) : undefined
     }
     /**
      * A keyed node a helper builds (`reviewStep('code', 'one')`): the one call in the declaration
@@ -808,7 +820,7 @@ export const sourceMap = ({
       const declaredStep = node.name === 'step' && reference === false
       if (declaredStep === true) declaredSteps++
       let hit = out.get(node.path)
-      const site = hit !== undefined && hit.span.file === rootId ? hit.span : (keyCall(node) ?? outer)
+      let site = hit !== undefined && hit.span.file === rootId ? hit.span : (keyCall(node) ?? outer)
       // A keyed node's span is its declaration; a traced read of its key only adds frames.
       const keyed = keyedNodes[node.name] === true
       const candidates =
@@ -832,9 +844,13 @@ export const sourceMap = ({
         const frames = readFrames(read, subject.file)
         const value = frames.at(-1)
         const readSite = siteOf(read)
-        // Unlocated by the AST, a keyed node is the object literal that reads its key.
-        const declared = keyed === false ? undefined : (hit?.span ?? (readSite === undefined ? undefined : objectAround(readSite)))
-        if (value !== undefined && value.role === 'value' && (keyed === false || declared !== undefined)) {
+        const declared = keyed === false ? undefined : (hit?.span ?? (readSite === undefined ? undefined : keyedObjectAround(readSite)))
+        if (keyed === true && declared === undefined && readSite !== undefined) {
+          // The key passed to a helper (`reviewStep('code', ids.second)`): that call bounds the
+          // node's reads, and the helper-step branch below locates the node.
+          const call = innermost('CallExpression', readSite)
+          if (call !== undefined) site = spanOf(root, call)
+        } else if (value !== undefined && value.role === 'value' && (keyed === false || declared !== undefined)) {
           tracedNodes++
           if (frames.some((frame) => frame.role === 'helper') === true) helperFramedNodes++
           hit = {
