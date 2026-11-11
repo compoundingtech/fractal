@@ -33,19 +33,27 @@ enum ServerRecord {
     Scope(String),
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum ClosureReason {
     ScopesClosed,
     RuntimeVanished,
 }
 
-#[derive(Serialize)]
-struct ProducerClosure<'a> {
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProducerClosure<S> {
     version: u8,
     reason: ClosureReason,
     publication_pending: bool,
-    scopes: &'a [crate::ScopeRetirementProof],
+    scopes: S,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ClosureRecord {
+    Current(ProducerClosure<Vec<crate::ScopeRetirementProof>>),
+    Legacy(Vec<crate::ScopeRetirementProof>),
 }
 
 fn close_producer(
@@ -127,11 +135,11 @@ impl PtyRuntime {
             "PTY server ownership disagrees with its publication");
         let unit = crate::server_unit(&observation.name, pid);
         let path = directory.join(format!("server-{pid}.json"));
-        let record = ServerRecord::Identity(ServerOwnership {
-            version: 1, unit: unit.clone(), pid,
+        let record = ServerOwnership {
+            version: 1, unit, pid,
             start_token: crate::process_start_token(pid)?,
-            boot_id: pty_client::registry::read_boot_id().context("server boot identity unavailable")?,
-        });
+            boot_id: pty_core::registry::read_boot_id().context("server boot identity unavailable")?,
+        };
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 serde_json::to_writer(&mut file, &record)?;
@@ -144,10 +152,10 @@ impl PtyRuntime {
                     ServerRecord::Identity(server) => &server.unit,
                     ServerRecord::Scope(unit) => unit,
                 };
-                anyhow::ensure!(*recorded_unit == unit, "PTY server scope ownership changed");
-                if let (ServerRecord::Identity(recorded), ServerRecord::Identity(current)) = (&recorded, &record) {
-                    anyhow::ensure!(recorded.version == current.version && recorded.pid == current.pid
-                        && recorded.start_token == current.start_token && recorded.boot_id == current.boot_id,
+                anyhow::ensure!(*recorded_unit == record.unit, "PTY server scope ownership changed");
+                if let ServerRecord::Identity(recorded) = &recorded {
+                    anyhow::ensure!(recorded.version == record.version && recorded.pid == record.pid
+                        && recorded.start_token == record.start_token && recorded.boot_id == record.boot_id,
                         "PTY server generation ownership changed");
                 }
             }
@@ -200,11 +208,16 @@ impl PtyRuntime {
             let name = name.to_str().context("non-UTF8 producer entry")?;
             if name == "owner.json" { continue; }
             if name == "closure.json" {
-                let closure: serde_json::Value = serde_json::from_reader(File::open(entry.path())?)?;
-                anyhow::ensure!(closure.is_array()
-                    || (closure["version"] == 1 && closure["publication_pending"] == false
-                        && matches!(closure["reason"].as_str(), Some("runtime-vanished" | "scopes-closed"))
-                        && closure["scopes"].is_array()), "invalid producer closure");
+                let closure: ClosureRecord = serde_json::from_reader(File::open(entry.path())?)?;
+                let scopes = match closure {
+                    ClosureRecord::Current(closure) => {
+                        anyhow::ensure!(closure.version == 1 && !closure.publication_pending,
+                            "invalid producer closure");
+                        closure.scopes
+                    }
+                    ClosureRecord::Legacy(scopes) => scopes,
+                };
+                anyhow::ensure!(!scopes.is_empty(), "empty producer closure");
                 continue;
             }
             let pid: u32 = name.strip_prefix("server-")
@@ -218,7 +231,7 @@ impl PtyRuntime {
                         && server.start_token > 0 && !server.boot_id.is_empty(),
                         "invalid server identity");
                     // A boot mismatch is deliberately unknown, not PID absence.
-                    anyhow::ensure!(Some(&server.boot_id) == pty_client::registry::read_boot_id().as_ref(),
+                    anyhow::ensure!(Some(&server.boot_id) == pty_core::registry::read_boot_id().as_ref(),
                         "server boot identity unavailable");
                     if crate::process_generation_alive(pid, server.start_token)? {
                         return Ok(false);
@@ -320,6 +333,7 @@ mod tests {
             (dead_pid, dead_token, "corrupt", false),
             (dead_pid, dead_token, "partial", false),
             (dead_pid, dead_token, "unknown-boot", false),
+            (dead_pid, dead_token, "corrupt-closure", false),
         ] {
             let root = tempfile::tempdir().unwrap();
             let runtime = PtyRuntime::new(root.path().join("registry"));
@@ -337,11 +351,14 @@ mod tests {
                 version: 1, unit: crate::server_unit("worker", pid), pid,
                 start_token: token,
                 boot_id: if invalid == "unknown-boot" { "unknown".into() }
-                    else { pty_client::registry::read_boot_id().unwrap() },
+                    else { pty_core::registry::read_boot_id().unwrap() },
             })).unwrap();
             if invalid == "corrupt" { std::fs::write(&server, b"{").unwrap(); }
             if invalid == "partial" {
                 std::fs::write(directory.join("server-1.next"), b"{").unwrap();
+            }
+            if invalid == "corrupt-closure" {
+                std::fs::write(directory.join("closure.json"), b"[{}]").unwrap();
             }
             let closed_scope = |unit: &str| Ok(Some(crate::ScopeRetirementProof {
                 version: 1, unit: unit.into(), load_state: "not-found".into(),
@@ -349,19 +366,25 @@ mod tests {
             }));
             let result = runtime.reconcile_producer(&directory, &mut owner, closed_scope);
             assert_eq!(result.unwrap_or(false), closes, "{invalid}");
-            assert_eq!(directory.join("closure.json").exists(), closes, "{invalid}");
+            assert_eq!(directory.join("closure.json").exists(), closes || invalid == "corrupt-closure", "{invalid}");
             if closes {
                 let closure: serde_json::Value = serde_json::from_reader(
                     File::open(directory.join("closure.json")).unwrap()).unwrap();
                 assert_eq!(closure["reason"], "runtime-vanished");
                 assert_eq!(closure["publication_pending"], false);
                 assert!(!owner.publication_pending);
+                let persisted: ProducerOwnership = serde_json::from_reader(
+                    File::open(directory.join("owner.json")).unwrap()).unwrap();
+                assert!(!persisted.publication_pending);
                 let before = std::fs::read(directory.join("closure.json")).unwrap();
                 assert!(runtime.reconcile_producer(&directory, &mut owner, closed_scope).unwrap());
                 assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), before);
             } else {
                 assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), original);
                 assert!(owner.publication_pending);
+                if invalid == "corrupt-closure" {
+                    assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), b"[{}]");
+                }
             }
         }
     }
