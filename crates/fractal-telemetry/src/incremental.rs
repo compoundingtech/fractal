@@ -176,6 +176,34 @@ pub fn change_keys(change: &Change) -> Vec<String> {
     keys
 }
 
+/// Whether a writer other than an evaluation changed something it read after feed position
+/// `since`. Such a change landed while the evaluation ran, so the evaluation could act on it, and
+/// the next observation of the feed marks the item for it anyway: what it wrote is no write a
+/// skipping pass would have missed. `own` are the evaluation's writes as `kind subject`; each
+/// accounts for one change of that kind and subject.
+pub fn changed_by_others<S: ChangeSource + ?Sized>(
+    store: &S,
+    since: (u64, i64),
+    reads: &BTreeSet<String>,
+    own: &[String],
+) -> Result<bool> {
+    let feed = store.changes_since(since.0, since.1)?;
+    let mut own = own.iter().fold(HashMap::<&str, usize>::new(), |mut own, entry| {
+        *own.entry(entry.as_str()).or_default() += 1;
+        own
+    });
+    Ok(feed.changes.iter().any(|change| {
+        if let Some(left) = own
+            .get_mut(format!("{} {}", change.kind, change.subject).as_str())
+            .filter(|left| **left > 0)
+        {
+            *left -= 1;
+            return false;
+        }
+        change_keys(change).iter().any(|key| reads.contains(key))
+    }))
+}
+
 impl Incremental {
     /// Read what changed since the last pass and mark the items that read it.
     pub fn observe<S: ChangeSource + ?Sized>(&self, store: &S) -> Result<()> {
@@ -377,6 +405,14 @@ impl Incremental {
             .items
             .get(item)
             .and_then(|item| item.due)
+    }
+
+    /// How far the passes have read the change feed; `None` before the first pass.
+    pub fn watermark(&self) -> Option<(u64, i64)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .watermark
     }
 
     /// What `item`'s last evaluation read.
@@ -674,6 +710,21 @@ mod tests {
         assert!(incremental.needs("stop/c", 0));
         assert!(incremental.needs("mission-run/a", 0));
         assert!(!incremental.needs("mission-run/b", 0));
+    }
+
+    #[test]
+    fn changes_by_others_leave_out_the_evaluations_own_writes_one_each() {
+        let feed = Feed(Mutex::new(Vec::new()));
+        let reads = BTreeSet::from(["step-run/s".to_owned()]);
+        let own = ["step-run.state step-run/s".to_owned()];
+        feed.0.lock().unwrap().push(change("step-run/s", "step-run.state", None, "{}"));
+        assert!(!changed_by_others(&feed, (0, 0), &reads, &own).unwrap());
+        // Another writer changed the same step too.
+        feed.0.lock().unwrap().push(change("step-run/s", "step-run.state", None, "{}"));
+        assert!(changed_by_others(&feed, (0, 0), &reads, &own).unwrap());
+        // Nothing the evaluation read changed.
+        let unread = BTreeSet::from(["step-run/t".to_owned()]);
+        assert!(!changed_by_others(&feed, (0, 0), &unread, &[]).unwrap());
     }
 
     fn change(subject: &str, kind: &str, actor: Option<&str>, body: &str) -> Change {

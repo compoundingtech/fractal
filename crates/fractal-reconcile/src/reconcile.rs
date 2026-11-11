@@ -1477,6 +1477,14 @@ pub struct Reconciler<R = NativeRuntime> {
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
 }
 
+/// Where an item's evaluation started: how many writes this thread had recorded and how far the
+/// passes had read the change feed. See [`Reconciler::missed_by_skipping`].
+#[derive(Clone, Copy)]
+struct EvaluationMark {
+    wrote: usize,
+    feed: Option<(u64, i64)>,
+}
+
 struct FileWatch {
     // Keep the subscription alive, including across replacements of the target file.
     _subscription: file_subscriptions::Lease,
@@ -3624,7 +3632,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let queued_before = work_message_agents.len();
             let cpu_started = crate::incremental::thread_cpu();
-            let wrote_mark = smallclaims::touched::wrote_len();
+            let mark = self.evaluation_mark();
             let ((result, due), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     caught(|| -> Result<()> {
@@ -4037,7 +4045,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
+                let wrote = self.missed_by_skipping(&item, mark, &reads, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -6024,7 +6032,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let _clock = smallclaims::store::clock_snapshot();
         let needed = self.needs_item(item, !skip);
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let ((result, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| match guard() {
                 Ok(false) => ReconcileItemOutcome::Rejected,
@@ -6045,7 +6053,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(item, wrote_mark, due);
+            let wrote = self.missed_by_skipping(item, mark, &reads, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6618,7 +6626,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return;
         }
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let ((outcome, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| -> Result<Option<Result<()>>> {
                 // A stop's actual origin is read once here and reused by `reconcile_stop`.
@@ -6651,7 +6659,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(item, wrote_mark, due);
+            let wrote = self.missed_by_skipping(item, mark, &reads, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -10631,7 +10639,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> bool {
         let subject = format!("mission-run/{id}");
         let cpu_started = crate::incremental::thread_cpu();
-        let wrote_mark = smallclaims::touched::wrote_len();
+        let mark = self.evaluation_mark();
         let mut due = None;
         let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| {
@@ -10717,7 +10725,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
+            let wrote = self.missed_by_skipping(&subject, mark, &reads, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10871,16 +10879,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
+    /// Where an item's evaluation starts, taken after [`Self::needs_item`] read the feed.
+    fn evaluation_mark(&self) -> EvaluationMark {
+        EvaluationMark { wrote: smallclaims::touched::wrote_len(), feed: self.incremental.watermark() }
+    }
+
     /// What an evaluation of `item` that nothing marked and nothing made due did, which an
-    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// incremental pass would have missed: the claims it wrote since `mark`, and a due time
     /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
-    /// limit it found, which no skipping pass would have woken for.
-    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
-        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+    /// limit it found, which no skipping pass would have woken for. Nothing when another writer,
+    /// such as the program engine settling a step, changed something its last evaluation also
+    /// read while it ran: a skipping pass is woken through those reads, so the next pass is
+    /// marked for it anyway. A key read for the first time wakes nothing and excuses nothing.
+    fn missed_by_skipping(
+        &self,
+        item: &str,
+        mark: EvaluationMark,
+        reads: &BTreeSet<String>,
+        due: Option<u128>,
+    ) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(mark.wrote);
+        let wrote = missed.len();
         if let Some(due) = due
             && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
         {
             missed.push(format!("due {item} at {due}"));
+        }
+        // A failed read of the feed keeps the correction.
+        if !missed.is_empty()
+            && mark.feed.is_some_and(|since| {
+                let woken: BTreeSet<String> =
+                    self.incremental.reads_of(item).intersection(reads).cloned().collect();
+                crate::incremental::changed_by_others(&self.store, since, &woken, &missed[..wrote])
+                    .unwrap_or(false)
+            })
+        {
+            missed.clear();
         }
         missed
     }
