@@ -20,7 +20,7 @@
 use super::*;
 use crate::peer::{MAX_READ_MESSAGES, MessageMarksAnswer, SEAT_FRESHNESS_READS_FEATURE};
 use crate::model::StatusFrom;
-use crate::store::{message_marks, relayed_closes};
+use crate::store::message_marks;
 use std::collections::HashMap;
 
 /// How long `conversations status` waits for the recipient's host.
@@ -260,6 +260,25 @@ async fn read_paced(
     silent_for: Duration,
 ) -> BTreeMap<String, Relayed> {
     let kept = state.store.extension::<KeptAnswers>();
+    read_with_cache(state, asks, deadline, silent_for, Some(&kept)).await
+}
+
+/// Independent daemon discovery never consumes hints or cached answers populated by GETs.
+pub(super) async fn read_uncached(
+    state: &AppState,
+    asks: BTreeMap<String, Vec<String>>,
+    deadline: Duration,
+) -> BTreeMap<String, Relayed> {
+    read_with_cache(state, asks, deadline, KEEP_FOR, None).await
+}
+
+async fn read_with_cache(
+    state: &AppState,
+    asks: BTreeMap<String, Vec<String>>,
+    deadline: Duration,
+    silent_for: Duration,
+    kept: Option<&KeptAnswers>,
+) -> BTreeMap<String, Relayed> {
     // Each message's host, and what it answered or why it did not.
     let mut heard = Vec::<Heard>::new();
     let mut requests = Vec::new();
@@ -274,9 +293,9 @@ async fn read_paced(
             continue;
         }
         let mut asked = Vec::new();
-        let silent = kept.silent(&host, silent_for);
+        let silent = kept.and_then(|kept| kept.silent(&host, silent_for));
         for subject in subjects {
-            match (kept.get(&subject), &silent) {
+            match (kept.and_then(|kept| kept.get(&subject)), &silent) {
                 (Some(answer), _) => heard.push((host.clone(), Ok(answer))),
                 (None, Some(reason)) => heard.push((host.clone(), Err((subject, reason.clone())))),
                 (None, None) if asked.len() < MAX_MESSAGES_PER_HOST => asked.push(subject),
@@ -319,7 +338,9 @@ async fn read_paced(
             for (host, subjects, answer) in answers {
                 let reason = match answer {
                     Ok(Ok(Some(answers))) => {
-                        kept.keep(answers.messages.iter().cloned());
+                        if let Some(kept) = kept {
+                            kept.keep(answers.messages.iter().cloned());
+                        }
                         heard.extend(
                             answers
                                 .messages
@@ -334,7 +355,9 @@ async fn read_paced(
                     Ok(Err(error)) => format!("{host} did not answer: {error:#}"),
                     Err(_) => format!("{host} did not answer in {deadline:?}"),
                 };
-                kept.fell_silent(&host, &reason);
+                if let Some(kept) = kept {
+                    kept.fell_silent(&host, &reason);
+                }
                 heard.extend(
                     subjects
                         .into_iter()
@@ -353,14 +376,13 @@ async fn read_paced(
 type Heard = (String, Result<MessageMarksAnswer, (String, String)>);
 
 /// What each message's host said, as a status over the seats this member places on that host. A
-/// close a host answered is queued for the client selectors (`relayed_closes`), which this read
-/// does not wait for.
+/// close remains an in-memory answer: only daemon maintenance persists relayed closes.
 pub(super) fn settle(
     store: &Arc<Store>,
     heard: Vec<Heard>,
 ) -> BTreeMap<String, Relayed> {
     let mut seats = BTreeMap::<String, Result<BTreeSet<String>, String>>::new();
-    let settled: BTreeMap<String, Relayed> = heard
+    heard
         .into_iter()
         .map(|(host, heard)| match heard {
             Ok(answer) => {
@@ -384,25 +406,7 @@ pub(super) fn settle(
             }
             Err((subject, reason)) => (subject, Relayed::Unknown { host, reason }),
         })
-        .collect();
-    let closes = settled
-        .iter()
-        .filter_map(|(subject, relayed)| match relayed {
-            Relayed::Answered { host, held: true, status: Some("closed"), latest: Some((receipt, at)), .. } => {
-                Some(relayed_closes::RelayedClose {
-                    message: subject.clone(),
-                    host: host.clone(),
-                    receipt: receipt.clone(),
-                    closed_at_unix_ms: *at,
-                })
-            }
-            _ => None,
-        })
-        .collect();
-    if let Err(error) = relayed_closes::queue(store, closes) {
-        tracing::warn!(error = %format!("{error:#}"), "could not queue relayed closes");
-    }
-    settled
+        .collect()
 }
 
 /// [`read`] from a thread outside the runtime, such as a doctor worker, through the runtime
