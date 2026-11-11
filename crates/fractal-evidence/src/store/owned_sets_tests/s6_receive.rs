@@ -1,4 +1,4 @@
-//! S6 T1/T2/T5. Include with `mod s6_receive;` in owned_sets_tests.rs.
+//! Generated held-view parity and actual live receive replay-fence regressions.
 //! No new production seam: FULL_REPLAYS is thread-local and every receive/project
 //! below runs synchronously on this test's thread (never an HTTP worker).
 use super::*;

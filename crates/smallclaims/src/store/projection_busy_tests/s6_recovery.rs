@@ -1,13 +1,10 @@
-//! S6 T3/T4/T6. Include with `mod s6_recovery;` in projection_busy_tests.rs.
-//! S6 contracts absent on d2e1d3bb: Store::replication_projection_recovery_required()
-//! and cfg(test|test-support) Store::project_replication_backlog_before_gate(FnOnce).
-//! The integrator will re-expose these names on r3; see tmp/s6-seams.md.
-//! Doctor/alert assertions remain with the integrator: their wiring is not yet defined.
+//! Durable receive admission, terminal recovery, and queued projection fencing.
 use super::*;
 use std::sync::mpsc;
 
 const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
 const RECOVERY: &str = "projection-recovery-required";
+const INTERNAL_RECOVERY: &str = "projection-recovery-required/internal";
 
 fn arm(runtime: &FaultRuntime, code: i32) {
     *runtime.stage.lock().unwrap() = Some("incremental");
@@ -53,7 +50,7 @@ fn t3_non_contention_failure_parks_with_typed_health_and_never_replays() {
     assert!(!store.project_replication_backlog_with_log("receive", |line| lines.push(line.to_owned())).unwrap());
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 0);
     let failed = recovery_health(&store);
-    assert_eq!((&failed.0, failed.1, failed.2.as_deref()), (&"stale".to_owned(), before.1, Some(RECOVERY)));
+    assert_eq!((&failed.0, failed.1, failed.2.as_deref()), (&"stale".to_owned(), before.1, Some(INTERNAL_RECOVERY)));
     assert!(failed.3.as_deref().is_some_and(|message| message.contains("internal")),
         "recovery must retain the original non-contention error code: {failed:?}");
     assert_eq!(effect(&store, "busy-test-effect"), before_effect, "speculative writes must roll back");
@@ -74,14 +71,14 @@ fn t3_non_contention_failure_parks_with_typed_health_and_never_replays() {
     let public = store.replication_status(true, Some(FLEET), &[]).unwrap();
     let graph = public.unhealthy.iter().find(|projection| projection.aggregate == "graph").expect("public health must expose recovery");
     assert_eq!(graph.status, "stale");
-    assert_eq!(graph.error_code.as_deref(), Some(RECOVERY));
+    assert_eq!(graph.error_code.as_deref(), Some(INTERNAL_RECOVERY));
     assert!(graph.error_message.as_deref().is_some_and(|message| message.contains("internal")));
     // A restart must retain the terminal reason; opening or an automatic pass must
     // not reinterpret a parked target as retryable, healthy work.
     drop(store);
     let reopened = Store::open(&path, "node", runtime.clone()).unwrap();
     assert!(reopened.replication_projection_recovery_required().unwrap());
-    let _outcome = reopened.project_replication_backlog();
+    assert!(!reopened.project_replication_backlog().unwrap());
     assert_eq!(recovery_health(&reopened), failed);
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 0);
 }
@@ -99,8 +96,8 @@ fn t4_receipt_and_admitted_input_are_durable_when_projection_is_deferred_or_fail
         let inventory = target.replication_inventory().unwrap();
         arm(&runtime, code);
         // Projection failure is a separate outcome from the already committed receipt.
-        // Baseline may replay SQLITE_ERROR; delivery durability must hold either way.
-        let _outcome = target.project_replication_backlog();
+        assert!(!target.project_replication_backlog().unwrap());
+        assert_eq!(runtime.replays.load(Ordering::Relaxed), 0);
         assert!(target.claim_by_id(&claim).unwrap().is_some());
         drop(target);
         let reopened = Store::open(&path, "node", runtime).unwrap();
@@ -130,8 +127,9 @@ fn t6_waiting_projection_rechecks_durable_recovery_under_the_gate() {
             count.fetch_add(1, Ordering::SeqCst);
             Ok(0_i64)
         }).unwrap();
+    // Test-only fixed trigger: increments a scalar counter, without copying row values.
     store.connection.write().execute_batch(
-        "CREATE TEMP TRIGGER s6_count_incremental BEFORE INSERT ON meta
+        /* sqlite-large-value: allow-for-now lv-habfd091c5cba owner=smallclaims::store::projection_busy_tests::s6_recovery TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER s6_count_incremental BEFORE INSERT ON meta
          WHEN NEW.key='busy-test-effect' BEGIN SELECT s6_incremental_attempt(); END;"
     ).unwrap();
     arm(&runtime, rusqlite::ffi::SQLITE_ERROR);
@@ -165,6 +163,6 @@ fn t6_waiting_projection_rechecks_durable_recovery_under_the_gate() {
     let failed = recovery_health(&store);
     assert_eq!(failed.0, "stale");
     assert_eq!(failed.1, before.1);
-    assert_eq!(failed.2.as_deref(), Some(RECOVERY));
+    assert_eq!(failed.2.as_deref(), Some(INTERNAL_RECOVERY));
     assert!(failed.3.as_deref().is_some_and(|message| message.contains("internal")));
 }
