@@ -945,7 +945,7 @@ enum SeatMove {
 async fn cross_host_seat_move(mode: SeatMove) {
     const SUBJECT: &str = "agent/move/worker";
     let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "amber").await;
+    let a = anchor(root.path(), "amber").await;
     let b = joined(root.path(), &a, "cobalt", &[]).await;
     let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join("pty"))
@@ -991,7 +991,10 @@ agent "move/worker" {
         .await;
     }
     if mode == SeatMove::SourceOffline {
-        a.stop();
+        // Offline, as a sleeping laptop is: its daemon and worker are frozen while its seat's
+        // process stays alive. Stopping the node would reap the process with the daemon's
+        // fixture scope, and leave the returning source nothing to retire.
+        a.signal("STOP");
         b.st_ok(&[
             "agents",
             "start",
@@ -1057,7 +1060,7 @@ agent "move/worker" {
             peek.contains("moved-seat-ready"),
             "destination is reachable while source is offline: {peek}"
         );
-        a.start().await;
+        a.signal("CONT");
         wait_until(
             "returning source retires its old incarnation",
             30,
