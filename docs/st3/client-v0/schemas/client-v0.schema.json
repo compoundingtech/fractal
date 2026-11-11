@@ -2337,7 +2337,17 @@
           "required": ["kind", "mission_run_id", "generation_id", "definition_id", "path", "state", "attempt", "readiness_epoch", "goals", "constraints"],
           "properties": {
             "kind": { "const": "work" },
-            "gate_kind": { "enum": ["watch", "predicate", "command", "llm", "human", "mixed", "run", "program", null] },
+            "gate_kind": { "enum": [
+              "watch",
+              "predicate",
+              "command",
+              "llm",
+              "human",
+              "mixed",
+              "run",
+              "program",
+              null
+            ] },
             "program": { "oneOf": [{ "$ref": "#/$defs/WorkProgram" }, { "type": "null" }], "description": "A program step's innermost open journal key and journal timing; null for other work." },
             "mission_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }], "description": "The mission this work's run belongs to." },
             "mission_run_id": { "$ref": "#/$defs/Id" },
