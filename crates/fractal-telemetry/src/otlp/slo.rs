@@ -5,7 +5,7 @@
 //! collector holds the history. Nothing here runs on a request path; once a minute a task reads
 //! the same report as `GET /v1/client/request-latency` and sends it to `[observations.otlp]`.
 //!
-//! Every point carries bounded labels, all from `slo/targets.toml` or fixed words: `target`, the
+//! Every point carries bounded labels, all from `slo/objectives.kdl` or fixed words: `target`, the
 //! `series` inside it (`owner` or `remote` for a read target, `reported` for a latency a paired
 //! phone reported, `statement`, `read`, `write` or `writer_hold` for the store), the `window`
 //! (`1m`, `5m`, `1h`) and, for the latency gauge, the `stat` (`p50`, `p99`, `max`). The target
@@ -154,7 +154,7 @@ pub fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Value> {
         gauge(
             "st_slo_target_ms",
             "ms",
-            "The target in slo/targets.toml for a series: its 99th percentile, or its maximum",
+            "The target in slo/objectives.kdl for a series: its 99th percentile, or its maximum",
             targets,
         ),
         gauge(

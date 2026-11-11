@@ -868,11 +868,11 @@ export const LoadEarlierPaging: Story = { tags: ['critical'], render: args => <L
   pagingRequests.mockClear()
   const lane = await canvas.findByTestId('transcript-scroll')
   const boundary = await canvas.findByTestId('history-boundary')
-  // The reader scrolls up to the boundary; reader input owns the position from here.
+  // The reader scrolls up to the boundary, which asks for the page; reader input owns the position from here.
+  await expect(within(boundary).getByRole('button', { name: 'Load earlier messages' })).toBeVisible()
+  await expect(pagingRequests).not.toHaveBeenCalled()
   lane.scrollTop = 0
-  await nextFrame()
-  await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
-  await expect(pagingRequests).toHaveBeenCalledTimes(1)
+  await waitFor(() => expect(pagingRequests).toHaveBeenCalledTimes(1))
   await expect(boundary).toHaveAttribute('aria-busy', 'true')
   const pending = within(boundary).getByRole('button', { name: 'Loading earlier messages…' })
   await expect(pending).toHaveAttribute('aria-disabled', 'true')
@@ -972,10 +972,12 @@ export const LoadEarlierPagingLong: Story = { render: args => <RepeatedLoadEarli
     if (iteration > 0) await userEvent.click(canvas.getByRole('button', { name: 'Reset transcript' }))
     await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
     const lane = await committedTranscriptHistory(canvasElement, 30, abortSignal)
-    lane.scrollTop = 0
     const boundary = await canvas.findByTestId('history-boundary')
-    await nextFrame()
-    await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
+    // Scrolling up to the boundary asks for the page; a lane with nothing to scroll keeps the button.
+    const scrolls = lane.scrollTop > 0
+    lane.scrollTop = 0
+    if (!scrolls) await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
+    await waitFor(() => expect(within(boundary).getByRole('button', { name: 'Loading earlier messages…' })).toBeVisible())
     await nextFrame()
     const idle = await sampleFrames()
     const control = { ...idle, ...transcriptFrameBudget(idle.intervals, idleFramePeriod(idle.intervals)) }

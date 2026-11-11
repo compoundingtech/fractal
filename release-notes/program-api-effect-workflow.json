@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The private `fractal` package gains `fractal/effect`: program-form missions (`Fractal.mission(intent, program)`) whose steps, worker turns, asks and child runs are `effect/workflow` activities and durable deferreds, and whose bundle entry implements the program host contract v1",
+  "replay": {"status": "none", "detail": "No daemon, claim or projection change. The package implements the bundle side of the program.step journal: it reads the journal the host hands over and writes entries through the host; the daemon side ships separately."},
+  "schema": {"status": "none", "detail": "No table, index, migration or claim kind change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "changed", "detail": "Additive: a new `fractal/effect` package entry point. Existing `fractal`, `fractal/tree` and `fractal/testing` exports are unchanged. The host contract's child-run method is `child(request)`, since the context already has a `run` field naming the mission run."},
+  "downtime": {"status": "none", "detail": "No deploy-time effect; the package is private and not published to npm."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Nothing to recover: no state is written outside a program host."}
+}

@@ -15,3 +15,12 @@ test('public discovery, successful access, and unrelated proxy refusal cannot es
     await assert.rejects(verifyUnpairedFabricGateway('http://127.0.0.1:1234', 'fractal-ios 0.1.0+test', async () => Response.json(payload, { status })), /did not refuse/);
   }
 });
+test('fabric proof accepts both API and error namespaces independently, but not unrelated versions', async () => {
+  for (const api_version of ['st3.client.v0', 'fractal.client.v0', 'unrelated.client.v0']) {
+    for (const error_version of ['st3.client.error.v0', 'fractal.client.error.v0', 'unrelated.client.error.v0']) {
+      const proof = verifyUnpairedFabricGateway('http://127.0.0.1:1234', 'test', async () => Response.json({ ...denied, api_version, error_version }, { status: 403 }));
+      if (api_version.startsWith('unrelated') || error_version.startsWith('unrelated')) await assert.rejects(proof, /did not refuse/);
+      else await proof;
+    }
+  }
+});

@@ -79,10 +79,19 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v19.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v20.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
+}
+
+/// Whether every replica admits `kind` only from a keyed member's signed envelope, by the
+/// daemon's own admission rule.
+fn keyed_only(kind: &str) -> bool {
+    use smallclaims::store::Runtime as _;
+    static RUNTIME: std::sync::LazyLock<fractal_store::store::FractalRuntime> =
+        std::sync::LazyLock::new(Default::default);
+    RUNTIME.requires_keyed_envelope(kind)
 }
 
 #[test]
@@ -989,7 +998,13 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
-        self.claim_of(spec, index)
+        let input = self.claim_of(spec, index)?;
+        // Every replica admits some kinds, such as an operation authorization, only from a keyed
+        // member's signed envelope and holds an unkeyed writer's as unsigned. These nodes have no
+        // member keys, so such a claim would stay pending on every other node and hold every later
+        // checkpoint back; production writes it only on keyed members. The input is still drawn,
+        // so a seed whose store refused it keeps its schedule.
+        (!keyed_only(&input.kind)).then_some(input)
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
@@ -1601,9 +1616,12 @@ impl World {
                     None => {}
                 }
             }
-            for id in held.keys() {
+            for (id, claim) in &held {
                 if !oracle_claims.contains_key(id) {
-                    failures.push(format!("{name}: holds {id}, which the oracle never saw"));
+                    failures.push(format!(
+                        "{name}: holds {id} ({} on {}, from {}), which the oracle never saw",
+                        claim.kind, claim.subject, claim.origin
+                    ));
                 }
             }
             if node.old_build {
@@ -1855,9 +1873,12 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v18 adds durable expiry to kind selection, shifting the shared RNG schedule.
-/// Hosted run 42793993503 observed seeds 2 and 34 converge without trimming; the other fixed seeds trim.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Corpus v20 adds the three `source.*` kinds to kind selection, shifting the shared RNG schedule.
+/// The never-trim set is characterized by hosted CI; a lightly loaded runner diverges from it
+/// (#6210).
+const NEVER_TRIMS: &[u64] = &[];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {

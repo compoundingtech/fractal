@@ -62,10 +62,10 @@ Live share has no histogram, max or latency count. Foreground is 1–60,000 ms a
 (`foreground_ms - live_ms`) forms over-target. It aims for at least 99% live foreground time.
 Neither background nor unreported/disconnected phone time is inferred.
 
-The six latency targets in `slo/targets.toml` are `ios-open-to-live` (3000 ms),
+The six latency objectives in `slo/objectives.kdl` are `ios-open-to-live` (3000 ms),
 `ios-connect` (1500), `ios-message-ack` (500), `ios-conversation-open` (1000),
 `ios-terminal-open` (1500) and `ios-recover` (10000). `ios-live-share` is a separate share
-entry at 99%. Client paths are `client/ios/NAME`, with carrier/path populations reported
+objective at 99%. Client paths are `client/ios/NAME`, with carrier/path populations reported
 separately from daemon response envelopes. The existing request-latency reader and
 `slo/NAME` doctor lines show them; no new reader is required.
 

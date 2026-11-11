@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { test } from 'node:test';
-import { retryTransient, notApplied } from '../../clients/typescript/fractal-client/index.ts';
+import { API_VERSION, retryTransient, notApplied } from '../../clients/typescript/fractal-client/index.ts';
+import { requirePairingAdvertisement } from './pairingProof.ts';
 
 const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
 const slice = (start, end, method = false) => {
@@ -86,15 +87,15 @@ const pairingHarness = (gateway = 'https://gateway.example', fabric = {}) => {
   const events = [];
   const requests = [];
   const dependencies = {
-    proof: undefined, validatePairingTrust: () => 'trusted fingerprint', canVerifyPairing: () => true,
+    proof: undefined, validatePairingTrust: () => 'trusted fingerprint', canVerifyPairing: () => true, requirePairingAdvertisement,
     PROFILE_KEY: 'profile', pairDraft: null,
     SecureStore: {
       getItemAsync: async key => profiles.get(key),
       setItemAsync: async (key, value) => { events.push('commit'); profiles.set(key, value); },
     },
-    gatewayFetch: () => async url => { requests.push(url); return { ok: true, text: async () => JSON.stringify({ api_version: 'test', capabilities: [{ id: 'device-key-proofs', version: 1, state: 'granted' }] }) }; },
+    gatewayFetch: () => async url => { requests.push(url); return { ok: true, text: async () => JSON.stringify({ api_version: API_VERSION, capabilities: [{ id: 'device-key-proofs', version: 1, state: 'granted' }] }) }; },
     fabricBuilt: false, carrierChoice: 'tailscale', fabricSnapshot: { phase: 'off' }, fabricMember: null,
-    isFabricGatewayId: value => value.startsWith('fabric://'), fabricGatewayId: target => `fabric://${target.node}/${encodeURIComponent(target.service)}`, API_VERSION: 'test',
+    isFabricGatewayId: value => value.startsWith('fabric://'), fabricGatewayId: target => `fabric://${target.node}/${encodeURIComponent(target.service)}`, API_VERSION,
     pairingFabricNode: () => ({}), createDeviceKey: async () => ({ key: 'new-public-key', handle: 'new-key', storage: 'secure' }),
     push: { forgetIssuer: async () => { events.push('cleanup'); return true; }, releaseIssuer: () => events.push('release') },
     FractalClient: class {

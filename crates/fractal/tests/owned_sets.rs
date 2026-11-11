@@ -1,6 +1,7 @@
 //! Each fixture serves an isolated daemon over its own Unix socket and durable graph.
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::OwnedSetsStore;
+use fractal_daemon::RetirementsStore;
 use std::{path::Path, sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
@@ -11,7 +12,7 @@ use fractal_daemon::{
     model::{ClaimInput, IntentInput},
     store::{
         Store,
-        owned_sets::{Options, Preview, Request, Source},
+        owned_sets::{Enforce, Options, PolicyRequest, Preview, Request, Source},
     },
 };
 use tokio::sync::{Notify, watch};
@@ -143,6 +144,7 @@ async fn request(daemon: &Daemon, sequence: u64, kdl: String) -> Request {
             adopt: Default::default(),
             allow_empty: false,
             confirm_retire: None,
+            policy: None,
             expected_subjects: Default::default(),
         },
         actor: "person/operator".into(),
@@ -1662,4 +1664,528 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
         ).unwrap_err().code,
         "authored-session-mismatch",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_tasks_publish_with_their_agent_and_revision_tokens_pin_the_same_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    let keys = (0..2)
+        .map(|_| Arc::new(MemberKey::generate().unwrap().0))
+        .collect::<Vec<_>>();
+    let amber = daemon(root.path(), "amber", keys[0].clone(), &keys[0]).await;
+    let ivory = daemon(root.path(), "ivory", keys[1].clone(), &keys[0]).await;
+    for (i, name) in ["amber", "ivory"].into_iter().enumerate() {
+        let mut fields = json!({"fleet_id":FLEET,"member_key":keys[i].public(),
+            "via":if i==0{"anchor"}else{"invite"},"mode":"listening"});
+        if i != 0 {
+            fields["sponsor"] = json!("host/amber");
+        }
+        append(&amber.store, &format!("host/{name}"), "fleet.member-admitted", fields);
+    }
+    let exchange = |amber: &Daemon, ivory: &Daemon| {
+        share(&amber.store, &ivory.store, "amber");
+        share(&ivory.store, &amber.store, "ivory");
+    };
+    exchange(&amber, &ivory);
+    // The full tree: an agent whose exec task compiles to its own subject, grouped `under` a
+    // sibling agent, and a schedule pinning a mission of the same publication.
+    let tree = |pump: bool| {
+        let mut kdl = bundle("tasks", false);
+        if pump {
+            kdl.push_str(
+                "agent \"garden/pump\" {\n workspace \".\"\n under \"agent/garden/orchard\" reason=\"The orchard runs its pump.\"\n exec \"flow\" { argv \"true\"; }\n}\n",
+            );
+        }
+        kdl.push_str("mission \"garden/harvest\" state=\"ready\" { goal \"Harvest\"; step \"work\" { assigned-to \"agent/garden/orchard\" } }\n\
+            schedule \"garden/daily\" { every \"6h\"; anchor \"2026-01-01T00:00:00Z\"; work { mission \"garden/harvest@ST_REVISION[garden/harvest]\"; workspace \"/tmp\"; } }\n");
+        kdl
+    };
+
+    // Older daemons refuse replicated revisions carrying tasks, so activation waits for all.
+    let mut publication = request(&amber, 10, tree(true)).await;
+    let refused: Preview = amber
+        .client
+        .post("/v1/sets/preview", &publication)
+        .await
+        .unwrap();
+    assert!(
+        refused
+            .blockers
+            .iter()
+            .any(|b| b == "host/ivory has not advertised owned-set agent task support; upgrade before activation"),
+        "{:?}",
+        refused.blockers
+    );
+    for (daemon, name) in [(&amber, "amber"), (&ivory, "ivory")] {
+        append(
+            &daemon.store,
+            &format!("daemon/{name}"),
+            "daemon.started",
+            json!({"status":"running","features":{"owned_sets":1,"owned_set_tasks":1}}),
+        );
+    }
+    exchange(&amber, &ivory);
+
+    let planned = preview(&amber, &mut publication).await;
+    for subject in [
+        "agent/garden/orchard",
+        "agent/garden/pump",
+        "exec/garden/pump/flow",
+        "mission/garden/harvest",
+        "schedule/garden/daily",
+    ] {
+        assert_eq!(planned.changes[subject], "added", "{subject}: {planned:?}");
+    }
+    let _: Value = amber
+        .client
+        .post("/v1/sets/apply", &publication)
+        .await
+        .unwrap();
+    exchange(&amber, &ivory);
+    let revision = amber
+        .store
+        .mission_spec("garden/harvest", None)
+        .unwrap()
+        .unwrap()
+        .revision;
+    for daemon in [&amber, &ivory] {
+        let selected = daemon.store.owned_sets().unwrap().remove(0);
+        assert!(selected.blockers.is_empty(), "{:?}", selected.blockers);
+        assert_eq!(selected.receipt.members["exec/garden/pump/flow"].kind, "exec");
+        assert!(
+            daemon
+                .store
+                .selected_desired_token("exec/garden/pump/flow")
+                .unwrap()
+                .is_some()
+        );
+        let schedule = daemon
+            .store
+            .desired_subject_with_writer("schedule/garden/daily")
+            .unwrap()
+            .unwrap()
+            .0;
+        let pinned = serde_json::to_string(&schedule.desired).unwrap();
+        assert!(pinned.contains(&format!("garden/harvest@{revision}")), "{pinned}");
+    }
+
+    // Omitting the agent retires its task with it; the unchanged mission keeps its revision.
+    let mut omit = request(&amber, 20, tree(false)).await;
+    let planned = preview(&amber, &mut omit).await;
+    assert_eq!(planned.changes["agent/garden/pump"], "retiring");
+    assert_eq!(planned.changes["exec/garden/pump/flow"], "retiring");
+    assert_eq!(planned.changes["mission/garden/harvest"], "unchanged");
+    assert_eq!(planned.changes["schedule/garden/daily"], "unchanged");
+    let _: Value = amber.client.post("/v1/sets/apply", &omit).await.unwrap();
+    exchange(&amber, &ivory);
+    for daemon in [&amber, &ivory] {
+        let selected = daemon.store.owned_sets().unwrap().remove(0);
+        assert!(selected.blockers.is_empty(), "{:?}", selected.blockers);
+        assert!(selected.receipt.retired.contains_key("exec/garden/pump/flow"));
+        let flow = daemon
+            .store
+            .desired_subject_with_writer("exec/garden/pump/flow")
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(flow.kind, "stop");
+    }
+
+    // A token naming a mission outside the publication refuses it outright.
+    let foreign = request(
+        &amber,
+        30,
+        tree(false).replace("ST_REVISION[garden/harvest]", "ST_REVISION[garden/elsewhere]"),
+    )
+    .await;
+    let error = amber
+        .client
+        .post::<_, Preview>("/v1/sets/preview", &foreign)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unresolved-revision-token"), "{error}");
+}
+
+const HARVEST: &str = "mission \"garden/harvest\" state=\"ready\" { goal \"Harvest\"; step \"work\" { assigned-to \"agent/garden/orchard\" } }\n";
+const ROSE: &str = "agent \"garden/rose\" {\n workspace \".\"\n harness \"codex\" {}\n}\n";
+const LILY: &str = "agent \"garden/lily\" {\n workspace \".\"\n command \"true\"\n}\n";
+
+/// The orchard and rose agents and the harvest mission, plus `extra` declarations.
+fn enforced_bundle(extra: &str) -> String {
+    format!("{}{ROSE}{HARVEST}{extra}", bundle("source", false))
+}
+
+fn enforce(mode: Enforce) -> PolicyRequest {
+    PolicyRequest { enforce: Some(mode), ..Default::default() }
+}
+
+async fn publish_set(d: &Daemon, sequence: u64, kdl: String, policy: Option<PolicyRequest>) -> (Preview, Value) {
+    let mut publication = request(d, sequence, kdl).await;
+    publication.options.policy = policy;
+    let preview = preview(d, &mut publication).await;
+    let result: Value = d.client.post("/v1/sets/apply", &publication).await.unwrap();
+    assert_eq!(result["publication"]["changed"], true, "{result}");
+    (preview, result)
+}
+
+/// A plain `fractal apply`, optionally `--force --reason`.
+async fn plain(d: &Daemon, kdl: &str, key: &str, force: Option<&str>) -> anyhow::Result<Value> {
+    let planned: Value = d
+        .client
+        .post("/v1/intent/mission", &json!({"intent": {"kdl": kdl}, "at_index": null}))
+        .await?;
+    d.client
+        .post("/v1/intent/apply", &json!({"intent": {"kdl": kdl}, "expected_subjects": planned["subject_tokens"],
+            "idempotency_key": key, "actor": "person/operator", "force_reason": force}))
+        .await
+}
+
+fn until() -> u64 {
+    u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap()
+        + 900_000
+}
+
+async fn hold(d: &Daemon, key: &str, force: bool) -> anyhow::Result<Value> {
+    d.client
+        .post("/v1/delivery/hold", &json!({"subject": "agent/garden/rose", "actor": "person/operator",
+            "held": true, "until_unix_ms": until(), "reason": "quiet during the demo",
+            "idempotency_key": key, "force": force}))
+        .await
+}
+
+async fn hold_active(d: &Daemon) -> bool {
+    let held: Value = d.client.get("/v1/delivery/hold?subject=agent%2Fgarden%2Frose").await.unwrap();
+    held["active"] == true
+}
+
+async fn source_status(d: &Daemon, audit: bool) -> Value {
+    d.client
+        .get(if audit { "/v1/source/status?audit=true" } else { "/v1/source/status" })
+        .await
+        .unwrap()
+}
+
+fn assert_contains(text: &str, expected: &[&str]) {
+    for expected in expected {
+        assert!(text.contains(expected), "{expected:?} missing from: {text}");
+    }
+}
+
+/// An `enforce` set refuses each ad hoc desired-state write to a member, naming the verb, the
+/// set, its source and the escape. A set without a policy keeps today's refusal, with no force.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_enforced_set_refuses_ad_hoc_writes_naming_each_verb() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    publish_set(&d, 10, enforced_bundle(""), Some(enforce(Enforce::Enforce))).await;
+    let source = [
+        "set-managed-subject", "owned-set/garden from acme/garden refs/heads/main",
+        "enforce enforce", "--force --reason TEXT",
+    ];
+    let refused = plain(&d, &bundle("ad hoc", false), "apply", None).await.unwrap_err().to_string();
+    assert_contains(&refused, &source);
+    assert_contains(&refused, &["ad hoc apply is refused"]);
+    let refused = plain(&d, "version 2\nstop \"agent/garden/orchard\"\n", "stop", None).await.unwrap_err().to_string();
+    assert_contains(&refused, &source);
+    assert_contains(&refused, &["ad hoc stop is refused"]);
+    let refused = hold(&d, "hold", false).await.unwrap_err().to_string();
+    assert_contains(&refused, &source);
+    assert_contains(&refused, &["ad hoc hold is refused"]);
+    assert!(!hold_active(&d).await);
+    let refused = d
+        .client
+        .post::<_, Value>("/v1/missions/garden%2Fharvest/retire",
+            &json!({"actor": "person/operator", "idempotency_key": "retire-harvest"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_contains(&refused, &source);
+    assert_contains(&refused, &["ad hoc mission retire is refused"]);
+    let refused = plain(&d, &bundle("ad hoc", false), "blank", Some("  ")).await.unwrap_err().to_string();
+    assert_contains(&refused, &["source-force-refused", "nonempty --reason"]);
+    assert!(source_status(&d, false).await["open"].as_array().unwrap().is_empty());
+
+    // `off` is today's behaviour: the refusal stands and there is no force path.
+    publish_set(&d, 11, enforced_bundle(""), Some(enforce(Enforce::Off))).await;
+    assert!(d.store.owned_sets().unwrap()[0].receipt.policy.is_none());
+    let refused = plain(&d, &bundle("ad hoc", false), "off", None).await.unwrap_err().to_string();
+    assert_contains(&refused, &["set-managed-subject", "publish its declaration through that set"]);
+    let refused = plain(&d, &bundle("ad hoc", false), "off-force", Some("hotfix")).await.unwrap_err().to_string();
+    assert_contains(&refused, &["source-force-refused", "no force path"]);
+    hold(&d, "off-hold", false).await.unwrap();
+    assert!(hold_active(&d).await);
+}
+
+/// Forced writes take effect and record debt; the next publication converges every member,
+/// reports each debt as reverted, adopted or closed, writes `source.debt.closed` for it in the
+/// same transaction, and releases a forced hold there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_writes_record_debt_until_the_next_publication_closes_it() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let policy = PolicyRequest {
+        enforce: Some(Enforce::Enforce),
+        namespaces: Some(vec!["agent/garden/*".into(), "mission/garden/*".into()]),
+        unmanaged_allow: Some(vec!["agent/garden/scratch-*".into()]),
+        ..Default::default()
+    };
+    publish_set(&d, 10, enforced_bundle(""), Some(policy)).await;
+    let set = d.store.owned_sets().unwrap().remove(0);
+    let orchard = "agent/garden/orchard";
+    let source_revision = d.store.mission_spec("garden/harvest", None).unwrap().unwrap().revision;
+
+    let forced = plain(&d, &bundle("ad hoc", false), "orchard", Some("hotfix while CI is down")).await.unwrap();
+    let recorded = &forced["source_debts_recorded"][0];
+    assert_eq!((recorded["subject"].as_str(), recorded["verb"].as_str()), (Some(orchard), Some("apply")));
+    assert_eq!(recorded["actor"], "person/operator");
+    assert_eq!(recorded["reason"], "hotfix while CI is down");
+    assert_eq!(recorded["sha"], format!("{:040x}", 10));
+    let forced_token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    assert_ne!(forced_token, set.receipt.members[orchard].claim);
+    assert_eq!(recorded["claim"], forced_token);
+
+    let mission = format!("version 2\n{}", HARVEST.replace("goal \"Harvest\"", "goal \"Harvest early\""));
+    let forced = plain(&d, &mission, "harvest", Some("frost tonight")).await.unwrap();
+    assert_eq!(forced["source_debts_recorded"][0]["verb"], "mission publish");
+    let forced_revision = d.store.mission_spec("garden/harvest", None).unwrap().unwrap().revision;
+    assert_ne!(forced_revision, source_revision);
+
+    hold(&d, "rose", true).await.unwrap();
+    assert!(hold_active(&d).await);
+
+    let refused = plain(&d, &format!("version 2\n{LILY}"), "lily", None).await.unwrap_err().to_string();
+    assert_contains(&refused, &["set-managed-subject", "namespace claimed by owned-set/garden"]);
+    plain(&d, &format!("version 2\n{LILY}"), "lily-forced", Some("trying a lily")).await.unwrap();
+    plain(&d, &format!("version 2\n{}", LILY.replace("lily", "tulip")), "tulip", Some("trying a tulip")).await.unwrap();
+    let plant = format!("version 2\n{}", HARVEST.replace("garden/harvest", "garden/plant"));
+    let forced = plain(&d, &plant, "plant", Some("trying a planting")).await.unwrap();
+    assert_eq!(forced["source_debts_recorded"][0]["verb"], "create");
+    plain(&d, &format!("version 2\n{}", LILY.replace("lily", "scratch-1")), "scratch", None).await.unwrap();
+    let status = source_status(&d, false).await;
+    assert_eq!(status["open"].as_array().unwrap().len(), 6, "{status}");
+    assert_eq!(status["sets"][0]["enforce"], "enforce");
+
+    // The source now declares the lily exactly as forced, and still omits the tulip.
+    let (preview, published) = publish_set(&d, 11, enforced_bundle(LILY), None).await;
+    assert!(preview.effects[orchard].starts_with("revert ad hoc change by person/operator: hotfix"), "{:?}", preview.effects);
+    assert_eq!(preview.changes["agent/garden/tulip"], "retiring");
+    assert_eq!(preview.changes["mission/garden/plant"], "retiring");
+    let outcomes: std::collections::BTreeMap<String, (String, String)> = published["publication"]["source_debts_reverted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["subject"].as_str().unwrap().to_owned(),
+            (d["verb"].as_str().unwrap().to_owned(), d["outcome"].as_str().unwrap().to_owned())))
+        .collect();
+    let expected = [
+        (orchard, "apply", "reverted"),
+        ("mission/garden/harvest", "mission publish", "reverted"),
+        ("agent/garden/rose", "hold", "reverted"),
+        ("agent/garden/lily", "create", "adopted"),
+        ("agent/garden/tulip", "create", "reverted"),
+        ("mission/garden/plant", "create", "reverted"),
+    ];
+    assert_eq!(outcomes.len(), expected.len(), "{outcomes:?}");
+    for (subject, verb, outcome) in expected {
+        assert_eq!(outcomes[subject], (verb.to_owned(), outcome.to_owned()), "{subject}");
+        let closed = d.store.latest_claim(subject, Some("source.debt.closed")).unwrap().unwrap();
+        assert_eq!(closed.body["fields"]["outcome"], outcome);
+        assert_eq!(closed.body["fields"]["publisher"], "person/operator");
+    }
+    // Converged: the set's declarations hold again and the forced hold is released.
+    let set = d.store.owned_sets().unwrap().remove(0);
+    assert_eq!(d.store.selected_desired_token(orchard).unwrap().unwrap(), set.receipt.members[orchard].claim);
+    assert_eq!(d.store.mission_spec("garden/harvest", None).unwrap().unwrap().revision, source_revision);
+    assert!(set.receipt.members.contains_key("agent/garden/lily"));
+    assert!(set.receipt.retired.contains_key("agent/garden/tulip"));
+    assert!(set.receipt.retired.contains_key("mission/garden/plant"));
+    assert_eq!(
+        d.store.mission_spec("garden/plant", None).unwrap().unwrap().state,
+        fractal_daemon::model::MissionState::Retired
+    );
+    assert!(!hold_active(&d).await);
+    let status = source_status(&d, false).await;
+    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    assert_eq!(status["closed"].as_array().unwrap().len(), 6, "{status}");
+    assert_eq!(status["closed"][0]["closed_by"]["set_revision"], format!("owned-set/garden@{}", set.revision));
+}
+
+/// Terminal retirement of a live member cannot be forced; through client-v0 it is refused as
+/// `set-managed-subject`, not `internal`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_retire_of_a_live_member_is_refused_through_client_v0() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    publish_set(&d, 10, enforced_bundle(""), Some(enforce(Enforce::Enforce))).await;
+    let orchard = "agent/garden/orchard";
+    let client = fractal_client::Client::unix_as(root.path().join("amber").join("st3.sock"), "person/operator");
+    let snapshot = client.capabilities().await.unwrap().snapshot.id;
+    let error = client
+        .agent_retire(
+            &format!("action/retire-{}", "a".repeat(64)),
+            "retire-orchard-terminally",
+            fractal_client::Fence {
+                snapshot_id: snapshot,
+                runtime_desired_revision: Some(d.store.selected_desired_token(orchard).unwrap().unwrap()),
+                ..Default::default()
+            },
+            fractal_client::AgentRetireParameters {
+                agent: orchard.into(),
+                reason: "done with it".into(),
+                successor: None,
+                expect_revision: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    let text = format!("{error:?} {error}");
+    assert_contains(&text, &["SetManagedSubject", "retirement is terminal and cannot be forced",
+        "omit agent/garden/orchard from the set publication"]);
+    assert!(!text.contains("Internal"), "{text}");
+    assert!(d.store.agent_retirement(orchard).unwrap().is_none());
+}
+
+/// An `audit` set refuses nothing beyond `off`: each write `enforce` would refuse proceeds and
+/// records `source.audited` with that refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_audit_set_records_what_enforce_would_refuse() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let policy = PolicyRequest {
+        enforce: Some(Enforce::Audit),
+        namespaces: Some(vec!["agent/garden/*".into()]),
+        ..Default::default()
+    };
+    publish_set(&d, 10, enforced_bundle(""), Some(policy)).await;
+    hold(&d, "audited-hold", false).await.unwrap();
+    assert!(hold_active(&d).await);
+    plain(&d, &format!("version 2\n{LILY}"), "audited-lily", None).await.unwrap();
+    let orchard = "agent/garden/orchard";
+    // A declaration cannot take effect over the set's member reference, so it is still refused.
+    let refused = plain(&d, &bundle("ad hoc", false), "audited-apply", None).await.unwrap_err().to_string();
+    assert_contains(&refused, &["set-managed-subject", "ad hoc apply is refused"]);
+    let token = d.store.selected_desired_token(orchard).unwrap().unwrap();
+    d.store.retire_agent(orchard, "person/operator", "done", &token, None, "audited-retire", &[]).unwrap();
+    let status = source_status(&d, true).await;
+    assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+    let audited: Vec<(String, String)> = status["audited"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["subject"].as_str().unwrap().to_owned(), a["verb"].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(audited, [
+        (orchard.to_owned(), "retire".to_owned()),
+        ("agent/garden/lily".to_owned(), "create".to_owned()),
+        ("agent/garden/rose".to_owned(), "hold".to_owned()),
+    ], "{status}");
+    assert_eq!(status["audited"][0]["actor"], "person/operator");
+    assert_contains(status["audited"][0]["refusal"].as_str().unwrap(), &["retirement is terminal"]);
+    assert!(source_status(&d, false).await.get("audited").is_none());
+}
+
+/// A policy needs every active member to advertise `source_enforcement`; a set naming its
+/// publishers refuses anyone else; debt and its closure replicate and both replicas converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_policy_is_gated_fenced_to_its_publisher_and_debt_replicates() {
+    let root = tempfile::tempdir().unwrap();
+    let keys = (0..2).map(|_| Arc::new(MemberKey::generate().unwrap().0)).collect::<Vec<_>>();
+    let amber = daemon(root.path(), "amber", keys[0].clone(), &keys[0]).await;
+    let ivory = daemon(root.path(), "ivory", keys[1].clone(), &keys[0]).await;
+    for (i, name) in ["amber", "ivory"].into_iter().enumerate() {
+        let mut fields = json!({"fleet_id":FLEET,"member_key":keys[i].public(),
+            "via":if i==0{"anchor"}else{"invite"},"mode":"listening"});
+        if i != 0 {
+            fields["sponsor"] = json!("host/amber");
+        }
+        append(&amber.store, &format!("host/{name}"), "fleet.member-admitted", fields);
+    }
+    let exchange = |amber: &Daemon, ivory: &Daemon| {
+        share(&amber.store, &ivory.store, "amber");
+        share(&ivory.store, &amber.store, "ivory");
+    };
+    exchange(&amber, &ivory);
+    let policy = PolicyRequest {
+        enforce: Some(Enforce::Enforce),
+        publisher: Some(vec!["person/operator".into()]),
+        ..Default::default()
+    };
+    let mut publication = request(&amber, 10, enforced_bundle("")).await;
+    publication.options.policy = Some(policy);
+    let blocked: Preview = amber.client.post("/v1/sets/preview", &publication).await.unwrap();
+    assert!(
+        blocked.blockers.iter().any(|b| b == "host/ivory has not advertised source enforcement support; upgrade before activation"),
+        "{:?}", blocked.blockers
+    );
+    for (daemon, name) in [(&amber, "amber"), (&ivory, "ivory")] {
+        append(&daemon.store, &format!("daemon/{name}"), "daemon.started",
+            json!({"status":"running","features":{"owned_sets":1,"source_enforcement":1}}));
+    }
+    exchange(&amber, &ivory);
+    preview(&amber, &mut publication).await;
+    let _: Value = amber.client.post("/v1/sets/apply", &publication).await.unwrap();
+    exchange(&amber, &ivory);
+
+    // Only the named publisher may publish the set.
+    let mut stranger = request(&amber, 11, enforced_bundle(LILY)).await;
+    stranger.actor = "person/intruder".into();
+    preview(&amber, &mut stranger).await;
+    let refused = amber.client.post::<_, Value>("/v1/sets/apply", &stranger).await.unwrap_err().to_string();
+    assert_contains(&refused, &["source-publisher-refused", "person/operator"]);
+
+    let orchard = "agent/garden/orchard";
+    let forced = plain(&amber, &bundle("ad hoc", false), "orchard", Some("hotfix")).await.unwrap();
+    exchange(&amber, &ivory);
+    let forced_token = forced["source_debts_recorded"][0]["claim"].as_str().unwrap().to_owned();
+    for daemon in [&amber, &ivory] {
+        assert_eq!(daemon.store.selected_desired_token(orchard).unwrap().unwrap(), forced_token);
+        assert_eq!(source_status(daemon, false).await["open"].as_array().unwrap().len(), 1);
+    }
+    publish_set(&amber, 12, enforced_bundle(""), None).await;
+    exchange(&amber, &ivory);
+    for daemon in [&amber, &ivory] {
+        let set = daemon.store.owned_sets().unwrap().remove(0);
+        assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+        assert_eq!(set.receipt.policy.as_ref().unwrap().publisher, ["person/operator"]);
+        assert_eq!(daemon.store.selected_desired_token(orchard).unwrap().unwrap(), set.receipt.members[orchard].claim);
+        let status = source_status(daemon, false).await;
+        assert!(status["open"].as_array().unwrap().is_empty(), "{status}");
+        assert_eq!(status["closed"][0]["outcome"], "reverted", "{status}");
+    }
+}
+
+/// A top-level subscription is a set member: omitting it retires it through its stopped form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_omitted_subscription_member_is_retired_by_its_stopped_form() {
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    // A repository's standing observer needs no declaration of its own.
+    let subscription = "subscription \"garden/alerts\" { observer \"observer/github/acme/garden\"; to \"agent/garden/orchard\"; on \"issues\"; delivery \"message\" { every \"30m\" } }\n";
+    let (planned, _) = publish_set(&d, 10, format!("{}{subscription}", bundle("source", false)), None).await;
+    assert_eq!(planned.changes["subscription/garden/alerts"], "added");
+    let set = d.store.owned_sets().unwrap().remove(0);
+    assert_eq!(set.receipt.members["subscription/garden/alerts"].kind, "subscription");
+    // Outside a set, plain apply has no top-level subscription at all: the ad hoc path is refused
+    // before ownership is consulted, so the set stays the subscription's only writer.
+    let refused = plain(&d, &format!("version 2\n{}", subscription.replace("30m", "1h")), "sub", None)
+        .await.unwrap_err().to_string();
+    assert_contains(&refused, &["runtime-outside-mission"]);
+    // Omitting a member retires it, which needs confirmation of this exact preview.
+    let mut omit = request(&d, 11, bundle("source", false)).await;
+    let planned = preview(&d, &mut omit).await;
+    omit.options.confirm_retire = Some(planned.digest.clone());
+    d.client.post::<_, Value>("/v1/sets/apply", &omit).await.unwrap();
+    assert_eq!(planned.changes["subscription/garden/alerts"], "retiring");
+    assert_eq!(planned.effects["subscription/garden/alerts"], "stop deliveries; retain delivered messages");
+    let set = d.store.owned_sets().unwrap().remove(0);
+    assert!(set.blockers.is_empty(), "{:?}", set.blockers);
+    assert!(set.receipt.retired.contains_key("subscription/garden/alerts"));
+    let stopped = d.store.desired_subject_with_writer("subscription/garden/alerts").unwrap().unwrap().0;
+    assert_eq!(stopped.kind, "subscription");
+    assert!(fractal_daemon::graph::subscription_spec(&stopped.desired).unwrap().stopped);
 }

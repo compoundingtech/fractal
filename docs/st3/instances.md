@@ -65,7 +65,8 @@ an existing migrated root, except that `work/` stays at its legacy location):
 | `bin/` | the `st3`, `st` and `pty` that the installer puts there | |
 | `claude/` | the instance's Claude account, plugins and `st` skill | `CLAUDE_CONFIG_DIR` |
 | `codex/` | the instance's Codex account and `st` skill | `CODEX_HOME` |
-| `home/` | the skill copy for pi, omp and opencode (`home/.agents/skills`) | |
+| `pi/` | the instance's shared pi/omp profile, login and native sessions | `PI_CODING_AGENT_DIR` |
+| `home/` | shared skills (`home/.agents/skills`) | |
 | `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the Fractal Assistant | |
 | `app/` | the macOS app bundle | |
 
@@ -73,6 +74,20 @@ The instance is applied to the environment once, at startup, before any thread e
 and everything it starts (seats, harnesses, hooks) inherit it, so code that reads `XDG_*_HOME`
 itself lands in the instance without knowing about instances. Seats of an instance sign in to
 Claude and Codex separately from your own; that is what makes the first run clean.
+
+Native-session inventory, search, session lists and conversation timelines use a discovery-only
+view at `state/native-sessions/`, never the login user's HOME. Checked `.claude`, `.codex` and
+`.omp/agent` aliases point to this instance's `claude/`, `codex/` and `pi/` directories. No other
+login-home native stores are scanned. The shared pi/omp profile is exposed once as omp;
+distinct saved-session labels for pi and omp within a named instance are not supported.
+`PI_CODING_AGENT_DIR` selects that same `pi/` profile for launched agents. Managed sessions with
+explicit driver-owned transcript paths retain those paths.
+
+HOME is unchanged for the daemon, drivers, hooks and their children: git, ssh, gh and shell rc
+files retain the login environment. The default instance keeps its existing discovery behavior.
+Before upgrading a named instance that uses omp, sign in to the instance's `pi/` profile or
+explicitly migrate its existing pi/omp credentials and configuration there while agents are
+stopped. Login-home profiles and sessions are not copied or deleted automatically.
 
 Beyond directories, an instance has its own names:
 
