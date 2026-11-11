@@ -11,10 +11,11 @@ pub const KIND: &str = "job.recorded";
 // Same subject-local repair ceiling as the operation-conflict contract (#6330).
 const REFOLD_LIMIT: usize = 4096;
 
+/// Large request payloads are boxed in memory without changing the durable JSON shape.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum JobRecord {
-    Submitted { binding: JobHostBinding, identity: IdempotencyKey, request: ExecutionRequest },
+    Submitted { binding: JobHostBinding, identity: IdempotencyKey, request: Box<ExecutionRequest> },
     Transition { binding: JobHostBinding, event: Event },
     LaunchIntent { binding: JobHostBinding, intent: fractal_jobs::launch::LaunchIntent },
     LaunchRefused {

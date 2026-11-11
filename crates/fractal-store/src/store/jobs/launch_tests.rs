@@ -121,12 +121,12 @@ impl JobLaunchEffects for Effects {
         self.order.borrow_mut().push("exit-usage");
         if !self.collision {
             self.order.borrow_mut().push("remove");
-            if let Err(error) = fs::remove_dir_all(&self.directory) {
-                if error.kind() != std::io::ErrorKind::NotFound
+            if let Err(error) = fs::remove_dir_all(&self.directory)
+                && (error.kind() != std::io::ErrorKind::NotFound
                     || !fs::symlink_metadata(&self.directory)
-                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
-                    return Err(error.into());
-                }
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+            {
+                return Err(error.into());
             }
         }
         Ok(usage)
