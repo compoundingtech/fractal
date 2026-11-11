@@ -135,7 +135,7 @@ A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fracta
 
 ### Publishing a program
 
-`loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Bun names inlined modules by their path from the tree root, so the same tree and lockfile give the same bytes wherever they are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:
+`loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun --minify-whitespace` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Minified whitespace drops the comment Bun writes above each inlined module with its path from the build directory, so the same sources and lockfile give the same bytes wherever the tree and its dependencies are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:
 
 ```kdl
 mission "factory/land-program" report-to="agent/factory" state="ready" timeout="2h" {

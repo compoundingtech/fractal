@@ -28,7 +28,7 @@ impl Member {
             Arc::new(Store::open(&state_dir.join("claims.sqlite3"), node, Arc::new(Plain)).unwrap());
         smallclaims::fleet::activate(&store, state_dir, &file).unwrap();
         let (wake, _) = watch::channel(0);
-        let config = WorkerConfig::from_fleet_file(state_dir, node).unwrap();
+        let config = WorkerConfig::from_fleet_file(state_dir, &state_dir.join("api.sock"), node).unwrap();
         tokio::spawn(sync::run(
             config,
             Local(store.clone()),

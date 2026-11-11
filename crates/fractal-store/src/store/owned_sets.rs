@@ -161,6 +161,12 @@ pub struct Preview {
     /// Open source debt against the previous revision that this publication closes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reverted_debts: Vec<crate::model::SourceDebt>,
+    /// The missions whose exact revision this store does not hold yet. Publication checks only
+    /// their exec gates: a held revision is not checked again, even if it was published with
+    /// --no-gate-check or replicated from another daemon (`fractal missions check` checks it).
+    /// Absent from older daemons, whose publications check every mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_check: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1619,6 +1625,7 @@ pub fn plan_tx(
     let mut changes = BTreeMap::<String, String>::new();
     let mut effects = BTreeMap::<String, String>::new();
     let mut heads = BTreeMap::new();
+    let mut gate_check = BTreeSet::new();
     let mut adoptions = BTreeMap::new();
     let mut retired = old
         .as_ref()
@@ -1662,6 +1669,13 @@ pub fn plan_tx(
             }
             .into(),
         );
+        if let Some(mission) = s.strip_prefix("mission/")
+            && existing.is_none_or(|m| m.revision != *revision)
+            && crate::store::missions::mission_revision_spec_tx(transaction, mission, revision)?
+                .is_none()
+        {
+            gate_check.insert(s.clone());
+        }
         if existing.is_none_or(|m| m.revision != *revision) {
             let effect = if s.starts_with("mission/") {
                 "publish definition; retain active runs".to_owned()
@@ -1936,6 +1950,7 @@ pub fn plan_tx(
         noop,
         policy,
         reverted_debts,
+        gate_check: Some(gate_check),
     };
     Ok(Plan {
         intent,
