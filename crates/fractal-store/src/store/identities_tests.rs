@@ -574,3 +574,96 @@ fn naming_operation_conflict_writer_hold_measurement() {
             samples[49], samples[98]);
     }
 }
+
+#[test]
+fn naming_operation_conflict_scope_fences_other_claimants_not_unrelated_names() {
+    const OTHER: &str = "agent/example-other/worker";
+    const UNRELATED: &str = "agent/example-unrelated/worker";
+    const DESTINATION: &str = "agent/example-contested/worker";
+    let a = node("node-a", None, None);
+    let b = node("node-b", None, None);
+    let store = node("node-c", None, None);
+    declare(&a, ORIGINAL);
+    declare(&b, OTHER);
+    let first = a.rename_identity(IdentityKind::Agent,
+        &request(ORIGINAL, DESTINATION, "scope-a"), &[]).unwrap();
+    let second = b.rename_identity(IdentityKind::Agent,
+        &request(OTHER, DESTINATION, "scope-b"), &[]).unwrap();
+    let first = a.claim_by_id(&first.claim_id).unwrap().unwrap();
+    let second = b.claim_by_id(&second.claim_id).unwrap().unwrap();
+    sync(&a, &store);
+    sync(&b, &store);
+    let declaration = declare(&store, UNRELATED);
+    let declaration = store.claim_by_id(&declaration).unwrap().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for _ in 0..OPERATION_CONFLICT_NAMING_CLAIMS {
+            append_claim_record_tx(&tx, store.origin(), UNRELATED, "intent.desired",
+                declaration.actor.as_deref(), &declaration.body, &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    let (winner, loser) = if first.id < second.id { (&first, &second) } else { (&second, &first) };
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, &winner.subject).unwrap().canonical_id, DESTINATION);
+    let (operation, _) = operation_parts(&loser.body).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, store.origin(), "custom/test/naming-scope", "custom.test.observed",
+            None, &json!({"fields":{},"_operation":{"id":operation,"request_digest":"different"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    // The conflicting operation belongs to the loser. Its scope must also fence the
+    // currently healthy winner, which a subject-only or cache-derived scope would miss.
+    let error = store.resolve_identity(IdentityKind::Agent, &winner.subject).unwrap_err();
+    assert_eq!(error.details["reason"], "operation-conflict-naming-refold-limit");
+    assert!(store.resolve_identity(IdentityKind::Agent, &loser.subject).is_err());
+    assert!(resolve_reference_conn(&store.readers.get(), DESTINATION).is_err());
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, UNRELATED).unwrap().identity, UNRELATED);
+    assert!(store.selected_desired_tokens(&[UNRELATED]).unwrap().contains_key(UNRELATED));
+    let health = store.replication_status(false, None, &[]).unwrap();
+    let degraded = health.unhealthy.iter().find(|row|
+        row.aggregate == "projection:naming-operation-conflict").unwrap();
+    let report: Value = serde_json::from_str(degraded.error_message.as_ref().unwrap()).unwrap();
+    assert_eq!(report["scope"], "scoped");
+    assert!(report["affected_names"].as_array().unwrap().contains(&json!(winner.subject)));
+    assert!(report["affected_names"].as_array().unwrap().contains(&json!(DESTINATION)));
+    assert_eq!(report["repair_command"], "run fractal replication replay --confirm in a planned window");
+    // A typed nested reference in a non-naming declaration must use the same fence.
+    let mut desired: DesiredSubject = serde_json::from_value(declaration.body.clone()).unwrap();
+    desired.subject = "resource/example-nested".into();
+    desired.kind = "resource".into();
+    desired.desired = json!({"name":"resource","arguments":["example-nested"],
+        "children":[{"name":"to","arguments":[winner.subject]}]});
+    assert!(normalize_desired(&store.readers.get(), &desired).is_err());
+    let mut intent = crate::parse_intent("version 2\nagent \"example-intent\" { command \"true\"; workspace \"/tmp\"; }\n", store.origin()).unwrap();
+    intent.subjects.clear();
+    intent.subjects.insert(desired.subject.clone(), desired);
+    assert!(normalize_intent(&store.readers.get(), &intent).is_err());
+    store.replay_replication_graph().unwrap();
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
+        .any(|row| row.aggregate == "projection:naming-operation-conflict"));
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, &winner.subject).unwrap().canonical_id, DESTINATION);
+    assert_eq!(store.resolve_identity(IdentityKind::Agent, UNRELATED).unwrap().identity, UNRELATED);
+    let reference = store.replication_snapshot().unwrap().projection_digests.clone();
+    store.replay_replication_graph().unwrap();
+    assert_eq!(reference, store.replication_snapshot().unwrap().projection_digests);
+}
+
+#[test]
+#[ignore = "explicit scope mutation probe; intentionally catches a stale healthy competitor"]
+fn naming_operation_conflict_other_claimants_mutation_is_detected() {
+    conflict_scope::OMIT_OTHER_CLAIMANTS.set(true);
+    let mutant = std::panic::catch_unwind(
+        naming_operation_conflict_scope_fences_other_claimants_not_unrelated_names);
+    conflict_scope::OMIT_OTHER_CLAIMANTS.set(false);
+    assert!(mutant.is_err(), "omitting other claimants must fail the scope regression");
+    eprintln!("NAMING_SCOPE_MUTATION: other-claimant regression failed when competitor traversal was omitted");
+}

@@ -673,7 +673,23 @@ degradation and deferred-repair health), and `lv-h2f8124d35909` and
 `lv-h5b8d52acffb1` (cleanup after bounded or explicit repair). Health details retain
 operation/claim identifiers, not payloads; their variable identifier representation
 remains the owner's `bound-or-reference-values-and-reclamation` debt. Degraded naming
-reads fail closed until repair, and ordinary flushes cannot bypass the cap.
+reads fail closed for the claim-derived affected-name component until repair; unrelated
+names retain the last fold with the degradation visible in store health and doctor.
+Ordinary flushes cannot bypass the cap.
 `fractal_store::store::identities_tests` owns `lv-h18f8ad5b42e2`, the ignored
 writer-held fold measurement's synthetic operation-state update; it adds no production
 data population or size proof.
+
+The naming schema site `lv-h5aebafde05b8` replaces `lv-h40ca3df48b16` and adds
+forward-only partial `claims_naming_from_index` and `claims_naming_to_index` indexes.
+They retain variable name keys from signed claims, not cached aliases.
+`fractal_store::store::identities_conflict_scope` owns `lv-h522af0cfffad`, selecting
+only the fixed operation/subject/from/to indexed query templates. Scope derivation counts
+all hydrated rows, including repeats, against the 64-row cap; unavailable proof or
+checkpoint-only naming evidence falls back to global fencing. Outstanding operation IDs
+are retained and scoped proofs refresh after new claims, so later competing identities
+cannot escape the fence. Nested typed references use the same fail-closed boundary.
+Health details list affected names and instruct: run `fractal replication replay --confirm`
+in a planned window. These name/operation bindings remain variable inline values, not
+byte-size proofs; the owning maintainer retains the trace/reference-representation debt.
+Follow-up: [#6371](https://github.com/compoundingtech/fractal/issues/6371).
