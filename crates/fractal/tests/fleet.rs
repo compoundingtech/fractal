@@ -8227,8 +8227,9 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     leave_claim_in_outbox(&n, &refused_claim, ATTEMPTS - 1);
 
     n.start().await;
+    // The drain tries the refused row last; wait until it records that attempt too.
     wait_until("the startup drain empties the outbox but for the refused message", 30, || async {
-        outbox(&n) == [refused]
+        outbox(&n) == [refused] && outbox_attempts(&n, refused).0 >= ATTEMPTS
     })
     .await;
     for subject in [held, eligible] {
