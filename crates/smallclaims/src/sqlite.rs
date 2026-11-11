@@ -2341,7 +2341,7 @@ mod tests {
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
                 done,
-            })).unwrap();
+            }).map_err(Box::new)).unwrap();
             answers.push(answer);
         }
         let first = receiver.recv().unwrap();
