@@ -7,6 +7,8 @@ import { makeFrameIngest } from '../data/frameIngest.ts'
 import { inputPaintRegionMounted, registerInputPaintRegions, installInputPaint, type InputPaintSample } from './inputPaint.ts'
 import { PortalContainerRegistrationContext, RegisteredPortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { App as RealAppShell } from '../web/App.tsx'
+import { installNativePopover } from '../testNativePopover.ts'
+import { createIntersectionObserverModel } from '../testIntersectionObserver.ts'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, defineConsts: (constants: unknown) => constants, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 vi.mock('virtual:build-identity', () => ({ buildIdentity: { machineVersion: 'test', dirty: false }, deploymentId: undefined }))
@@ -43,6 +45,8 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
   const paints = new Set<() => void>()
   const samples: InputPaintSample[] = []
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  // The dev-bar changes list observes its first entry; nothing enters view in jsdom.
+  vi.stubGlobal('IntersectionObserver', createIntersectionObserverModel().IntersectionObserver)
   let nextFrame = 0
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { const id = ++nextFrame; frames.set(id, callback); return id })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => { frames.delete(id) })
@@ -108,7 +112,7 @@ const setup = ({ stopped = false, scheduleAfter = false, nested = false, timer =
       createElement(RegisteredPortal, { container: portalContainer, children: count === 0 ? null : createElement('div', { role: 'menu' }, 'Opened') }),
     )
     if (appShell) return createElement('div', { onClick: (event: React.MouseEvent) => {
-      if ((event.target as Element).closest('[data-changelog-popover]') !== null) {
+      if ((event.target as Element).closest('[data-devbar-build-changes]') !== null) {
         event.stopPropagation()
         setTimeout(() => flushSync(() => setCount((value) => value + 1)), 0)
       }
@@ -256,25 +260,26 @@ it.each([
   expect(run.samples).toEqual([])
 })
 
-it('uses the registered app-shell host for the real status-bar changelog and excludes its stopped no-op timer', async () => {
+it('keeps the real dev-bar build popover inside a registered React root and excludes its stopped no-op timer', async () => {
+  const restorePopover = installNativePopover()
+  cleanups.push(restorePopover)
   const run = setup({ appShell: true })
-  // The diagnostics bar is a lazy chunk (App.tsx), so its status-bar changelog trigger mounts after the import settles.
-  let changes: HTMLButtonElement | undefined
+  // The diagnostics bar is a lazy chunk (App.tsx), so its build trigger mounts after the import settles.
+  let trigger: HTMLButtonElement | undefined
   await vi.waitFor(() => {
-    changes = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('Changes'))
-    expect(changes).toBeDefined()
+    trigger = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('Build identity'))
+    expect(trigger).toBeDefined()
   }, { timeout: 10_000 })
   // Opening is setup, not a measured trusted input.
-  flushSync(() => changes!.click())
+  flushSync(() => trigger!.click())
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
-  const popover = document.querySelector('[data-changelog-popover]')!
+  const popover = document.querySelector('[data-devbar-build-changes]')!
   expect(popover).not.toBeNull()
-  const host = document.querySelector('[data-app-overlay-host]')!
-  expect(host.contains(popover)).toBe(true)
-  expect(run.reactRoots.has(host)).toBe(true)
+  // The kit's native popover renders in place, inside the app root the capture observes.
+  expect([...run.reactRoots].some((root) => root.contains(popover))).toBe(true)
   const heading = popover.querySelector('h1')!
-  heading.id = 'changelog-noop'
-  run.click('#changelog-noop')
+  heading.id = 'build-changes-noop'
+  run.click('#build-changes-noop')
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
   expect(document.querySelector('#shell-timer')!.textContent).toBe('1')
   await run.frame()

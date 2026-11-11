@@ -608,16 +608,17 @@ fn structured_request(
                     },
                     inner,
                 );
-                let others = drafts.noted_answers.iter().any(|id| *id != answer.id);
+                let others = noted_labels(request, &drafts.noted_answers, Some(&answer.id));
                 let line = if choosing {
                     format!("This note stays with “{}” · {outcome}.", answer.label)
-                } else if others {
-                    format!(
-                        "Enter sends “{}” · {outcome} with this note only; notes on other answers stay here, unsent.",
-                        answer.label
-                    )
                 } else {
-                    format!("Enter sends “{}” · {outcome} with this note only.", answer.label)
+                    match others {
+                        Some(others) => format!(
+                            "Enter sends “{}” · {outcome} with this note, plus your notes on {others}.",
+                            answer.label
+                        ),
+                        None => format!("Enter sends “{}” · {outcome} with this note.", answer.label),
+                    }
                 };
                 card.wrap(&[text::run(line, theme::dim())], inner);
                 if !choosing {
@@ -639,6 +640,17 @@ fn structured_request(
                 };
                 card.section(section, None, inner);
                 text_box(card, &format!("{title} to {from}"), drafts, "", inner);
+                if !choosing
+                    && let Some(others) = noted_labels(request, &drafts.noted_answers, None)
+                {
+                    card.wrap(
+                        &[text::run(
+                            format!("Enter sends this answer, plus your notes on {others}."),
+                            theme::dim(),
+                        )],
+                        inner,
+                    );
+                }
                 if !choosing {
                     card.buttons_fit(
                         &[
@@ -670,14 +682,31 @@ fn structured_request(
                 inner,
             );
         }
-        if !drafts.noted_answers.is_empty() {
-            let send = match answer {
-                Some(answer) => format!(
-                    "Enter sends “{}” · {} with only that option's note; other notes stay here, unsent.",
-                    answer.label, outcome_word(answer)
-                ),
-                None => "Enter writes a custom answer; notes on named options stay here, unsent.".into(),
-            };
+        // What Enter sends: the highlighted answer and every note on the other answers.
+        let own = answer.is_some_and(|answer| drafts.noted_answers.contains(&answer.id));
+        let others = noted_labels(request, &drafts.noted_answers, answer.map(|answer| answer.id.as_str()));
+        let send = match (answer, others) {
+            (None, Some(others)) => {
+                Some(format!("Enter writes a custom answer; your notes on {others} go with it."))
+            }
+            (Some(answer), Some(others)) if required => Some(format!(
+                "Your notes on {others} go with “{}” once you write what should change.",
+                answer.label
+            )),
+            (Some(answer), Some(others)) => Some(format!(
+                "Enter sends “{}” · {}{}, plus your notes on {others}.",
+                answer.label,
+                outcome_word(answer),
+                if own { " with its note" } else { "" }
+            )),
+            (Some(answer), None) if own && !required => Some(format!(
+                "Enter sends “{}” · {} with its note.",
+                answer.label,
+                outcome_word(answer)
+            )),
+            _ => None,
+        };
+        if let Some(send) = send {
             card.wrap(&[text::run(send, theme::dim())], inner);
         }
         let enter = match answer {
@@ -744,6 +773,26 @@ pub(super) fn can_note(
     highlighted.is_some_and(|index| index < named)
         || (highlighted == Some(named) && request.custom)
         || (named == 0 && (request.entry_type == "feedback" || request.custom))
+}
+
+/// The answers with a saved note, except `except`, in the request's order, as the send line
+/// names them: “A”, “A” and “B”, or “A”, “B” and “C”. None when there are none.
+fn noted_labels(
+    request: &fractal_client::StructuredRequest,
+    noted: &[String],
+    except: Option<&str>,
+) -> Option<String> {
+    let labels = request
+        .answers
+        .iter()
+        .filter(|answer| Some(answer.id.as_str()) != except && noted.contains(&answer.id))
+        .map(|answer| format!("“{}”", answer.label))
+        .collect::<Vec<_>>();
+    match labels.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+    }
 }
 
 /// What a named answer does, in words for its note and send line. A choice only selects.
@@ -4113,11 +4162,11 @@ mod request_notes {
                 noted: &["ship"],
                 shows: &[
                     "NOTE FOR “SHIP IT” · ACCEPT",
-                    "Enter sends “Ship it” · accept with this note only.",
+                    "Enter sends “Ship it” · accept with this note.",
                     "Send “Ship it” · accept",
                     "✎ note",
                 ],
-                hides: &["unsent"],
+                hides: &["unsent", "plus your notes"],
                 ..case("decision accept note", decision())
             },
             Case {
@@ -4128,8 +4177,9 @@ mod request_notes {
                 shows: &[
                     "NOTE FOR “HOLD IT” · DECLINE",
                     "Send “Hold it” · decline",
-                    "with this note only; notes on other answers stay here, unsent.",
+                    "Enter sends “Hold it” · decline with this note, plus your notes on “Ship it”.",
                 ],
+                hides: &["unsent"],
                 ..case("decision decline note beside another note", decision())
             },
             Case {
@@ -4174,6 +4224,38 @@ mod request_notes {
                 ..case("choice custom answer", choice())
             },
             Case {
+                text: Some("neither"),
+                editing: true,
+                noted: &["a", "b"],
+                shows: &["Enter sends this answer, plus your notes on “Option A” and “Option B”."],
+                ..case("choice custom answer beside notes", choice())
+            },
+            Case {
+                answering: Some(3),
+                noted: &["ship", "hold", "revise"],
+                shows: &[
+                    "Enter writes a custom answer; your notes on “Ship it”, “Hold it” and “Revise first” go with it.",
+                ],
+                ..case("decision custom highlighted beside notes", decision())
+            },
+            Case {
+                answering: Some(0),
+                noted: &["hold"],
+                shows: &["Enter sends “Ship it” · accept, plus your notes on “Hold it”."],
+                hides: &["with its note"],
+                ..case("decision unnoted answer beside a note", decision())
+            },
+            Case {
+                answering: Some(2),
+                noted: &["ship"],
+                shows: &[
+                    "what should change? Start typing; Enter sends it with “Revise first”",
+                    "Your notes on “Ship it” go with “Revise first” once you write what should change.",
+                ],
+                hides: &["Enter sends “Revise first”"],
+                ..case("decision changes highlighted beside a note", decision())
+            },
+            Case {
                 editing: true,
                 shows: &["ANSWER IN WORDS TO PLANNER", "Send the answer"],
                 hides: &["Custom answer"],
@@ -4194,7 +4276,7 @@ mod request_notes {
                     "✕ Not sent  the asker already closed this request",
                     "NOTE FOR “SHIP IT” · ACCEPT",
                     "This note stays with “Ship it” · accept.",
-                    "Enter sends “Hold it” · decline with only that option's note",
+                    "Enter sends “Hold it” · decline with its note, plus your notes on “Ship it”.",
                     "c  Add note",
                 ],
                 hides: &["Enter sends “Ship it”"],

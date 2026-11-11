@@ -317,10 +317,11 @@ pub async fn replication_receive(
         .get("x-fractal-exchange-id")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("-");
+    let correlation = uuid::Uuid::parse_str(correlation_id).ok();
     let peer = request.peer.clone();
     let envelopes_offered = request.exchange.envelopes.len();
     let metrics = smallclaims::receive_metrics::RequestMetrics::default();
-    let result = replication_receive_inner(state, request, metrics.clone()).await;
+    let result = replication_receive_inner(state, request, metrics.clone(), correlation).await;
     let counters = metrics.snapshot();
     let outcome = match &result {
         Err(error) if matches!(error.code.as_str(), "database-busy" | "database-locked") => "contended",
@@ -351,6 +352,7 @@ async fn replication_receive_inner(
     state: AppState,
     request: ReplicationReceiveRequest,
     metrics: smallclaims::receive_metrics::RequestMetrics,
+    correlation: Option<uuid::Uuid>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
@@ -467,7 +469,16 @@ async fn replication_receive_inner(
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
-    .await?;
+    .await.inspect_err(|error| {
+        smallclaims::replication_diagnostics::FAILURE_DIAGNOSTICS.record(
+            smallclaims::replication_diagnostics::FailureKind::DaemonReceive,
+            || format!(
+                "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
+                correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+                error.code,
+            ),
+        );
+    })?;
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,

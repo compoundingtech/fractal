@@ -118,6 +118,9 @@ class ArchiveTests(unittest.TestCase):
                     self.assertIn("ci-compat-archive identity", job)
                     self.assertNotIn("actions/download-artifact@", job)
                     self.assertIn("python3 scripts/ci-compat-archive download", job)
+                    # A later checkout cleans the untracked archive after a successful download.
+                    download = job.index("python3 scripts/ci-compat-archive download")
+                    self.assertNotIn("uses: actions/checkout@", job[download:])
                     self.assertIn("CI_TEST_ARCHIVE_ARTIFACT_ID:", job)
                     self.assertIn("GH_TOKEN: ${{ github.token }}", job)
                     self.assertNotIn("Restore the prepared compatibility archive", job)

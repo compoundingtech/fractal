@@ -17,6 +17,64 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {
+    let cases: serde_json::Value = decode("message-sender-outcomes.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/Page"
+    })).unwrap();
+    assert!(validator.is_valid(&cases));
+    for raw in cases["items"].as_array().unwrap() {
+        let message: Message = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(message.state, raw["state"].as_str().unwrap());
+        let encoded = serde_json::to_value(message).unwrap();
+        assert_eq!(encoded["state"], raw["state"]);
+    }
+}
+
+#[test]
+fn person_option_notes_round_trip_and_empty_omission() {
+    let legacy = serde_json::json!({"id": "land", "text": "Ship it."});
+    let input: PersonAnswerInput = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(input.option_notes.is_empty());
+    assert_eq!(serde_json::to_value(&input).unwrap(), legacy);
+    let notes = serde_json::json!([{"id": "hold", "text": "Keep as a fallback."}]);
+    let wire = serde_json::json!({"id": "land", "text": "Ship it.", "option_notes": notes});
+    let input: PersonAnswerInput = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(input.option_notes[0].id, "hold");
+    assert_eq!(serde_json::to_value(input).unwrap(), wire);
+    let stored = serde_json::json!({"type": "decision", "outcome": "accept",
+        "id": "land", "text": "Ship it.", "option_notes": notes});
+    let answer: PersonAnswer = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(serde_json::to_value(answer).unwrap(), stored);
+    let mut empty = stored;
+    empty["option_notes"] = serde_json::json!([]);
+    let answer: PersonAnswer = serde_json::from_value(empty.clone()).unwrap();
+    empty.as_object_mut().unwrap().remove("option_notes");
+    assert_eq!(serde_json::to_value(answer).unwrap(), empty);
+}
+
+#[test]
+fn person_option_notes_schema_is_nested_and_strict() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/PersonAnswerInput"
+    })).unwrap();
+    assert!(validator.is_valid(&serde_json::json!({"id": "land",
+        "option_notes": [{"id": "hold", "text": "Fallback."}]})));
+    for note in [
+        serde_json::json!({"id": "hold"}),
+        serde_json::json!({"id": "hold", "text": ""}),
+        serde_json::json!({"id": "hold", "text": "x".repeat(8001)}),
+        serde_json::json!({"id": "hold", "text": "Fallback.", "label": "extra"}),
+    ] {
+        assert!(!validator.is_valid(&serde_json::json!({"id": "land", "option_notes": [note]})));
+    }
+}
+
+#[test]
 fn related_run_rows_decode_and_validate_server_semantics() {
     let value: serde_json::Value = serde_json::from_slice(&fixture("agent-related-runs.json")).unwrap();
     let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();

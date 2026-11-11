@@ -79,10 +79,19 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v19.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
+}
+
+/// Whether every replica admits `kind` only from a keyed member's signed envelope, by the
+/// daemon's own admission rule.
+fn keyed_only(kind: &str) -> bool {
+    use smallclaims::store::Runtime as _;
+    static RUNTIME: std::sync::LazyLock<fractal_store::store::FractalRuntime> =
+        std::sync::LazyLock::new(Default::default);
+    RUNTIME.requires_keyed_envelope(kind)
 }
 
 #[test]
@@ -989,7 +998,13 @@ impl World {
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
-        self.claim_of(spec, index)
+        let input = self.claim_of(spec, index)?;
+        // Every replica admits some kinds, such as an operation authorization, only from a keyed
+        // member's signed envelope and holds an unkeyed writer's as unsigned. These nodes have no
+        // member keys, so such a claim would stay pending on every other node and hold every later
+        // checkpoint back; production writes it only on keyed members. The input is still drawn,
+        // so a seed whose store refused it keeps its schedule.
+        (!keyed_only(&input.kind)).then_some(input)
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
@@ -1020,7 +1035,24 @@ impl World {
             });
         }
         let family = self.rng.pick(&spec.subjects).clone();
-        let subject = self.subject_of(&family, index)?;
+        let subject = if spec.kind == "message.expired" {
+            // Expiry requires existing sent mail. A fresh subject would make every random
+            // expiry fail admission even with the runtime actor; native admission still
+            // decides whether delivery or closure has already made this mail ineligible.
+            let mut subjects = claims(&self.nodes[index].store)
+                .into_values()
+                .filter(|claim| claim.kind == "message.sent")
+                .map(|claim| claim.subject)
+                .collect::<Vec<_>>();
+            subjects.sort();
+            subjects.dedup();
+            if subjects.is_empty() {
+                return None;
+            }
+            self.rng.pick(&subjects).clone()
+        } else {
+            self.subject_of(&family, index)?
+        };
         let deployment = deployment_fields(&spec.kind);
         let (fields, actor) = if let Some(mut fields) = deployment {
             if spec.kind == "deploy.go" && self.rng.chance(40) {
@@ -1035,11 +1067,15 @@ impl World {
                     fields.insert(name.clone(), self.value_of(field, index));
                 }
             }
-            let actor = match self.rng.below(4) {
-                0 => None,
-                1 => Some(PERSON.to_owned()),
-                2 if subject.starts_with("agent/") => Some(subject.clone()),
-                _ => Some("agent/run-0/worker-0".to_owned()),
+            let actor = if spec.kind == "message.expired" {
+                Some("daemon/runtime".to_owned())
+            } else {
+                match self.rng.below(4) {
+                    0 => None,
+                    1 => Some(PERSON.to_owned()),
+                    2 if subject.starts_with("agent/") => Some(subject.clone()),
+                    _ => Some("agent/run-0/worker-0".to_owned()),
+                }
             };
             (fields, actor)
         };
@@ -1580,9 +1616,12 @@ impl World {
                     None => {}
                 }
             }
-            for id in held.keys() {
+            for (id, claim) in &held {
                 if !oracle_claims.contains_key(id) {
-                    failures.push(format!("{name}: holds {id}, which the oracle never saw"));
+                    failures.push(format!(
+                        "{name}: holds {id} ({} on {}, from {}), which the oracle never saw",
+                        claim.kind, claim.subject, claim.origin
+                    ));
                 }
             }
             if node.old_build {
@@ -1690,6 +1729,33 @@ fn append_generated_claim(
                 && claim.body["revision"] == intent.missions[id].revision
         })
         .expect("publication API wrote the generated mission"))
+}
+
+#[test]
+fn generated_message_expiry_is_admitted_and_replicates() {
+    let mut world = World::new(1, Sabotage::None);
+    let mut sent = world.claim_of(&corpus()["message.sent"], 0).unwrap();
+    sent.actor = Some(PERSON.into());
+    sent.fields = BTreeMap::from([
+        ("status".into(), json!("sent")),
+        ("from".into(), json!(PERSON)),
+        ("to".into(), json!("agent/run-0/worker-0")),
+        ("content".into(), json!("Convergence expiry fixture")),
+    ]);
+    append_generated_claim(&world.nodes[0].store, &sent).unwrap();
+
+    // Use the random schedule's exact generation and admission paths, not a
+    // hand-authored expiry that only proves corpus membership.
+    let input = world.claim_of(&corpus()["message.expired"], 0).unwrap();
+    assert_eq!(input.subject, sent.subject);
+    assert_eq!(input.actor.as_deref(), Some("daemon/runtime"));
+    assert_eq!(input.fields["status"], json!("expired"));
+    let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+    let expiry = world.nodes[0].store.latest_claim(&input.subject, Some("message.expired")).unwrap().unwrap();
+    assert_eq!(expiry.id, claim.id);
+    world.tap(0);
+    assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
 }
 
 #[test]
@@ -1807,14 +1873,17 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v17 adds operation receipts to kind selection, shifting the shared RNG schedule.
-/// Hosted run 42507264532 observed seed 2 converge without trimming; the other fixed seeds trim.
-const NEVER_TRIMS: &[u64] = &[2];
+/// Corpus v19 adds `program.step` to kind selection, shifting the shared RNG schedule. Hosted run
+/// 42884923668 observed every fixed seed converge and trim once no seed writes a keyed-only claim.
+/// Burst run 42884913070 left seeds 55 and 610 untrimmed at the same commit: a lightly loaded
+/// runner diverges from hosted CI (#6210).
+const NEVER_TRIMS: &[u64] = &[];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }

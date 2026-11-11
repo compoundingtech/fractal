@@ -289,6 +289,47 @@ fn seat_command(root: &Path, socket: &Path) -> Command {
     command
 }
 
+/// Keep provider supervision real while selecting the fake provider through the managed
+/// runtime contract, rather than relying on the raw executable after `--`.
+fn managed_seat_command(
+    root: &Path,
+    socket: &Path,
+    subject: &str,
+    harness: &str,
+    provider: &str,
+) -> Command {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let bin = root.join("managed-runtime/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join(harness);
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!{}\nexec \"$FRACTAL_TEST_PROVIDER\" \"$@\"\n",
+            env!("ST3_FIXTURE_BASH"),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = root.join("managed-runtime/profile.json");
+    std::fs::write(
+        &profile,
+        serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut command = seat_command(root, socket);
+    command
+        .env("AGENT_RUNTIME_PROFILE", profile)
+        .env("ST_AGENT", subject)
+        .env("FRACTAL_AGENT", subject)
+        .env("FRACTAL_TEST_PROVIDER", provider);
+    command
+}
+
 fn driver_log(root: &Path) -> String {
     std::fs::read_to_string(root.join("state/st3/driver-api-warnings.log")).unwrap_or_default()
 }
@@ -394,7 +435,7 @@ impl Drop for TestSeat {
 /// test's process group and temporary home; TestSeat also cleans up on a failed assertion.
 async fn native_exit_driver(root: &Path, daemon: &mut Daemon) -> TestSeat {
     let seat = "agent/grove/exit-orchid";
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = managed_seat_command(root, &daemon.socket, seat, "claude", "python3");
     declare_claude(daemon, seat);
     daemon.observe_running(seat, "exit-orchid:one");
     daemon.start_admitted_protocol().await;
@@ -461,7 +502,7 @@ async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached(
     daemon.start_admitted_protocol().await;
     let provider = "printf '%s\\n' '--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)' 'Inbound messages will be silently dropped' 'Have an administrator set channelsEnabled: true in managed settings to enable'; exec sleep 300";
     let mut driver = TestSeat(Some(
-        seat_command(root, &daemon.socket)
+        managed_seat_command(root, &daemon.socket, seat, "claude", "sh")
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .env("ST3_CLAUDE_ATTACH_WINDOW_MS", "50")
@@ -710,7 +751,7 @@ async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_res
     let seat = "agent/grove/quiet-cedar";
     let incarnation = "quiet-cedar:one";
     let mut daemon = Daemon::new(root);
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = managed_seat_command(root, &daemon.socket, seat, "claude", "python3");
     declare_claude(&daemon, seat);
     daemon.observe_running(seat, incarnation);
     daemon.start_admitted_protocol().await;
@@ -886,7 +927,7 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     let root = root.path();
     let seat = "agent/grove/title-cedar";
     let mut daemon = Daemon::new(root);
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = managed_seat_command(root, &daemon.socket, seat, "claude", "sleep");
     declare_claude(&daemon, seat);
     daemon.observe_running(seat, "title-cedar:one");
     daemon.start_admitted_protocol().await;
@@ -1035,7 +1076,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     daemon.start().await;
     daemon.stop().await;
 
-    let mut driver = seat_command(root, &daemon.socket)
+    let mut driver = managed_seat_command(root, &daemon.socket, seat, "claude", "sleep")
         .args(["driver", "claude", "--subject", seat, "--", "sleep", "300"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -2579,7 +2620,7 @@ channel.stdin.flush()
 time.sleep(300)
 "#;
     let mut driver = TestSeat(Some(
-        seat_command(root, &daemon.socket)
+        managed_seat_command(root, &daemon.socket, seat, "claude", "python3")
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .env("ST3_CLAUDE_READINESS_GRACE_MS", HOOKLESS_GRACE_MS.to_string())

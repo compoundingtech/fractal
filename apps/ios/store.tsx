@@ -9,7 +9,7 @@ import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plain
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
-import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof';
+import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, requirePairingAdvertisement, validatePairingTrust, verifyPairing, type PairingAdvertisement } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
@@ -21,7 +21,7 @@ import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/fractal-collections';
-import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
+import { FabricCarrier, routeLabel, selectRoute, shouldRetryFabric, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
 import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
@@ -40,7 +40,7 @@ import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
-import { approveRenewal, pendingRenewals, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
+import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -423,8 +423,7 @@ function useAppStore(proof?: FabricProfile) {
       const text = await response.text();
       if (!response.ok || text.length > 256 * 1024) throw new Error('Could not contact the renewal member. Your previous pairing was kept.');
       const envelope: unknown = JSON.parse(text);
-      if (!envelope || typeof envelope !== 'object' || !('api_version' in envelope) || envelope.api_version !== API_VERSION || !('value' in envelope)) throw new Error('Invalid renewal response');
-      return envelope.value;
+      return renewalResponseValue(envelope);
     },
   };
   const renewalRoute = (profile: PhoneProfile): string | undefined => {
@@ -768,14 +767,12 @@ function useAppStore(proof?: FabricProfile) {
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');
-    let advertisement: { api_version?: string; capabilities?: Array<{ id: string; version: number; state: string }> };
+    let advertisement: PairingAdvertisement;
     try { advertisement = JSON.parse(text); } catch { throw new Error('Invalid pairing advertisement. The code was not submitted.'); }
-    if (advertisement.api_version !== API_VERSION || !Array.isArray(advertisement.capabilities) || !advertisement.capabilities.some(c => c.id === 'device-key-proofs' && c.version === 1 && c.state === 'granted')) {
-      throw new Error('Member does not support verifiable device grants; upgrade it. The code was not submitted.');
-    }
+    const capabilities = requirePairingAdvertisement(advertisement);
     // A member that grants paired phones its gateway over Fabric learns this phone's NodeID here.
     const node = fabricBuilt ? fabricNode || await fabricIdentity().catch(() => '') : '';
-    const fabricFields = pairingFabricNode(advertisement.capabilities, node);
+    const fabricFields = pairingFabricNode(capabilities, node);
     const made = await createDeviceKey();
     if (!made) throw new Error('This build cannot make a device key; update the phone app.');
     let consumed = false;
@@ -1262,7 +1259,10 @@ function useAppStore(proof?: FabricProfile) {
       setOrder(updated);
       if (!proof) void AsyncStorage.setItem(ORDER_KEY, JSON.stringify(updated));
     },
-    reconnect() { feed?.reconnect(); },
+    reconnect() {
+      if (shouldRetryFabric(carrierChoice, carrier.snapshot.phase)) carrier.retry();
+      feed?.reconnect();
+    },
     setSimpleOn(on: boolean) {
       setSimpleOn(on);
       if (!proof) void AsyncStorage.setItem(SIMPLE_KEY, on ? '1' : '0').catch(() => {});

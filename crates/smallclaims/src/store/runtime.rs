@@ -109,6 +109,19 @@ pub trait Runtime: Send + Sync {
         false
     }
 
+    /// Admit a write whose claim names no actor but whose writer is known, such as a document
+    /// binding: the runtime's actor-keyed decisions see the writer as they see an actor.
+    fn admit_writer_tx(
+        &self,
+        _transaction: &Transaction<'_>,
+        _origin: &str,
+        _writer: &str,
+        _kind: &str,
+        _subject: &str,
+    ) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
     fn classify_replicated_claim(
         &self,

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Missions can declare a `program` step (`program \"/abs/bundle.mjs\" sha256=\"…\" stalled-after=\"10m\"`), `fractal apply` sends the bundle's bytes with the publication and the daemon stores them as a replicated blob; the `program.step` journal claim kind is registered",
+  "replay": {
+    "status": "changed",
+    "detail": "New claim kind `program.step` (step-run subject, system-only, append, durable) with fields key, status, attempt, program, value, error, ms and optional child. No writer exists yet; older members refuse it as an unknown kind until they upgrade. Step definitions without `program` serialize and hash exactly as before."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index or migration change. Bundles use the existing local_blobs/blobs tables: put_blob stages them, the mission.published claim's `bundle_hash` promotes them."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule or authority change. A publication may only stage bundles its own programs name (`unused-program-bundle`)."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "ApplyRequest and the owned-set apply request gain an optional `program_bundles` map (sha256 -> base64), omitted when empty, so older clients and daemons are unaffected unless a mission declares a program. /v1/intent/apply and /v1/sets/apply accept bodies up to 32 MiB. A publication of a program whose blob this member does not hold is refused with `missing-program-bundle`; `fractal apply`, `apply --dry-run` and `fractal validate` refuse a bundle whose bytes no longer match its sha256. A member whose build predates `program` would read a published program mission without the field and quarantine the revision, so each daemon now advertises `mission_program=1` on `daemon.started` and a revision with a program step is refused with `mission-program-unavailable` (also an `apply --dry-run` blocker) until every current member advertises it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart or migration beyond a normal deploy."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "A refused publication writes no claim. Bundle bytes it carried that verified are staged in local_blobs before the store's checks run and stay there unpromoted (local only, never replicated) until a publication that names them promotes them."
+  }
+}

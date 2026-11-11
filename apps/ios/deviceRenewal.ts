@@ -1,5 +1,11 @@
 import type { PersonPairedSession } from '../../clients/typescript/fractal-client';
 import { verifyPairing, verifyPersonRoot, type ProofCrypto } from './pairingProof.ts';
+import { isClientApiVersion } from './protocolVersions.ts';
+
+export const renewalResponseValue = (envelope: unknown): unknown => {
+  if (!envelope || typeof envelope !== 'object' || !('api_version' in envelope) || !isClientApiVersion(envelope.api_version) || !('value' in envelope)) throw new Error('Invalid renewal response');
+  return envelope.value;
+};
 
 export type RenewalProfile = { url: string; credential: string; personRootFingerprint?: string; signing?: { key: string; storage: 'secure-enclave' | 'software'; handle?: string; person: string; chain: string[] } };
 export type RenewalOffer = {

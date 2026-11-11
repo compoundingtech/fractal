@@ -53,6 +53,7 @@ pub async fn apply(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
     let response = state
         .store
         .apply_owned_set(
@@ -183,7 +184,7 @@ pub async fn get(
         state.store.read_snapshot(|index| {
             Ok((
                 client_snapshot_at(&state, index),
-                detail(&state, &id, query.sha),
+                state.store.with_owned_set_snapshot_reads(|| detail(&state, &id, query.sha)),
             ))
         })
     })

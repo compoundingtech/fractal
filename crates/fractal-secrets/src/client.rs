@@ -583,6 +583,21 @@ impl Client {
         Ok(client)
     }
 
+    /// Name the mission run a program effect acts as over the trusted Unix boundary. The daemon
+    /// accepts it only when the caller's run credential binds that run.
+    pub fn unix_run(path: impl Into<PathBuf>, run: impl Into<String>) -> Result<Self> {
+        let run = run.into();
+        anyhow::ensure!(
+            run.strip_prefix("mission-run/").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }),
+            "Unix run authority must be one concrete `mission-run/<id>` subject"
+        );
+        let mut client = Self::unix(path);
+        client.person = Some(run);
+        Ok(client)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let first_page = path.starts_with("/v1/client/") && !request_has_page_cursor(path);
         for attempt in 0..3 {
@@ -1858,6 +1873,15 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unix_run_client_names_exactly_one_mission_run() {
+        let client = Client::unix_run("/tmp/socket", "mission-run/0123abcd").unwrap();
+        assert_eq!(client.person.as_deref(), Some("mission-run/0123abcd"));
+        for run in ["mission-run/", "mission-run/a/b", "person/operator", "mission-run/a b"] {
+            assert!(Client::unix_run("/tmp/socket", run).is_err(), "{run}");
+        }
+    }
 
     #[tokio::test]
     async fn bind_422_warns_and_keeps_retrying() {
