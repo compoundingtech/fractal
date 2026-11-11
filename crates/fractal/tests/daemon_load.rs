@@ -1866,6 +1866,7 @@ fn run(
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: NODE.into(),
+        runtime_dir: root.join("state"),
         state_dir: root.join("state"),
         pty_root: root.join("pty"),
         pty_binary: pty.clone(),

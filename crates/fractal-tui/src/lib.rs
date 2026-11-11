@@ -1637,6 +1637,7 @@ mission "release" state="ready" {
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: node.into(),
+                runtime_dir: root.path().into(),
                 state_dir: root.path().into(),
                 pty_root: root.path().join("pty"),
                 pty_binary: root.path().join("unused-pty"),

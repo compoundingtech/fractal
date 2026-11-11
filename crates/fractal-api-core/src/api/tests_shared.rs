@@ -11,6 +11,7 @@ pub fn state(root: &Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "node".into(),
+        runtime_dir: root.to_path_buf(),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),

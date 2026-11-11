@@ -258,6 +258,8 @@ pub struct AppState {
     pub event_notify: watch::Sender<u64>,
     pub node: String,
     pub state_dir: std::path::PathBuf,
+    /// Directory containing this daemon's configured API socket.
+    pub runtime_dir: std::path::PathBuf,
     pub pty_root: std::path::PathBuf,
     pub pty_binary: std::path::PathBuf,
     pub fleet_id: Option<String>,

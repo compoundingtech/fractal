@@ -335,6 +335,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "orchid".into(),
+        runtime_dir: root.path().into(),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: "pty".into(),
