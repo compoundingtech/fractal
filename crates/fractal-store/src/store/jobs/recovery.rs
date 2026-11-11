@@ -10,7 +10,7 @@ pub struct RecoveryFacts {
     pub released: Option<Released>,
 }
 
-fn recorded(tx: &Transaction<'_>, id: &str) -> Result<(Option<LaunchIntent>, Option<Released>)> {
+pub(super) fn recorded(tx: &Transaction<'_>, id: &str) -> Result<(Option<LaunchIntent>, Option<Released>)> {
     let mut statement = tx.prepare("SELECT event FROM job_history WHERE job_id=?1
         AND refusal IS NULL AND json_extract(event,'$.action') IN ('launch-intent','launch-released')
         ORDER BY ordinal")?;

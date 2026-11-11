@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retain audited whole-tree stop confirmations and uncertain stops (unit 9a)",
+  "replay": {"status": "changed", "detail": "Jobs-only projection retains generation-bound stop audit and usage. Bare WholeTreeStopped transition records are refused; acknowledgements require an audited sampled stop record."},
+  "schema": {"status": "changed", "detail": "Adds stop-started and stop-resolved job.recorded variants; no SQL schema or shared writer changes."},
+  "rules": {"status": "changed", "detail": "INACTIVE. Only pending cancellation can become cancelled after a confirmed whole-tree stop. Uncertain stop keeps cancel-requested. No timing defaults or production caller."},
+  "compatibility": {"status": "changed", "detail": "Repeated stop acknowledgement is idempotent. Natural ChildExit under cancellation does not bypass whole-tree confirmation, consistent with unit 8."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Pure and real-projection replay fixtures added; cargo and native execution not run."},
+  "recovery": {"status": "changed", "detail": "Retains typed uncertainty or counters-unavailable, never fabricated zero usage. Reserved operator audit requires a deployment-pinned authenticated PERSON grant; no endpoint is exposed."}
+}
