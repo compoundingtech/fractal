@@ -2361,6 +2361,31 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn source_map_get(
+        &self,
+        subject: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<SubjectSourceMap>, ClientError> {
+        let mut path = format!("/v1/client/source-maps?subject={}", percent_encode(subject));
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
+    }
+    pub async fn source_blob_get(
+        &self,
+        hash: &str,
+        subject: &str,
+        revision: &str,
+    ) -> Result<Envelope<SourceBlob>, ClientError> {
+        self.get(&format!(
+            "/v1/client/source-blobs/{}?subject={}&revision={}",
+            percent_encode(hash),
+            percent_encode(subject),
+            percent_encode(revision)
+        ))
+        .await
+    }
     pub async fn subject_definition(
         &self,
         subject: &str,

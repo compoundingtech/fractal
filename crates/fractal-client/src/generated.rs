@@ -1188,6 +1188,92 @@ pub struct MissionDeclarationProvenance {
     pub renderer: Option<String>,
 }
 
+/// Where one agent or mission revision came from; requires read.declarations.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SubjectSourceMap {
+    pub subject: String,
+    pub revision: String,
+    pub map: SourceMapClaim,
+    /// The subject's mapped revisions, newest first.
+    pub revisions: Vec<SourceMapRevision>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapRevision {
+    pub revision: String,
+    pub set_revision: String,
+    pub repository: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub sha: String,
+    pub sequence: u64,
+    pub recorded_at_unix_ms: u64,
+}
+
+/// The `source.mapped` claim body. File indices refer to `files`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapClaim {
+    pub subject: String,
+    pub revision: String,
+    pub set_revision: String,
+    pub repository: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub sha: String,
+    pub sequence: u64,
+    pub files: Vec<SourceMapFile>,
+    pub declaration: usize,
+    pub inputs: Vec<usize>,
+    pub nodes: Vec<SourceMapNode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapFile {
+    pub repository: String,
+    pub path: String,
+    pub blob: String,
+    pub blob_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapNode {
+    pub kdl: String,
+    #[serde(rename = "kdlLines")]
+    pub kdl_lines: [u32; 2],
+    pub span: SourceMapSpan,
+    pub frames: Vec<SourceMapFrame>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapSpan {
+    pub file: usize,
+    pub start: SourceMapPosition,
+    pub end: SourceMapPosition,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapPosition {
+    pub line: u32,
+    pub column: u32,
+}
+
+/// One contributing location: declaration, helper or value; `enclosing` is a range, not a point.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceMapFrame {
+    pub file: usize,
+    pub start: SourceMapPosition,
+    pub end: SourceMapPosition,
+    pub role: String,
+    pub precision: String,
+}
+
+/// The text of one source file version, by sha256.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SourceBlob {
+    pub hash: String,
+    pub text: String,
+}
+
 /// Applied desired state, not the original declaration file or a proposed mission revision.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SubjectDefinition {
@@ -1598,6 +1684,9 @@ pub struct Mission {
 pub struct MissionRunSummary {
     pub id: String,
     pub generation_id: Option<String>,
+    /// The mission revision the run is pinned to; absent on older daemons.
+    #[serde(default)]
+    pub revision: Option<String>,
     pub requester: String,
     pub status: String,
     pub phase: String,
