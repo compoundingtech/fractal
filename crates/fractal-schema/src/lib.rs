@@ -5049,6 +5049,8 @@ mod tests {
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited"] {
             current.claims.remove(kind).unwrap();
         }
+        current.claims.remove("job.recorded").unwrap();
+        current.subjects.remove("job").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
@@ -5230,6 +5232,7 @@ mod tests {
             [
                 "attention.requested",
                 "attention.resolved",
+                "job.recorded",
                 "lane.approved",
                 "lane.joined",
                 "lane.left",
