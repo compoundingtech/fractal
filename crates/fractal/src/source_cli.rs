@@ -143,7 +143,7 @@ fn snippet(text: &str, start: u32, end: u32, cap: usize) -> Vec<(u32, &str)> {
         .collect()
 }
 
-fn file_text<'a>(read: &'a MapRead, file: usize) -> &'a str {
+fn file_text(read: &MapRead, file: usize) -> &str {
     read.map.files.get(file).and_then(|file| read.texts.get(&file.blob_hash)).map_or("", String::as_str)
 }
 
