@@ -336,6 +336,17 @@ fn operation_conflict_owned_set_exclusion_survives_later_receipt_chunk() {
     let store = Store::open_memory("fixture").unwrap();
     store.project_replication_backlog().unwrap();
     {
+        let connection = store.readers.get();
+        let mut plan = connection.prepare(
+            "EXPLAIN QUERY PLAN SELECT aggregate FROM projection_health INDEXED BY projection_health_degraded_operation_subject
+             WHERE status='stale' AND error_code='operation-conflict-no-bounded-refold'
+             AND aggregate GLOB 'projection:operation-conflict:*'",
+        ).unwrap();
+        let steps = plan.query_map([], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(steps.iter().any(|step| step.contains("projection_health_degraded_operation_subject")));
+    }
+    {
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         let body = json!({"subject":"exec/excluded-member","kind":"exec","desired":{"value":"excluded"},
@@ -383,4 +394,50 @@ fn operation_conflict_owned_set_exclusion_survives_later_receipt_chunk() {
     owned_sets::project_tx(&tx).unwrap();
     tx.commit().unwrap();
     assert!(!absent());
+}
+
+#[test]
+fn operation_conflict_checkpoint_adoption_invalidates_discovery_during_projection() {
+    let store = Store::open_memory("fixture").unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", "custom/late-checkpoint", "custom.test.observed", None,
+            &json!({"fields":{},"_operation":{"id":"op/late-checkpoint","request_digest":"b"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.project_replication_backlog().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for number in 0..=smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append_claim_record_tx(&tx, "peer", "custom/checkpoint-race", "custom.test.observed", None,
+                &json!({"fields":{"number":number}}), &[], None).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let target = store.index().unwrap();
+    let adopted = std::cell::Cell::new(false);
+    FULL_REPLAYS.with(|count| count.set(0));
+    store.project_replication_backlog_with_yield(|| {
+        if adopted.replace(true) { return; }
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hd5cb81fd9252 owner=fractal_store::store::operation_conflict_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+            actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
+            VALUES ('late-tombstone','peer',1,'envelope','custom/late-checkpoint','custom.test.observed',
+                NULL,'[]','op/late-checkpoint','a',0,'checkpoint/2026-10-01')", []).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h69417713b2cb owner=fractal_store::store::operation_conflict_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
+        tx.commit().unwrap();
+    }).unwrap();
+    assert!(adopted.get());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    assert!(!smallclaims::store::operation_conflict_discovery_valid(&store.readers.get(), target).unwrap());
+    assert!(store.replication_projection_needs_recovery().unwrap());
+    // The next reader pass invalidates the old watermark and discovers the new tombstone,
+    // even though no new claim index was admitted after the preceding scan.
+    store.project_replication_backlog().unwrap();
+    assert!(smallclaims::store::operation_conflict_discovery_valid(&store.readers.get(), target).unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
 }

@@ -17276,13 +17276,14 @@ pub fn try_project_all_simple_replication_tx(
 // A whole-log replay is unsafe while this log contains conflicting operations. Keep the
 // independent replay requirement visible, but let bounded receipt move past it. Repair is
 // explicit: receipt must not repeatedly strand unrelated claims behind an unhealthy graph.
-fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, reason: &str) -> Result<bool, FractalError> {
+fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, through: u64, reason: &str) -> Result<bool, FractalError> {
     let conflict: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM operations INDEXED BY operations_conflict_index WHERE state='conflict')
          OR EXISTS(SELECT 1 FROM projection_health WHERE aggregate GLOB 'projection:operation-conflict-fence:*')",
         [], |row| row.get(0),
     ).map_err(internal)?;
-    if conflict {
+    let unproven = !smallclaims::store::operation_conflict_discovery_valid(tx, through).map_err(internal)?;
+    if conflict || unproven {
         tx.execute(
             /* sqlite-large-value: allow-for-now lv-ha8b524108446 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
              VALUES ('projection:deferred-replay','stale','operation-conflict-replay-deferred',?1,?2)
@@ -17290,7 +17291,7 @@ fn defer_replay_for_operation_conflict(tx: &Transaction<'_>, reason: &str) -> Re
             params![reason, now_ms().to_string()],
         ).map_err(internal)?;
     }
-    Ok(conflict)
+    Ok(conflict || unproven)
 }
 
 pub fn try_project_simple_replication_tx(
@@ -17308,11 +17309,11 @@ pub fn try_project_simple_replication_tx(
         .map_err(internal)?;
     let (status, frontier) = match health {
         Some(health) => health,
-        None if defer_replay_for_operation_conflict(transaction, "missing-health")? => ("healthy".to_owned(), 0),
+        None if defer_replay_for_operation_conflict(transaction, through, "missing-health")? => ("healthy".to_owned(), 0),
         None => return Ok(replay_needed("missing-health")),
     };
     if status != "healthy"
-        && !defer_replay_for_operation_conflict(transaction, "unhealthy-projection")? {
+        && !defer_replay_for_operation_conflict(transaction, through, "unhealthy-projection")? {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17496,7 +17497,7 @@ pub fn try_project_simple_replication_tx(
                     continue;
                 }
             }
-            if defer_replay_for_operation_conflict(transaction, reason)? {
+            if defer_replay_for_operation_conflict(transaction, through, reason)? {
                 unsupported_conflict_subjects.insert(claim.subject.clone());
                 continue;
             }
@@ -17986,7 +17987,7 @@ pub fn try_project_simple_replication_tx(
     }
     // A later receipt must not implicitly repair a set excluded by an earlier chunk.
     let mut excluded = transaction.prepare(
-        "SELECT aggregate FROM projection_health WHERE status='stale'
+        "SELECT aggregate FROM projection_health INDEXED BY projection_health_degraded_operation_subject WHERE status='stale'
          AND error_code='operation-conflict-no-bounded-refold'
          AND aggregate GLOB 'projection:operation-conflict:*'",
     ).map_err(internal)?;

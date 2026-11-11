@@ -44,6 +44,8 @@ pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 mod proof;
 pub mod prepared_envelope;
 mod replica_record;
+mod operation_conflict_fence;
+pub use operation_conflict_fence::valid as operation_conflict_discovery_valid;
 use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
@@ -1249,6 +1251,7 @@ impl Store {
         })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
+        operation_conflict_fence::initialize(connection)?;
         Ok(fresh)
     }
 
@@ -8798,14 +8801,25 @@ impl Store {
     /// A first upgrade scans the old log once; each metadata page commits its own watermark.
     /// Receipts beyond this pass's fixed target belong to the next pass, never this scan.
     fn discover_operation_conflicts(&self, target: u64) -> Result<()> {
-        let mut scanned: u64 = self.readers.get().query_row(
-            "SELECT last_good_store_index FROM projection_health WHERE aggregate='projection:operation-conflict-scan'",
-            [], |row| row.get(0),
-        ).optional()?.unwrap_or(0);
-        while scanned < target {
+        let (mut scanned, generation, mut unproven) = {
+            let connection = self.readers.get();
+            let tx = connection.unchecked_transaction()?;
+            let generation = operation_conflict_fence::generation(&tx)?;
+            let saved: Option<(u64, Option<String>)> = tx.query_row(
+                "SELECT last_good_store_index,error_message FROM projection_health WHERE aggregate='projection:operation-conflict-scan'",
+                [], |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional()?;
+            match saved {
+                Some((scanned, Some(saved_generation))) if saved_generation == generation => (scanned,generation,false),
+                _ => (0,generation,true),
+            }
+        };
+        while scanned < target || unproven {
+            unproven = false;
             let (through, conflicts) = {
                 let connection = self.readers.get();
                 let tx = connection.unchecked_transaction()?;
+                if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
                 let mut page = tx.prepare(
                     "SELECT store_index,id,
                        CASE WHEN json_type(body,'$._operation.id')='text' THEN json_extract(body,'$._operation.id') END,
@@ -8844,6 +8858,7 @@ impl Store {
             // and watermark are committed. The evidence set survives subsequent passes.
             let mut connection = self.connection.write();
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if operation_conflict_fence::generation(&tx)? != generation { return Ok(()); }
             for (operation, evidence) in conflicts {
                 tx.execute(
                     /* sqlite-large-value: allow-for-now lv-hb7532db3c65d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
@@ -8853,10 +8868,10 @@ impl Store {
                 )?;
             }
             tx.execute(
-                /* sqlite-large-value: allow-for-now lv-hc1d2cd2957a7 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,last_good_store_index,updated_at_unix_ms)
-                 VALUES ('projection:operation-conflict-scan','healthy',?1,?2)
-                 ON CONFLICT(aggregate) DO UPDATE SET last_good_store_index=MAX(last_good_store_index,excluded.last_good_store_index)",
-                params![through,now_ms().to_string()],
+                /* sqlite-large-value: allow-for-now lv-hb0e4de996f4f owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,last_good_store_index,updated_at_unix_ms,error_message)
+                 VALUES ('projection:operation-conflict-scan','healthy',?1,?2,?3)
+                 ON CONFLICT(aggregate) DO UPDATE SET last_good_store_index=excluded.last_good_store_index,error_message=excluded.error_message",
+                params![through,now_ms().to_string(),generation],
             )?;
             tx.commit()?;
             scanned = through;
@@ -9041,6 +9056,9 @@ impl Store {
                             .with_detail("previous_claim_id", previous_claim_id);
                         self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                         return Err(error);
+                    }
+                    if !operation_conflict_discovery_valid(&transaction, target)? {
+                        return Err(FractalError::new("operation-conflict-discovery-unproven", "checkpoint or restored history changed during discovery; retry"));
                     }
                     // Replay is not target-bounded. A later admission has not been scanned:
                     // defer until the next pass discovers that newly admitted range.

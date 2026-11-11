@@ -625,9 +625,17 @@ diagnostic. Both retain metadata, never claim bodies, with the same bounding deb
 `lv-hf0bbe1f00bc2` is the second-chunk stale-health regression fixture.
 
 `smallclaims::store` owns `lv-hb7532db3c65d` (full operation/claim identity evidence),
-`lv-hc1d2cd2957a7` (the incremental reader scan watermark), `lv-hcc82e02fe20f`
+`lv-hb0e4de996f4f` (the generation-qualified incremental reader scan watermark), `lv-hcc82e02fe20f`
 (graph health that retains deferred-repair visibility), and `lv-h362e35c78646`
 (clearing that deferred row only after explicit full repair succeeds).
 Evidence contains identifiers, not claim bodies; identifier representation remains
 the same bounding debt. Discovery reads only the newly admitted target range on
 readers; writer metadata pages are capped at the projection chunk size.
+
+`smallclaims::store::operation_conflict_fence` owns `lv-hdd122545f0d0` and
+`lv-h12783970e005`, installing checkpoint/restored-prefix invalidation triggers
+and the partial stale-exclusion index. They mutate integer generation metadata;
+the index retains existing operation/subject keys, with the same bounded-identity
+debt rather than a new body population. `lv-hd5cb81fd9252` and `lv-h69417713b2cb`
+are synthetic checkpoint-adoption/stale-health regression sites owned by
+`fractal_store::store::operation_conflict_tests`.
