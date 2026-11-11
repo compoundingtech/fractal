@@ -11,10 +11,26 @@ pub(super) fn check(connection: &Connection, name: &str) -> Result<(), FractalEr
     let blocked: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
          AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
-              OR EXISTS(SELECT 1 FROM json_each(error_message,'$.affected_names') WHERE value=?1)))",
+              OR EXISTS(SELECT 1 FROM meta WHERE key='operation-conflict-naming-name:' || ?1)))",
         [name], |row| row.get(0),
     ).map_err(internal)?;
     if blocked { return Err(unavailable(name, "operation-conflict-naming-refold-limit")); }
+    Ok(())
+}
+
+pub(super) fn clear(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h864348ae5781 owner=fractal_store::store::identities_conflict_scope TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB 'operation-conflict-naming-name:*'", [])?;
+    Ok(())
+}
+
+pub(super) fn persist(transaction: &Transaction<'_>, report: &Value) -> Result<()> {
+    clear(transaction)?;
+    if report["scope"] == "scoped" {
+        for name in report["affected_names"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h05bf16937ee4 owner=fractal_store::store::identities_conflict_scope TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![format!("operation-conflict-naming-name:{name}"), "1"])?;
+        }
+    }
     Ok(())
 }
 

@@ -708,3 +708,10 @@ Health details list affected names and instruct: run `fractal replication replay
 in a planned window. These name/operation bindings remain variable inline values, not
 byte-size proofs; the owning maintainer retains the trace/reference-representation debt.
 Follow-up: [#6371](https://github.com/compoundingtech/fractal/issues/6371).
+
+`lv-h05bf16937ee4` and `lv-h864348ae5781` retain and reclaim the same component
+as at most 64 keyed `meta` entries. Healthy reads stop at the absent keyed health
+row; degraded membership uses primary-key probes, never a JSON-array scan on the
+message-body hot path. Refresh replaces these rows in the same transaction and
+explicit repair clears them. Variable name-key representation remains the scope
+module owner's `bound-or-reference-values-and-reclamation` debt.

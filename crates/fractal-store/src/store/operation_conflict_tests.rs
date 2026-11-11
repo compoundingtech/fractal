@@ -142,7 +142,7 @@ mission "bounded-run" state="ready" {
     let run = store.create_mission_run_inner(&crate::model::MissionRunRequest {
         mission: "bounded-run".into(), revision: None, workspace: "/tmp".into(),
         requester: Some("person/operator".into()), mode: None,
-        inputs: Default::default(), idempotency_key: "bounded-run".into(),
+        inputs: Default::default(), idempotency_key: "bounded-run-creation".into(),
     }, None, None, None).unwrap();
     let operation = "op/conflicting-run-final-drain";
     {

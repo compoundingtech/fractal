@@ -6903,7 +6903,7 @@ impl Store {
             .prepare_cached(
                 "SELECT requested.value, desired.claim_id,CASE WHEN requested.value GLOB 'agent/*' OR requested.value GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
                     AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
-                         OR EXISTS(SELECT 1 FROM json_each(error_message,'$.affected_names') WHERE value=requested.value OR value=names.identity))),h.unavailable,
+                         OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || requested.value, 'operation-conflict-naming-name:' || names.identity)))),h.unavailable,
                     (SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=COALESCE(names.identity,requested.value) AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
@@ -8876,7 +8876,7 @@ pub fn current_desired_row(connection: &Connection, subject: &str) -> Result<Opt
             "SELECT d.kind, d.revision, d.claim_id, d.body, d.member, d.owner_run, d.owner_generation,
                  CASE WHEN requested.identity GLOB 'agent/*' OR requested.identity GLOB 'mission/*' THEN COALESCE((SELECT error_code FROM projection_health WHERE aggregate='projection:naming-operation-conflict'
                     AND (COALESCE(json_extract(error_message,'$.scope'),'global')<>'scoped'
-                         OR EXISTS(SELECT 1 FROM json_each(error_message,'$.affected_names') WHERE value=?1 OR value=requested.identity))),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
+                         OR EXISTS(SELECT 1 FROM meta WHERE key IN ('operation-conflict-naming-name:' || ?1, 'operation-conflict-naming-name:' || requested.identity)))),h.unavailable,(SELECT CASE WHEN COUNT(*)=0 THEN NULL WHEN MAX(state='invalid')=1 THEN 'conflict' ELSE 'pending-replication' END
                      FROM replica_records WHERE subject_hint=requested.identity AND state IN ('unknown','invalid')
                      AND (kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published') OR kind_hint IS NULL))) END
              FROM (SELECT COALESCE((SELECT identity FROM identity_names WHERE name=?1),?1) AS identity) requested

@@ -497,6 +497,7 @@ pub(super) fn refold_operation_conflict(transaction: &Transaction<'_>, details: 
         return Ok(false);
     }
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h2f8124d35909 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:naming-operation-conflict'", [])?;
+    conflict_scope::clear(transaction)?;
     holds::rebuilt(count);
     holds::fold_progress(0, count);
     flush(transaction)?;
@@ -505,6 +506,7 @@ pub(super) fn refold_operation_conflict(transaction: &Transaction<'_>, details: 
 }
 
 fn record_degraded(transaction: &Transaction<'_>, details: &Value) -> Result<()> {
+    conflict_scope::persist(transaction, details)?;
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-hf50ecf2614c0 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate,status,error_code,error_message,updated_at_unix_ms)
              VALUES('projection:naming-operation-conflict','stale','operation-conflict-naming-refold-limit',?1,?2)
@@ -542,6 +544,7 @@ use smallclaims::naming::{Fact, Head, reduce as reduce_naming};
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     reduce(transaction, true)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h5b8d52acffb1 owner=fractal_store::store::identities TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='projection:naming-operation-conflict'", [])?;
+    conflict_scope::clear(transaction)?;
     Ok(())
 }
 

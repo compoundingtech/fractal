@@ -635,6 +635,11 @@ fn naming_operation_conflict_scope_fences_other_claimants_not_unrelated_names() 
     assert!(report["affected_names"].as_array().unwrap().contains(&json!(winner.subject)));
     assert!(report["affected_names"].as_array().unwrap().contains(&json!(DESTINATION)));
     assert_eq!(report["repair_command"], "run fractal replication replay --confirm in a planned window");
+    let scoped_keys: usize = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM meta WHERE key GLOB 'operation-conflict-naming-name:*'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(scoped_keys, report["affected_names"].as_array().unwrap().len());
     // A typed nested reference in a non-naming declaration must use the same fence.
     let mut desired: DesiredSubject = serde_json::from_value(declaration.body.clone()).unwrap();
     desired.subject = "resource/example-nested".into();
@@ -647,6 +652,11 @@ fn naming_operation_conflict_scope_fences_other_claimants_not_unrelated_names() 
     intent.subjects.insert(desired.subject.clone(), desired);
     assert!(normalize_intent(&store.readers.get(), &intent).is_err());
     store.replay_replication_graph().unwrap();
+    let scoped_keys: usize = store.readers.get().query_row(
+        "SELECT COUNT(*) FROM meta WHERE key GLOB 'operation-conflict-naming-name:*'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(scoped_keys, 0, "explicit repair clears keyed failure scope");
     assert!(!store.replication_projection_needs_recovery().unwrap());
     assert!(!store.replication_status(false, None, &[]).unwrap().unhealthy.iter()
         .any(|row| row.aggregate == "projection:naming-operation-conflict"));
