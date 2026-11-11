@@ -132,6 +132,57 @@ fn operation_conflict_above_refold_cap_preserves_graph_and_reports_degraded() {
 }
 
 #[test]
+fn operation_conflict_run_chunk_dispatch_never_defers_an_unbounded_refold() {
+    let store = Store::open_memory("fixture").unwrap();
+    super::tests_shared_seats::publish_mission(&store, r#"version 2
+mission "bounded-run" state="ready" {
+  goal "Exercise conflict dispatch."
+  step "program" { agentless }
+}"#, "bounded-run");
+    let run = store.create_mission_run_inner(&crate::model::MissionRunRequest {
+        mission: "bounded-run".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/operator".into()), mode: None,
+        inputs: Default::default(), idempotency_key: "bounded-run".into(),
+    }, None, None, None).unwrap();
+    let operation = "op/conflicting-run-final-drain";
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for number in 0..=OPERATION_CONFLICT_REFOLD_CLAIMS {
+            append_claim_record_tx(&tx, "peer", &run.subject, "custom.test.observed", None,
+                &json!({"fields":{"number":number}}), &[], None).unwrap();
+        }
+        append_claim_record_tx(&tx, "peer", &run.subject, "mission-run.state", None,
+            &json!({"fields":{"state":"running"},"_operation":{"id":operation,"request_digest":"z"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    store.replay_replication_graph().unwrap();
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        append_claim_record_tx(&tx, "peer", &run.subject, "mission-run.state", None,
+            &json!({"fields":{"state":"running"},"_operation":{"id":operation,"request_digest":"a"}}),
+            &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    FULL_REPLAYS.with(|count| count.set(0));
+    // The production driver dispatches project_incremental_chunk, then final-drain work.
+    // A conflict run must finish its bounded/savepoint attempt before that generic queue.
+    store.project_replication_backlog().unwrap();
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    let health = store.replication_status(false, None, &[]).unwrap();
+    assert!(health.unhealthy.iter().any(|row| row.aggregate.contains(operation)
+        && row.error_code.as_deref() == Some("operation-conflict-refold-limit")));
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    assert!(!projection_work_pending_tx(&tx).unwrap());
+    finish_projection_work_tx(&tx).unwrap();
+    assert!(!projection_work_pending_tx(&tx).unwrap());
+    tx.rollback().unwrap();
+}
+
+#[test]
 fn operation_conflict_refuses_a_guard_requested_full_replay() {
     for checkpoint_only in [false, true] {
         let store = Store::open_memory("fixture").unwrap();

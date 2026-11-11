@@ -638,6 +638,10 @@ the remaining debt is bounding every identifier and diagnostic representation an
 keyed reclamation when conflicts are repaired. `lv-h58880ffb5371`,
 `lv-h53bf80630f0f` and `lv-hc33c6f16bf1d` are fixed savepoint-control strings,
 with no payload binds; their conservative sink classification is retained.
+Conflict-dirty run trees/parts execute their bounded savepoint wrapper during the
+receipt chunk, before ordinary run work enters the final-drain queue. When a dirty
+tree covers a dirty part, its conflict diagnostics move to the tree so the same cap
+and rollback boundary apply to the widened rebuild.
 `smallclaims::store` owns `lv-h60fdf4c7a583`, updating one operation's existing
 digest/canonical-claim/state columns from the canonical reducer. Its next storage
 step is the same bounded-identifier representation as the other operation sites.

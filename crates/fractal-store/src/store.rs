@@ -18317,6 +18317,12 @@ fn try_project_simple_replication_inner_tx(
     }
     for part in covered_parts {
         dirty.remove(&part);
+        if let Aggregate::RunPart(top) = &part
+            && let Some(root) = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?
+            && let Some(affected) = aggregate_conflicts.remove(&part)
+        {
+            aggregate_conflicts.entry(Aggregate::RunTree(root)).or_default().extend(affected);
+        }
     }
     for claim in &claims {
         insert_event(
@@ -18455,7 +18461,9 @@ fn try_project_simple_replication_inner_tx(
             .map_err(internal)?;
     }
     for aggregate in trees {
-        if defer_runs {
+        // Conflict diagnostics and the savepoint/cap belong to this receipt, not the
+        // generic final-drain queue. Fold those runs bounded here; defer ordinary work.
+        if defer_runs && !aggregate_conflicts.contains_key(aggregate) {
             let value = serde_json::to_string(aggregate).map_err(internal)?;
             transaction.execute(/* sqlite-large-value: allow-for-now lv-h9138a3691eef owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 params![pending_run_rebuild_key(aggregate)?, value]).map_err(internal)?;
