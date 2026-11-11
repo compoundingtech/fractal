@@ -24,7 +24,7 @@ pub struct Cursor {
 
 /// Discover at most one page, within one time budget. A timed-out read cannot later queue work.
 pub async fn turn(state: &AppState, cursor: &mut Cursor) -> anyhow::Result<()> {
-    let budget = TurnBudget(ReadBudget::new("maintenance.relayed_closes", TURN_LIMIT));
+    let budget = TurnBudget(ReadBudget::new_quiet("maintenance.relayed_closes", TURN_LIMIT));
     tokio::time::timeout(TURN_LIMIT, discover(state, cursor, &budget.0)).await??;
     Ok(())
 }
