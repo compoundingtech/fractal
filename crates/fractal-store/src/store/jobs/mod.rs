@@ -35,6 +35,17 @@ pub enum JobRecord {
         resolution: fractal_jobs::recovery::Resolution,
         usage: Option<fractal_jobs::recovery::RecoveryUsage>,
     },
+    StopStarted {
+        binding: JobHostBinding,
+        intent: fractal_jobs::launch::LaunchIntent,
+        audit: fractal_jobs::cancel::StopAudit,
+    },
+    StopResolved {
+        binding: JobHostBinding,
+        intent: fractal_jobs::launch::LaunchIntent,
+        audit: fractal_jobs::cancel::StopAudit,
+        resolution: fractal_jobs::cancel::StopResolution,
+    },
 }
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
@@ -183,6 +194,7 @@ fn apply(
         }
         JobRecord::Transition { binding, event } => {
             ensure!(*event != Event::LaunchIntent, "job-launch-generation-required");
+            ensure!(*event != Event::WholeTreeStopped, "job-stop-proof-required");
             let (existing, state) = current.as_mut().context("job-not-submitted")?;
             ensure!(existing == binding, "job-binding-conflict");
             let next = transition(*state, *event)?;
@@ -220,6 +232,9 @@ fn apply(
         JobRecord::LaunchReleased { .. } | JobRecord::Recovered { .. } => {
             recovery::apply(tx, subject, at, record, current)?;
         }
+        JobRecord::StopStarted { .. } | JobRecord::StopResolved { .. } => {
+            cancel::apply(tx, subject, at, record, current)?;
+        }
     }
     Ok(())
 }
@@ -227,6 +242,7 @@ fn apply(
 mod receipts;
 mod queries;
 mod recovery;
+mod cancel;
 pub use recovery::{RecoveryFacts, recovery_facts};
 pub use receipts::{job_id, receipt_for_key};
 pub use queries::{HistoryRow, JobRow, JobsProjectionStale, history_by_job, job_by_id, jobs_for_requester, queue_for_host};
