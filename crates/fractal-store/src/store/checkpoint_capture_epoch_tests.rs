@@ -11,7 +11,7 @@ fn desired_projection_rebuild_advances_capture_epoch() {
     let before = epoch(&store);
     let mut writer = store.connection.write();
     let tx = writer.transaction().unwrap();
-    rebuild_base_aggregate_tx(&tx, &Aggregate::Desired(subject.into())).unwrap();
+    rebuild_base_aggregate_tx(&tx, &Aggregate::Desired(subject.into()), false, u64::MAX).unwrap();
     assert!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap() > before);
     tx.commit().unwrap();
     drop(writer);
@@ -27,7 +27,7 @@ fn mission_definitions_projection_rebuild_advances_capture_epoch() {
     let before = epoch(&store);
     let mut writer = store.connection.write();
     let tx = writer.transaction().unwrap();
-    rebuild_base_aggregate_tx(&tx, &Aggregate::Mission("mission/capture".into())).unwrap();
+    rebuild_base_aggregate_tx(&tx, &Aggregate::Mission("mission/capture".into()), false, u64::MAX).unwrap();
     assert!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap() > before);
     tx.commit().unwrap();
     drop(writer);
