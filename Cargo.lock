@@ -2365,6 +2365,7 @@ name = "fractal-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fractal-jobs",
  "libc",
  "portable-pty",
  "pty-client",
