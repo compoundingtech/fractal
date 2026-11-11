@@ -325,6 +325,7 @@ fn foreground_batched_write_gets_a_bounded_turn_during_a_long_verdict_loop() {
         let tx = connection.transaction().unwrap();
         for i in 0..total {
             tx.execute(
+                /* sqlite-large-value: allow-for-now lv-h4a820d51c105 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */
                 "INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)",
                 [format!("removed-claim/{i:05}")],
             ).unwrap();
@@ -356,6 +357,7 @@ fn foreground_batched_write_gets_a_bounded_turn_during_a_long_verdict_loop() {
             ).unwrap();
             recorded.send(queued).unwrap();
             tx.execute(
+                /* sqlite-large-value: allow-for-now lv-hece6d82a830b owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */
                 "INSERT INTO meta(key,value) VALUES ('verdict-fairness-foreground','committed')",
                 [],
             ).unwrap();
