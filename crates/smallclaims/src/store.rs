@@ -2240,7 +2240,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h52b61956c36c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
         )?;
-        assistant_grant_authority::refresh_claim(transaction, id)?;
+        assistant_grant_authority::refresh_local_append(transaction, id)?;
     }
     Ok(store_index)
 }

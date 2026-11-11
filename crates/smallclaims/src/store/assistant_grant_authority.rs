@@ -754,6 +754,10 @@ fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
 
 fn attachment_one(connection: &Connection) -> Result<bool> {
     let Some((owner,partition)) = queue_owner(connection,"attachment")? else { return Ok(false); };
+    attachment_task_one(connection, &owner, &partition)
+}
+
+fn attachment_task_one(connection: &Connection, owner: &str, partition: &str) -> Result<bool> {
     let task: Option<(String,String,String,String,String,String,String)> = connection.query_row(
         "SELECT claim_id,candidate_kind,grant_subject,origin,actor,after_claim_id,upper_claim_id
          FROM assistant_grant_attachments WHERE claim_id=?1 AND candidate_kind=?2", params![owner,partition],
@@ -804,6 +808,36 @@ fn attachment_one(connection: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+// A local transition has only the GRANTED partition. Visit one candidate, then
+// probe only for completion: never consume a second candidate in this request.
+// The earlier newest-base fast path plus this unit insert at most two pairs.
+fn finish_local_transition(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
+    attachment_task_one(connection, &claim.id, GRANTED)?;
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h45c096d84c6c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachments
+         WHERE claim_id=?1 AND candidate_kind=?2
+           AND NOT EXISTS(SELECT 1 FROM assistant_grant_pending AS candidate
+               INDEXED BY assistant_grant_pending_attachment_index
+               WHERE candidate.grant_subject=assistant_grant_attachments.grant_subject
+                 AND candidate.authenticated=1 AND candidate.origin=assistant_grant_attachments.origin
+                 AND candidate.actor=assistant_grant_attachments.actor AND candidate.kind=?2
+                 AND candidate.claim_id>assistant_grant_attachments.after_claim_id
+                 AND candidate.claim_id<=assistant_grant_attachments.upper_claim_id)",
+        params![claim.id, GRANTED],
+    )?;
+    // At most two base witnesses were touched above. Only finished subjects
+    // permit cleanup; unrelated tasks and proof/dirty fences are never removed.
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h133b802d1e9c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_attachment_witnesses WHERE base_claim_id IN (
+             SELECT base_claim_id FROM assistant_grant_attachment_witnesses
+             WHERE grant_subject=?1
+               AND NOT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=?1)
+             LIMIT 2)",
+        [&claim.subject],
+    )?;
+    Ok(())
+}
+
 fn attachment_witness_one(connection: &Connection) -> Result<bool> {
     let Some((base,_)) = queue_owner(connection,"witness")? else { return Ok(false); };
     let subject: String = connection.query_row(
@@ -825,13 +859,19 @@ fn local_origin(connection: &Connection) -> Result<String> {
 /// Admission pays structural/authentication cost once. Invalid rows never enter
 /// the authority or the pending-authentication writer/window index.
 pub fn refresh_claim(connection: &Connection, id: &str) -> Result<()> {
-    // Receipt/local append boundary: only durable local admission is immediate.
-    // Remote first-authentication runs in maintenance after generation validation.
+    // Receipt boundary: remote first-authentication runs in maintenance after
+    // generation validation; this path has no local request work allowance.
     refresh_claim_inner(connection, id, false)
 }
 
+/// Only the actual append transaction may spend the separate bounded request
+/// allowance; maintenance refreshes retain their one-unit slice accounting.
+pub fn refresh_local_append(connection: &Connection, id: &str) -> Result<()> {
+    refresh_claim_with_authentication(connection,id,false,None,true)
+}
+
 fn refresh_claim_inner(connection: &Connection, id: &str, membership_current: bool) -> Result<()> {
-    refresh_claim_with_authentication(connection,id,membership_current,None)
+    refresh_claim_with_authentication(connection,id,membership_current,None,false)
 }
 
 #[derive(Default)]
@@ -844,7 +884,7 @@ struct PreviousAuthentication {
 }
 
 fn refresh_claim_with_authentication(connection: &Connection, id: &str,
-    membership_current: bool, verified: Option<Authentication>) -> Result<()> {
+    membership_current: bool, verified: Option<Authentication>, local_append_transaction: bool) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
         format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1"));
     let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1665a4a8cfdf owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h5520ddeb5d20 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional()?;
@@ -917,10 +957,10 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
                OR assistant_grant_pending.auth_envelope_hash IS NOT excluded.auth_envelope_hash
                OR assistant_grant_pending.auth_record_position IS NOT excluded.auth_record_position",
             params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?,proof_key,proof_sequence,proof_hash,proof_position])? != 0;
-        // One local transition may materialize only its newest base pair for
-        // owner management. All other pairs stay queued, and bearer fences stay
-        // intact. No base/transition product is visited in the append request.
-        if changed && !admitted && authenticated && local_append && claim.kind!=GRANTED
+        // One local transition materializes its newest base pair for management.
+        // Its own bounded attachment unit below also completes the usual
+        // single-base case without imposing a needless bearer fence.
+        if changed && !admitted && authenticated && local_append_transaction && local_append && claim.kind!=GRANTED
             && let Some(base) = management_latest(connection,&claim.subject,GRANTED)?
             && transition_valid(&base,&claim) {
             connection.execute(
@@ -932,7 +972,12 @@ fn refresh_claim_with_authentication(connection: &Connection, id: &str,
                 recompute_base(connection,&base.id)?;
             }
         }
-        if changed && !admitted && authenticated { attach_claim(connection,&claim)?; }
+        if changed && !admitted && authenticated {
+            attach_claim(connection,&claim)?;
+            if local_append_transaction && local_append && claim.kind!=GRANTED {
+                finish_local_transition(connection,&claim)?;
+            }
+        }
         if admitted && !authenticated { rebuild_authenticated_subject(connection,&claim)?; }
         if matches!(authentication, Authentication::Pending) {
             connection.execute(/* sqlite-large-value: allow-for-now lv-he3fa452add20 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [id])?;
@@ -1385,7 +1430,7 @@ fn addition_one(connection: &Connection) -> Result<bool> {
             if fleet_id.as_deref().is_some_and(|fleet_id|
                 VerifiedEnvelopeSignature::verify(shard.as_deref(),fleet_id,&writer,sequence,&hash,&key,&signature).is_some()) {
                 refresh_claim_with_authentication(connection,&claim,true,
-                    Some(Authentication::Authenticated(Some((key,sequence,hash.clone(),position)))))?;
+                    Some(Authentication::Authenticated(Some((key,sequence,hash.clone(),position)))),false)?;
                 connection.execute(/* sqlite-large-value: allow-for-now lv-h4e1ea146a20c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
                 connection.execute(/* sqlite-large-value: allow-for-now lv-h1e384e782172 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
             }

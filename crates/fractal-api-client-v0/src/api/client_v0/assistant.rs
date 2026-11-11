@@ -305,6 +305,15 @@ mod tests {
         let paired = paired(&state).await;
         let id = paired["grant"]["id"].as_str().unwrap();
         let granted = owner_grant(&state,id).unwrap();
+        // These response/retry cases intentionally exercise real multi-base
+        // attachment work, not the ordinary single-base synchronous fast path.
+        for _ in 0..8 {
+            state.store.append_claim(&ClaimInput {
+                subject:granted.subject.clone(),kind:GRANTED.into(),actor:granted.actor.clone(),
+                fields:serde_json::from_value(fields(&granted).unwrap().clone()).unwrap(),
+                evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+            }).unwrap();
+        }
         let body = if route=="revoke" { Value::Null } else if route=="policy" {
             json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES[..4],
                 "disclosure_consent":true,"consent_evidence":"owner approved renewal",

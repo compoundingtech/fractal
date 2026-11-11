@@ -672,12 +672,24 @@ Pending-row and witness indexes retain these variable TEXT keys inline.
 Reference/chunk conversion must preserve exact authenticated pairs and
 conservative conflict visibility until resumable attachment work finishes.
 
-The same producer owns `lv-h41fad2bc67c1`: a genuine authenticated local
-transition copies one newest base grant's effective record and variable identity
-keys into a conservative attachment witness before materializing that validated
-pair for owner management. Other pairs remain queued and bearer fences remain
-intact. Its `bound-or-reference-values-and-reclamation` TODO must preserve
-conservative visibility and witness cleanup; a one-row copy is not a byte bound.
+The same producer owns witness-copy site `lv-h41fad2bc67c1` and local completion
+sites `lv-h45c096d84c6c` and `lv-h133b802d1e9c`. Only the actual local-append
+transaction receives this allowance: its authenticated transition can materialize
+the newest management pair and consume one attachment candidate, for at most two
+transition pairs plus one optional repaired-base self-pair. The candidate's exact
+record/identity and conservative effective-grant witness remain inline.
+A subsequent completion-only probe may delete the exhausted task but never
+consume another candidate; witness cleanup deletes at most two base witnesses
+only after the subject's attachment tasks finish. Unrelated proof/dirty fences
+remain intact, and maintenance refreshes retain their ordinary one-unit budget.
+The producer's `bound-or-reference-values-and-reclamation` TODO must preserve
+candidate accounting, conservative visibility and keyed cleanup through
+representation changes; bounded row counts do not bound encoded bytes.
+
+The reviewed `smallclaims::store::insert_claim` flow retains
+`flow-h8ff255a3c271` and its body/predecessor preparation TODO. Its fingerprint
+now includes the dedicated `refresh_local_append` hook after stamping the local
+append witness, rather than granting this allowance to historical maintenance.
 
 The seven maintenance queues register owner/subowner TEXT identities with local
 integer admission sequences. Insert/delete triggers maintain that registry;

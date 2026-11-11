@@ -295,14 +295,21 @@ opposite history. A first local base with no opposite history remains immediatel
 usable. Late opposite claims create their own tasks, including pairs beyond an
 older task's high-water mark.
 Owner mutation responses are separate from bearer readiness. A genuine local
-policy or revocation append validates and materializes at most one pair against
-the indexed newest base, with constant-size witness/recompute work; remaining
-pairs are still background work. The configured authoritative owner can inspect
-that committed management result and retry immediately without using bearer
-authorization. Revoke retries preserve the original revocation; policy and
-read-trust retries each append one new revision, as before. These routes do not
-offer keyed replay. Their successful responses never lift the subject's bearer
-fence.
+policy or revocation append validates its indexed newest-base pair, then runs
+one candidate unit from its own attachment task, one indexed completion-only
+probe, and at most two witness deletions if the subject has no attachment tasks.
+This materializes at most two transition/base pairs (plus one repaired base's
+self-pair), with at most two constant-size effective-row recomputations. No
+other task runs synchronously. The usual single-base case completes immediately:
+the next bearer request sees the committed policy or pin without a maintenance
+drain. Unfinished multi-base attachment work and all unrelated authentication
+obligations still fence bearer access until they finish. This separate constant
+request allowance is used only by the local append transaction, never by a
+maintenance refresh, preserving the shared 64-unit and zero-duration bounds.
+The configured authoritative owner can inspect the committed result and retry
+immediately without using bearer authorization. Revoke retries preserve the
+original revocation; policy and read-trust retries each append one new revision,
+as before. These routes do not offer keyed replay.
 Management selects the newest applicable authenticated transition by an indexed
 seek scoped to subject, kind, origin, actor and immutable grant identity. All
 identity predicates precede the descending store index, so unrelated local

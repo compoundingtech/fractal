@@ -53,9 +53,6 @@ async fn fixture_for_owner_and_principal(scopes: &[&str], pin_trust: bool, owner
             AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();
         fixture.revision=grant["policy_revision"].as_u64().unwrap();
     }
-    // Owner pin responses precede bounded attachment reconciliation. Read-proof
-    // fixtures begin only after the real maintenance path lifts the bearer fence.
-    while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
     fixture.state.store.start_agent_roster_refresher().unwrap();
     crate::api::refresh_agent_roster(&fixture.state.store, false).unwrap();
     fixture.state.store.start_attention_list_refresher().unwrap();
@@ -102,6 +99,63 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
     let status=response.status();
     let bytes=to_bytes(response.into_body(),64*1024).await.unwrap();
     (status,serde_json::from_slice(&bytes).unwrap(),bytes.len())
+}
+
+#[tokio::test]
+async fn owner_policy_response_and_bearer_read_complete_single_base_but_fence_real_backlog() {
+    use smallclaims::store::assistant_grant_authority as authority;
+    for bases in [1, 9] {
+        let fixture = fixture(SCOPES, true).await;
+        let subject = subject(&fixture.grant).unwrap();
+        let granted = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
+        let mut payload = fixture.payload("summary", "");
+        for _ in 1..bases {
+            fixture.state.store.append_claim(&ClaimInput {
+                subject:subject.clone(),kind:GRANTED.into(),actor:granted.actor.clone(),
+                fields:serde_json::from_value(fields(&granted).unwrap().clone()).unwrap(),
+                evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+            }).unwrap();
+        }
+        let policy = json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES,
+            "expires_in_seconds":86400,"disclosure_consent":true,
+            "consent_evidence":"owner approved renewal","minimal_read_mode":"approval-once"});
+        let app = crate::api::router_for_transport(fixture.state.clone(),
+            ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+        let mut owner_request = Request::builder().method("POST")
+            .uri(format!("/v1/client/assistant/grants/{}/policy",fixture.grant))
+            .header(LOCAL_PERSON_HEADER,OWNER).header("content-type","application/json")
+            .body(Body::from(policy.to_string())).unwrap();
+        owner_request.extensions_mut().insert(crate::api::LocalPeer {
+            pid:8,peer_process:None,ancestor:None,
+        });
+        let response = app.oneshot(owner_request).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK,"owner write with {bases} bases");
+        let response: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(),64*1024).await.unwrap()).unwrap();
+        let revision = response["value"]["policy_revision"].as_u64().unwrap();
+        let committed = authority::management_transition(&fixture.state.store.readers.get(),&granted,POLICY)
+            .unwrap().unwrap();
+        assert_eq!(fields(&committed).unwrap()["policy_revision"],revision);
+        assert_eq!(revision,fixture.revision+1,"the successful write must commit one revision");
+        payload.policy_revision = revision;
+        let proof = fixture.header(&payload,&fixture.attestor);
+        let (status,_,_) = fixture.request("/v1/client/assistant/summary",Some(&proof)).await;
+        if bases==1 {
+            assert_eq!(status,StatusCode::OK,"single-base owner write must not require a drain");
+            authority::subject_ready(&fixture.state.store.readers.get(),&subject).unwrap();
+        } else {
+            assert_eq!(status,StatusCode::FORBIDDEN,"unfinished multi-base work must remain fenced");
+            assert!(authority::subject_ready(&fixture.state.store.readers.get(),&subject).is_err());
+            while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+            authority::subject_ready(&fixture.state.store.readers.get(),&subject).unwrap();
+            payload.nonce = uuid::Uuid::new_v4().to_string();
+            let proof = fixture.header(&payload,&fixture.attestor);
+            assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&proof)).await.0,
+                StatusCode::OK,"bearer read must recover after genuine attachment work finishes");
+            assert_eq!(authority::management_transition(&fixture.state.store.readers.get(),&granted,POLICY)
+                .unwrap().unwrap().id,committed.id,"maintenance cannot change the committed owner result");
+        }
+    }
 }
 
 #[tokio::test]
