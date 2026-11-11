@@ -34,6 +34,14 @@ pub enum QuotaSource {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum QuotaFailure { Transport, InvalidSnapshot }
+/// The operator's usage hub quota. `snapshot` is the hub's own v3 document, relayed unchanged.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UsageHubQuota {
+    Disabled,
+    Available { snapshot: serde_json::Value, refresh_seconds: u64 },
+    Unavailable { refresh_seconds: u64, reason: QuotaFailure },
+}
 
 impl crate::Client {
     pub async fn quota(&self) -> Result<crate::Envelope<QuotaSource>, crate::ClientError> {
