@@ -198,7 +198,7 @@ describe('live header parity', () => {
   })
   it('opens the agent canonical KDL from the overflow menu in a labelled dialog that Escape closes', async () => {
     await click('More actions')
-    await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL read its whole declaration' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL, read its whole declaration' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
     const dialog = document.querySelector<HTMLElement>('[role="dialog"][data-testid="declaration-dialog"]')
     expect(dialog).not.toBeNull()
     const heading = dialog!.querySelector('h2')

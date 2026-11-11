@@ -90,7 +90,7 @@ export const OverflowMenu: Story = {
   play: async ({ canvasElement }) => {
     await userEvent.click(within(canvasElement).getByRole('button', { name: 'More actions' }))
     const menu = await within(document.body).findByRole('menu', { name: 'More actions' })
-    await expect(within(menu).getByRole('menuitem', { name: 'View KDL read its whole declaration' })).toBeVisible()
+    await expect(within(menu).getByRole('menuitem', { name: 'View KDL, read its whole declaration' })).toBeVisible()
   },
 }
 

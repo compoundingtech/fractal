@@ -442,7 +442,7 @@ export const SidebarDragUnmountCleanup: Story = {
       await user.click(canvas.getByRole('button', { name: 'More actions' }))
       const menu = await canvas.findByRole('menu', { name: 'More actions' })
       await expect(menu).toBeVisible()
-      await expect(within(menu).getByRole('menuitem', { name: 'View KDL read its whole declaration' })).toBeVisible()
+      await expect(within(menu).getByRole('menuitem', { name: 'View KDL, read its whole declaration' })).toBeVisible()
       await user.keyboard('{Escape}')
       await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
       await user.keyboard('{Control>}b{/Control}')
