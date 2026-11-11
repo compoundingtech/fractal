@@ -1,0 +1,49 @@
+{
+  "status": "found",
+  "fetched_at": "2026-11-07T06:40:00Z",
+  "stale": false,
+  "item": {
+    "owner": "acme",
+    "repo": "garden",
+    "id": 9001,
+    "name": "CI",
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "failure",
+    "head_branch": "ada/water-schedule",
+    "head_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "url": "https://github.com/acme/garden/actions/runs/9001",
+    "run_attempt": 1,
+    "started_at": "2026-11-07T05:59:00Z",
+    "completed_at": "2026-11-07T06:08:05Z",
+    "pull_requests": [
+      7
+    ],
+    "jobs": [
+      {
+        "name": "build",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-11-07T05:59:10Z",
+        "completed_at": "2026-11-07T06:03:42Z",
+        "url": "https://github.com/acme/garden/actions/runs/9001/job/1"
+      },
+      {
+        "name": "test (ubuntu)",
+        "status": "completed",
+        "conclusion": "failure",
+        "started_at": "2026-11-07T05:59:12Z",
+        "completed_at": "2026-11-07T06:08:05Z",
+        "url": "https://github.com/acme/garden/actions/runs/9001/job/2"
+      },
+      {
+        "name": "lint",
+        "status": "completed",
+        "conclusion": "skipped",
+        "started_at": null,
+        "completed_at": null,
+        "url": "https://github.com/acme/garden/actions/runs/9001/job/3"
+      }
+    ]
+  }
+}
