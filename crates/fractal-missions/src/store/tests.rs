@@ -3091,11 +3091,13 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
         FULL_REPLAYS.with(|count| count.set(0));
         let mut lines = Vec::new();
         assert!(
-            controller
+            !controller
                 .project_replication_backlog_with_log("test", |line| lines.push(line.to_owned()))
                 .unwrap()
         );
-        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 1);
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        assert!(controller.replication_projection_recovery_required().unwrap());
+        assert_eq!(incremental, graph_digest_of(&controller));
         let detail: Value = serde_json::from_str(
             lines
                 .iter()
@@ -3107,6 +3109,8 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
         assert_eq!(detail["claim_kind"], "work.claimed");
         assert_eq!(detail["claim_id"], incoming.id);
         assert_eq!(detail["operation_id"], operation);
+        controller.replay_replication_graph().unwrap();
+        assert!(!controller.replication_projection_recovery_required().unwrap());
         assert!(controller.operation_projection_drift().unwrap().is_empty());
         let conflicted = graph_digest_of(&controller);
         controller.replay_replication_graph().unwrap();

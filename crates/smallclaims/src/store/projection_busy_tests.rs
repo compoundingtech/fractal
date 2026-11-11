@@ -447,6 +447,7 @@ fn explicit_replay_contention_rolls_back_without_staling_health() {
     store.project_replication_backlog().unwrap();
     let before = health(&store);
     pending_claim(&store);
+    let deferred_before = store.replication_projection_deferred();
     *runtime.stage.lock().unwrap() = Some("replay");
     runtime
         .fault
@@ -454,11 +455,35 @@ fn explicit_replay_contention_rolls_back_without_staling_health() {
     let error = store.replay_replication_graph().unwrap_err();
     assert!(error.downcast_ref::<Error>().unwrap().is_sqlite_contention());
     assert_eq!(health(&store), before);
-    assert!(store.replication_projection_deferred());
+    assert_eq!(store.replication_projection_deferred(), deferred_before);
     assert_eq!(store.projection_contention_generation(), 0);
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 1);
     store.replay_replication_graph().unwrap();
     assert_eq!(runtime.replays.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn explicit_replay_completion_preserves_newer_deferral_and_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(FaultRuntime::new());
+    let store = Store::open(&dir.path().join("claims.sqlite3"), "node", runtime.clone()).unwrap();
+    store.defer_replication_projection();
+    let old_generation = store.replication_projection_state.load(Ordering::Acquire);
+    store.replay_replication_graph_before_completion(|| {
+        store.defer_replication_projection();
+    }).unwrap();
+    assert!(store.replication_projection_deferred());
+    let newer_generation = store.replication_projection_state.load(Ordering::Acquire);
+    assert_ne!(newer_generation, old_generation);
+    let before = health(&store);
+    *runtime.stage.lock().unwrap() = Some("replay");
+    runtime.fault.store(rusqlite::ffi::SQLITE_BUSY, Ordering::Relaxed);
+    assert!(store.replay_replication_graph().is_err());
+    assert!(store.replication_projection_deferred());
+    assert_eq!(store.replication_projection_state.load(Ordering::Acquire), newer_generation);
+    assert_eq!(health(&store), before);
+    store.replay_replication_graph().unwrap();
+    assert!(!store.replication_projection_deferred());
 }
 
 #[test]

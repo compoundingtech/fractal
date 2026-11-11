@@ -8792,9 +8792,19 @@ impl Store {
 
     /// Replay the graph from nothing now, as a restored store does once its claims are back.
     pub fn replay_replication_graph(&self) -> Result<()> {
+        self.replay_replication_graph_inner(|| {})
+    }
+
+    #[cfg(test)]
+    fn replay_replication_graph_before_completion(&self, before_completion: impl FnOnce()) -> Result<()> {
+        self.replay_replication_graph_inner(before_completion)
+    }
+
+    fn replay_replication_graph_inner(&self, before_completion: impl FnOnce()) -> Result<()> {
         crate::profile::note("projection: full replay");
         let _replay = crate::profile::span("projection/full-replay");
         let mut connection = self.connection.write();
+        let generation = self.replication_projection_state.load(Ordering::Acquire);
         let _timing = time_stage(&self.replication_timers.projection);
         let transaction = connection.transaction()?;
         let health = transaction.query_row(
@@ -8813,6 +8823,7 @@ impl Store {
         FULL_REPLAYS.with(|replays| replays.set(replays.get() + 1));
         self.runtime.replay_from_nothing(&transaction)?;
         self.runtime.after_projection(&transaction)?;
+        let pending = self.runtime.projection_work_pending(&transaction)?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h9513a9e75a35 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
@@ -8821,6 +8832,12 @@ impl Store {
             params![current_index_tx(&transaction)?, now_ms().to_string()],
         )?;
         transaction.commit()?;
+        before_completion();
+        if !pending {
+            let _ = self.replication_projection_state.compare_exchange(
+                generation, generation & !1, Ordering::AcqRel, Ordering::Acquire,
+            );
+        }
         drop(connection);
         self.runtime.forget_views();
         Ok(())
