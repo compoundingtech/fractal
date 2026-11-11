@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve the jobs CLI output macro explicitly through the existing pipe-aware CLI writer.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "Explicitly import the same cli_println macro used by neighboring CLI modules, avoiding glob/prelude ambiguity while retaining JSON output and closed-pipe handling."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
