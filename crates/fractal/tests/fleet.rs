@@ -5660,6 +5660,16 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         )
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        // Managed harness launch takes omp from the runtime profile's wrapper directory, never
+        // from PATH (fractal-drivers managed_launch).
+        let profile = node.root.join("runtime-profile.json");
+        fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": node.root.join("bin")}}},
+        })).unwrap()).unwrap();
+        node.env.extend([
+            ("AGENT_RUNTIME_PROFILE".to_owned(), profile.display().to_string()),
+            ("AGENT_PERSONA".to_owned(), "generalist".to_owned()),
+        ]);
         node.start().await;
     }
     let workspace = root.path().join("workspace");
