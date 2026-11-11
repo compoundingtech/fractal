@@ -43,6 +43,14 @@ pub fn check_authority(
     Ok(())
 }
 
+/// Kernel incarnation of a process, not just a reusable numeric PID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessIdentity {
+    pub boot_id: String,
+    pub start_ticks: u64,
+}
+
 /// Authenticated durable release fact. Absence means uncertainty even if a PID
 /// exists. PID identity is checked against J, never via kill(pid, 0) alone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +58,7 @@ pub fn check_authority(
 pub struct Released {
     pub holder_pid: u32,
     pub pin: RecoveryPin,
+    pub identity: ProcessIdentity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

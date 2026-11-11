@@ -33,6 +33,7 @@ impl LaunchJournal for Journal {
         self.append(JobRecord::LaunchReleased {
             binding: self.binding.clone(), intent: intent.clone(),
             released: fractal_jobs::recovery::Released {
+                identity: fractal_jobs::recovery::ProcessIdentity { boot_id: "fixture-boot".into(), start_ticks: 7 },
                 holder_pid, pin: fractal_jobs::recovery::RecoveryPin {
                     host: self.binding.execution_host.clone(),
                     member_key: "fixture-member-key".into(),

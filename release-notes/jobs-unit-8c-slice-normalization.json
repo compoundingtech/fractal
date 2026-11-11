@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share configured slice normalization between launch and recovery (unit 8c)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission and recovery remain inactive; the heavy slice remains configuration-only."},
+  "compatibility": {"status": "changed", "detail": "Recovery discovery reuses launch's slice_name normalization and validation before comparing keeper properties. Slash-qualified configuration such as app.slice/app-capped.slice/app-capped-heavy.slice now identifies the same keeper before and after restart, covered by a shared-configuration launch/recovery regression test."},
+  "downtime": {"status": "none", "detail": "No live behavior or deployment changes."},
+  "manual": {"status": "none", "detail": "No activation or configuration defaults."},
+  "recovery": {"status": "changed", "detail": "Accepted slash-qualified heavy slices no longer falsely fail keeper discovery after restart. No launch, retry or release capability is added."}
+}

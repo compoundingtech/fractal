@@ -45,6 +45,7 @@ pub(super) fn apply(
             ensure!(binding == existing, "job-binding-conflict");
             ensure!(expected_intent.as_ref() == Some(intent), "job-launch-intent-mismatch");
             ensure!(expected_release.is_none(), "job-release-already-recorded");
+            ensure!(!released.identity.boot_id.is_empty(), "job-release-boot-identity-required");
             ensure!(released.holder_pid > 0 && !released.pin.member_key.is_empty(), "job-release-identity-required");
             ensure!(released.pin.host == binding.execution_host
                 && released.pin.admitted_claim == binding.authority_declaration, "job-recovery-pin-mismatch");
@@ -86,7 +87,8 @@ mod tests {
         let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
         let pin = RecoveryPin { host: binding.execution_host.clone(), member_key: "same-key".into(), admitted_claim: binding.authority_declaration.clone() };
         let intent = LaunchIntent { generation: ExecutionGeneration(NonZeroU64::new(1).unwrap()), outcome_file: "/receipt".into() };
-        let released = Released { holder_pid: 42, pin: pin.clone() };
+        let released = Released { holder_pid: 42, pin: pin.clone(),
+            identity: fractal_jobs::recovery::ProcessIdentity { boot_id: "boot".into(), start_ticks: 7 } };
         for (index, record) in [submitted.clone(), JobRecord::LaunchIntent { binding: binding.clone(), intent: intent.clone() },
             JobRecord::LaunchReleased { binding: binding.clone(), intent: intent.clone(), released: released.clone() },
             JobRecord::Recovered { binding: binding.clone(), intent: Some(intent.clone()), pin: pin.clone(), resolution: Resolution::KeepRunning },
