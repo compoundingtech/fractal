@@ -956,6 +956,8 @@ mod schema_install_tests {
                 // smallclaims initialization exist before exercising historical raw writes.
                 drop(Store::open(&path, "node").unwrap());
                 let connection = Connection::open(&path).unwrap();
+                // Raw historical writes still run the installed projection digest triggers.
+                smallclaims::store::configure_projection_writer(&connection).unwrap();
                 let baseline_indexes = claims_indexes(&connection);
                 assert!(baseline_indexes.iter().any(|(name, _)| name == "claims_assistant_v1_credential_index"));
                 assert!(baseline_indexes.iter().all(|(name, _)| !OBSOLETE_INDEXES.contains(&name.as_str())));
@@ -995,6 +997,7 @@ mod schema_install_tests {
                 drop(connection);
 
                 let connection = Connection::open(&path).unwrap();
+                smallclaims::store::configure_projection_writer(&connection).unwrap();
                 migrate_schema(&connection).unwrap();
                 install_initial_schema(&connection, false).unwrap();
                 authority::install(&connection, "node").unwrap();
@@ -1048,6 +1051,7 @@ mod schema_install_tests {
                 drop(connection);
 
                 let connection = Connection::open(&path).unwrap();
+                smallclaims::store::configure_projection_writer(&connection).unwrap();
                 migrate_schema(&connection).unwrap();
                 install_initial_schema(&connection, false).unwrap();
                 authority::install(&connection, "node").unwrap();
