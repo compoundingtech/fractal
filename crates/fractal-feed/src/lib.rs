@@ -182,6 +182,8 @@ pub enum Update {
     /// The open conversation's entries. `replace` means these are its newest page and every
     /// earlier entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
+        /// The wire subscription that delivered this frame, for content-free diagnostics.
+        subscription_id: String,
         target: String,
         /// The session the entries belong to: earlier pages are read from its timeline.
         session_id: String,
@@ -802,7 +804,7 @@ async fn connected(
                     CollectionEvent::Conversation { id, session_id, replace, items, has_more, header, .. } => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         current.served();
-                        if updates.send(Update::Conversation { target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
+                        if updates.send(Update::Conversation { subscription_id: id, target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
                             return Ended::Closed;
                         }
                     }

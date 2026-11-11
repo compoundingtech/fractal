@@ -33,6 +33,7 @@ mod terminal_tab;
 #[cfg(test)]
 #[path = "../../tests/support/attach_default.rs"]
 mod attach_default;
+pub(crate) mod freshness;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
 pub use lastrun::note_exit as lastrun_note_exit;
@@ -3042,6 +3043,17 @@ impl Ui {
             }
             *state
         };
+        if freshness::enabled() && key.starts_with("chat:") {
+            tracing::debug!(
+                target: "fractal_tui::freshness",
+                stage = "document", pane = key,
+                document_last_id = doc.entries.last().map(|(id, _)| id.as_str()),
+                line_count = total, follow = state.follow, top = state.top,
+                total, height,
+                main_pane_key = ?self.main_pane_key(),
+                focused_pane = ?self.focused_pane().map(|pane| pane.key()),
+            );
+        }
         let top = state.top;
         if matches!(
             Pane::parse(key),
@@ -4812,8 +4824,10 @@ impl Ui {
             KeyCode::PageDown => self.scroll_main(self.page() as isize),
             KeyCode::Home => self.scroll_main(-100_000),
             KeyCode::End => {
+                self.freshness_panes("end_before");
                 self.follow_latest();
                 self.scroll_main(100_000);
+                self.freshness_panes("end_after");
             }
             KeyCode::Char('x') if self.tab() == 2 => self.system = !self.system,
             KeyCode::Enter if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_tool(),

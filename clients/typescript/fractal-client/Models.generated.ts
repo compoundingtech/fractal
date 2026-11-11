@@ -1862,6 +1862,7 @@ export type ErrorCode = (
   | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
+  | "set-managed-subject"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -2383,7 +2384,7 @@ export type Message = ResourceHeader & {
   kind: "message";
   sent_at: Timestamp;
   session_id?: (Id | null);
-  state: "sent" | "delivered" | "read" | "closed";
+  state: "sent" | "delivered" | "read" | "closed" | "expired";
   status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;
@@ -2602,6 +2603,7 @@ export type MissionStep = {
   next_wake_at?: (Timestamp | null);
   nudged_at?: (Timestamp | null);
   path: string;
+  program?: MissionStepProgram;
   progress_at?: (Timestamp | null);
   since: Timestamp;
   started_at?: number | null;
@@ -2647,6 +2649,28 @@ export type MissionStepPresentation = {
   | "failed"
   | "pending"
 ;
+};
+
+export type MissionStepProgram = {
+  entries: Array<MissionStepProgramEntry>;
+  fault?: ({
+  reason: string;
+  scope: string;
+} | null);
+  last_entry_at?: (Timestamp | null);
+  open_key?: string | null;
+  stalled_after_ms: number;
+  truncated: boolean;
+};
+
+export type MissionStepProgramEntry = {
+  child?: string | null;
+  ended_at?: (Timestamp | null);
+  error?: string | null;
+  key: string;
+  ms?: number | null;
+  started_at?: (Timestamp | null);
+  status: ("started" | "completed" | "failed" | string);
 };
 
 export type MissionStepTransition = {
@@ -4531,6 +4555,7 @@ export type Work = ResourceHeader & {
   | "human"
   | "mixed"
   | "run"
+  | "program"
   | null
 ;
   generation_id: Id;
@@ -4542,6 +4567,7 @@ export type Work = ResourceHeader & {
   nudged_at_unix_ms?: number | null;
   path: string;
   person_answers?: Array<PersonAnswerRecord>;
+  program?: (WorkProgram | null);
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
@@ -4561,6 +4587,14 @@ export type WorkLabel = {
   since: Timestamp;
   state: WorkState;
   title?: string | null;
+};
+
+export type WorkProgram = {
+  child?: string | null;
+  last_entry_at_unix_ms?: number | null;
+  open_key?: string | null;
+  open_since_unix_ms?: number | null;
+  stalled_after_ms: number;
 };
 
 export type WorkState = 

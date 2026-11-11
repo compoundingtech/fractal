@@ -3064,7 +3064,8 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain, with the login
+    // shell the fixture executable writes under the test's HOME (fractal-secrets test_support).
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -3076,6 +3077,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.bash_profile",
                 "home/.zprofile",
                 "home/.zshrc",
+                "home/.cache",
+                "home/.cache/fractal-fixture",
                 "config",
                 "config/fish",
                 "config/fish/config.fish",
@@ -3089,6 +3092,8 @@ async fn uninstall_leaves_nothing_behind() {
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
+            || (relative.parent() == Some(Path::new("home/.cache/fractal-fixture"))
+                && relative.to_string_lossy().contains("/login-shell-"))
             || relative.to_string_lossy().ends_with(".log");
         if !expected {
             remaining.push(relative);
@@ -4897,13 +4902,15 @@ async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() 
         !a.notes().await.contains("custom/fleet-test/r-after"),
         "a admitted a removed member's write relayed through c"
     );
-    // c admitted it before it knew; doctor says so.
-    let doctor = c.st(&["--json", "doctor"]);
-    let report = String::from_utf8_lossy(&doctor.stdout);
-    assert!(
-        report.contains("beyond high water"),
-        "c's doctor does not report what it admitted from r: {report}"
-    );
+    // c admitted it before it knew; doctor says so once the daemon has counted. c's daemon counts
+    // 30 s after it starts, and again at most once a minute after doctor finds the removal arrived
+    // since the last count (fleet_admission_check).
+    wait_until("c's doctor reports what it admitted from r", 90, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        let counted = String::from_utf8_lossy(&doctor.stdout).contains("beyond high water");
+        async move { counted }
+    })
+    .await;
     // From now on c refuses r too.
     r.note("r-later").await;
     tokio::time::sleep(Duration::from_secs(3)).await;

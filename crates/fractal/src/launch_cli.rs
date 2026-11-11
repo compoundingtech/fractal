@@ -804,6 +804,7 @@ async fn retire_mission(client: &Client, args: MissionRetireArgs, json_output: b
             &MissionRetireRequest {
                 actor: args.actor,
                 idempotency_key: format!("mission-retire:{mission}:{nonce}"),
+                force_reason: args.force.then_some(args.reason).flatten(),
             },
         )
         .await?;

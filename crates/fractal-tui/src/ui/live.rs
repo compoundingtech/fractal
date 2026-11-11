@@ -551,6 +551,10 @@ pub fn run(context: Context) -> Result<()> {
     // Messages sent from here, shown at once until st reports them back.
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
+    if super::freshness::enabled() {
+        tracing::debug!(target: "fractal_tui::freshness", stage = "startup",
+            version = %crate::version::short(crate::version::now()), endpoint = ?client);
+    }
     ui.load_prefs();
     // A demo's agents are scripted stand-ins whose terminals stay empty: they open on their
     // conversation, without changing this device's choice.
@@ -724,6 +728,10 @@ pub fn run(context: Context) -> Result<()> {
                     agents_live = false;
                     glasses_ready = true;
                     client = member;
+                    if super::freshness::enabled() {
+                        tracing::debug!(target: "fractal_tui::freshness", stage = "connected",
+                            version = %crate::version::short(crate::version::now()), endpoint = ?client);
+                    }
                     resources_generation += 1;
                     resources_stale = true;
                     extras.inventory_supported = None;
@@ -867,6 +875,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Conversation {
+                    subscription_id,
                     target,
                     session_id,
                     replace,
@@ -874,6 +883,12 @@ pub fn run(context: Context) -> Result<()> {
                     items,
                     header,
                 } => {
+                    if super::freshness::enabled() {
+                        tracing::debug!(target: "fractal_tui::freshness", stage = "frame",
+                            subscription_id, target_id = target, frame_session = session_id,
+                            newest = ?super::freshness::newest(&items), count = items.len(), replace);
+                        ui.freshness_panes("update_before");
+                    }
                     if let Some(trace) = &mut open_timing {
                         trace.received(&target, items.len());
                     }
@@ -890,7 +905,7 @@ pub fn run(context: Context) -> Result<()> {
                             .insert(target.clone(), header.clone());
                     }
                     filled.entry(target.clone()).or_default().apply(
-                        timelines.entry(target).or_default(),
+                        timelines.entry(target.clone()).or_default(),
                         fractal_conversation_ui::Frame {
                             replace,
                             has_more,
@@ -899,6 +914,15 @@ pub fn run(context: Context) -> Result<()> {
                             header,
                         },
                     );
+                    if super::freshness::enabled() {
+                        let held = &timelines[&target];
+                        tracing::debug!(target: "fractal_tui::freshness", stage = "held",
+                            subscription_id, target_id = target,
+                            held_session = ?held.session_id,
+                            newest = ?super::freshness::newest(&held.items),
+                            newest_id = held.items.last().map(|entry| entry.id.as_str()),
+                            count = held.items.len());
+                    }
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
                         let Some(id) = pending.message_id.as_ref() else {
@@ -2033,6 +2057,7 @@ pub fn run(context: Context) -> Result<()> {
             || execute!(io::stdout(), EndSynchronizedUpdate),
             |target| ui.conversation_entry_visible(target),
         )?;
+        ui.freshness_panes("presented");
         ui.quality.live(extras.live);
         let top = u8::from(extras.live)
             | (u8::from(extras.offline.is_some()) << 1)
@@ -2295,6 +2320,12 @@ fn conversations(
                 let mut entries = adapt::conversation(&timeline.items, &names);
                 if let Some(note) = history_note(timeline) {
                     entries.insert(0, note);
+                }
+                if super::freshness::enabled() {
+                    tracing::debug!(target: "fractal_tui::freshness", stage = "adapted",
+                        target_id = target, held_session = ?timeline.session_id,
+                        last_id = entries.last().map(|entry| entry.id.as_str()),
+                        count = entries.len());
                 }
                 Load::Ready(entries)
             }

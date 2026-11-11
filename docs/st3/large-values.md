@@ -202,6 +202,8 @@ These accept existing inline representations, not a value-size or cost bound.
 
 The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
 
+The same flow takes a `source_forced` flag: a mission retire that its owning set's source gate admitted as forced skips only the plain `set-managed-subject` refusal, and records its source debt in the same transaction. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
+
 ### Agent answer atomicity inventory review
 
 The dormant answer writer shares generic append's operation-outcome admission and isolates its mutations in a savepoint. These reviewed exceptions preserve existing value representations; they do not establish size bounds.

@@ -21,7 +21,6 @@ describe('changelog view', () => {
     const html = renderToStaticMarkup(<ChangelogView state={{ _tag: 'Ready', manifest }} baseline={initialSeen} onRetry={() => undefined} />)
     expect(html).toContain('Recent changes')
     expect(html).not.toContain('New since you last looked')
-    expect(html).toContain(manifest.build.machineVersion)
     expect(html).toContain('private')
   })
   it('places new changes before recent changes in one view', () => {
@@ -35,11 +34,10 @@ describe('changelog view', () => {
     expect(html).toContain('>Recent<')
     expect(html).not.toContain('New since you last looked')
   })
-  it('shows a short canonical revision and labelled kinds without changing manifest identity', () => {
-    const html = renderToStaticMarkup(<ChangelogView state={{ _tag: 'Ready', manifest }} onRetry={() => undefined} buildRevision="123456789abc" />)
-    expect(html).toContain('>1234567</p>')
+  it('labels kinds and leaves build identity to the host popover', () => {
+    const html = renderToStaticMarkup(<ChangelogView state={{ _tag: 'Ready', manifest }} onRetry={() => undefined} />)
     expect(html).not.toContain(' title=')
-    expect(html).not.toContain(`>${manifest.build.machineVersion}</p>`)
+    expect(html).not.toContain(manifest.build.machineVersion)
     expect(html).toContain('data-changelog-kind="feature"')
     expect(html).toContain('>Feature</span>')
     expect(html).toContain('>Fix</span>')

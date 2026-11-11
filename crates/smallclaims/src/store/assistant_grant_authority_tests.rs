@@ -835,7 +835,7 @@ fn committed_backfill_slice_resumes_after_reopen_and_is_idempotent() {
         append(&store, SUBJECT, POLICY, changed);
         append(&store, SUBJECT, REVOKED, fields());
         drain_authority(&store);
-        let mut connection = store.connection.write();
+        let connection = store.connection.write();
         expected = snapshot(&connection);
         assert_eq!(expected.len(), 70);
         reset_projection(&connection);
