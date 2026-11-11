@@ -577,9 +577,12 @@ scripts/jobs-rolling-upgrade-proof \
 
 Use a fresh output directory. The delegated cgroup must be beneath
 `/sys/fs/cgroup/`; the proof opts into a guardian-owned empty child without
-moving any process. After reaping descendants, the guardian kills any remaining
-cgroup occupants and removes that child even when cancellation kills the Bash
-process before its EXIT trap runs. Other supervisor callers do not opt into this
+moving any process. After reaping descendants, the guardian writes `cgroup.kill`,
+waits up to ten seconds for `cgroup.events` to report `populated 0`, then removes
+the child. Timeout or cleanup failure fails the run. This handles cancellation
+that kills the Bash process before its EXIT trap runs, provided the guardian
+survives. An external SIGKILL, OOM kill or cgroup kill of the guardian itself
+cannot be cleaned up in-process. Other supervisor callers do not opt into this
 behavior. Successful completion also removes and checks absence of its own
 keeper before printing the final PASS. To check for leaks after any run, use the
 printed command `find "$DELEGATED_CGROUP" -maxdepth 1 -name 'jobs-proof-*' -print`;
@@ -590,6 +593,11 @@ the environment marker and the actual `/proc` ancestor chain's command lines.
 This also rejects marker-free `--scope` guardians; unreadable ancestry fails
 closed. An outer subreaper could otherwise kill the nested cleanup guardian
 before it removes the cgroup.
+On supervised re-exec, the proof verifies that the guardian PID exported with the
+keeper is its direct parent, has a `fractal_test_process.py` command line, and
+matches the supervisor marker. The only accepted keeper path is the configured
+parent's exact `jobs-proof-<guardian-pid>` child; stale or supplied paths fail
+closed before any keeper removal.
 Jobs need explicit `enabled = true`, `allowed_classes =
 ["heavy"]` and a real `keeper_cgroups` namespace. This supplies the production
 accept-time pidfd/cgroup recursion guard, not an activation bypass. Submission

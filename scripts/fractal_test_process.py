@@ -111,6 +111,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
             owned_keeper.mkdir(mode=0o700)
             keeper = owned_keeper  # Own only a directory we successfully created.
             env["FRACTAL_TEST_KEEPER_CGROUP"] = str(keeper)
+            env["FRACTAL_TEST_KEEPER_GUARDIAN_PID"] = str(os.getpid())
             import shlex
             print("Verify no proof cgroup remains: find "
                   f"{shlex.quote(str(parent))} -maxdepth 1 -name 'jobs-proof-*' -print",
@@ -144,10 +145,13 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
         reap_descendants()
         if keeper is not None and keeper.exists():
             try:
-                try:
-                    (keeper / "cgroup.kill").write_text("1\n")
-                finally:
-                    keeper.rmdir()
+                (keeper / "cgroup.kill").write_text("1\n")
+                deadline = time.monotonic() + 10
+                while "populated 0" not in (keeper / "cgroup.events").read_text().splitlines():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"keeper still populated after 10 seconds: {keeper}")
+                    time.sleep(0.05)
+                keeper.rmdir()
             except OSError as error:
                 print(f"isolated test keeper cleanup: {error}", file=sys.stderr)
                 code = code or 1

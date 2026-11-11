@@ -33,7 +33,35 @@ if [[ -n ${FRACTAL_TEST_SUPERVISOR:-} && -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]]; 
   echo 'Refusing nested supervision without a keeper; run jobs-rolling-upgrade-proof directly, not through fractal_test_process.py.' >&2
   exit 2
 fi
-if [[ -z ${FRACTAL_TEST_KEEPER_CGROUP:-} ]] || ! python3 "$supervisor" --is-supervised; then
+if [[ -n ${FRACTAL_TEST_KEEPER_CGROUP:-} ]]; then
+  # guardian() Popen starts this shebang script directly; env and bash exec in
+  # place, so the proof shell's parent must be the keeper-owning guardian.
+  python3 - "$cgroup_parent" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+try:
+    guardian = int(os.environ["FRACTAL_TEST_KEEPER_GUARDIAN_PID"])
+    shell_stat = (Path("/proc") / str(os.getppid()) / "stat").read_text()
+    parent = int(shell_stat.rsplit(")", 1)[1].split()[1])
+    argv = (Path("/proc") / str(guardian) / "cmdline").read_bytes().split(b"\0")
+    option = argv.index(b"--keeper-cgroup-parent")
+    if option >= argv.index(b"--") or argv[option + 1] != os.fsencode(sys.argv[1]):
+        raise ValueError("supervising guardian did not opt into this keeper parent")
+    expected = Path(sys.argv[1]) / f"jobs-proof-{guardian}"
+    keeper = Path(os.environ["FRACTAL_TEST_KEEPER_CGROUP"])
+    if (guardian <= 1 or parent != guardian
+            or os.environ.get("FRACTAL_TEST_SUPERVISOR") != str(guardian)
+            or not any(os.path.basename(arg) == b"fractal_test_process.py" for arg in argv)
+            or keeper != expected or keeper.resolve(strict=True) != expected
+            or not (keeper / "cgroup.events").is_file()):
+        raise ValueError("keeper is not bound to the direct supervising guardian")
+except (KeyError, OSError, ValueError, IndexError) as error:
+    print(f"Refusing unowned keeper ({error}); run the proof directly.", file=sys.stderr)
+    raise SystemExit(2)
+PY
+else
   # --scope guardians may export no environment marker. Inspect ancestry before
   # starting our guardian; our own supervised re-exec never enters this branch.
   python3 - <<'PY'

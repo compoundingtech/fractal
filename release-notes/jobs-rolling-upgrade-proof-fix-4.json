@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Wait for keeper retirement and bind proof cgroup ownership to the direct guardian.",
+  "replay": {"status": "none", "detail": "No claim or projection changes."},
+  "schema": {"status": "none", "detail": "No registry or database changes."},
+  "rules": {"status": "none", "detail": "No job admission or authorization changes."},
+  "compatibility": {"status": "none", "detail": "Only the opt-in keeper lifecycle changes. The shared guardian exports its own PID together with the keeper path. The proof validates its direct supervising parent through /proc, the guardian command and opt-in parent argument, the supervisor marker, and the exact configured-parent/jobs-proof-<guardian-pid> path before accepting that keeper."},
+  "downtime": {"status": "none", "detail": "Manual proof tooling only."},
+  "manual": {"status": "changed", "detail": "Stale or supplied keeper paths fail closed. Documentation states the accepted limit: an external SIGKILL, OOM kill or cgroup kill of the guardian itself cannot be cleaned up in-process. The printed leak-inspection command remains available."},
+  "recovery": {"status": "changed", "detail": "After reaping descendants, guardian cleanup writes cgroup.kill, polls cgroup.events for populated 0 for at most ten seconds, then removes the keeper. A timeout or cleanup error fails the run instead of racing asynchronous SIGKILL completion with an immediate rmdir."}
+}
