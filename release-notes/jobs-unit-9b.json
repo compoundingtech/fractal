@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound cancellation escalation through the uniform J retirement path (unit 9b)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "changed", "detail": "INACTIVE timed stop requires an explicit escalation duration, with no default. Kill, positive populated=0 confirmation, sample and removal use the same retirement internals as launch and recovery."},
+  "compatibility": {"status": "changed", "detail": "Existing unbounded launch/recovery retirement API is retained; cancellation adds typed kill, population, timeout and removal errors."},
+  "downtime": {"status": "none", "detail": "No production caller or activation."},
+  "manual": {"status": "none", "detail": "Fake-tree tests cover never-empty, failed removal, vanished J, missing control files and kill failure. Cargo and native execution not run."},
+  "recovery": {"status": "changed", "detail": "Only confirmed absence of J is a vanished-tree success with counters-unavailable. Other failures cannot acknowledge cancellation."}
+}
