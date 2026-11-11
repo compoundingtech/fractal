@@ -56,11 +56,12 @@ pub async fn apply(
     store_program_bundles(&state, &intent, &request.program_bundles)?;
     let response = state
         .store
-        .apply_owned_set(
+        .apply_owned_set_mapped(
             &intent,
             &request.options,
             &request.idempotency_key,
             &request.actor,
+            request.source_map.as_ref(),
         )
         .map_err(ApiError::bad)?;
     signal_changed(&state);

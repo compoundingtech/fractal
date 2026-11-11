@@ -1888,6 +1888,9 @@ pub struct ApplyResponse {
     /// Open source debt this set publication closed, with each change it reverted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_debts_reverted: Vec<SourceDebt>,
+    /// Set publications with `--source-map`: claims recorded or kept, file texts stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_maps: Option<fractal_schema::source_map::SourceMapCounts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

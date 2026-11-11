@@ -151,6 +151,31 @@ because older daemons refuse replicated revisions that carry such members.
 Ordinary publication and existing clients remain usable during the upgrade. An older daemon must
 not be introduced into a fleet after set activation.
 
+## Source maps
+
+`fractal apply --set ... --source-map MAP.json` records a `fractal.source-map/v1` document beside
+the set commit, in the same transaction. Each mapped subject must be a live member of this
+publication; anything else is refused with `invalid-source-map`, and nothing is applied. A file
+may omit `text` and name only its `sha256` when the daemon already stores that text; an unknown
+sha256 is refused with `source-blob-missing`. Files are capped at 1 MiB and a map at 32 MiB.
+
+Each mapped member revision gets one `source.mapped` claim on `<agent|mission>/<id>@<revision>`
+naming the set revision, source commit, its files (`blob` is the git blob id, `blob_hash` the
+sha256 of its text) and the spans of its KDL nodes. The texts those files name are stored once by
+sha256 as claim-referenced blobs, so they replicate and survive checkpoints with the claim. The
+first mapped publication of a revision wins; a later map for the same revision is kept, never
+refused, so the claim says where the revision was introduced. A noop publication records nothing.
+Maps never enter a revision, bundle, preview or set hash. The apply result reports
+`source_maps: {recorded, kept, blobs_new, blobs_deduped}` (blob counts are distinct texts).
+
+The apply idempotency check covers the intent, options and actor, not the map: a retry with the
+same key and a different map answers the first response and records nothing from the second map.
+A revision left unmapped that way gets its map from the next publication that carries one.
+
+`GET /v1/source-maps?subject=ID[&revision=REV][&texts=true]` answers the claim of a revision
+(default: the current one), with `texts: {blob_hash: text}` on request; 404 `source-map-missing`
+when that revision has none. `GET /v1/source-blobs/<sha256>` answers one stored text.
+
 ## Inspect publication and rollout
 
 ```sh

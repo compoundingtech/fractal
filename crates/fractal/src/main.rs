@@ -3439,6 +3439,9 @@ struct ApplyArgs {
     /// Why this ad hoc change is forced; recorded with its actor in `fractal source status`.
     #[arg(long, requires = "force", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     reason: Option<String>,
+    /// fractal.source-map/v1 JSON recorded beside each mapped member revision.
+    #[arg(long, requires = "set")]
+    source_map: Option<PathBuf>,
     /// Complete person, agent or run subject authoring the publication; defaults to the
     /// harness's own agent, else to the run a program effect acts as.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -3614,12 +3617,24 @@ async fn run_owned_set_apply(
     };
     // Read and check the bundles first, so a dry run refuses a stale bundle too.
     let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
+    let source_map = args
+        .source_map
+        .as_deref()
+        .map(|path| -> Result<fractal_schema::source_map::SourceMap> {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let map: fractal_schema::source_map::SourceMap = serde_json::from_slice(&bytes)
+                .with_context(|| format!("{} is not a fractal.source-map/v1 document", path.display()))?;
+            map.validate(bytes.len()).map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
+            Ok(map)
+        })
+        .transpose()?;
     let mut request = Request {
         intent,
         options,
         actor,
         idempotency_key: uuid::Uuid::now_v7().to_string(),
         program_bundles: BTreeMap::new(),
+        source_map: None,
     };
     let preview: Preview = client.post("/v1/sets/preview", &request).await?;
     if args.dry_run {
@@ -3651,6 +3666,7 @@ async fn run_owned_set_apply(
     }
     request.options.expected_subjects = preview.expected_subjects;
     request.program_bundles = program_bundles;
+    request.source_map = source_map;
     let response: Value = client.post("/v1/sets/apply", &request).await?;
     print_value(&response, json_output)
 }
