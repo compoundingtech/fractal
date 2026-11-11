@@ -128,6 +128,7 @@ pub use harness_questions::{
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod message_reads;
+pub mod relayed_close_maintenance;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod population_metrics;
