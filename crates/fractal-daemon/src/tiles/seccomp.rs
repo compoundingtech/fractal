@@ -92,6 +92,7 @@ fn jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 
 const LOAD: u32 = libc::BPF_LD | libc::BPF_W | libc::BPF_ABS;
 const EQUAL: u32 = libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K;
+#[cfg(any(target_arch = "x86_64", test))]
 const AT_LEAST: u32 = libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K;
 const ANY_BIT: u32 = libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K;
 const RETURN: u32 = libc::BPF_RET | libc::BPF_K;

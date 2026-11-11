@@ -195,6 +195,28 @@ fn every_persistent_table_has_a_projection_scope() {
         "projection_digest_operation_rows",
         "projection_digest_repaired_claims",
         "replica_envelope_signatures",
+        // Like signature judgments, grant authority depends on member-local
+        // receipt proofs, membership generations and arrival order. The shared
+        // grant/policy/revocation evidence is already covered by canonical claims.
+        // Neither authenticated snapshots nor unfinished maintenance are shared rows.
+        "assistant_grant_authority",
+        "assistant_grant_effective",
+        "assistant_grant_pending",
+        "assistant_grant_proof_invalidations",
+        "assistant_grant_proof_rechecks",
+        "assistant_grant_dirty",
+        "assistant_grant_auth_cursor",
+        "assistant_grant_additions",
+        "assistant_grant_auth_work",
+        "assistant_grant_retractions",
+        "assistant_grant_recompute",
+        "assistant_grant_attachments",
+        "assistant_grant_attachment_witnesses",
+        "assistant_grant_membership_state",
+        "assistant_grant_local_appends",
+        "assistant_grant_membership_windows",
+        "assistant_grant_queue_sequences",
+        "assistant_grant_queue_owners",
         "claim_signature_judging",
         "claim_signature_nonce_uses",
         "claim_signature_candidates",
