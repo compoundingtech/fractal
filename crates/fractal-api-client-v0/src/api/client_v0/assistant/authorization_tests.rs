@@ -102,6 +102,165 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
 }
 
 #[tokio::test]
+async fn owner_policy_response_and_bearer_read_complete_single_base_but_fence_real_backlog() {
+    use smallclaims::store::assistant_grant_authority as authority;
+    for bases in [1, 9] {
+        let fixture = fixture(SCOPES, true).await;
+        let subject = subject(&fixture.grant).unwrap();
+        let granted = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
+        let mut payload = fixture.payload("summary", "");
+        for _ in 1..bases {
+            fixture.state.store.append_claim(&ClaimInput {
+                subject:subject.clone(),kind:GRANTED.into(),actor:granted.actor.clone(),
+                fields:serde_json::from_value(fields(&granted).unwrap().clone()).unwrap(),
+                evidence:Vec::new(),expected_subject:None,idempotency_key:None,
+            }).unwrap();
+        }
+        let policy = json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES,
+            "expires_in_seconds":86400,"disclosure_consent":true,
+            "consent_evidence":"owner approved renewal","minimal_read_mode":"approval-once"});
+        let app = crate::api::router_for_transport(fixture.state.clone(),
+            ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+        let mut owner_request = Request::builder().method("POST")
+            .uri(format!("/v1/client/assistant/grants/{}/policy",fixture.grant))
+            .header(LOCAL_PERSON_HEADER,OWNER).header("content-type","application/json")
+            .body(Body::from(policy.to_string())).unwrap();
+        owner_request.extensions_mut().insert(crate::api::LocalPeer {
+            pid:8,peer_process:None,ancestor:None,
+        });
+        let response = app.oneshot(owner_request).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK,"owner write with {bases} bases");
+        let response: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(),64*1024).await.unwrap()).unwrap();
+        let revision = response["value"]["policy_revision"].as_u64().unwrap();
+        let committed = authority::management_transition(&fixture.state.store.readers.get(),&granted,POLICY)
+            .unwrap().unwrap();
+        assert_eq!(fields(&committed).unwrap()["policy_revision"],revision);
+        assert_eq!(revision,fixture.revision+1,"the successful write must commit one revision");
+        payload.policy_revision = revision;
+        let proof = fixture.header(&payload,&fixture.attestor);
+        let (status,_,_) = fixture.request("/v1/client/assistant/summary",Some(&proof)).await;
+        if bases==1 {
+            assert_eq!(status,StatusCode::OK,"single-base owner write must not require a drain");
+            authority::subject_ready(&fixture.state.store.readers.get(),&subject).unwrap();
+        } else {
+            assert_eq!(status,StatusCode::FORBIDDEN,"unfinished multi-base work must remain fenced");
+            assert!(authority::subject_ready(&fixture.state.store.readers.get(),&subject).is_err());
+            while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+            authority::subject_ready(&fixture.state.store.readers.get(),&subject).unwrap();
+            payload.nonce = uuid::Uuid::new_v4().to_string();
+            let proof = fixture.header(&payload,&fixture.attestor);
+            assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&proof)).await.0,
+                StatusCode::OK,"bearer read must recover after genuine attachment work finishes");
+            assert_eq!(authority::management_transition(&fixture.state.store.readers.get(),&granted,POLICY)
+                .unwrap().unwrap().id,committed.id,"maintenance cannot change the committed owner result");
+        }
+    }
+}
+
+#[tokio::test]
+async fn p1_owner_transitions_ignore_wrong_origin_overlays_but_fence_the_subject_head() {
+    for kind in [POLICY, REVOKED] {
+        let fixture = fixture(SCOPES, false).await;
+        let subject = subject(&fixture.grant).unwrap();
+        let granted = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
+        let peer = Store::open_memory("wrong-origin").unwrap();
+        // These overlays must be authenticated data from the wrong issuer.
+        // An unsigned import instead fences the subject until it authenticates.
+        const FLEET: &str = "86700000-0000-4000-8000-000000000001";
+        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let peer_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        for store in [&*fixture.state.store, &peer] {
+            store.bind_fleet(FLEET).unwrap();
+            store.pin_fleet_anchor(anchor.public()).unwrap();
+        }
+        fixture.state.store.set_member_key(Some(anchor.clone())).unwrap();
+        peer.set_member_key(Some(peer_key.clone())).unwrap();
+        fixture.state.store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+        fixture.state.store.append_claim(&ClaimInput {
+            subject: "host/wrong-origin".into(), kind: "fleet.member-admitted".into(),
+            actor: Some(OWNER.into()),
+            fields: serde_json::from_value(json!({
+                "fleet_id": FLEET, "member_key": peer_key.public(),
+                "via": "invite", "mode": "listening", "writer_floor": 0,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let replicate = |from: &Store, to: &Store| {
+            let exchange = from.export_replication_exchange_answering(
+                FLEET, &to.replication_inventory().unwrap(),
+                &to.replication_signature_requests().unwrap(),
+            ).unwrap();
+            to.receive_replication_exchange(from.origin(), FLEET, &exchange).unwrap();
+            to.validate_replication_backlog().unwrap();
+            to.project_replication_backlog().unwrap();
+        };
+        replicate(&fixture.state.store, &peer);
+        while !peer.advance_assistant_grant_authority_backfill().unwrap() {}
+        while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+        let overlay = || {
+            let mut value = fields(&granted).unwrap().clone();
+            if kind == POLICY {
+                value["policy_revision"] = json!(999);
+                value["expires_at_unix_ms"] = json!(1);
+                value["scopes"] = json!([]);
+            }
+            let claim = peer.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some(OWNER.into()),
+                fields: serde_json::from_value(value).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            replicate(&peer, &fixture.state.store);
+            assert!(fixture.state.store.claim_by_id(&claim.id).unwrap().is_some(),
+                "wrong-origin evidence must remain in raw history without becoming authority");
+            assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap().is_none(),
+                "receipt must fence the subject before background authentication");
+            while !fixture.state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+            assert!(fixture.state.store.claim_has_authenticated_member_writer(&claim.id).unwrap(),
+                "wrong-origin filtering must be exercised after writer authentication");
+            assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap().is_some());
+        };
+
+        overlay();
+        let policy = serde_json::from_value::<AssistantGrantPolicy>(json!({
+            "api_version": CLIENT_API_VERSION, "scopes": SCOPES, "expires_in_seconds": 86400,
+            "disclosure_consent": true, "consent_evidence": "recorded owner consent",
+            "minimal_read_mode": "approval-once",
+        })).unwrap();
+        let Json(renewed) = update_policy(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()), AxumPath(fixture.grant.clone()),
+            Json(policy)).await.unwrap();
+        assert_eq!(renewed["policy_revision"], 2);
+        assert_eq!(renewed["revoked"], false);
+        let renewed_claim = effective(&fixture.state, &granted).unwrap();
+        assert_eq!(renewed_claim.body["evidence"], json!([granted.id]));
+
+        overlay();
+        let Json(pinned) = pin(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()), AxumPath(fixture.grant.clone()),
+            Json(fixture.trust_request())).await.unwrap();
+        assert_eq!(pinned["policy_revision"], 3);
+        assert_eq!(pinned["read_trust"]["key_id"], "approval-key/test");
+        let pinned_claim = effective(&fixture.state, &granted).unwrap();
+        assert_eq!(pinned_claim.body["evidence"], json!([renewed_claim.id]));
+
+        overlay();
+        let Json(revoked) = revoke(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone())).await.unwrap();
+        assert_eq!(revoked["revoked"], true);
+        let revocation = latest(&fixture.state, &subject, REVOKED).unwrap().unwrap();
+        assert_eq!(revocation.origin, granted.origin);
+        assert_eq!(revocation.body["evidence"], json!([pinned_claim.id]));
+        assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").is_err());
+        assert_eq!(fixture.request("/v1/client/assistant/summary", None).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(pin(State(fixture.state.clone()), Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()), Json(fixture.trust_request())).await.unwrap_err().status,
+            StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
 async fn scg_read_accepts_header_aliases_and_binds_presented_domain() {
     let fixture = fixture(SCOPES, true).await;
     let path = "/v1/client/assistant/summary";

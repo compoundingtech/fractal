@@ -73,7 +73,7 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
         .store
         .apply_internal(&intent, "participant-recipient")
         .unwrap();
-    let grant_subject = "custom/client/assistant-v1-participant-fixture";
+    let grant_subject = "custom/client/assistant-v1-0123456789abcdef01234567";
     let grant_id = "assistant-grant/0123456789abcdef01234567";
     let session_actor = format!("assistant/chatgpt/session/{grant_id}");
     let expires = std::time::SystemTime::now()
@@ -90,6 +90,8 @@ fn daemon_authorship_is_truthful_without_widening_legacy_sender_or_guessing_broa
             fields: serde_json::from_value(json!({
                 "principal":"assistant/chatgpt", "session_actor":session_actor,
                 "issuer":"person/fixture", "disclosure_consent":true, "policy_revision":1,
+                "credential_hash":credential_digest("participant-fixture-credential"),
+                "minimal_read_mode":"approval-once",
                 "expires_at_unix_ms":expires, "scopes":["write.assistant.messages"],
                 "recipient_allowlist":["agent/eval.worker"], "grant_id":grant_id
             }))

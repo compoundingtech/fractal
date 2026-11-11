@@ -630,6 +630,8 @@
       "peer-too-old",
       "validation-failed",
       "idempotency-conflict",
+      "grant-profile-conflict",
+      "assistant-grant-authority-not-ready",
       "legacy-action-receipt-untrusted",
       "issuer-required",
       "pairing-origin-required",
@@ -4012,6 +4014,35 @@
       "write.assistant.answers"
     ] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
+    "ExternalGrantProfile": { "enum": ["assistant", "service"] },
+    "GrantProfileConflictCause": { "enum": ["revoked", "expired"] },
+    "GrantProfileWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grant_id", "origin", "profile"],
+      "properties": {
+        "grant_id": { "type": ["string", "null"], "description": "Grant ID; null only for legacy local fixtures without an ID." },
+        "origin": { "type": "string" },
+        "profile": { "$ref": "#/$defs/ExternalGrantProfile" }
+      }
+    },
+    "GrantProfileConflictWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grants"],
+      "properties": {
+        "grants": { "type": "array", "items": { "$ref": "#/$defs/GrantProfileWitness" } }
+      }
+    },
+    "ClearedGrantProfileConflictWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grants", "cause"],
+      "properties": {
+        "grants": { "type": "array", "items": { "$ref": "#/$defs/GrantProfileWitness" } },
+        "cause": { "$ref": "#/$defs/GrantProfileConflictCause" }
+      }
+    },
     "AssistantGrant": {
       "type": "object",
       "additionalProperties": false,
@@ -4033,6 +4064,8 @@
         "disclosure_consent": { "type": "boolean" },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "revoked": { "type": "boolean" },
+        "conflict": { "anyOf": [{ "$ref": "#/$defs/GrantProfileConflictWitness" }, { "type": "null" }], "description": "Current opposite-profile conflict, or null when no active conflict exists. Present only on daemon-configured-owner grant inspection with witness=1; omitted from default inspection, bearer authentication errors, pairing and mutation responses." },
+        "cleared_conflicts": { "type": "array", "items": { "$ref": "#/$defs/ClearedGrantProfileConflictWitness" }, "description": "Revoked or expired opposite-profile witnesses; emitted only on daemon-configured-owner grant inspection with witness=1 when conflict is null. Never disclosed by bearer authentication errors or pairing." },
         "read_trust": { "$ref": "#/$defs/AssistantReadTrust", "description": "Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied." }
       }
     },

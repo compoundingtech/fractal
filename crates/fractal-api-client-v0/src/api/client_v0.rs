@@ -4038,6 +4038,9 @@ fn operation_resources(state: &AppState, at: &str) -> Result<Vec<Value>, ApiErro
     };
     let mut values = checks
         .iter()
+        // Grant IDs and issuing identities are trusted-local doctor diagnostics, not
+        // projection data for paired clients. Both collection and detail use this list.
+        .filter(|check| check.name != "assistant-grant-provenance")
         .map(|check| {
             let digest = hex::encode(Sha256::digest(check.name.as_bytes()));
             json!({
@@ -13945,6 +13948,69 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
+    async fn paired_operations_do_not_disclose_local_doctor_grant_provenance() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let credential = "operations-provenance-reader";
+        state.store.append_client_operation_claim(&ClaimInput {
+            subject: "custom/client/operations-provenance-reader".into(),
+            kind: "custom.client.pairing-completed".into(),
+            actor: Some("person/ada".into()),
+            fields: BTreeMap::from([
+                ("credential_hash".into(), json!(credential_digest(credential))),
+                ("session_actor".into(), json!("client/operations-provenance-reader")),
+                ("person_id".into(), json!("person/ada")),
+                ("scopes".into(), json!(["read.projections"])),
+                ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let grant_id = "claim/private-doctor-grant";
+        let origin = "private-doctor-origin";
+        let issuer = "person/owner";
+        state.store.connection.write().execute(
+            "INSERT INTO assistant_grant_pending
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
+             VALUES(?1,?1,'custom.client.assistant.v1.granted',?2,?3,1,0,'{}')",
+            rusqlite::params![grant_id, origin, issuer],
+        ).unwrap();
+        let checks = doctor_report(&state).unwrap().0.checks;
+        let provenance = checks.iter()
+            .find(|check| check.name == "assistant-grant-provenance").unwrap();
+        for private in [grant_id, origin, issuer] {
+            assert!(provenance.message.contains(private), "{provenance:?}");
+        }
+        // Serve exactly the detailed local report through the remote projection paths.
+        operation_reports().insert(
+            Arc::as_ptr(&state.store) as usize,
+            OperationReport {
+                store: Arc::downgrade(&state.store), checks: Some(Arc::new(checks)),
+                at: Instant::now(), refreshing: false,
+            },
+        );
+        let digest = hex::encode(Sha256::digest(b"assistant-grant-provenance"));
+        let app = super::super::fabric_router(state.clone());
+        for (uri, expected) in [
+            ("/v1/client/operations".to_owned(), StatusCode::OK),
+            (format!("/v1/client/operations/diagnostic-{}", &digest[..16]), StatusCode::NOT_FOUND),
+        ] {
+            let request = Request::builder().uri(uri)
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+            assert!(session.allows("read.projections"));
+            assert!(!session.local_peer);
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let body = std::str::from_utf8(&bytes).unwrap();
+            for private in [grant_id, origin, issuer, "assistant-grant-provenance"] {
+                assert!(!body.contains(private), "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn fleet_operational_commands_are_bounded_and_report_slow_queries() {
         use crate::OperationsFixtureStore;
         let root = tempfile::tempdir().unwrap();
@@ -14074,18 +14140,18 @@ mission "differential" state="ready" {
     async fn accountable_root_declaration_read_exposes_typed_person() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let source = "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+        let source = "version 2\nagent \"example/root\" { accountable \"person/owner\"; command \"true\"; }";
         let intent = crate::graph::parse_intent(source, "terminal-test").unwrap();
         let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
-        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/avery")).unwrap();
+        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/owner")).unwrap();
         let value = agent_declaration(State(state),
-            Extension(ClientSession::local(Some("person/avery")).unwrap()),
+            Extension(ClientSession::local(Some("person/owner")).unwrap()),
             AxumPath("example/root".into()), Query(AgentDeclarationQuery {
                 revision: None, show_env_values: false,
             })).await.unwrap().0;
-        assert_eq!(value["accountable"], "person/avery");
+        assert_eq!(value["accountable"], "person/owner");
         let decoded: fractal_client::AgentDeclaration = serde_json::from_value(value).unwrap();
-        assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
+        assert_eq!(decoded.accountable.as_deref(), Some("person/owner"));
     }
 
     #[tokio::test]

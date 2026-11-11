@@ -485,6 +485,7 @@ impl ApiError {
             | "stale-subject"
             | "stale-fence"
             | "idempotency-conflict"
+            | "grant-profile-conflict"
             | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
@@ -506,6 +507,7 @@ impl ApiError {
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
+            | "assistant-grant-authority-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
@@ -2063,6 +2065,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "grant-profile-conflict"
         | "invalid-answer"
         | "not-answerable"
         | "idempotency-key-expired"
@@ -2111,6 +2114,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "mission-list-not-ready"
         | "mission-list-ended"
         | "message-selectors-not-ready"
+        | "assistant-grant-authority-not-ready"
         | "response-too-large"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"
@@ -9713,6 +9717,104 @@ pub(crate) fn fleet_admission_check(
     }
 }
 
+fn pending_assistant_grant_checks(
+    connection: &rusqlite::Connection,
+    local_origin: &str,
+) -> anyhow::Result<Vec<DoctorCheck>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT pending.claim_id,pending.kind,pending.origin,pending.actor
+         FROM assistant_grant_pending pending
+         WHERE pending.authenticated=0
+           AND pending.kind='custom.client.assistant.v1.granted'
+           AND NOT EXISTS(SELECT 1 FROM assistant_grant_local_appends local
+                          WHERE local.claim_id=pending.claim_id)
+         ORDER BY pending.claim_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+    })?;
+    rows.map(|row| {
+        let (id, kind, origin, actor) = row?;
+        let reason = if origin == local_origin {
+            "grant predates local-append provenance; re-issue"
+        } else {
+            "grant lacks local-append provenance and verified member signature/membership; issuance age unknown"
+        };
+        Ok(DoctorCheck {
+            name: "assistant-grant-provenance".into(),
+            status: "warn".into(),
+            message: format!("{id}: {reason}; kind={kind}; origin={origin}; actor={actor}"),
+        })
+    }).collect()
+}
+
+fn assistant_grant_subject_maintenance_checks(
+    connection: &rusqlite::Connection,
+) -> anyhow::Result<Vec<DoctorCheck>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT claims.subject, 'dirty claim awaiting projection' AS cause
+         FROM assistant_grant_dirty dirty JOIN claims ON claims.id=dirty.claim_id
+         UNION
+         SELECT pending.grant_subject, 'retired raw claim awaiting projection'
+         FROM assistant_grant_dirty dirty
+         JOIN assistant_grant_pending pending ON pending.claim_id=dirty.claim_id
+         WHERE NOT EXISTS(SELECT 1 FROM claims WHERE id=dirty.claim_id)
+         UNION
+         SELECT claims.subject, 'signature authentication cursor in progress'
+         FROM assistant_grant_auth_cursor cursor JOIN claims ON claims.id=cursor.claim_id
+         UNION
+         SELECT grant_subject, 'unauthenticated grant, policy or revocation evidence'
+         FROM assistant_grant_pending WHERE authenticated=0
+         UNION
+         SELECT pending.grant_subject, 'writer membership revalidation queued: ' || dirty.writer
+         FROM assistant_grant_retractions dirty
+         JOIN assistant_grant_pending pending
+           ON pending.origin=dirty.writer AND pending.auth_member_key=dirty.member_key
+         WHERE pending.auth_sequence BETWEEN dirty.lower_sequence AND dirty.upper_sequence
+           AND (pending.auth_sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
+           AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_windows windows
+             WHERE windows.writer=pending.origin AND windows.member_key=pending.auth_member_key
+               AND pending.auth_sequence>=windows.start
+               AND (windows.end IS NULL OR pending.auth_sequence<=windows.end))
+         UNION
+         SELECT pending.grant_subject, 'authentication proof evidence changed'
+         FROM assistant_grant_proof_invalidations work
+         JOIN assistant_grant_pending pending ON pending.origin=work.writer
+           AND pending.auth_sequence=work.sequence AND pending.auth_envelope_hash=work.envelope_hash
+         WHERE pending.claim_id>work.claim_id
+           AND (work.member_key='' OR pending.auth_member_key=work.member_key)
+         UNION
+         SELECT pending.grant_subject, 'authentication proof evidence changed'
+         FROM assistant_grant_proof_rechecks work
+         JOIN assistant_grant_pending pending ON pending.claim_id=work.claim_id
+         UNION
+         SELECT pending.grant_subject, 'retracted authority effective-state recomputation'
+         FROM assistant_grant_recompute work
+         JOIN assistant_grant_pending pending ON pending.claim_id=work.claim_id
+         UNION
+         SELECT grant_subject, 'authenticated grant attachment in progress'
+         FROM assistant_grant_attachments
+         UNION
+         SELECT grant_subject, 'attachment conflict-witness cleanup'
+         FROM assistant_grant_attachment_witnesses
+         ORDER BY 1,2",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.map(|row| {
+        let (subject, cause) = row?;
+        Ok(DoctorCheck {
+            // Keep subject causes in the existing trusted-local-only check, which
+            // paired operations exclude from both collection and detail reads.
+            name: "assistant-grant-provenance".into(),
+            status: "warn".into(),
+            message: format!("subject={subject}: external-grant subject maintenance; cause={cause}; bearer clients receive generic credential rejection"),
+        })
+    }).collect()
+}
+
 fn doctor_report_within(
     state: &AppState,
     clock: &DoctorClock,
@@ -9756,6 +9858,12 @@ fn doctor_report_within(
                 message: error.to_string(),
             }),
         }
+        checks.extend(pending_assistant_grant_checks(
+            &state.store.readers.get(), state.store.origin(),
+        ).map_err(ApiError::internal)?);
+        checks.extend(assistant_grant_subject_maintenance_checks(
+            &state.store.readers.get(),
+        ).map_err(ApiError::internal)?);
         Ok(checks)
     });
     checks.check("claim-signatures", || {

@@ -45,6 +45,11 @@ pub use projection_gate::{ProjectionGate, ProjectionGuard};
 
 mod proof;
 pub mod prepared_envelope;
+pub mod assistant_grant_authority;
+#[cfg(test)]
+mod assistant_grant_authority_tests;
+#[cfg(test)]
+mod assistant_grant_authority_bench;
 mod replica_record;
 use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
@@ -887,6 +892,12 @@ pub struct Store {
     admission_schema_digest: std::sync::OnceLock<String>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// Request-only sealed folds, which may omit local batches not yet sealed.
+    /// Never used by the sealing path's `membership_cache` fast path.
+    sealed_membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// Last inherited generation whose applied window snapshot was checked.
+    /// Equal snapshots advance only this memory cache, never the writer.
+    assistant_grant_membership_observed_generation: AtomicI64,
     /// Where the scan for signatures missing on admitted envelopes stands.
     signature_backfill: Mutex<signature_backfill::SignatureBackfill>,
     /// Read-only sealed view; never populated with the client's local-signer fallback.
@@ -1101,6 +1112,7 @@ impl Store {
             // frame the initialization wrote, before open returns.
             connection.pragma_update(None, "synchronous", "FULL")?;
         }
+        Self::install_assistant_authority_schema(&connection, &origin)?;
         let readers = if let Some(admitted) = &admitted {
             ReadPool::new_admitted(admitted.clone())?
         } else {
@@ -1152,6 +1164,7 @@ impl Store {
         }
         runtime.finish_open_projections(&mut connection)?;
         seed_empty_projection_health(&connection)?;
+        Self::install_assistant_authority_schema(&connection, &origin)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -1249,6 +1262,21 @@ impl Store {
         Ok(fresh)
     }
 
+    // Finish DDL before constructing any readers: otherwise the first query on
+    // each preinitialized reader must discover the changed schema and reprepare.
+    fn install_assistant_authority_schema(connection: &Connection, origin: &str) -> Result<()> {
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            connection, assistant_grant_authority_bench::OpenAuthorityPhase::BeforeInstall,
+        );
+        assistant_grant_authority::install(connection, origin)?;
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            connection, assistant_grant_authority_bench::OpenAuthorityPhase::Installed,
+        );
+        Ok(())
+    }
+
     /// Wrap an opened, initialized writer connection and its read pool.
     pub fn from_connection(
         connection: Connection,
@@ -1266,6 +1294,17 @@ impl Store {
         anyhow::ensure!(
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
+        );
+        {
+            let transaction = connection.unchecked_transaction()?;
+            assistant_grant_authority::backfill_slice(
+                &transaction, std::time::Duration::from_secs(2),
+            )?;
+            transaction.commit()?;
+        }
+        #[cfg(test)]
+        assistant_grant_authority_bench::observe_open_authority(
+            &connection, assistant_grant_authority_bench::OpenAuthorityPhase::StartupComplete,
         );
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
@@ -1346,6 +1385,8 @@ impl Store {
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
+            sealed_membership_cache: Mutex::new(None),
+            assistant_grant_membership_observed_generation: AtomicI64::new(i64::MIN),
             fleet_authority: std::sync::OnceLock::new(),
             admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
@@ -2200,7 +2241,16 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
             serde_json::to_string(predecessors)?,
             now.to_string(),
         ])?;
-    Ok(transaction.last_insert_rowid() as u64)
+    let store_index = transaction.last_insert_rowid() as u64;
+    if matches!(kind, assistant_grant_authority::GRANTED | assistant_grant_authority::POLICY | assistant_grant_authority::REVOKED) {
+        // This function is the local append boundary; replicated admission uses
+        // its own insert path and must never write this marker.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h52b61956c36c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
+        )?;
+        assistant_grant_authority::refresh_local_append(transaction, id)?;
+    }
+    Ok(store_index)
 }
 
 /// The next sequence for a local batch: one past the writer's highest batch, including one a
@@ -2778,8 +2828,13 @@ impl Store {
             {
                 return Ok(membership.clone());
             }
-            // Do not populate the sealing path's cache with a fold that can omit local batches.
-            fleet_membership_tx(&connection)
+            // Keep cold request folds separate: they can omit unsealed local batches,
+            // so publishing them into membership_cache would bypass the sealing path.
+            sealed_membership_tx(
+                &connection,
+                &mut self.sealed_membership_cache.lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )
         })
     }
 
@@ -3079,6 +3134,96 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Whether an accepted copy was signed by a keyed fleet member acting as its origin.
+    /// Requires a valid record in a validated or degraded envelope, a signature key authorized
+    /// for that writer's sequence, and a cryptographically valid signature in this store's
+    /// fleet/shard domain. Invalid sibling records do not disqualify a valid record in a
+    /// degraded envelope. Legacy and unkeyed writers do not authenticate provenance. Reads only sealed
+    /// membership; this query never seals local batches or scans the replication log.
+    pub fn claim_has_authenticated_member_writer(&self, claim_id: &str) -> Result<bool> {
+        Ok(self.authenticated_member_writer_claim_ids(&serde_json::to_string(&[claim_id])?)?
+            .contains(claim_id))
+    }
+
+    /// The requested claims with fully authenticated keyed-member envelope provenance.
+    /// Uses the same membership windows, record states, origin check and fleet/shard signature
+    /// domain as [`Self::claim_has_authenticated_member_writer`]. All claims share one read
+    /// snapshot and one sealed-membership lookup; identical envelope signatures are verified
+    /// at most once, including signatures shared by several claims or repeated input IDs.
+    pub fn claim_ids_with_authenticated_member_writers(
+        &self,
+        claim_ids: &[String],
+    ) -> Result<BTreeSet<String>> {
+        if claim_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        self.authenticated_member_writer_claim_ids(&serde_json::to_string(claim_ids)?)
+    }
+
+    fn authenticated_member_writer_claim_ids(&self, claim_ids: &str) -> Result<BTreeSet<String>> {
+        self.read_snapshot(|_| {
+            let membership = self.fleet_membership_sealed()?;
+            let connection = self.readers.get();
+            let Some(fleet_id) = self.signing_fleet_id(&connection)? else {
+                return Ok(BTreeSet::new());
+            };
+            let shard = fleet_meta(&connection, "shard_id")?;
+            let mut statement = connection.prepare_cached(
+                "SELECT records.claim_id, records.writer, records.sequence, records.envelope_hash,
+                        signatures.member_key, signatures.signature
+                 FROM replica_records AS records
+                 JOIN claims ON claims.id=records.claim_id AND claims.origin=records.writer
+                 JOIN replica_envelopes AS envelopes
+                   USING (writer, sequence, envelope_hash)
+                 JOIN replica_envelope_signatures AS signatures
+                   USING (writer, sequence, envelope_hash)
+                 WHERE records.claim_id IN (SELECT value FROM json_each(?1))
+                   AND records.state='valid'
+                   AND envelopes.receipt_state IN ('validated', 'degraded')",
+            )?;
+            let rows = statement.query_map([claim_ids], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ),
+                ))
+            })?;
+            let mut authenticated = BTreeSet::new();
+            let mut verified = BTreeMap::new();
+            for row in rows {
+                let (claim_id, signature_identity) = row?;
+                if authenticated.contains(&claim_id) {
+                    continue;
+                }
+                let valid = *verified.entry(signature_identity).or_insert_with_key(|identity| {
+                    let (writer, sequence, hash, key, signature) = identity;
+                    if !matches!(
+                        membership.window(writer, *sequence),
+                        crate::fleet::Window::Keyed(keys) if keys.contains(key)
+                    ) {
+                        return false;
+                    }
+                    #[cfg(test)]
+                    membership_query_tests::SIGNATURE_VERIFICATIONS.with(|count| {
+                        count.set(count.get() + 1);
+                    });
+                    VerifiedEnvelopeSignature::verify(
+                        shard.as_deref(), &fleet_id, writer, *sequence, hash, key, signature,
+                    ).is_some()
+                });
+                if valid {
+                    authenticated.insert(claim_id);
+                }
+            }
+            Ok(authenticated)
+        })
     }
 
 
@@ -3424,6 +3569,22 @@ fn fleet_generation(connection: &Connection) -> Result<i64> {
         .query_row(/* sqlite-large-value: allow-for-now lv-h339ecb1b2413 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
 }
 
+// The caller holds one snapshot for both the generation read and membership fold.
+fn sealed_membership_tx(
+    connection: &Connection,
+    cache: &mut Option<(i64, crate::fleet::Membership)>,
+) -> Result<crate::fleet::Membership> {
+    let generation = fleet_generation(connection)?;
+    if let Some((cached_generation, membership)) = cache.as_ref()
+        && *cached_generation == generation
+    {
+        return Ok(membership.clone());
+    }
+    let membership = fleet_membership_tx(connection)?;
+    *cache = Some((generation, membership.clone()));
+    Ok(membership)
+}
+
 // The caller holds a read snapshot. Unlike the client view this has no local signer;
 // Membership::fold and FleetView::from_membership use no clock or expiry state.
 fn sealed_fleet_view_tx(
@@ -3719,7 +3880,7 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
     }
 
     fn store(&self, transaction: &Transaction<'_>, now: &str) -> Result<usize> {
-        Ok(transaction
+        let inserted = transaction
             .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-hece070718e6e owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
              writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
@@ -3732,7 +3893,8 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
                 self.member_key,
                 self.signature,
                 now
-            ])?)
+            ])?;
+        Ok(inserted)
     }
 }
 
@@ -3757,6 +3919,7 @@ impl FleetAuthority for Store {
     fn fleet_generation(&self) -> Result<i64> {
         fleet_generation(&self.readers.get())
     }
+
 
     fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
         Store::fleet_membership(self)
@@ -7176,7 +7339,11 @@ impl Store {
         );
         self.fleet_authority
             .set(authority)
-            .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))
+            .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))?;
+        // Generation numbers belong to their authority. Recheck the inherited
+        // snapshot even if it happens to equal the shard's former local number.
+        self.assistant_grant_membership_observed_generation.store(i64::MIN, Ordering::Release);
+        Ok(())
     }
 
     /// The fleet this store's envelopes sign for: its authority's, for a shard.

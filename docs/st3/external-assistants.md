@@ -33,13 +33,13 @@ scopes only.** The production setup below deliberately omits write scopes.
 ### Owner setup and permissions
 
 On the daemon host, the configured owning person begins pairing through the
-trusted-local CLI. `person/robin` below is a fixture: use the configured owner,
+trusted-local CLI. `person/owner` below is a fixture: use the configured owner,
 not a new identity chosen by the client. Record disclosure consent before issuance;
 the CLI's `--disclose-to-openai` flag is still required and does not grant a
 different provider or unrelated caller disclosure permission.
 
 ```sh
-fractal devices --as person/robin pair --assistant assistant/mcp \
+fractal devices --as person/owner pair --assistant assistant/mcp \
   --scope read.assistant.summary --scope read.assistant.attention \
   --scope read.assistant.agents --scope read.assistant.missions \
   --scope read.assistant.conversation \
@@ -138,8 +138,8 @@ not an enforced allowlist (Q21 / [#3250](https://github.com/compoundingtech/frac
 Inspect or revoke the exact grant from the trusted-local owner CLI:
 
 ```sh
-fractal devices --as person/robin grant inspect GRANT_ID
-fractal devices --as person/robin grant revoke GRANT_ID
+fractal devices --as person/owner grant inspect GRANT_ID
+fractal devices --as person/owner grant revoke GRANT_ID
 ```
 
 Revocation is authoritative and survives restart; deleting a profile or removing
@@ -156,6 +156,258 @@ must treat assistant requests as untrusted external content, and consequential
 requests still require independent owning-person confirmation. Older daemons
 reject the new principal rather than accepting it as ChatGPT or a person; do not
 work around rejection by switching credentials.
+
+### Upgrade: reissue grants without authenticated historical provenance
+
+The authority projection remains version 1 (unreleased). A durable local-append
+marker is written only when this member appends a new grant, policy, or revocation
+claim locally. Upgrade does not manufacture markers for existing claims. An
+unmarked historical claim needs a verified member envelope signature and matching
+admitted membership window, even when its origin names this member. Unsigned or
+unsealed Legacy history fails closed; merely retaining the old bearer is not
+sufficient. Grants issued before upgrade without a verifiable member signature
+stay unusable and the configured owner must reissue them.
+
+A logical backup restore assigns a new writer and does not carry this member's
+local-append markers. Unsigned pre-restore grants therefore fail closed, even if
+they authenticated before backup. The same configured-owner reissue procedure
+below applies; a restore is not a way to manufacture historical provenance.
+
+Authority maintenance is lifecycle-owned. While work remains, pages execute
+back-to-back as bounded transactions, releasing the writer between pages and
+yielding to the runtime rather than using sleep-based pacing.
+Each transaction shares a 64-unit budget across changed membership windows,
+history, dirty-signature claims, and membership retries; empty membership-writer
+tasks also consume one unit. Membership folding and snapshot comparison happen
+on readers before writer admission; only changed keys are applied, never a full
+window replacement in a receipt transaction.
+Each authentication refresh visits one indexed replica record and at most 16
+writer membership keys, looking up signatures by their full
+`(writer, sequence, envelope_hash, member_key)` key rather than enumerating
+nonmember signatures. Durable record/key cursors continue across units so later
+eligible evidence is eventually checked. Only relevant member-key evidence or
+membership retries reset that progress. Fresh nonmember signatures neither
+reset cursors nor enqueue projection work. They can invalidate the inherited
+fleet-generation cache: maintenance folds the authoritative sealed view on
+readers, compares windows, and observes an unchanged snapshot in memory without
+opening a writer transaction or resetting authentication work. No parallel
+membership-invalidation revision or trigger set is maintained. An identical
+signature is also a no-op.
+
+Authority schema installation has its own durable version, separate from backfill
+readiness. An unchanged reopen neither replaces triggers nor rewrites metadata;
+idle maintenance likewise leaves queue frontiers and completed backfill markers
+untouched. This preserves SQLite's schema cookie and durable consumer bindings.
+Any change to authority tables, indexes or triggers must bump `SCHEMA_VERSION` and provide any required migration; update the recorded versioned DDL digest alongside it.
+The schema-version fast path still detects legacy cursor/work state read-only:
+key-only authentication cursors, older addition cursors, missing auth-work
+initialization and legacy membership-dirty obligations migrate in a conditional
+savepoint even when the schema marker is current. Completed migrations and
+already-current pending work do not rewrite schema or metadata on reopen.
+The `assistant_grant_*` tables are member-local derived authentication state,
+including effective snapshots: they depend on local verified receipts, arrival
+order and maintenance progress, not only canonical claims. Shared grant, policy
+and revocation evidence remains covered by the canonical claim digest; these
+local tables do not enter shared projection ordering or digest comparisons.
+Proof maintenance seeks `(writer, claim_id, sequence, envelope_hash, position)`,
+leaving claim-only checkpoint membership lookups on their existing claim index.
+The authority schema producer's transitional large-value entry is
+`lv-hcda5071d3120` (formerly `lv-h01e62b989d49`); its existing
+`chunk-or-reference-variable-columns` debt remains. The same producer owns
+`lv-hbbdcd60c3dad` and `lv-h31877443d557` for conditional local-origin and schema
+version metadata writes, retaining `bound-or-reference-values-and-reclamation`
+review debt rather than claiming value-size proof.
+
+Global not-ready applies only during initial/version backfill. Thereafter dirty
+or pending authentication fences only that grant subject, including a pending
+revoke; established credentials for unrelated subjects remain usable. The last
+authenticated effective snapshot remains a conflict witness until an authenticated
+transition changes it: pending work cannot clear an existing opposite-profile
+conflict. The inherited fleet-generation fold can still aggregate historical
+signature keys on readers; that pre-existing amplification is tracked by #6124
+and is not claimed fixed here. During a transient subject fence, bearer clients
+receive generic credential rejection, not a subject-maintenance reason. This is
+intentional: distinguishing a fenced credential from an invalid credential would
+create an authentication oracle. Operators can see the cause in trusted-local
+`fractal doctor`. Writer-time subject fences also retain the generic
+authorization denial. Clean-grant inspection omits optional cleared-conflict
+explanations for other subjects whose authentication is pending, rather than
+denying inspection or weakening an established conflict witness.
+Repeated maintenance must use `Store::advance_assistant_grant_authority_backfill`,
+which prepares and generation-checks the real sealed membership view. The raw
+connection slice used once at startup cannot prepare that view: a stale durable
+`applied_generation` intentionally blocks membership-dependent queue work until
+the Store driver supplies verified membership, even for an empty snapshot.
+Raw-connection migration fixtures use the test-support
+`prepare_membership_for_test` adapter to run the same sealed fold and production
+window preparation/application transactionally, without invoking a Store schema
+upgrade or changing the fixture's baseline storage version and claims indexes.
+
+After the authority backfill completes, `fractal doctor` lists every pending
+unauthenticated, unmarked local grant claim ID under the claim-store check with
+reason `grant predates local-append provenance; re-issue`. It also lists remote
+unmarked grants, but reports missing verified provenance and unknown issuance age:
+the absence of this member's local marker does not prove remote history predates
+upgrade. A verified historical signature removes the unauthenticated warning.
+The same private provenance check lists affected grant subjects and their
+maintenance causes: dirty claims awaiting projection, signature authentication
+cursors in progress, unauthenticated grant/policy/revocation evidence, or queued
+writer membership revalidation. Retractions revisit only claims authenticated by
+the affected member key at sequences that lost window coverage; unaffected
+authenticated subjects are not fenced by new membership windows. Durable
+key/range cursors and per-base authority deletion/effective recomputation share
+the 64-unit transaction budget. A membership warning covers only those precise
+proof dependencies beyond its cursor and clears as maintenance advances.
+Restored window coverage immediately exempts covered proof dependencies from
+the retraction fence; maintenance trims or cancels the queued ranges within its
+budget. A legitimate key removal still costs \(O(\text{rows authenticated by
+that key})\) in total, across bounded transactions, and affected subjects remain
+fenced until rechecked. Only an authenticated fleet member already authorized
+to remove members can trigger this membership cost.
+
+Each remote authentication records its complete proof identity: writer,
+sequence, envelope hash, record position and member key. Signature deletion or
+replacement, record invalidation/deletion, and envelope invalidation/deletion
+persistently queue only dependent proofs in the mutating transaction. Indexed
+maintenance visits one dependent claim per unit; an unrelated membership
+addition cannot hide proof withdrawal. Private doctor diagnostics include
+`authentication proof evidence changed`. Raw claims removed by checkpoint trim
+retire their cached authority through the same bounded demotion path.
+Proof withdrawal creates a separate durable verification obligation, not just an
+ordinary projection-dirty row. Non-verifying receipt/envelope refreshes cannot
+clear that obligation, including when revalidation changes a record to invalid
+or repaired and refreshes its envelope in the same transaction. Only maintenance
+using current membership can discharge it after verification finishes; partial
+authentication pages retain the obligation and subject fence.
+Coverage additions queue durable writer/key/range tasks, capped at the writer's
+stored receipt frontier; future-only additions create no historical work. Tasks
+seek only grant claims needing authentication through a body-free writer/claim
+work index, maintained atomically with unauthenticated rows and cursor/recheck
+obligations. Each task then seeks that claim's own receipts in the added range.
+One claim selection, receipt attempt or claim completion consumes a budget unit;
+unrelated history is never enumerated. Total work is proportional to needing
+grant rows and their own matching receipts, not all writer receipts.
+After demotion, maintenance uses one durable round-robin queue turn, in order:
+dirty authentication, proof rechecks, proof invalidation, membership retraction,
+coverage addition, positive attachment, conflict-witness cleanup, initial history
+backfill. Each nonempty turn performs one charged unit and advances the persisted
+turn before a slice can end, including `Duration::ZERO`. Empty queues cost a
+bounded indexed probe each; dispatch visits at most eight queues per unit.
+Thus, absent demotion work, each runnable queue receives a unit within eight
+one-unit slices even under continuous arrivals to other queues. There are no
+per-queue slice reservations. Every owner-based queue (the first seven turns)
+also uses a locally assigned monotone integer admission sequence, an indexed
+sequence cursor, and a fixed per-round upper frontier. Re-enqueuing an owner
+already present does not change its sequence. Each visit advances to the next
+owner even if that owner's authentication or pair cursor is unfinished. New
+arrivals, regardless of their content-hash ordering, wait behind the current
+round's owners. An owner present at round start receives a visit within that
+round's owner count; its own page cursor resumes on later rounds.
+Repeated cursor or recheck writes retain one work-set entry even under an outer
+SQL upsert's conflict policy.
+A claim with a durable proof recheck has exactly one authentication-cursor
+owner: the recheck verifier. Ordinary dirty dispatch invokes that same verifier
+step and discharges the obligation on completion, so even a one-unit or
+zero-duration slice makes progress without authenticating the claim twice or
+waiting indefinitely to reach a later queue.
+Original authentication cursors never rewind for membership additions. Key
+pages seek `(writer,start,member_key)` with start at or below the receipt sequence;
+expired windows are filtered after the fixed candidate limit and still consume
+the budget. A key learned below a cursor can restore a demoted row through its
+independent addition task. On upgrade, committed legacy writer-retry obligations
+become durable verifier rechecks before their old queue is dropped. Old key-only
+cursors are requeued rather than interpreted in the new start/key ordering.
+Positive attachment uses a separate durable task for each authenticated claim
+and opposite claim kind. Its exact subject/origin/actor/kind index fixes a
+high-water claim ID when the task is created; a monotone keyset cursor visits one
+candidate per unit, including incompatible candidates. Task completion and
+conflict-witness cleanup also consume the shared 64-unit transaction budget
+(a zero-duration slice performs at most one unit). Authentication and task
+creation commit atomically; no append or receive transaction enumerates the
+opposite history. A first local base with no opposite history remains immediately
+usable. Late opposite claims create their own tasks, including pairs beyond an
+older task's high-water mark.
+Owner mutation responses are separate from bearer readiness. A genuine local
+policy or revocation append validates its indexed newest-base pair, then runs
+one candidate unit from its own attachment task, one indexed completion-only
+probe, and at most two witness deletions if the subject has no attachment tasks.
+This materializes at most two transition/base pairs (plus one repaired base's
+self-pair), with at most two constant-size effective-row recomputations. No
+other task runs synchronously. The usual single-base case completes immediately:
+the next bearer request sees the committed policy or pin without a maintenance
+drain. Unfinished multi-base attachment work and all unrelated authentication
+obligations still fence bearer access until they finish. This separate constant
+request allowance is used only by the local append transaction, never by a
+maintenance refresh, preserving the shared 64-unit and zero-duration bounds.
+The configured authoritative owner can inspect the committed result and retry
+immediately without using bearer authorization. Revoke retries preserve the
+original revocation; policy and read-trust retries each append one new revision,
+as before. These routes do not offer keyed replay.
+Management selects the newest applicable authenticated transition by an indexed
+seek scoped to subject, kind, origin, actor and immutable grant identity. All
+identity predicates precede the descending store index, so unrelated local
+identities and authenticated foreign members cannot add a scanned prefix or
+block owner mutations. Each read decodes at most one record; its B-tree seek is
+logarithmic in index size, independent of the number of colliding foreign rows.
+A newer same-identity base does not erase a policy revision or revocation merely
+because its reverse attachment has not run. Matching local-origin transitions
+require durable local-append provenance or authenticated writer evidence, never
+origin text alone; unrelated transitions are ignored, not management errors.
+
+
+The subject remains fenced until its attachment tasks and witness cleanup finish.
+Cleanup seeks exactly one witness by its queue admission sequence before
+probing that subject's attachment index. It advances and charges the visit whether
+the witness is deleted or skipped because its own subject still has tasks.
+Unrelated attachment backlogs do not prevent eligible cleanup; a long ineligible
+prefix consumes separate bounded visits instead of an uncharged eligibility scan.
+The fixed round frontier prevents new arrivals from repeatedly overtaking
+waiting witnesses.
+Before changing an effective base, maintenance retains its previous effective
+record as a conflict witness, so partially attached restrictive transitions cannot
+hide an established cross-subject conflict. Demotion cancels the demoted claim's
+tasks; attachment candidates must still have authenticated endpoints. Private
+doctor diagnostics report `authenticated grant attachment in progress` and
+`attachment conflict-witness cleanup`. Total attachment work and eventual pair
+storage can still be \(O(\text{bases}\times\text{transitions})\), but each
+transaction is bounded and its cursor survives restart.
+
+This adds task/witness tables, a queue-owner admission registry and indexes without
+changing projection version 1 or rescanning raw history. Installation indexes only
+the already-queued owner set once; persistent queue insert/delete triggers keep it
+current atomically. Sequence counters survive queue retirement so deleted owners'
+positions cannot be reused. Earlier projection builds attached authenticated
+claims atomically, so their committed pairs need no replay; unfinished
+authentication/backfill continues through the new bounded tasks.
+
+Subject readiness starts with indexed subject claims and probes the queued
+obligations by their keys; unrelated queue growth does not cause a queue scan.
+It is not constant cost: a subject with many claims or matching proof/range
+obligations costs more. The q39 measurement must include queued retractions for
+the measured subject, not only a clean subject or unrelated queued work.
+These details remain on trusted-local doctor only: paired clients with
+`read.projections` cannot retrieve the provenance check through either the
+operations collection or operation detail. Clients continue to receive generic
+credential rejection during subject maintenance, without those diagnostic details.
+
+Reissue means **a new explicit pairing**, not renewal of the old grant or a SQL
+edit. On the daemon host, use the configured owner and original assistant
+principal with only explicitly approved scopes and recorded disclosure consent:
+
+```sh
+fractal devices --as person/owner pair --assistant assistant/mcp \
+  --scope read.assistant.summary \
+  --disclose-to-openai --consent-evidence '<recorded owner consent reference>'
+fractal devices complete MEMBER_URL PAIRING_ID --assistant \
+  --profile /absolute/path/to/new-profile.json
+```
+
+Use `assistant/chatgpt` instead when replacing a ChatGPT grant; never switch
+principals to work around rejection. Complete the printed challenge using stdin,
+then provision the newly issued credential in a protected token file as described
+above and remove the old adapter credential. Service-profile issuance remains
+disabled; this procedure does not enable it. Do not insert provenance markers,
+rewrite signed history, or delete claims to make old grants authenticate.
 
 ## Adapter call diagnostics
 
@@ -213,6 +465,7 @@ commands from a local terminal on the same host; SSH sessions are not supported.
 - Each request rechecks the authoritative grant, revocation, expiry, and current policy. Revocation targets the exact grant, not a shared device actor. Restart must not revive a revoked or expired grant.
 - Completion, authenticated assistant requests, renewal/policy changes, and revocation must reach the authoritative grant-issuer member. Replicated grants cannot establish current revocation/policy authority or enable cross-member proof replay.
 - Versioned assistant grant/revocation claims are separate from historical person claims. Credentials are stored authoritatively as digests, never bearers. Public projections must not expose credential digests. Rebuildable projections are not sole authorization authority.
+- Replicated grant, policy, and revocation claims acquire projection authority only after their envelope signatures verify against the keyed membership window. A persistent SQLite trigger queues affected grant-kind records when a signature is inserted, including by older writers without projection hooks. Background draining survives reopen and reruns cryptographic authentication without rescanning completed claim history or requiring a membership change; signature-row presence alone never grants authority.
 - Creation, completion, renewal, policy change, and revocation outcomes must retain issuer, actor, transport, timestamps, and claim references for audit. Logs and public CLI output must not expose bearer credentials or private keys.
 
 ### Pairing verifier and recovery

@@ -1,6 +1,6 @@
-//! Claim-backed external credentials. Storage names remain stable across profiles.
+//! Projection-backed external authority. Raw pairing and audit history remain evidence, not authorization.
 use super::*;
-use rusqlite::OptionalExtension as _;
+use smallclaims::store::assistant_grant_authority as authority;
 pub const ROUTES: &[(&str, &str)] = &[
     ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
     ("attention-content", "read.assistant.attention"),
@@ -16,6 +16,14 @@ pub const ROUTES: &[(&str, &str)] = &[
 ];
 pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
+
+fn authority_error(error: FractalError) -> ApiError {
+    if error.code == "assistant-grant-subject-not-ready" {
+        credential_rejected("the client credential is unknown or expired")
+    } else {
+        ApiError::bad(error)
+    }
+}
 
 /// Closed authority profiles: callers cannot register a profile or mix its rights.
 /// Service authentication is supported, but production issuance remains disabled.
@@ -68,22 +76,6 @@ fn digest_only(source: &Value) -> Result<(), ApiError> {
     Ok(())
 }
 
-// Issuance-only scan: authentication retains its existing indexed lookup and reads.
-// append owns the admission lock; several grants of the same profile are allowed.
-// Filter revoked/expired history before loading claim bodies into Rust. Expiry
-// uses the latest policy, not the original grant. Keep malformed missing fields
-// in the result so the existing validation below still reports them.
-const ADMISSION_QUERY: &str =
-    "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
-     AND (?5 IS NULL OR COALESCE(
-         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
-          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
-         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
 fn admission_now_ms() -> u128 {
     #[cfg(test)]
     if let Some(now) = tests::ADMISSION_NOW.get() {
@@ -91,34 +83,72 @@ fn admission_now_ms() -> u128 {
     }
     client_now_ms()
 }
+fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
+    candidate_grants_except(state, principal, expiry_cut, None, None)
+}
+
+fn candidate_grants_except(state: &AppState, principal: &str, expiry_cut: Option<u64>,
+    excluded: Option<&str>, ignored_profile: Option<Profile>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
+    let ignored_profile = ignored_profile.map(|profile| match profile {
+        Profile::Assistant => "assistant", Profile::Service => "service",
+    });
+    authority::candidates(&state.store.readers.get(), principal, owning_person(state)?,
+        expiry_cut, excluded, ignored_profile).map_err(authority_error)?
+        .into_iter().map(|grant| {
+            let profile = Profile::stored(fields(&grant)?)?;
+            Ok((grant, profile))
+        }).collect()
+}
+
+fn unexpired(source: &Value, now: u64) -> bool {
+    source["expires_at_unix_ms"].as_u64().is_some_and(|expires| expires > now)
+}
+
+
+fn witness(grant: &ClaimRecord, profile: Profile) -> Value {
+    json!({"grant_id":fields(grant).ok().and_then(|source| source.get("grant_id")),
+        "origin":grant.origin,"profile":match profile { Profile::Assistant => "assistant", Profile::Service => "service" }})
+}
+
+fn conflict_error() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "grant-profile-conflict".into(),
+        message: "principal has active grants of opposite profiles; revoke one to clear the conflict".into(),
+        details: Box::default(),
+    }
+}
+
+#[cfg(test)]
+pub fn profile_conflict(state: &AppState, granted: &ClaimRecord) -> Result<Option<Value>, ApiError> {
+    profile_conflict_at(state, granted, client_now_ms() as u64)
+}
+
+fn profile_conflict_at(state: &AppState, granted: &ClaimRecord, now: u64) -> Result<Option<Value>, ApiError> {
+    let active = candidate_grants(state, projection_principal(fields(granted)?)?, Some(now))?;
+    let Some((grant, profile)) = active.iter().find(|(grant, _)| grant.id == granted.id) else {
+        return Ok(None);
+    };
+    Ok(active.iter().find(|(_, other)| other != profile).map(|(other, other_profile)|
+        json!({"grants":[witness(grant, *profile),witness(other, *other_profile)]})))
+}
 
 fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
     let profile = Profile::stored(source)?;
-    let principal = principal(source)?;
-    // Without a valid owner the old scan must still surface its configuration
-    // error before examining expiry; do not prefilter those rows.
-    let expiry_cut = owning_person(state).ok().map(|_| admission_now_ms() as u64);
-    let ids = {
-        let connection = state.store.readers.get();
-        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h99f1a302c7b1 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ ADMISSION_QUERY).map_err(ApiError::internal)?;
-        query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut], |row| row.get::<_, String>(0))
-            .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
-    };
-    for id in ids {
-        let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
-            .ok_or_else(|| forbidden("external grant is absent"))?;
-        if grant.origin != state.store.origin() || grant.actor.as_deref() != Some(owning_person(state)?)
-            || latest(state, &grant.subject, REVOKED)?.is_some() {
-            continue;
-        }
-        let policy = effective(state, &grant)?;
-        let active = fields(&policy)?;
-        if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > admission_now_ms() {
-            profile.compatible(Profile::stored(fields(&grant)?)?)?;
-            profile.compatible(Profile::stored(active)?)?;
+    for (_, other) in candidate_grants(state, principal(source)?, Some(admission_now_ms() as u64))? {
+        if profile != other {
+            return Err(conflict_error());
         }
     }
     Ok(())
+}
+
+// Owner management and retained evidence must recognize the projection identity,
+// including legacy Service grants on assistant principals. Never use this parser
+// for issuance or bearer authentication: those require `principal` below.
+pub fn projection_principal(source: &Value) -> Result<&str, ApiError> {
+    Profile::stored(source)?;
+    authority::principal(source).ok_or_else(|| forbidden("invalid external grant projection principal"))
 }
 
 pub fn principal(source: &Value) -> Result<&str, ApiError> {
@@ -131,13 +161,11 @@ pub fn principal(source: &Value) -> Result<&str, ApiError> {
                 && component(parts.next()) && parts.next().is_none()
         }).ok_or_else(|| forbidden("invalid service principal"));
     }
-    crate::store::assistant_write::principal(source)
+    authority::principal(source)
         .ok_or_else(|| forbidden("invalid assistant principal"))
 }
 pub const BEGUN: &str = "custom.client.assistant.v1.begun";
-pub const GRANTED: &str = "custom.client.assistant.v1.granted";
-pub const POLICY: &str = "custom.client.assistant.v1.policy";
-pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
+pub use authority::{GRANTED, POLICY, REVOKED};
 pub const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
@@ -175,6 +203,9 @@ pub fn fields(claim: &ClaimRecord) -> Result<&Value, ApiError> {
     claim.body.get("fields").ok_or_else(|| forbidden("invalid assistant grant claim"))
 }
 pub fn latest(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
+    if matches!(kind, GRANTED | POLICY | REVOKED) {
+        return authority::latest(&state.store.readers.get(), subject, kind).map_err(authority_error);
+    }
     Ok(state.store.claims_for_subject_kind_at(subject, kind, None, true, 1)
         .map_err(ApiError::internal)?.claims.into_iter().next())
 }
@@ -188,7 +219,25 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
         None
     };
     if matches!(kind, BEGUN | GRANTED | POLICY | REVOKED) {
-        assistant_profile(&value)?;
+        if kind == REVOKED {
+            Profile::stored(&value)?;
+            // A legacy conflicting profile may no longer be issuable, but its
+            // authoritative owner must still be able to retire that evidence.
+            let revoke_principal = authority::principal(&value)
+                .ok_or_else(|| forbidden("invalid external grant revocation principal"))?;
+            let granted = authority::management_latest(&state.store.readers.get(), &subject, GRANTED)
+                .map_err(authority_error)?.ok_or_else(|| forbidden("assistant grant is absent"))?;
+            if actor != owning_person(state)? || granted.actor.as_deref() != Some(actor)
+                || granted.origin != state.store.origin()
+                || previous.is_none()
+                || Some(revoke_principal) != authority::principal(fields(&granted)?)
+                || ["grant_id", "issuer", "profile"].iter()
+                    .any(|key| value.get(*key) != granted.body["fields"].get(*key)) {
+                return Err(forbidden("assistant revocation requires the authoritative grant owner and immutable identity"));
+            }
+        } else {
+            assistant_profile(&value)?;
+        }
         digest_only(&value)?;
         if let Some(previous) = previous {
             let previous = fields(previous)?;
@@ -198,11 +247,17 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
             admit_profile(state, &value)?;
         }
     }
+    // Authority/evidence uses the validated policy; fencing uses the real head.
+    let expected_subject = if matches!(kind, POLICY | REVOKED) {
+        state.store.latest_claim(&subject, None).map_err(ApiError::internal)?.map(|claim| claim.id)
+    } else {
+        previous.map(|claim| claim.id.clone())
+    };
     state.store.append_claim(&ClaimInput {
         subject, kind: kind.into(), actor: Some(actor.into()),
         fields: serde_json::from_value(value).map_err(ApiError::internal)?,
         evidence: previous.map(|claim| vec![claim.id.clone()]).unwrap_or_default(),
-        expected_subject: Some(previous.map(|claim| claim.id.clone())),
+        expected_subject: Some(expected_subject),
         idempotency_key: None,
     }).map_err(ApiError::bad)
 }
@@ -215,8 +270,10 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
     let mut audit_principal = actor.split_once("/session/").map(|(principal, _)| principal.to_owned());
     if let Some(subject) = grant_id.and_then(|id| subject(id).ok()) {
         for kind in [BEGUN, GRANTED, POLICY, REVOKED] {
-            if let Some(claim) = latest(state, &subject, kind)? {
-                audit_principal = Some(principal(fields(&claim)?)?.to_owned());
+            // Audit references retained evidence, including unauthoritative overlays.
+            if let Some(claim) = state.store.claims_for_subject_kind_at(&subject, kind, None, true, 1)
+                .map_err(ApiError::internal)?.claims.into_iter().next() {
+                audit_principal = Some(projection_principal(fields(&claim)?)?.to_owned());
                 referenced.push(claim.id);
             }
         }
@@ -235,16 +292,48 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
     Ok(())
 }
 
-pub fn effective(state: &AppState, granted: &ClaimRecord) -> Result<ClaimRecord, ApiError> {
-    Ok(latest(state, &granted.subject, POLICY)?.unwrap_or_else(|| granted.clone()))
+fn transition(state: &AppState, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
+    authority::transition(&state.store.readers.get(), granted, kind).map_err(authority_error)
 }
+
+pub fn revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError> {
+    Ok(transition(state, granted, REVOKED)?.is_some())
+}
+
+pub fn effective(state: &AppState, granted: &ClaimRecord) -> Result<ClaimRecord, ApiError> {
+    Ok(transition(state, granted, POLICY)?.unwrap_or_else(|| granted.clone()))
+}
+// These management reads require the configured authoritative owner, never a
+// bearer. Attachment work may fence bearer authorization after a committed write.
+pub fn owner_grant(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
+    let granted = authority::management_latest(&state.store.readers.get(), &subject(id)?, GRANTED)
+        .map_err(authority_error)?.ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
+    if granted.origin != state.store.origin() || granted.actor.as_deref()!=Some(owning_person(state)?) {
+        return Err(forbidden("assistant management requires its authoritative owner"));
+    }
+    Ok(granted)
+}
+pub fn owner_effective(state: &AppState, granted: &ClaimRecord) -> Result<ClaimRecord, ApiError> {
+    Ok(authority::management_transition(&state.store.readers.get(),granted,POLICY)
+        .map_err(authority_error)?.unwrap_or_else(|| granted.clone()))
+}
+pub fn owner_revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError> {
+    Ok(authority::management_transition(&state.store.readers.get(),granted,REVOKED)
+        .map_err(authority_error)?.is_some())
+}
+pub fn owner_projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
+    projection_record(&owner_effective(state,granted)?,owner_revoked(state,granted)?)
+}
+
 pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
-    let policy = effective(state, granted)?;
-    let source = fields(&policy)?;
+    projection_record(&effective(state,granted)?,revoked(state,granted)?)
+}
+fn projection_record(policy: &ClaimRecord, revoked: bool) -> Result<Value, ApiError> {
+    let source = fields(policy)?;
     let mut value = json!({"kind":"assistant-grant","id":source["grant_id"],
-        "principal":principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
+        "principal":projection_principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
         "expires_at":client_timestamp(source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0)),
-        "revoked":latest(state, &granted.subject, REVOKED)?.is_some()});
+        "revoked":revoked});
     for name in ["session_actor","device_id","key_id","scopes","policy_revision",
                  "minimal_read_mode","recipient_allowlist","disclosure_consent","consent_evidence"] {
         value[name] = source[name].clone();
@@ -255,20 +344,63 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
     Ok(value)
 }
 
+pub fn projection_with_witness(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
+    let mut value = projection(state, granted)?;
+    let policy = effective(state, granted)?;
+    let source = fields(&policy)?;
+    let now = client_now_ms() as u64;
+    value["conflict"] = profile_conflict_at(state, granted, now)?.unwrap_or(Value::Null);
+    if value["conflict"].is_null() {
+        let profile = Profile::stored(fields(granted)?)?;
+        let mut cleared = Vec::new();
+        for (other, other_profile) in candidate_grants(state, projection_principal(source)?, None)? {
+            if profile == other_profile { continue; }
+            // Historical explanations are optional: another subject's pending proof
+            // must not turn inspection of this clean grant into a bearer denial.
+            let explanation = (|| {
+                let connection = state.store.readers.get();
+                let policy = authority::transition(&connection, &other, POLICY)?
+                    .unwrap_or_else(|| other.clone());
+                let revoked = authority::transition(&connection, &other, REVOKED)?.is_some();
+                Ok::<_, FractalError>((policy, revoked))
+            })();
+            let (policy, other_revoked) = match explanation {
+                Err(error) if error.code == "assistant-grant-subject-not-ready" => continue,
+                result => result.map_err(authority_error)?,
+            };
+            let cause = if other_revoked || value["revoked"] == true { Some("revoked") }
+                else if !unexpired(fields(&policy)?, now) || !unexpired(source, now) { Some("expired") } else { None };
+            if let Some(cause) = cause {
+                cleared.push(json!({"grants":[witness(granted, profile),witness(&other, other_profile)],"cause":cause}));
+            }
+        }
+        value["cleared_conflicts"] = json!(cleared);
+    }
+    Ok(value)
+}
+
 pub fn authenticate(state: &AppState, digest: &str, transport: &'static str)
     -> Result<Option<ClientSession>, ApiError> {
-    let id: Option<String> = state.store.readers.get().query_row(
-        "SELECT id FROM claims WHERE kind=?1 AND json_extract(body,'$.fields.credential_hash')=?2 ORDER BY store_index DESC LIMIT 1",
-        rusqlite::params![GRANTED, digest], |row| row.get(0))
-        .optional().map_err(ApiError::internal)?;
-    let Some(id) = id else { return Ok(None) };
-    let granted = state.store.claim_by_id(&id).map_err(ApiError::internal)?
-        .ok_or_else(|| forbidden("assistant grant is absent"))?;
+    let Some(granted) = authority::by_credential(&state.store.readers.get(), digest)
+        .map_err(authority_error)? else { return Ok(None); };
     session(state, &granted, transport).map(Some)
 }
 pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     -> Result<ClientSession, ApiError> {
+    if !authority::contains(&state.store.readers.get(), &granted.id).map_err(authority_error)? {
+        return Err(credential_rejected("the client credential is unknown or expired"));
+    }
+    let now = client_now_ms() as u64;
     let policy = effective(state, granted)?;
+    let is_revoked = revoked(state, granted)?;
+    if !is_revoked && unexpired(fields(&policy)?, now)
+        && authority::structurally_valid(granted, &policy) {
+        let profile = Profile::stored(fields(granted)?)?;
+        if candidate_grants_except(state, principal(fields(granted)?)?, Some(now), Some(&granted.id), Some(profile))?
+            .iter().any(|(_, other)| *other != profile) {
+            return Err(conflict_error());
+        }
+    }
     let source = fields(&policy)?;
     let principal = principal(source)?;
     let granted_fields = fields(granted)?;
@@ -278,18 +410,15 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         digest_only(granted_fields)?;
         digest_only(source)?;
     }
-    if self::principal(granted_fields)? != principal
-        || ["grant_id", "session_actor", "issuer"].iter().any(|key| source[*key] != granted_fields[*key])
-        || source["session_actor"].as_str().and_then(|actor| actor.strip_prefix(principal))
-            .and_then(|suffix| suffix.strip_prefix("/session/")) != source["grant_id"].as_str() {
+    if !authority::structurally_valid(granted, &policy) {
         return Err(forbidden("assistant grant principal and session are inconsistent"));
     }
     if granted.origin != state.store.origin() || policy.origin != granted.origin
         || granted.actor.as_deref() != Some(owning_person(state)?) || policy.actor.as_deref() != Some(owning_person(state)?) {
         return Err(forbidden("assistant requests require the authoritative grant issuer"));
     }
-    if latest(state, &granted.subject, REVOKED)?.is_some()
-        || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms()
+    if is_revoked
+        || !unexpired(source, now)
         || source["issuer"] != owning_person(state)?
         || (profile == Profile::Assistant
             && (!matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
@@ -395,6 +524,9 @@ pub fn audit_service_read(state: &AppState, session: &ClientSession) -> Result<(
 }
 
 #[cfg(test)]
+mod conflict_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -403,6 +535,29 @@ mod tests {
     thread_local! {
         pub(super) static SERVICE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         pub(super) static ADMISSION_NOW: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[test]
+    fn strict_principal_reuses_projection_identity_only_for_assistant_profiles() {
+        assert_eq!(principal(&json!({})).unwrap(), PRINCIPAL);
+        for profile in [None, Some("assistant")] {
+            for identity in ["assistant/chatgpt", "assistant/mcp"] {
+                let mut fields = json!({"principal":identity});
+                if let Some(profile) = profile { fields["profile"] = json!(profile); }
+                assert_eq!(principal(&fields).unwrap(), identity);
+            }
+        }
+        assert!(principal(&json!({"profile":"assistant","principal":"plugin/test/reader"})).is_err());
+        assert_eq!(principal(&json!({"profile":"service","principal":"plugin/test/reader"})).unwrap(),
+            "plugin/test/reader");
+        for identity in ["assistant/chatgpt", "assistant/mcp"] {
+            let legacy = json!({"profile":"service","principal":identity});
+            assert_eq!(projection_principal(&legacy).unwrap(), identity);
+            assert!(principal(&legacy).is_err(), "management identity must not admit a Service bearer");
+        }
+        for invalid in [Value::Null, json!("assistant/other"), json!("person/owner"), json!(7)] {
+            assert!(principal(&json!({"principal":invalid})).is_err());
+        }
     }
 
     fn concurrent_grants(profiles: [&str; 2], seed_conflicting_service: bool) -> (usize, usize, usize) {
@@ -419,6 +574,9 @@ mod tests {
                 fields: serde_json::from_value(json!({
                     "profile":"service","principal":PRINCIPAL,"issuer":"person/owner",
                     "expires_at_unix_ms":u64::MAX,
+                    "grant_id":"333333333333333333333333",
+                    "session_actor":format!("{PRINCIPAL}/session/333333333333333333333333"),
+                    "minimal_read_mode":"approval-once","disclosure_consent":true,"scopes":[],
                     "credential_hash":credential_digest("persisted service conflict")
                 })).unwrap(),
                 evidence: Vec::new(), expected_subject: Some(None), idempotency_key: None,
@@ -458,11 +616,96 @@ mod tests {
         (admitted, refused, usable)
     }
 
-    // 98e550cb's Rust-only admission, retained independently as the differential
-    // oracle. Only its wall clock is substituted so expiry == now is exact.
-    fn rust_only_admission(state: &AppState, source: &Value) -> Result<(), ApiError> {
+    fn reference_principal(source: &Value) -> Option<&str> {
+        match source.get("principal") {
+            None => Some(PRINCIPAL),
+            Some(Value::String(value)) if value == PRINCIPAL => Some(PRINCIPAL),
+            Some(Value::String(value)) if value == MCP_PRINCIPAL => Some(MCP_PRINCIPAL),
+            Some(Value::String(value)) if source["profile"] == "service" => {
+                let mut parts = value.split('/');
+                let component = |part: Option<&str>| part.is_some_and(|part|
+                    !part.is_empty() && part.bytes().all(|byte|
+                        byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)));
+                (parts.next()==Some("plugin") && component(parts.next())
+                    && component(parts.next()) && parts.next().is_none()).then_some(value.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    // Independent raw-history oracle. Intentionally does not call the projection's
+    // validator: original identity/digests and effective policy rights have distinct roles.
+    fn reference_structure(state: &AppState, grant: &ClaimRecord, policy: &ClaimRecord) -> bool {
+        let Some(original) = grant.body.get("fields").filter(|value| value.is_object()) else { return false };
+        let Some(effective) = policy.body.get("fields").filter(|value| value.is_object()) else { return false };
+        let parse_principal = reference_principal;
+        let valid = |claim: &ClaimRecord, source: &Value| {
+            let Some(principal) = parse_principal(source) else { return false };
+            let Some(id) = source["grant_id"].as_str() else { return false };
+            subject(id).is_ok_and(|subject| subject == claim.subject)
+                && claim.actor.as_deref() == state.owning_person.as_deref()
+                && source["issuer"].as_str() == state.owning_person.as_deref()
+                && source["session_actor"].as_str() == Some(format!("{principal}/session/{id}").as_str())
+                && matches!(source.get("profile"), None | Some(Value::String(_)))
+                && source.get("profile").is_none_or(|value| value == "assistant" || value == "service")
+                && !["credential", "code"].iter().any(|key| source.get(*key).is_some())
+                && ["credential_hash", "code_hash"].iter().all(|key| source.get(*key).is_none_or(|value|
+                    value.as_str().is_some_and(|digest| digest.len() == 64
+                        && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))))
+        };
+        let service = original["profile"]=="service"
+            && parse_principal(original).is_some_and(|principal| principal.starts_with("plugin/"));
+        grant.origin == policy.origin && grant.subject == policy.subject
+            && valid(grant, original) && valid(policy, effective)
+            && (service || (matches!(effective["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
+                && effective["disclosure_consent"] == true))
+            && effective["expires_at_unix_ms"].as_u64().is_some()
+            && effective["scopes"].as_array().is_some_and(|scopes|
+                scopes.iter().all(|scope| scope.as_str().is_some_and(|scope|
+                    if service { SERVICE_SCOPES.contains(&scope) } else { SCOPES.contains(&scope) })))
+            && original["credential_hash"].as_str().is_some()
+            && parse_principal(original) == parse_principal(effective)
+            && ["grant_id", "session_actor", "issuer", "profile"].iter()
+                .all(|key| original.get(*key) == effective.get(*key))
+    }
+
+    // Deliberately walk subject history rather than reuse the production SQL
+    // transition selector, effective-policy fold, or revocation helper.
+    pub(super) fn reference_transition(state: &AppState, grant: &ClaimRecord, kind: &str)
+        -> Result<Option<ClaimRecord>, ApiError> {
+        let original = fields(grant)?;
+        let mut history = state.store.claims_for(&grant.subject, Some(kind)).map_err(ApiError::internal)?;
+        history.sort_by_key(|claim| std::cmp::Reverse(claim.store_index));
+        for claim in history {
+            let Ok(source) = fields(&claim) else { continue };
+            if claim.origin != grant.origin || claim.actor.as_deref() != Some(owning_person(state)?)
+                || source["issuer"] != owning_person(state)?
+                || source["grant_id"] != original["grant_id"]
+                || source["issuer"] != original["issuer"]
+                || reference_principal(source) != reference_principal(original)
+                || reference_principal(source).is_none()
+                || Profile::stored(source).ok() != Profile::stored(original).ok()
+                || Profile::stored(source).is_err() {
+                continue;
+            }
+            if kind == POLICY && !reference_structure(state, grant, &claim) {
+                continue;
+            }
+            if grant.origin != state.store.origin()
+                && !state.store.claim_has_authenticated_member_writer(&claim.id).map_err(ApiError::internal)? {
+                continue;
+            }
+            return Ok(Some(claim));
+        }
+        Ok(None)
+    }
+
+    // Independent Rust-only candidate scan: C's authenticated transition and
+    // typed-conflict semantics, without the production SQL active prefilter.
+    pub(super) fn rust_only_admission(state: &AppState, source: &Value) -> Result<(), ApiError> {
         let profile = Profile::stored(source)?;
         let principal = principal(source)?;
+        owning_person(state)?;
         let ids = {
             let connection = state.store.readers.get();
             let mut query = connection.prepare(
@@ -474,15 +717,20 @@ mod tests {
         for id in ids {
             let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
                 .ok_or_else(|| forbidden("external grant is absent"))?;
-            if grant.origin != state.store.origin() || grant.actor.as_deref() != Some(owning_person(state)?)
-                || latest(state, &grant.subject, REVOKED)?.is_some() {
+            if grant.actor.as_deref() != Some(owning_person(state)?)
+                || (grant.origin != state.store.origin()
+                    && !state.store.claim_has_authenticated_member_writer(&grant.id).map_err(ApiError::internal)?)
+                || reference_transition(state, &grant, REVOKED)?.is_some() {
                 continue;
             }
-            let policy = effective(state, &grant)?;
+            let policy = reference_transition(state, &grant, POLICY)?.unwrap_or_else(|| grant.clone());
+            if !reference_structure(state, &grant, &policy) { continue; }
             let active = fields(&policy)?;
             if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > admission_now_ms() {
-                profile.compatible(Profile::stored(fields(&grant)?)?)?;
-                profile.compatible(Profile::stored(active)?)?;
+                Profile::stored(fields(&grant)?)?.compatible(Profile::stored(active)?)?;
+                if profile != Profile::stored(active)? {
+                    return Err(conflict_error());
+                }
             }
         }
         Ok(())
@@ -502,15 +750,18 @@ mod tests {
             ("equal-boundary", json!({"expires_at_unix_ms":100}), vec![], 0, false, false),
             ("null-expiry", json!({"expires_at_unix_ms":null}), vec![], 0, false, false),
             ("missing-expiry", json!({}), vec![], 0, false, false),
-            ("replicated-revoke", json!({"expires_at_unix_ms":101}), vec![], 1, true, false),
+            ("replicated-revoke", json!({"expires_at_unix_ms":101}), vec![], 1, true, true),
             ("revoke-of-revoke", json!({"expires_at_unix_ms":101}), vec![], 2, false, false),
             ("several-policies-live", json!({"expires_at_unix_ms":99}), vec![102, 98, 101], 0, false, true),
             ("several-policies-expired", json!({"expires_at_unix_ms":101}), vec![99, 102, 100], 0, false, false),
+            ("renewed-expired-base", json!({"expires_at_unix_ms":99}), vec![98, 100, 102], 0, false, true),
+            ("shortened-long-policy", json!({"expires_at_unix_ms":99}), vec![1000, 99], 0, false, false),
+            ("wrong-origin-future-policy", json!({"expires_at_unix_ms":99}), vec![98, 99], 0, false, false),
             ("unrelated-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, false),
             ("legacy-default-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
-            ("null-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("null-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, false),
             ("mcp-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
-            ("service-principal-live", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("service-principal-live", json!({"expires_at_unix_ms":101}), vec![], 0, false, false),
             ("service-principal-expired", json!({"expires_at_unix_ms":99}), vec![], 0, false, false),
         ];
         for (name, mut source, policies, revokes, replicated, denied) in cases {
@@ -518,17 +769,24 @@ mod tests {
             let mut state = crate::api::tests_shared::state(root.path());
             state.owning_person = Some("person/owner".into());
             let service_namespace = name.starts_with("service-principal-");
-            source["profile"] = json!(if service_namespace { "assistant" } else { "service" });
+            source["profile"] = json!("service");
             if service_namespace {
-                // Legacy persisted opposite-profile evidence must still fence
-                // a valid plugin principal, without relaxing issuance parsing.
                 source["principal"] = json!("plugin/test/reader");
             } else if name == "null-principal" {
                 source["principal"] = Value::Null;
             } else if name != "legacy-default-principal" {
                 source["principal"] = json!(if matches!(name, "unrelated-principal" | "mcp-principal") { MCP_PRINCIPAL } else { PRINCIPAL });
             }
-            let subject = format!("custom/client/differential-{name}");
+            let id = "0123456789abcdef01234567";
+            let subject = subject(id).unwrap();
+            source["grant_id"] = json!(id);
+            source["issuer"] = json!("person/owner");
+            let stored_principal = source["principal"].as_str().unwrap_or(PRINCIPAL);
+            source["session_actor"] = json!(format!("{stored_principal}/session/{id}"));
+            source["minimal_read_mode"] = json!("approval-once");
+            source["disclosure_consent"] = json!(true);
+            source["credential_hash"] = json!("a".repeat(64));
+            source["scopes"] = json!([]);
             let append_fixture = |store: &Store, kind: &str, value: Value, previous: Option<&ClaimRecord>| {
                 store.append_claim(&ClaimInput {
                     subject:subject.clone(), kind:kind.into(), actor:Some("person/owner".into()),
@@ -543,11 +801,18 @@ mod tests {
                 policy["expires_at_unix_ms"] = json!(expiry);
                 previous = append_fixture(&state.store, POLICY, policy, Some(&previous));
             }
+            if name == "wrong-origin-future-policy" {
+                let peer = Store::open_memory("overlay").unwrap();
+                let mut forged = source.clone();
+                forged["expires_at_unix_ms"] = json!(u64::MAX);
+                append_fixture(&peer, POLICY, forged, None);
+                state.store.import_replication("overlay", &peer.export_replication(0).unwrap()).unwrap();
+            }
             if replicated {
                 let peer = Store::open_memory("peer").unwrap();
                 let revoke = append_fixture(&peer, REVOKED, source.clone(), None);
                 state.store.import_replication("peer", &peer.export_replication(0).unwrap()).unwrap();
-                let imported = latest(&state, &subject, REVOKED).unwrap().unwrap();
+                let imported = state.store.claim_by_id(&revoke.id).map_err(ApiError::internal).unwrap().unwrap();
                 assert_eq!(imported.id, revoke.id);
                 assert_eq!(imported.origin, "peer");
             } else {
@@ -576,51 +841,37 @@ mod tests {
     }
 
     #[test]
-    fn admission_sql_filters_only_inactive_effective_policies() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection.execute_batch(
-            "CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,body TEXT,store_index INTEGER PRIMARY KEY);
-             CREATE INDEX principal_scan ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
-             CREATE INDEX subject_kind ON claims(subject,kind,store_index);"
-        ).unwrap();
-        let fixtures = [
-            ("expired", json!({"fields":{"expires_at_unix_ms":99}}), None, false),
-            ("live", json!({"fields":{"expires_at_unix_ms":101}}), None, true),
-            ("boundary", json!({"fields":{"expires_at_unix_ms":100}}), None, false),
-            ("max", json!({"fields":{"expires_at_unix_ms":u64::MAX}}), None, true),
-            ("negative", json!({"fields":{"expires_at_unix_ms":-1}}), None, false),
-            ("string", json!({"fields":{"expires_at_unix_ms":"101"}}), None, false),
-            ("float", json!({"fields":{"expires_at_unix_ms":101.0}}), None, false),
-            ("absent-expiry", json!({"fields":{}}), None, false),
-            // Missing fields must still reach fields() and its existing error.
-            ("absent-fields", json!({}), None, true),
-            ("renewed", json!({"fields":{"expires_at_unix_ms":99}}),
-                Some(json!({"fields":{"expires_at_unix_ms":101}})), true),
-            ("shortened", json!({"fields":{"expires_at_unix_ms":101}}),
-                Some(json!({"fields":{"expires_at_unix_ms":99}})), false),
-            ("invalid-policy", json!({"fields":{"expires_at_unix_ms":99}}),
-                Some(json!({})), true),
-        ];
-        let mut expected = Vec::new();
-        for (id, grant, policy, included) in fixtures {
-            connection.execute("INSERT INTO claims(id,subject,kind,body) VALUES(?1,?1,?2,?3)",
-                rusqlite::params![id, GRANTED, grant.to_string()]).unwrap();
-            if let Some(policy) = policy {
-                connection.execute("INSERT INTO claims(id,subject,kind,body) VALUES(?1,?2,?3,?4)",
-                    rusqlite::params![format!("{id}-policy"), id, POLICY, policy.to_string()]).unwrap();
+    fn projection_candidates_apply_effective_expiry_including_repaired_original_expiry() {
+        for (expiry, policy_expiry, included) in [
+            (json!(99), None, false), (json!(101), None, true),
+            (json!(100), None, false), (json!(u64::MAX), None, true),
+            (json!(-1), None, false), (json!("101"), None, false),
+            (json!(101.0), None, false), (Value::Null, None, false),
+            (json!(99), Some(101), true), (json!(101), Some(99), false),
+            (Value::Null, Some(101), true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = crate::api::tests_shared::state(root.path());
+            state.owning_person = Some("person/owner".into());
+            let id = "0123456789abcdef01234567";
+            let subject = subject(id).unwrap();
+            let mut source = json!({"grant_id":id,"issuer":"person/owner",
+                "session_actor":format!("{PRINCIPAL}/session/{id}"),
+                "credential_hash":"a".repeat(64),"minimal_read_mode":"approval-once",
+                "disclosure_consent":true,"scopes":[],"expires_at_unix_ms":expiry});
+            let append = |kind: &str, source: Value| state.store.append_claim(&ClaimInput {
+                subject:subject.clone(),kind:kind.into(),actor:Some("person/owner".into()),
+                fields:serde_json::from_value(source).unwrap(),evidence:Vec::new(),
+                expected_subject:None,idempotency_key:None,
+            }).unwrap();
+            let granted = append(GRANTED, source.clone());
+            if let Some(expiry) = policy_expiry {
+                source["expires_at_unix_ms"] = json!(expiry);
+                append(POLICY, source);
             }
-            if included { expected.push(id.to_owned()); }
+            let candidates = candidate_grants(&state, PRINCIPAL, Some(100)).unwrap();
+            assert_eq!(candidates.iter().any(|(claim, _)| claim.id == granted.id), included);
         }
-        let mut found = connection.prepare(ADMISSION_QUERY).unwrap()
-            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, 100_u64],
-                |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        found.sort();
-        expected.sort();
-        assert_eq!(found, expected);
-        let unfiltered = connection.prepare(ADMISSION_QUERY).unwrap()
-            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, Option::<u64>::None],
-                |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(unfiltered.len(), 12, "invalid owner configuration must not hide validation errors");
     }
 
     #[test]
@@ -639,14 +890,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
         state.owning_person = Some("person/owner".into());
-        let source = json!({"principal":PRINCIPAL,"issuer":"person/owner",
-            "expires_at_unix_ms":u64::MAX,"credential_hash":credential_digest("private bearer")});
+        let mut source = json!({"principal":PRINCIPAL,"issuer":"person/owner",
+            "expires_at_unix_ms":u64::MAX,"credential_hash":credential_digest("private bearer"),
+            "minimal_read_mode":"approval-once","disclosure_consent":true,"scopes":[]});
         for id in ["111111111111111111111111", "222222222222222222222222"] {
+            source["grant_id"] = json!(id);
+            source["session_actor"] = json!(format!("{PRINCIPAL}/session/{id}"));
             append(&state, subject(id).unwrap(), GRANTED, "person/owner", source.clone(), None).unwrap();
         }
         let service_subject = subject("333333333333333333333333").unwrap();
         let mut service = source.clone();
         service["profile"] = json!("service");
+        service["grant_id"] = json!("333333333333333333333333");
+        service["session_actor"] = json!(format!("{PRINCIPAL}/session/333333333333333333333333"));
+        service["minimal_read_mode"] = json!("approval-once");
+        service["disclosure_consent"] = json!(true);
+        service["scopes"] = json!([]);
         // Simulate an existing profile record without enabling service issuance.
         let grant = state.store.append_claim(&ClaimInput {
             subject: service_subject.clone(), kind: GRANTED.into(), actor: Some("person/owner".into()),
@@ -654,19 +913,20 @@ mod tests {
             expected_subject: Some(None), idempotency_key: None,
         }).unwrap();
         let next = subject("444444444444444444444444").unwrap();
+        source["grant_id"] = json!("444444444444444444444444");
+        source["session_actor"] = json!(format!("{PRINCIPAL}/session/444444444444444444444444"));
         assert!(append(&state, next.clone(), GRANTED, "person/owner", source.clone(), None).is_err());
         assert!(latest(&state, &next, GRANTED).unwrap().is_none());
-        state.store.append_claim(&ClaimInput {
-            subject: service_subject, kind: REVOKED.into(), actor: Some("person/owner".into()),
-            fields: BTreeMap::new(), evidence: vec![grant.id.clone()],
-            expected_subject: Some(Some(grant.id.clone())), idempotency_key: None,
-        }).unwrap();
-        let candidates = {
-            let connection = state.store.readers.get();
-            connection.prepare(ADMISSION_QUERY).unwrap()
-                .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, client_now_ms() as u64], |row| row.get::<_, String>(0))
-                .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
-        };
+        let mut forged = fields(&grant).unwrap().clone();
+        forged["profile"] = json!("assistant");
+        assert!(append(&state, service_subject.clone(), REVOKED, "person/owner",
+            forged, Some(&grant)).is_err());
+        assert!(append(&state, service_subject.clone(), REVOKED, "person/other",
+            fields(&grant).unwrap().clone(), Some(&grant)).is_err());
+        append(&state, service_subject, REVOKED, "person/owner",
+            fields(&grant).unwrap().clone(), Some(&grant)).unwrap();
+        let candidates = candidate_grants(&state, PRINCIPAL, Some(client_now_ms() as u64)).unwrap()
+            .into_iter().map(|(grant, _)| grant.id).collect::<Vec<_>>();
         assert_eq!(candidates.len(), 2);
         assert!(!candidates.contains(&grant.id), "revoked history must not reach the admission loop");
         assert!(append(&state, next, GRANTED, "person/owner", source, None).is_ok());
@@ -728,7 +988,7 @@ mod tests {
                 fields:serde_json::from_value(source).unwrap(), evidence:vec![granted.id.clone()],
                 expected_subject:Some(Some(granted.id)), idempotency_key:None,
             }).unwrap();
-            assert!(authenticate(&state, &credential_digest(&id), "unix").is_err());
+            assert!(!matches!(authenticate(&state, &credential_digest(&id), "unix"), Ok(Some(_))));
         }
     }
 

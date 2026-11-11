@@ -58,7 +58,11 @@ fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &str,
     let policy = append(node, &id, POLICY, fields, Some(&granted));
     let mut claims = BTreeSet::from([granted, policy.clone()]);
     if revoked {
-        claims.insert(append(node, &id, REVOKED, json!({}), Some(&policy)));
+        // Same shape as the owner revoke route: only an authoritative revocation counts.
+        claims.insert(append(node, &id, REVOKED, json!({
+            "version": 1, "grant_id": id, "principal": principal, "issuer": PERSON,
+            "transport": "fixture", "timestamp": "2026-01-01T00:00:00Z", "outcome": "revoked"
+        }), Some(&policy)));
     }
     Grant { id, credential, claims }
 }
@@ -79,9 +83,38 @@ async fn auth_response(node: &Node, grant: &Grant) -> (u16, String) {
 }
 
 async fn assert_auth(node: &Node, grant: &Grant, accepted: bool) {
+    assert_status(node, grant, if accepted { 400 } else { 403 }).await;
+}
+
+async fn assert_status(node: &Node, grant: &Grant, expected: u16) {
     let (status, body) = auth_response(node, grant).await;
-    assert_eq!(status, if accepted { 400 } else { 403 },
+    assert_eq!(status, expected,
         "{} grant {}: {body}\n{}", node.name, grant.id, node.logs());
+}
+
+// The valid Assistant credential (index 3) is suspended by retained opposite-profile
+// evidence. The historical Service-on-assistant credential (index 6) is not a valid
+// Service principal: strict bearer validation refuses it before conflict detection.
+// Grant 3 (index 2) also has a non-assistant scope, so it stays a plain 403 refusal.
+fn candidate_counterexample_status(index: usize) -> u16 {
+    if index == 3 { 409 } else { 403 }
+}
+
+async fn assert_candidate_counterexample(node: &Node, grants: &[Grant]) {
+    for (index, grant) in grants.iter().enumerate() {
+        if index == 3 || index == 6 {
+            let (status, body) = auth_response(node, grant).await;
+            assert_eq!(status, candidate_counterexample_status(index), "{body}\n{}", node.logs());
+            let error: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(error["code"],
+                if index == 3 { "grant-profile-conflict" } else { "forbidden" }, "{body}");
+            if index == 6 {
+                assert_eq!(error["message"], "invalid service principal", "{body}");
+            }
+        } else {
+            assert_status(node, grant, candidate_counterexample_status(index)).await;
+        }
+    }
 }
 
 async fn assert_retained(node: &Node, grants: &[Grant]) {
@@ -171,9 +204,7 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     assert_candidate_issuance_grammar(&node).await;
     // Includes the unissuable profile-blind counterexample; candidate must refuse it.
     let grants = fixtures(&mut node, true).await;
-    for (index, grant) in grants.iter().enumerate() {
-        assert_auth(&node, grant, index == 3).await;
-    }
+    assert_candidate_counterexample(&node, &grants).await;
     let state = node.state_dir();
     node.stop();
     node.binary = old;
@@ -233,10 +264,285 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     node.binary = PathBuf::from(st3());
     node.start().await;
     assert_eq!(node.state_dir(), state);
-    for (index, grant) in grants.iter().enumerate() {
-        assert_auth(&node, grant, index == 3).await;
-    }
+    assert_candidate_counterexample(&node, &grants).await;
     assert_retained(&node, &grants).await;
+}
+
+// Use the release's real issuance and policy routes: this history must predate the
+// candidate's first Store::open, rather than being seeded by candidate store code.
+async fn issue_with_policy(node: &Node, key: u8) -> Grant {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let policy = json!({
+        "api_version":"st3.client.v0",
+        "scopes":["read.assistant.summary", "read.assistant.attention",
+            "read.assistant.missions", "read.assistant.agents"],
+        "expires_in_seconds":3600, "minimal_read_mode":"approval-once",
+        "disclosure_consent":true, "consent_evidence":"Disposable rollback fixture owner consent"
+    });
+    let mut begin = policy.clone();
+    begin["assistant_id"] = json!("assistant/chatgpt");
+    begin["device_name"] = json!(format!("rollback fixture {key}"));
+    let challenge: Value = owner.post("/v1/client/pairings", &begin).await.unwrap();
+    let challenge = challenge.get("value").unwrap_or(&challenge);
+    let pairing = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let response = reqwest::Client::builder().unix_socket(node.socket()).build().unwrap()
+        .post(format!("http://localhost/v1/client/pairings/{pairing}/complete"))
+        .json(&json!({"api_version":"st3.client.v0", "code":challenge["code"],
+            "device_public_key":URL_SAFE_NO_PAD.encode([key; 32]), "key_storage":"software"}))
+        .send().await.unwrap();
+    let status = response.status();
+    let paired: Value = response.json().await.unwrap();
+    assert_eq!(status.as_u16(), 200, "baseline assistant issuance: {paired}");
+    let paired = paired.get("value").unwrap_or(&paired);
+    let id = paired["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/").to_owned();
+    let changed: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{id}/policy"), &policy,
+    ).await.unwrap();
+    let changed = changed.get("value").unwrap_or(&changed);
+    assert_eq!(changed["policy_revision"], 2, "{changed}");
+    let subject = format!("custom/client/assistant-v1-{id}");
+    let claims = node.claims().await.into_iter()
+        .filter(|claim| claim["subject"] == subject)
+        .map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    Grant { id, credential: paired["credential"].as_str().unwrap().to_owned(), claims }
+}
+
+fn authority_history(node: &Node) -> Vec<(String, String)> {
+    let connection = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    connection.prepare(
+        "SELECT id, body FROM claims WHERE kind IN (?1, ?2, ?3) ORDER BY id",
+    ).unwrap().query_map([GRANTED, POLICY, REVOKED], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    }).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+async fn assert_authority_projection_ready(node: &Node) {
+    // Health means serving, not that the asynchronously scheduled backfill finished.
+    wait_until("authority backfill becomes ready after daemon startup", 30, || async {
+        let reader = rusqlite::Connection::open_with_flags(
+            node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap();
+        authority_backfill_progress(&reader).1
+    }).await;
+    let version: String = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap().query_row(
+        "SELECT value FROM meta WHERE key='assistant_grant_authority_version'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(version, "1", "candidate must complete authority backfill before rollback");
+}
+
+fn authority_projection_snapshot(connection: &rusqlite::Connection) -> (Vec<String>, Vec<String>) {
+    let authority = connection.prepare(
+        "SELECT json_array(claim_id,base_claim_id,grant_subject,kind,origin,actor,principal,profile,
+            expires_at,store_index,credential_hash,record)
+         FROM assistant_grant_authority ORDER BY claim_id,base_claim_id",
+    ).unwrap().query_map([], |row| row.get(0)).unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>().unwrap();
+    let effective = connection.prepare(
+        "SELECT json_array(claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record)
+         FROM assistant_grant_effective ORDER BY claim_id",
+    ).unwrap().query_map([], |row| row.get(0)).unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>().unwrap();
+    (authority, effective)
+}
+
+fn authority_backfill_progress(connection: &rusqlite::Connection) -> (u64, bool) {
+    connection.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1),0),
+            EXISTS(SELECT 1 FROM meta WHERE key='assistant_grant_authority_version')",
+        [format!("assistant_grant_authority_cursor/{GRANTED}")],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+async fn authority_projection_resumes_after_daemon_is_killed_with_committed_partial_backfill() {
+    use smallclaims::store::assistant_grant_authority as authority;
+
+    if fractal_daemon::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "issuer");
+    node.binary = compat_binary();
+    node.start().await;
+    let active = issue_with_policy(&node, 7).await;
+    let revoked = issue_with_policy(&node, 8).await;
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let _: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{}/revoke", revoked.id), &json!({}),
+    ).await.unwrap();
+    let history = authority_history(&node);
+    assert_eq!(history.len(), 5);
+    node.stop();
+
+    let database = node.state_dir().join("claims.sqlite3");
+    let mut connection = rusqlite::Connection::open(&database).unwrap();
+    fractal_daemon::store::configure_projection_writer(&connection).unwrap();
+    authority::install(&connection, &node.name).unwrap();
+    // Install alone leaves applied_generation=-1. Resolve real sealed membership
+    // before copying so both interrupted and reference runs use the same proof
+    // snapshot, rather than retrying Legacy authentication as pending forever.
+    const MAX_AUTHORITY_SLICES: usize = 128;
+    let mut membership_prepared = false;
+    for _ in 0..MAX_AUTHORITY_SLICES {
+        if authority::prepare_membership_for_test(&connection).unwrap() {
+            membership_prepared = true;
+            break;
+        }
+    }
+    assert!(membership_prepared,
+        "interrupted-backfill membership preparation did not complete within {MAX_AUTHORITY_SLICES} pages");
+    let reference_path = root.path().join("uninterrupted.sqlite3");
+    connection.execute("VACUUM INTO ?1", [reference_path.to_str().unwrap()]).unwrap();
+    let mut reference = rusqlite::Connection::open(&reference_path).unwrap();
+    fractal_daemon::store::configure_projection_writer(&reference).unwrap();
+    let mut reference_complete = false;
+    for _ in 0..MAX_AUTHORITY_SLICES {
+        let transaction = reference.transaction().unwrap();
+        let done = authority::backfill_slice(&transaction, Duration::from_secs(2)).unwrap();
+        transaction.commit().unwrap();
+        if done { reference_complete = true; break; }
+    }
+    assert!(reference_complete,
+        "uninterrupted reference backfill did not complete within {MAX_AUTHORITY_SLICES} slices");
+    authority::ready(&reference).unwrap();
+    let unauthenticated: usize = reference.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_pending WHERE authenticated=0",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(unauthenticated,history.len(),
+        "all five valid Legacy claims must settle as unauthenticated, not pending verification");
+    let unfinished: bool = reference.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)
+            OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor)
+            OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(!unfinished,"reference must finish authentication, not merely expose an empty authority table");
+    let expected = authority_projection_snapshot(&reference);
+    assert!(expected.0.is_empty(), "pre-marker Legacy grants lack authenticated writer provenance");
+    assert!(expected.1.is_empty());
+    drop(reference);
+
+    // Commit one real backfill step rather than making the fixture's size depend on
+    // machine speed. The writer fence holds startup at this incomplete migration,
+    // so an actual process kill cannot race a fast daemon finishing all five rows.
+    let transaction = connection.transaction().unwrap();
+    assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
+    transaction.commit().unwrap();
+    let partial = authority_backfill_progress(&connection);
+    assert!(partial.0 > 0, "must kill with durable forward progress");
+    assert!(!partial.1, "the committed projection must still be incomplete");
+    assert!(authority_projection_snapshot(&connection).0.is_empty(),
+        "a partial cursor must not turn ambiguous Legacy evidence into authority");
+    let blocker = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+    node.binary = PathBuf::from(st3());
+    let pty = node.root.join("bin/pty");
+    let mut daemon = DaemonProcess::spawn_isolated(
+        node.command(&["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]),
+        fs::File::create(node.root.join("daemon.log")).unwrap(),
+        fs::File::create(node.root.join("daemon.stderr.log")).unwrap(),
+    ).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(daemon.try_wait().unwrap().is_none(), "candidate exited before interrupted startup:\n{}", node.logs());
+        // Startup owns the directory fence before opening/migrating the store.
+        if fractal_daemon::node_identity::lock_directory(&node.state_dir()).is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "candidate did not acquire its startup state fence:\n{}", node.logs());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(authority_backfill_progress(&blocker), partial);
+    daemon.kill().unwrap();
+    assert!(!daemon.wait().unwrap().success(), "the interrupted daemon must not exit gracefully");
+    assert_eq!(authority_backfill_progress(&blocker), partial, "kill must retain the committed cursor");
+    blocker.rollback().unwrap();
+    drop(connection);
+    assert_eq!(authority_history(&node), history, "process kill must not alter raw evidence");
+
+    node.start().await;
+    assert_authority_projection_ready(&node).await;
+    let reader = rusqlite::Connection::open_with_flags(
+        &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    assert_eq!(authority_projection_snapshot(&reader), expected,
+        "restart must converge exactly to uninterrupted authority and effective rows");
+    assert_auth(&node, &active, false).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_eq!(authority_history(&node), history, "restart must preserve every raw claim body");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+async fn previous_release_authorizes_and_revokes_after_authority_projection_rollback() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "issuer");
+    node.binary = compat_binary();
+    node.start().await;
+    let active = issue_with_policy(&node, 7).await;
+    let revoked = issue_with_policy(&node, 8).await;
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let _: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{}/revoke", revoked.id), &json!({}),
+    ).await.unwrap();
+    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &revoked, false).await;
+    let history = authority_history(&node);
+    assert_eq!(history.len(), 5, "two grants, two policy renewals and one revocation");
+    let projection_exists: bool = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='assistant_grant_authority')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(!projection_exists, "baseline history must predate authority projection initialization");
+    let state = node.state_dir();
+
+    node.stop();
+    node.binary = PathBuf::from(st3());
+    node.start().await;
+    assert_eq!(node.state_dir(), state);
+    assert_authority_projection_ready(&node).await;
+    // The old standalone issuer had no member signature or local-append marker.
+    // The upgrade preserves evidence but requires its owner to re-issue.
+    assert_auth(&node, &active, false).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_eq!(authority_history(&node), history, "backfill must not rewrite raw evidence");
+
+    node.stop();
+    node.binary = compat_binary();
+    node.start().await;
+    assert_eq!(node.state_dir(), state);
+    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_eq!(authority_history(&node), history, "baseline must retain the backfilled history");
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let _: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{}/revoke", active.id), &json!({}),
+    ).await.unwrap();
+    assert_auth(&node, &active, false).await;
+    let after_revoke = authority_history(&node);
+    assert_eq!(after_revoke.len(), history.len() + 1);
+    for claim in &history {
+        assert!(after_revoke.contains(claim), "baseline revoke changed prior evidence");
+    }
+
+    node.stop();
+    node.binary = PathBuf::from(st3());
+    node.start().await;
+    assert_authority_projection_ready(&node).await;
+    assert_auth(&node, &active, false).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_retained(&node, &[active, revoked]).await;
+    assert_eq!(authority_history(&node), after_revoke, "reopen must retain the baseline revoke");
 }
 
 fn compat_binary() -> PathBuf {
@@ -247,6 +553,18 @@ fn compat_binary() -> PathBuf {
 async fn candidate_offline_service_fixtures_replicate_without_authorizing_credentials() {
     if fractal_daemon::test_support::supervise_test() { return; }
     mixed_pair(None, false).await;
+}
+
+// Candidate-only reproduction of the rollback fixture, without a baseline binary.
+#[tokio::test(flavor = "multi_thread")]
+async fn candidate_suspends_the_offline_counterexample_profile_conflict() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "issuer");
+    node.start().await;
+    let grants = fixtures(&mut node, true).await;
+    assert_candidate_counterexample(&node, &grants).await;
+    assert_retained(&node, &grants).await;
 }
 
 async fn assert_candidate_issuance_grammar(node: &Node) {

@@ -497,8 +497,8 @@ export class FractalClient {
         return this.request<PairedSession>('POST', `/v1/client/pairings/${encodeURIComponent(routedId(id))}/complete`, request, undefined, undefined, requestOptions);
     }
 
-    async assistantGrant(id: string): Promise<EnvelopeOf<AssistantGrant>> {
-        return this.request<AssistantGrant>('GET', `/v1/client/assistant/grants/${encodeURIComponent(id)}`);
+    async assistantGrant(id: string, options: { witness?: boolean } = {}): Promise<EnvelopeOf<AssistantGrant>> {
+        return this.request<AssistantGrant>('GET', `/v1/client/assistant/grants/${encodeURIComponent(id)}${query({ witness: options.witness ? 1 : undefined })}`);
     }
     async assistantGrantRevoke(id: string): Promise<EnvelopeOf<AssistantGrant>> {
         return this.request<AssistantGrant>('POST', `/v1/client/assistant/grants/${encodeURIComponent(id)}/revoke`, {});

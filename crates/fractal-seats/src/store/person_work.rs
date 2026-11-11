@@ -986,9 +986,9 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         let (store, origin, mut input) = fixture();
         input.request = Some(gateway_decision());
         let ask = store.ask_person(&input).unwrap();
-        let grant_id = "assistant-grant/projection-test";
+        let grant_id = "assistant-grant/0123456789abcdef01234567";
         let authorization = super::super::assistant_write::AssistantWriteAuthorization {
-            grant_subject: "custom/client/assistant-projection-test".into(),
+            grant_subject: "custom/client/assistant-v1-0123456789abcdef01234567".into(),
             actor: format!("assistant/chatgpt/session/{grant_id}"),
             owner: "person/avery".into(),
             policy_revision: 1,
@@ -1003,6 +1003,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
                 "grant_id": grant_id, "principal": "assistant/chatgpt",
                 "session_actor": authorization.actor, "issuer": authorization.owner,
                 "disclosure_consent": true, "policy_revision": 1,
+                "credential_hash": "a".repeat(64), "minimal_read_mode": "approval-once",
                 "expires_at_unix_ms": (now_ms() + 60_000) as u64,
                 "scopes": ["write.assistant.answers"]
             })).unwrap(),

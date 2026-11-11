@@ -32,6 +32,13 @@ Without `--database`, restore selects `claims.sqlite3` in the configured `store_
 `state_dir` when `store_dir` is unset. Stop the daemon before restoring there. Neither command
 installs services or starts a daemon.
 
+Logical restore assigns a new writer and does not carry the source member's local
+append markers for external grants. Unsigned pre-restore grants fail closed rather
+than inheriting local authority. The configured owner must explicitly reissue them
+using the same [grant reissue procedure](external-assistants.md#upgrade-reissue-grants-without-authenticated-historical-provenance)
+as unsigned pre-upgrade grants; retaining an old bearer or editing provenance
+markers is not recovery.
+
 A backup of a member also holds the whole text of the [long messages](long-messages.md) that
 member owns, which are files outside the database; restore checks each against its hash and its
 claim and returns them to the product state root. Moving the database with `store_dir` does not
