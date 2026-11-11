@@ -2416,7 +2416,7 @@ mod tests {
         }).await;
         for _ in 0..2 {
             let details = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
-                Duration::ZERO, "status-etag-fixture/repo", (owner, "repo"), true, true,
+                Duration::ZERO, "status-etag-fixture/repo", (owner, "repo"), true, false, true,
                 &BTreeSet::new(), true, &[]).await.unwrap();
             assert!(details.open[0]["checks"].as_array().unwrap().iter().any(|check| check["name"] == "legacy/build"));
         }
