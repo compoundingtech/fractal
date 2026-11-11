@@ -39,7 +39,7 @@ const childObservation = { subagentCount: undefined, subagentObservation: { _tag
 const cohortRows: readonly Row[] = [
   { ...knownRow, ref: 'agent/first', id: 'first', title: 'First session' },
   { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } },
-  { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Needs you' },
+  { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Waiting' },
   { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', harness: 'opencode', subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
   { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } },
   { ...knownRow, ...childObservation, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
@@ -156,7 +156,6 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
 async function paintedText(card: HTMLElement): Promise<string> {
   const painted = card.cloneNode(true) as HTMLElement
   const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
-  await expect(carriers.length).toBeGreaterThan(0)
   for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
   return painted.textContent!
 }
@@ -248,6 +247,8 @@ export const scenarioExemptions: readonly string[] = [
   'DensitiesAndChildren:contract-fixture',
   'FrozenWorkingVersusIdle:contract-fixture',
   'HoverCardKnown:contract-fixture',
+  'HoverCardMissions:contract-fixture',
+  'HoverCardRetainedMissions:contract-fixture',
   'HoverCardUnknown:contract-fixture',
   'PhoneFocusNoHover:contract-fixture',
   'PhoneTouchTargets:contract-fixture',
@@ -257,10 +258,41 @@ export const scenarioExemptions: readonly string[] = [
 ]
 type Story = StoryObj
 export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
+const missionsRow: Row = { ...knownRow, ref: 'agent/missions', id: 'missions', title: 'Mission session', description: 'Fix the review gate',
+  mission: 'mission/example/review', missionContext: {
+    _tag: 'Mission', id: 'mission/example/review', slug: 'review', title: 'example/review', progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Fix the review gate' },
+    queued: Array.from({ length: 7 }, (_, index) => ({ id: `mission/person-ask/${index}`, slug: `0123456789abcdef${index}`, title: `Queued goal ${index + 1}` })),
+  } }
+export const HoverCardMissions: Story = { tags: ['critical'], name: 'Hover card · current and queued missions', render: () => <main {...stylex.props(styles.root)}><CardPair row={missionsRow} /></main>, play: async ({ canvasElement }) => {
+  // The card's module loads on demand.
+  const missions = within(await within(canvasElement).findByTestId('hover-missions', {}, { timeout: hoverSettleTimeout }))
+  const items = missions.getAllByRole('listitem')
+  await expect(items[0]).toHaveTextContent('example/review2/5Fix the review gate')
+  // About five rows: the current mission and four queued, then the remainder as a count.
+  await expect(items).toHaveLength(5)
+  await expect(missions.getByText('+3 more')).toBeVisible()
+  await expect(canvasElement.textContent).not.toContain('0123456789abcdef')
+  // The goal is the current step here, so the card does not say it twice.
+  await expect(within(canvasElement).getByTestId('hover-facts').textContent?.match(/Fix the review gate/g)).toHaveLength(1)
+} }
+export const HoverCardRetainedMissions: Story = { tags: ['critical'], name: 'Hover card · retained missions say so under a live agent', render: () => <main tabIndex={0} {...stylex.props(styles.root)}>
+  <div data-testid="stale-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Stale', updatedAt: storyNow - 5 * 60_000 } }} now={storyNow} /></div>
+  <div data-testid="failed-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Failed' } }} now={storyNow} /></div>
+  <div data-testid="live-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Live' } }} now={storyNow} /></div>
+</main>, play: async ({ canvasElement }) => {
+  const card = (id: string) => within(within(canvasElement).getByTestId(id))
+  const stale = await card('stale-card').findByTestId('hover-missions-note', {}, { timeout: hoverSettleTimeout })
+  await expect(stale).toHaveTextContent('Mission info may be out of date. Updated 5m ago.')
+  await expect(card('stale-card').getByTestId('hover-missions')).toContainElement(stale)
+  await expect(card('failed-card').getByTestId('hover-missions-note')).toHaveTextContent('Couldn\u2019t refresh mission info.')
+  await expect(card('failed-card').getByTestId('hover-missions-note').textContent).not.toContain('Updated')
+  await expect(card('live-card').queryByTestId('hover-missions-note')).toBeNull()
+} }
 export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
   await expect(await paintedText(card)).not.toMatch(/unknown|unavailable|—/i)
+  await expect(card.querySelectorAll('[aria-describedby]')).toHaveLength(0)
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
 export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {

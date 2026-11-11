@@ -5,10 +5,13 @@ import { Dialog, Popover, Text } from 'react-aria-components'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
 import { borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import type { SidebarAgentRow as Row } from './model'
+import { rowAttention, rowStatusLabel, type SidebarAgentRow as Row } from './model'
 import type { AgentRowActionsProps } from './DeferredRowActions.tsx'
 import { sidebarRowTitle, sidebarSubagentObservationText, usageText, tokenCount, spendCount, openRow } from './rowPresentation.tsx'
 import { SidebarStatus } from './SidebarStatus'
+import { EntityCard, EntityCardHeader, EntityCardMeta, EntityCardMetaLine, EntityCardText } from '../entity/EntityCard'
+import { MissionsSection, missionsSay } from '../entity/MissionCard'
+import { agentDescriptor } from '../entity/agent'
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
 import { useTouchLayout } from './useTouchLayout'
@@ -19,7 +22,7 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
     <dt {...stylex.props(styles.detailLabel)}>Name</dt><dd {...stylex.props(styles.detailValue)}>{sidebarRowTitle(row)}</dd>
     <dt {...stylex.props(styles.detailLabel)}>ID</dt><dd {...stylex.props(styles.detailValue)}>{row.ref}</dd>
     {row.description !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Description</dt><dd {...stylex.props(styles.detailValue)}>{row.description}</dd></>}
-    {(!reportedStatusOnly || row.status !== 'unobserved') && <><dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{row.statusLabel}; {row.freshness} observation</dd></>}
+    {(!reportedStatusOnly || row.status !== 'unobserved') && <><dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{rowStatusLabel(row)}; {row.freshness} observation</dd></>}
     {row.statusSince !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Elapsed in status</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.statusSince} {...clock} />; since {new Date(row.statusSince).toISOString()}</dd></>}
     {row.lastActivityAt !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Last activity</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastActivityAt} {...clock} kind="activity" />; {new Date(row.lastActivityAt).toISOString()}</dd></>}
     <dt {...stylex.props(styles.detailLabel)}>Needs you</dt><dd {...stylex.props(styles.detailValue)}>{row.needsMe === undefined ? 'Unknown' : row.needsMe ? 'Yes' : 'No'}</dd><dt {...stylex.props(styles.detailLabel)}>Unread</dt><dd {...stylex.props(styles.detailValue)}>{row.unread ?? 'Unknown'}</dd>
@@ -34,12 +37,13 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
     {row.worktree !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Worktree</dt><dd {...stylex.props(styles.detailValue)}>{row.worktree}</dd></>}
     {row.pullRequest !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Pull request</dt><dd {...stylex.props(styles.detailValue)}>#{row.pullRequest.number}: {row.pullRequest.title}; {row.pullRequest.state}; {row.pullRequest.ref}</dd></>}
     {row.terminal !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Terminal</dt><dd {...stylex.props(styles.detailValue)}>{row.terminal}</dd></>}
-    {row.mission !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Mission</dt><dd {...stylex.props(styles.detailValue)}>{row.mission}</dd></>}
+    {row.mission !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Mission</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext?._tag === 'Mission' && row.missionContext.title !== undefined ? `${row.missionContext.title}; ${row.mission}` : row.mission}</dd></>}
     {row.missionContext?._tag === 'Mission' && <>
       {row.missionContext.progress._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Steps</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.progress.done} of {row.missionContext.progress.total}</dd></>}
       {row.missionContext.step._tag === 'Step' && <><dt {...stylex.props(styles.detailLabel)}>Step</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.name}</dd></>}
       {row.missionContext.step._tag === 'Waiting' && <><dt {...stylex.props(styles.detailLabel)}>Waiting for you</dt><dd {...stylex.props(styles.detailValue)}>{row.missionContext.step.handle === undefined ? '' : `${row.missionContext.step.handle} `}{row.missionContext.step.question}</dd></>}
-      {row.missionContext.queued.length > 0 && <><dt {...stylex.props(styles.detailLabel)}>Queued missions</dt><dd {...stylex.props(styles.detailValue)}><ul>{row.missionContext.queued.map(mission => <li key={mission.id}>{mission.slug}</li>)}</ul></dd></>}
+      {(row.missionContext.alsoCurrent?.length ?? 0) > 0 && <><dt {...stylex.props(styles.detailLabel)}>Also current</dt><dd {...stylex.props(styles.detailValue)}><ul>{row.missionContext.alsoCurrent!.map(mission => <li key={mission.id}>{mission.title ?? mission.slug}{mission.progress._tag === 'Known' ? ` · ${mission.progress.done}/${mission.progress.total}` : ''}</li>)}</ul></dd></>}
+      {row.missionContext.queued.length > 0 && <><dt {...stylex.props(styles.detailLabel)}>Queued missions</dt><dd {...stylex.props(styles.detailValue)}><ul>{row.missionContext.queued.map(mission => <li key={mission.id}>{mission.title ?? mission.slug}</li>)}</ul></dd></>}
     </>}
     {row.subagent !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Subagent ID</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.id}</dd>
       {row.subagent.subagent_type !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Kind</dt><dd {...stylex.props(styles.detailValue)}>{row.subagent.subagent_type}</dd></>}
@@ -53,30 +57,34 @@ export function AgentRowDetails({ row, reportedStatusOnly = false, ...clock }: {
 /** Only reported facts render; unknown or unavailable fields are omitted rather than shown as placeholders. */
 export function AgentHoverCard({ row, reportedStatusOnly = false, ...clock }: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
   const showStatus = !reportedStatusOnly || row.status !== 'unobserved'
-  return <div data-testid="agent-hover-card" {...stylex.props(styles.card)}>
-    <strong {...stylex.props(styles.cardTitle)}>{row.title}</strong>
-    <div {...stylex.props(styles.cardSummary)}>{showStatus && <><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="Agents" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span></>}<Icon name="gear" size={12} /><span>{row.host}</span></div>
-    {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} />{row.description}</p>}
-    <dl {...stylex.props(styles.details)}>
-      {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />{row.usage.usd === undefined ? 'Tokens' : 'Spend'}</dt><dd {...stylex.props(styles.detailValue)}>{row.usage.usd === undefined ? '' : `${spendCount.format(row.usage.usd)} · `}{tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : row.usage.scope === 'lifetime-incl-subagents' ? 'Lifetime · includes subagents' : 'Reported by agent'}</div></dd></>}
-      <ContextDetails row={row} />
-      {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
-      {row.lastTurn._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />{row.lastTurn.kind === 'turn-completed' ? 'Last turn' : 'Last activity'}</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastTurn.at} {...clock} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} /></dd></>}
-      {row.model !== undefined && <><dt {...stylex.props(styles.cardLabel)}><Icon name="gear" size={12} />Model</dt><dd {...stylex.props(styles.detailValue)}>{row.model}</dd></>}
-      {row.pullRequest !== undefined && <><dt {...stylex.props(styles.cardLabel)}><Icon name="swap" size={12} />PR</dt><dd {...stylex.props(styles.detailValue)}>#{row.pullRequest.number} · {row.pullRequest.title}</dd></>}
-      {row.branch !== undefined && <><dt {...stylex.props(styles.cardLabel)}><Icon name="swap" size={12} />Branch</dt><dd {...stylex.props(styles.detailValue)}>{row.branch}</dd></>}
-      {row.children.length > 0 && <><dt {...stylex.props(styles.cardLabel)}><Icon name="message" size={12} />Subagents</dt><dd {...stylex.props(styles.detailValue)}>{row.children.length}<ul {...stylex.props(styles.cardChildren)}>{row.children.slice(0, 3).map(child => <li key={child.ref}>{sidebarRowTitle(child)}</li>)}</ul></dd></>}
-    </dl>
-  </div>
+  return <EntityCard entity={agentDescriptor(row)} testId="agent-hover-card">
+    <EntityCardHeader title={row.title}
+      glyph={showStatus ? <SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={rowAttention(row) === 'needs-you'} freshness={row.freshness} iconOnly /> : undefined}
+      summary={[showStatus ? rowStatusLabel(row) : undefined, <><Icon name="gear" size={12} />{row.host}</>]} />
+    {row.description !== undefined && !missionsSay(row.missionContext, row.description) && <EntityCardText>{row.description}</EntityCardText>}
+    <MissionsSection context={row.missionContext} info={row.missionInfo} {...clock} />
+    <EntityCardMeta>
+      {row.usage._tag === 'Known' && <EntityCardMetaLine icon="dot" label={row.usage.usd === undefined ? 'Tokens' : 'Spend'}>{row.usage.usd === undefined ? '' : `${spendCount.format(row.usage.usd)} · `}{tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : row.usage.scope === 'lifetime-incl-subagents' ? 'Lifetime · includes subagents' : 'Reported by agent'}</div></EntityCardMetaLine>}
+      <ContextDetails row={row} coarseTime />
+      {row.duration._tag === 'Known' && <EntityCardMetaLine icon="clock" label="Duration"><SidebarDuration duration={row.duration} /></EntityCardMetaLine>}
+      {row.lastTurn._tag === 'Known' && <EntityCardMetaLine icon="clock" label={row.lastTurn.kind === 'turn-completed' ? 'Last turn' : 'Last activity'}><SidebarTime at={row.lastTurn.at} {...clock} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} /></EntityCardMetaLine>}
+      {row.model !== undefined && <EntityCardMetaLine icon="gear" label="Model">{row.model}</EntityCardMetaLine>}
+      {row.pullRequest !== undefined && <EntityCardMetaLine icon="swap" label="PR">#{row.pullRequest.number} · {row.pullRequest.title}</EntityCardMetaLine>}
+      {row.branch !== undefined && <EntityCardMetaLine icon="swap" label="Branch">{row.branch}</EntityCardMetaLine>}
+      {row.children.length > 0 && <EntityCardMetaLine icon="message" label="Subagents">{row.children.length}<ul {...stylex.props(styles.cardChildren)}>{row.children.slice(0, 3).map(child => <li key={child.ref}>{sidebarRowTitle(child)}</li>)}</ul></EntityCardMetaLine>}
+    </EntityCardMeta>
+  </EntityCard>
 }
 /** Context is disclosed only in popovers, with its native scope and observation provenance. */
-const ContextDetails = ({ row }: { readonly row: Row }) => row.context?._tag !== 'Known' ? null : <>
+const ContextDetails = ({ row, coarseTime = false }: { readonly row: Row; readonly coarseTime?: boolean }) => row.context?._tag !== 'Known' ? null : <>
   <dt {...stylex.props(styles.detailLabel)}>Context</dt>
   <dd data-context-observation {...stylex.props(styles.detailValue)}>
     {row.freshness === 'live' ? 'Reported' : 'Last observed'} main-session context: {Math.round(row.context.usedPercent)}%
     {row.context.usedTokens === undefined ? '' : `; ${row.context.usedTokens.toLocaleString('en')} used tokens`}
     {row.context.windowTokens === undefined ? '' : `; ${row.context.windowTokens.toLocaleString('en')} token window`}
-    {`; as of ${new Date(row.context.observedAt).toISOString()}`}
+    {coarseTime
+      ? <>; as of <time dateTime={new Date(row.context.observedAt).toISOString()}>{new Date(row.context.observedAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></>
+      : `; as of ${new Date(row.context.observedAt).toISOString()}`}
   </dd>
 </>
 // A 320px Agents sheet, the 340px details surface and its two 8px viewport gutters.
@@ -124,12 +132,7 @@ const styles = stylex.create({
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, width: g.specimenAside, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', maxHeight: g.commandMaxHeight, overflowY: 'auto', boxShadow: elevation.popover, zIndex: 30 },
   detailsCompact: { maxWidth: 'calc(100vw - 16px)' },
   details: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', columnGap: s.md, rowGap: s.sm, margin: s.zero, overflowWrap: 'anywhere' },
-  card: { display: 'flex', flexDirection: 'column', gap: s.md, width: g.specimenAside, maxWidth: '100%', boxSizing: 'border-box', overflowWrap: 'anywhere' },
-  cardTitle: { fontSize: t.uiSize, lineHeight: t.uiLeading },
-  cardSummary: { display: 'flex', alignItems: 'center', gap: s.sm, color: ink.fgSoft },
-  cardWork: { display: 'flex', alignItems: 'start', gap: s.sm, margin: s.zero, paddingBlock: s.sm, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
   cardScope: { color: ink.fgSoft, fontSize: t.denseSize },
-  cardLabel: { display: 'flex', alignItems: 'center', gap: s.sm, margin: s.zero, color: ink.fgSoft },
   cardChildren: { margin: s.zero, padding: s.zero, listStyleType: 'none', color: ink.fgSoft },
   detailLabel: { margin: s.zero, color: ink.fgSoft },
   detailValue: { margin: s.zero, minWidth: 0, color: ink.fg },
