@@ -222,11 +222,11 @@ fn exercise(bad: Option<(usize, u8)>, missing_slice: bool, collision: bool, clea
         generation: ExecutionGeneration(NonZeroU64::new(7).unwrap()), outcome_file: String::new(),
     };
     let outcome = if extra == Extra::RelativeOutcome { PathBuf::from("outcome.json") }
-        else { receipts::outcome_path(&receipt_directory, &id, &intent).unwrap() };
+        else { fractal_runtime::job_launch::receipts::outcome_path(&receipt_directory, &id, &intent).unwrap() };
     intent.outcome_file = outcome.to_str().unwrap().into();
     if extra == Extra::ReceiptCollision {
         // Existing generation reservation is fixture input, never overwritten.
-        receipts::reserve(Some(&receipt_directory), &id, &intent).unwrap();
+        fractal_runtime::job_launch::receipts::reserve(Some(&receipt_directory), &id, &intent).unwrap();
     }
     let plan = JobScopePlan::new(4096, 8192, 8, 4096, 8192, 4096).unwrap();
     let launcher = vec!["fixture-launcher".into()];
