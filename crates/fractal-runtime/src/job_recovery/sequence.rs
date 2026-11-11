@@ -70,12 +70,12 @@ impl ExecRuntime {
             journal.record(request, &resolution, Some(&usage))?;
             return Ok(RecoveryResult { resolution: Some(resolution), usage: Some(usage) });
         };
-        if let Some(released) = request.released {
-            if effects.holder_matches(&job, released)? && effects.populated(&job)? {
-                let resolution = Resolution::KeepRunning;
-                journal.record(request, &resolution, None)?;
-                return Ok(RecoveryResult { resolution: Some(resolution), usage: None });
-            }
+        if let Some(released) = request.released
+            && effects.holder_matches(&job, released)? && effects.populated(&job)?
+        {
+            let resolution = Resolution::KeepRunning;
+            journal.record(request, &resolution, None)?;
+            return Ok(RecoveryResult { resolution: Some(resolution), usage: None });
         }
         // An uncertain/unreleased J is stopped, never released or relaunched.
         // Even normal receipt recovery uses kill->empty->sample->remove. Preserve

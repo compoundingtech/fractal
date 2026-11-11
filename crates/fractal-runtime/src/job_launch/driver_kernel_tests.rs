@@ -88,7 +88,7 @@ fn real_kernel_keeper_replacement_preserves_running_job() {
         let mut contents = String::new();
         events.read_to_string(&mut contents).unwrap();
         let members = fs::read_to_string(idle.join("cgroup.procs")).unwrap();
-        if let Ok(pid) = members.trim().parse::<u32>() { if pid != old_pid { break pid; } }
+        if let Ok(pid) = members.trim().parse::<u32>() && pid != old_pid { break pid; }
         let remaining = deadline.checked_duration_since(Instant::now()).expect("keeper replacement timed out");
         let mut descriptor = libc::pollfd { fd: events.as_raw_fd(), events: libc::POLLPRI | libc::POLLERR, revents: 0 };
         let result = unsafe { libc::poll(&mut descriptor, 1, remaining.as_millis().min(i32::MAX as u128) as i32) };

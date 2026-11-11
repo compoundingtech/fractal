@@ -1,6 +1,6 @@
 //! Real jobs projection replay; only cgroup/process effects are fixtures.
 use super::*;
-use fractal_jobs::{launch::{ExecutionGeneration, LaunchIntent}, recovery::*};
+use fractal_jobs::{launch::{ExecutionGeneration, HolderOutcome, LaunchIntent}, recovery::*};
 use fractal_runtime::{ExecRuntime, job_launch::{ExitUsage, sample_exit}, job_recovery::*};
 use std::{cell::RefCell, fs, num::NonZeroU64, rc::Rc};
 type Order = Rc<RefCell<Vec<&'static str>>>;

@@ -57,7 +57,7 @@ pub fn sample_exit(directory: &Path, host: &str) -> ExitUsage {
     }
     match job_scope::read_usage(directory, host) {
         Ok(usage) => match sample_presence(directory, fs::symlink_metadata(directory)) {
-            Ok(()) => ExitUsage::Sample(usage),
+            Ok(()) => ExitUsage::Sample(Box::new(usage)),
             Err(reason) => ExitUsage::CountersUnavailable(reason),
         },
         Err(_) => ExitUsage::CountersUnavailable(CountersUnavailable::ReadFailed),
