@@ -33,7 +33,7 @@ fn launch_hash_inputs_keep_base_golden_bytes() {
     let old = json!({"visualization":{"version":"st3.visualization.v0"}});
     let new = json!({"visualization":{"version":"fractal.visualization.v0"}});
     for collection in ["launches", "launches/fixed/variants"] {
-        assert_eq!(client_items_digest(collection, &[new.clone()]).unwrap(),
+        assert_eq!(client_items_digest(collection, std::slice::from_ref(&new)).unwrap(),
             hex::encode(Sha256::digest(serde_json::to_vec(&vec![old.clone()]).unwrap())));
     }
     assert_eq!(new["visualization"]["version"], "fractal.visualization.v0");
