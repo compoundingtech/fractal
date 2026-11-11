@@ -52,9 +52,11 @@ pub(super) fn apply(
             ensure!(*state == JobState::Launching, "job-release-not-launching");
             transition(*state, Event::Started)?
         }
-        JobRecord::Recovered { binding, intent, pin, resolution } => {
+        JobRecord::Recovered { binding, intent, pin, resolution, usage } => {
             ensure!(binding == existing, "job-binding-conflict");
             ensure!(*intent == expected_intent, "job-launch-intent-mismatch");
+            ensure!(matches!(resolution, Resolution::KeepRunning) || intent.is_none()
+                || usage.is_some(), "job-recovery-sample-required");
             ensure!(pin.host == binding.execution_host && !pin.member_key.is_empty()
                 && pin.admitted_claim == binding.authority_declaration, "job-recovery-pin-mismatch");
             if let Some(released) = &expected_release {
@@ -91,7 +93,7 @@ mod tests {
             identity: fractal_jobs::recovery::ProcessIdentity { boot_id: "boot".into(), start_ticks: 7 } };
         for (index, record) in [submitted.clone(), JobRecord::LaunchIntent { binding: binding.clone(), intent: intent.clone() },
             JobRecord::LaunchReleased { binding: binding.clone(), intent: intent.clone(), released: released.clone() },
-            JobRecord::Recovered { binding: binding.clone(), intent: Some(intent.clone()), pin: pin.clone(), resolution: Resolution::KeepRunning },
+            JobRecord::Recovered { binding: binding.clone(), intent: Some(intent.clone()), pin: pin.clone(), resolution: Resolution::KeepRunning, usage: None },
             JobRecord::LaunchIntent { binding: binding.clone(), intent: intent.clone() }].into_iter().enumerate()
         {
             super::super::tests::insert(&tx, id.as_str(), &format!("replay-{index}"), index as u64, &record);
@@ -117,9 +119,10 @@ mod tests {
         let records = [
             submitted.clone(),
             JobRecord::LaunchIntent { binding: binding.clone(), intent: intent.clone() },
-            JobRecord::Recovered { binding: binding.clone(), intent: Some(intent.clone()), pin: pin.clone(), resolution: Resolution::KeepRunning },
-            JobRecord::Recovered { binding: binding.clone(), intent: None, pin: pin.clone(), resolution: Resolution::UnknownAfterHostLoss },
-            JobRecord::Recovered { binding: binding.clone(), intent: Some(intent), pin, resolution: Resolution::UnknownAfterHostLoss },
+            JobRecord::Recovered { binding: binding.clone(), intent: Some(intent.clone()), pin: pin.clone(), resolution: Resolution::KeepRunning, usage: None },
+            JobRecord::Recovered { binding: binding.clone(), intent: None, pin: pin.clone(), resolution: Resolution::UnknownAfterHostLoss, usage: None },
+            JobRecord::Recovered { binding: binding.clone(), intent: Some(intent), pin, resolution: Resolution::UnknownAfterHostLoss,
+                usage: Some(fractal_jobs::recovery::RecoveryUsage::CountersUnavailable(fractal_jobs::launch::CountersUnavailable::CgroupVanished)) },
         ];
         for (index, record) in records.into_iter().enumerate() {
             super::super::tests::insert(&tx, id.as_str(), &format!("uncertain-{index}"), index as u64, &record);

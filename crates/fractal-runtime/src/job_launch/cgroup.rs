@@ -1,9 +1,10 @@
 use super::keeper::{populated, validate_path};
 use crate::job_scope;
-use fractal_jobs::{launch::CountersUnavailable, scope::observation::RawScopeUsage};
+use fractal_jobs::launch::CountersUnavailable;
 use anyhow::{Result, ensure};
 use fractal_jobs::launch::LaunchRefusal;
 use std::{fs, io::{Read, Seek}, os::{fd::AsRawFd, unix::fs::MetadataExt}, path::Path};
+pub use fractal_jobs::recovery::RecoveryUsage as ExitUsage;
 pub fn verify_dedicated(directory: &Path, pid: Option<u32>) -> Result<()> {
     validate_path(directory)?;
     let metadata = fs::metadata(directory)?;
@@ -47,11 +48,6 @@ pub fn kill_and_wait_empty(directory: &Path) -> Result<()> {
             if error.kind() != std::io::ErrorKind::Interrupted { return Err(error.into()); }
         }
     }
-}
-#[derive(Debug)]
-pub enum ExitUsage {
-    Sample(RawScopeUsage),
-    CountersUnavailable(CountersUnavailable),
 }
 
 /// A vanished J is evidence of unavailable counters, never zero and never a rerun.
