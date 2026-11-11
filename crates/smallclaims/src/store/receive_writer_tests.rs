@@ -476,14 +476,15 @@ fn admission_does_not_restore_source_dropped_before_its_background_loan() {
 fn admission_reuses_a_generation_checked_fold_across_unchanged_pages() {
     let source = node("birch");
     let target = node("cedar");
-    let exchange = page(&source, &target, 33);
+    let count = ADMISSION_CHUNK_ENVELOPES + 1;
+    let exchange = page(&source, &target, count);
     target
         .receive_replication_exchange("birch", FLEET, &exchange)
         .unwrap();
     ADMISSION_MEMBERSHIP_FOLDS.with(|count| count.set(0));
     ADMISSION_TRANSACTIONS.with(|count| count.set(0));
-    assert_eq!(target.validate_replication_backlog().unwrap().valid, 33);
-    ADMISSION_TRANSACTIONS.with(|count| assert!(count.get() >= 5));
+    assert_eq!(target.validate_replication_backlog().unwrap().valid, count);
+    ADMISSION_TRANSACTIONS.with(|count| assert!(count.get() >= 2));
     ADMISSION_MEMBERSHIP_FOLDS.with(|count| {
         assert_eq!(
             count.get(),
@@ -491,6 +492,172 @@ fn admission_reuses_a_generation_checked_fold_across_unchanged_pages() {
             "unchanged pages must not repeat the full membership fold"
         )
     });
+}
+
+fn drain_budgeted_page(restart: bool, always_expired: bool, legacy_reoffer: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("receiver.sqlite3");
+    let source = node("birch");
+    let mut target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    let count = ADMISSION_CHUNK_ENVELOPES * 3 + 1;
+    let exchange = page(&source, &target, count);
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    let mut admitted = 0;
+    let mut deferrals = 0;
+    for _ in 0..=count {
+        let mut checks = 0;
+        let mut expired = || {
+            checks += 1;
+            always_expired || checks >= 2
+        };
+        let outcome = target.admit_replication_backlog(
+            AdmissionAuthority::Membership, Some(&mut expired),
+        ).unwrap();
+        assert!(outcome.valid > 0, "every receive must commit progress");
+        admitted += outcome.valid;
+        assert!(admitted <= count, "an admitted envelope was repeated");
+        if !outcome.deferred {
+            break;
+        }
+        deferrals += 1;
+        assert!(target.replication_admission_pending().unwrap());
+        if restart {
+            drop(target);
+            target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        }
+        if legacy_reoffer {
+            // The old sender sees the unchanged receipt schema. Re-offering its page is safe:
+            // receipt deduplication neither rewinds admission nor changes an admitted row.
+            let receipt = target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+            assert_eq!(receipt.received, 0);
+            assert_eq!(receipt.duplicate, exchange.envelopes.len());
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct LegacyReceiveResponse {
+                receipt: crate::replication::ReplicationReceipt,
+                changed: bool,
+                store_index: u64,
+            }
+            let index = target.index().unwrap();
+            let wire = serde_json::to_value(crate::replication::ReplicationReceiveResponse {
+                receipt, changed: false, store_index: index,
+            }).unwrap();
+            let legacy: LegacyReceiveResponse = serde_json::from_value(wire).unwrap();
+            assert_eq!(legacy.receipt.received, 0);
+            assert!(!legacy.changed);
+            assert_eq!(legacy.store_index, index);
+        }
+    }
+    assert!(deferrals > 0, "the injected budget must exercise resume");
+    assert_eq!(admitted, count);
+    assert!(!target.replication_admission_pending().unwrap());
+    assert_eq!(target.validate_replication_backlog().unwrap().valid, 0);
+    let rows: usize = target.readers.get().query_row(
+        "SELECT COUNT(*) FROM claims WHERE origin='birch'", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(rows, count);
+}
+
+#[test]
+fn receive_budget_deferral_and_resume_drain_a_page() {
+    drain_budgeted_page(false, false, false);
+}
+
+#[test]
+fn an_always_expired_receive_budget_still_drains_a_page() {
+    drain_budgeted_page(false, true, false);
+}
+
+#[test]
+fn an_always_expired_receive_budget_still_advances_projection() {
+    let source = node("birch");
+    let target = node("cedar");
+    let count = ADMISSION_CHUNK_ENVELOPES * 3 + 1;
+    let exchange = page(&source, &target, count);
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    let mut frontier = 0_u64;
+    for _ in 0..3 {
+        let admission = target.validate_replication_backlog_for_receive(
+            Instant::now() - RECEIVE_ADMISSION_BUDGET,
+        ).unwrap();
+        assert!(admission.deferred, "admission must remain under sustained budget pressure");
+        target.apply_replication_repairs().unwrap();
+        target.project_replication_backlog_chunk().unwrap();
+        let projected: u64 = target.readers.get().query_row(
+            "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(projected > frontier, "each deferred receive must advance projection");
+        assert!(projected - frontier <= PROJECTION_CHUNK_CLAIMS as u64);
+        assert!(!target.claims_for("note/catch-up/0", None).unwrap().is_empty());
+        frontier = projected;
+    }
+    assert!(target.replication_admission_pending().unwrap());
+}
+
+#[test]
+fn completed_admission_epoch_survives_restart_and_detects_new_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("receiver.sqlite3");
+    let source = node("birch");
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    assert!(target.replication_admission_pending().unwrap(), "a missing completion marker needs a sweep");
+    let exchange = page(&source, &target, 1);
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert!(target.replication_admission_pending().unwrap());
+    target.validate_replication_backlog().unwrap();
+    assert!(!target.replication_admission_pending().unwrap());
+    drop(target);
+    let target = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert!(!target.replication_admission_pending().unwrap());
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert!(!target.replication_admission_pending().unwrap(), "duplicates do not restart a completed sweep");
+    let earlier = node("alder");
+    let exchange = page(&earlier, &target, 1);
+    target.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+    assert!(target.replication_admission_pending().unwrap());
+    target.validate_replication_backlog().unwrap();
+    assert!(!target.replication_admission_pending().unwrap());
+}
+
+#[test]
+fn receive_budget_resume_survives_restart_without_duplicate_admission() {
+    drain_budgeted_page(true, true, false);
+}
+
+#[test]
+fn a_legacy_sender_can_reoffer_a_budget_deferred_page() {
+    drain_budgeted_page(true, true, true);
+}
+
+#[test]
+fn a_new_receipt_before_the_resume_cursor_is_not_skipped() {
+    let source = node("birch");
+    let earlier = node("alder");
+    let target = node("cedar");
+    let count = ADMISSION_CHUNK_ENVELOPES + 1;
+    let exchange = page(&source, &target, count);
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    let first = target.admit_replication_backlog(
+        AdmissionAuthority::Membership, Some(&mut || true),
+    ).unwrap();
+    assert!(first.deferred);
+    let exchange = page(&earlier, &target, 1);
+    target.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+    let mut admitted = first.valid;
+    for _ in 0..=count {
+        let outcome = target.admit_replication_backlog(
+            AdmissionAuthority::Membership, Some(&mut || true),
+        ).unwrap();
+        admitted += outcome.valid;
+        if !outcome.deferred {
+            break;
+        }
+    }
+    assert_eq!(admitted, count + 1);
+    assert!(!target.replication_admission_pending().unwrap());
 }
 
 #[test]

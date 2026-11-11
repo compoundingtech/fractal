@@ -308,6 +308,7 @@ pub async fn replication_receive(
         .and_then(|value| uuid::Uuid::parse_str(value).ok());
     let store = state.store.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+        let receive_started = std::time::Instant::now();
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -335,12 +336,13 @@ pub async fn replication_receive(
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
         }
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
-        let (admission, repairs) = if new_data {
+        let (admission, repairs) = if new_data || store.replication_admission_pending()
+            .map_err(|error| FractalError::new("internal", error.to_string()))?
+        {
             let admission = store
-                .validate_replication_backlog()
+                .validate_replication_backlog_for_receive(receive_started)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
-            let repairs = store
-                .apply_replication_repairs()
+            let repairs = store.apply_replication_repairs()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
             (admission, repairs)
         } else {
@@ -349,7 +351,7 @@ pub async fn replication_receive(
         // A catching-up node defers projection; the first receive after the deferral window,
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
-        let projection = if new_data || was_deferred {
+        let projection = if new_data || admission.changed || was_deferred || admission.deferred {
             use opentelemetry::trace::{Span as _, TraceContextExt as _};
             use tracing_opentelemetry::OpenTelemetrySpanExt as _;
             let receive = crate::otel::export_enabled().then(|| {
@@ -358,9 +360,11 @@ pub async fn replication_receive(
             let mut span = crate::otel::stage_root(
                 "st.replication.projection", "receive", receive,
             );
-            let result = admitted_projection_result(
-                store.project_replication_backlog_unless_catching_up(),
-            );
+            let result = admitted_projection_result(if admission.deferred {
+                store.project_replication_backlog_chunk().map(Some)
+            } else {
+                store.project_replication_backlog_unless_catching_up()
+            });
             if let Some(span) = span.as_mut() {
                 span.set_attribute(opentelemetry::KeyValue::new(
                     "st.replication.peer", request.peer.clone(),
@@ -605,6 +609,7 @@ pub async fn shard_replication_receive(
     let response = blocking_action(move || {
         let internal = |error: anyhow::Error| FractalError::new("internal", error.to_string());
         let before_index = store.index().map_err(internal)?;
+        let receive_started = std::time::Instant::now();
         let receipt = store.receive_replication_exchange_via(
             &request.peer,
             &request.fleet_id,
@@ -615,10 +620,15 @@ pub async fn shard_replication_receive(
         // Held envelopes get another pass when the graph's membership moved since the last one.
         if replication_receive_has_new_data(receipt.received + receipt.signatures)
             || store.fleet_moved_since_admission().map_err(internal)?
+            || store.replication_admission_pending().map_err(internal)?
         {
-            store.validate_replication_backlog().map_err(internal)?;
+            let admission = store.validate_replication_backlog_for_receive(receive_started).map_err(internal)?;
             store.apply_replication_repairs().map_err(internal)?;
-            store.project_replication_backlog().map_err(internal)?;
+            if admission.deferred {
+                store.project_replication_backlog_chunk().map_err(internal)?;
+            } else {
+                store.project_replication_backlog().map_err(internal)?;
+            }
         }
         let store_index = store.index().map_err(internal)?;
         Ok(ReplicationReceiveResponse {
