@@ -3434,7 +3434,7 @@ struct ApplyArgs {
     #[arg(long, requires = "force", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     reason: Option<String>,
     /// Complete person, agent or run subject authoring the publication; defaults to the
-    /// harness's own seat, else to the run a program effect acts as.
+    /// harness's own agent, else to the run a program effect acts as.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT", value_parser = parse_mission_publication_actor)]
     actor: Option<String>,
