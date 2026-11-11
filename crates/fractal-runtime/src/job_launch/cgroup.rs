@@ -56,7 +56,7 @@ pub fn sample_exit(directory: &Path, host: &str) -> ExitUsage {
         return ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished);
     }
     match job_scope::read_usage(directory, host) {
-        Ok(usage) if directory.is_dir() => ExitUsage::Sample(usage),
+        Ok(usage) if directory.is_dir() => ExitUsage::Sample(Box::new(usage)),
         Ok(_) => ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished),
         Err(_) => ExitUsage::CountersUnavailable(CountersUnavailable::ReadFailed),
     }
