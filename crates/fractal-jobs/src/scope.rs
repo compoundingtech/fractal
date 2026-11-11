@@ -1,5 +1,6 @@
 //! Inactive Linux scope contract; all policy values come from configuration.
 //! `io.weight` is not an IO limit and has no effect with NVMe scheduler `none`.
+pub mod observation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JobScopePlan {

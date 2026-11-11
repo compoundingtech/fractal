@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive per-job Linux scope readback and raw usage observations (unit 12b)",
+  "replay": {"status": "none", "detail": "No claims, projections or replay paths change."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Gate-slot remains the admission path; these helpers are not wired into launch paths."},
+  "compatibility": {"status": "none", "detail": "Additive internal Rust support only. All limits and heavy ceilings must be supplied by configuration; no policy defaults. io.weight is not an IO limit and has no effect with NVMe scheduler none."},
+  "downtime": {"status": "none", "detail": "Inactive helpers require no service interruption."},
+  "manual": {"status": "none", "detail": "No activation. Future unit 7 must apply and verify caps before the first process. Runtime provides raw CPU, peak memory, memory events and IO reads with per-read host time and host name; absent reads remain unknown."},
+  "recovery": {"status": "none", "detail": "No durable state or host configuration is changed automatically."}
+}
