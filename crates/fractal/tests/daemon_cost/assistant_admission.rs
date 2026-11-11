@@ -244,50 +244,130 @@ fn profile_reads(path: &std::path::Path, from: usize, label: &str) -> u64 {
     rows[0]["read_acquisitions"].as_u64().expect("profile rows report read_acquisitions")
 }
 
-/// Withdraw a real replicated record through the production API, never by inserting
-/// queue rows. Retain the Store writer after commit so maintenance cannot consume
-/// the recheck while authentication reads the committed WAL snapshot.
-fn queued_subject_authentication(state: &AppState, connection: &rusqlite::Connection, profile_log: &std::path::Path) -> Value {
-    use smallclaims::store::assistant_grant_authority::SUBJECT_PENDING_QUERY;
-    let (claim_id, subject, digest, envelope) = connection.query_row(
-        "SELECT pending.claim_id,pending.grant_subject,
-                json_extract(pending.record,'$.body.fields.credential_hash'),
-                envelopes.writer,envelopes.sequence,envelopes.previous_hash,
-                envelopes.envelope_hash,envelopes.accepted_at_unix_ms,envelopes.payload
-         FROM assistant_grant_pending AS pending
-         JOIN replica_envelopes AS envelopes
-           ON envelopes.writer=pending.origin AND envelopes.sequence=pending.auth_sequence
-          AND envelopes.envelope_hash=pending.auth_envelope_hash
-         WHERE pending.authenticated=1 AND pending.kind=?1 AND pending.origin<>?2
-           AND pending.auth_record_position=0
-         ORDER BY pending.claim_id LIMIT 1",
-        rusqlite::params![GRANTED,NODE],
-        |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,
-            smallclaims::claim::ReplicaEnvelope {
-                writer:row.get(3)?,sequence:row.get(4)?,previous_hash:row.get(5)?,
-                hash:row.get(6)?,accepted_at_unix_ms:row.get::<_,String>(7)?.parse().unwrap(),
-                payload:row.get(8)?,member_key:None,signature:None,
-            })),
-    ).expect("queued measurement needs an authenticated foreign grant at record position zero");
-    assert!(api::client_v0::external_grants::authenticate(state,&digest,"http").unwrap().is_some());
+/// Direct native Store receipt and handler authentication, not worker self-sync:
+/// the worker suppresses its own origin. A fresh same-origin receiver has no
+/// durable local append, so only the exact replicated proof can authorize it.
+fn queued_subject_authentication(state: &AppState, history: &rusqlite::Connection, profile_log: &std::path::Path) -> Value {
+    use smallclaims::store::assistant_grant_authority::{self as authority, SUBJECT_PENDING_QUERY};
+    const ORIGIN: &str = "benchmark-queued-issuer";
+    const ID: &str = "ffffffffffffffffffffffff";
+    let fleet = super::super::daemon_bench::FLEET;
+    let subject = format!("custom/client/assistant-v1-{ID}");
+    let digest = hex::encode(ring::digest::digest(&ring::digest::SHA256,
+        b"q39/dedicated-same-origin-replicated-credential").as_ref());
+    let collisions: u64 = history.query_row(
+        "SELECT count(*) FROM claims WHERE kind=?1 AND
+            (subject=?2 OR json_extract(body,'$.fields.credential_hash')=?3)",
+        rusqlite::params![GRANTED,subject,digest], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(collisions,0,"queued fixture identity must not collide with clean grants or expired history");
+    let root = tempfile::tempdir().unwrap();
+    let issuer = Store::open_memory(ORIGIN).unwrap();
+    issuer.bind_fleet(fleet).unwrap();
+    let signer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    issuer.pin_fleet_anchor(signer.public()).unwrap();
+    issuer.set_member_key(Some(signer.clone())).unwrap();
+    issuer.admit_fleet_anchor(fleet,signer.public(),"listening").unwrap();
+    let grant = issuer.append_claim(&ClaimInput {
+        subject:subject.clone(), kind:GRANTED.into(), actor:Some(OWNER.into()),
+        fields:serde_json::from_value(json!({
+            "grant_id":ID,"session_actor":format!("assistant/chatgpt/session/{ID}"),
+            "issuer":OWNER,"principal":"assistant/chatgpt","profile":"assistant",
+            "expires_at_unix_ms":u64::MAX,"credential_hash":digest,"policy_revision":1,
+            "scopes":["read.assistant.summary"],"minimal_read_mode":"caller-bound-allow",
+            "disclosure_consent":true
+        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    issuer.seal_local_batches().unwrap();
+    let database = root.path().join("queued.sqlite");
+    let receiver = Arc::new(Store::open(&database,ORIGIN).unwrap());
+    receiver.bind_fleet(fleet).unwrap();
+    receiver.pin_fleet_anchor(signer.public()).unwrap();
+    // Never install an own-origin signer on the receiver or export from it.
+    let exchange = issuer.export_replication_exchange_answering(
+        fleet,&receiver.replication_inventory().unwrap(),&receiver.replication_signature_requests().unwrap(),
+    ).unwrap();
+    receiver.receive_replication_exchange(ORIGIN,fleet,&exchange).unwrap();
+    receiver.validate_replication_backlog().unwrap();
+    receiver.project_replication_backlog().unwrap();
+    let mut complete = false;
+    const MAX_QUEUED_FIXTURE_AUTHORITY_SLICES: usize = 1024;
+    for _ in 0..MAX_QUEUED_FIXTURE_AUTHORITY_SLICES {
+        if receiver.advance_assistant_grant_authority_backfill().unwrap() {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete,
+        "q39 queued fixture authority drain did not complete within {MAX_QUEUED_FIXTURE_AUTHORITY_SLICES} slices");
+    assert!(!receiver.assistant_grant_authority_maintenance_pending().unwrap());
+    assert!(receiver.member_public_key().is_none(),"queued receiver must never sign its own origin");
+    assert!(receiver.claim_has_authenticated_member_writer(&grant.id).unwrap(),
+        "queued target must have an admitted native signed envelope and authorized membership window");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let local_appends: u64 = connection.query_row(
+        "SELECT count(*) FROM assistant_grant_local_appends WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(local_appends,0,"queued target must not have durable local-append provenance");
+    let digest_rows: u64 = connection.query_row(
+        "SELECT count(*) FROM claims WHERE kind=?1 AND json_extract(body,'$.fields.credential_hash')=?2",
+        rusqlite::params![GRANTED,digest], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(digest_rows,1,"queued credential must identify exactly one grant");
+    assert_eq!(authority::by_credential(&connection,&digest).unwrap().unwrap().id,grant.id);
+    let (member_key,sequence,envelope_hash,position): (String,u64,String,u64) = connection.query_row(
+        "SELECT auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position
+         FROM assistant_grant_pending WHERE claim_id=?1 AND authenticated=1",
+        [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).expect("queued target must retain a nonnull actual replicated proof tuple");
+    assert_eq!(member_key,signer.public());
+    let intact_records = || connection.query_row(
+        "SELECT count(*) FROM replica_records WHERE claim_id=?1 AND state='valid'",
+        [&grant.id], |row| row.get::<_,u64>(0),
+    ).unwrap();
+    assert_eq!(intact_records(),1,"queued target must have exactly one intact proof route");
+    let mut state = state.clone();
+    state.store = receiver;
+    state.node = ORIGIN.into();
+    state.state_dir = root.path().into();
+    assert!(api::client_v0::external_grants::authenticate(&state,&digest,"http").unwrap().is_some());
+    let claim_id = grant.id.clone();
     let mut writer = state.store.graph.connection.write();
     let transaction = writer.transaction().unwrap();
-    smallclaims::store::record_invalid_replica_envelope(
-        &transaction,&envelope,
-        &smallclaims::error::Error::new("admission-bench-proof-withdrawn","synthetic fixture withdraws its authenticated proof"),
-    ).unwrap();
+    // Withdraw exactly the record referenced by the authenticated tuple. Its
+    // production trigger queues the claim recheck directly, unlike envelope
+    // invalidation which first queues a separate invalidation obligation.
+    assert_eq!(transaction.execute(
+        "UPDATE replica_records SET state='invalid'
+         WHERE claim_id=?1 AND writer=?2 AND sequence=?3 AND envelope_hash=?4 AND position=?5 AND state='valid'",
+        rusqlite::params![claim_id,ORIGIN,sequence,envelope_hash,position],
+    ).unwrap(),1,"queued fixture must withdraw its exact authenticated replica record");
     transaction.commit().unwrap();
-    let matching_rechecks = || connection.query_row(
-        "SELECT count(*) FROM assistant_grant_pending AS pending
-         JOIN assistant_grant_proof_rechecks AS work ON work.claim_id=pending.claim_id
-         WHERE pending.grant_subject=?1 AND pending.claim_id=?2",
-        rusqlite::params![subject,claim_id], |row| row.get::<_,u64>(0),
+    assert_eq!(intact_records(),0,"no alternative intact proof route may survive withdrawal");
+    let matching_rechecks = || {
+        let mut query = connection.prepare(
+            "SELECT work.claim_id FROM assistant_grant_proof_rechecks AS work
+             JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
+             WHERE pending.grant_subject=?1 AND pending.claim_id=?2 ORDER BY work.claim_id",
+        ).unwrap();
+        query.query_map(rusqlite::params![subject,claim_id], |row| row.get::<_,String>(0))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let queue_counts = || connection.query_row(
+        "SELECT (SELECT count(*) FROM assistant_grant_proof_rechecks),
+                (SELECT count(*) FROM assistant_grant_proof_invalidations),
+                (SELECT count(*) FROM assistant_grant_dirty),
+                (SELECT count(*) FROM assistant_grant_auth_cursor)",
+        [], |row| Ok([row.get::<_,u64>(0)?,row.get(1)?,row.get(2)?,row.get(3)?]),
     ).unwrap();
     let queued = matching_rechecks();
-    assert!(queued>0,"proof withdrawal must leave a matching committed recheck");
+    assert_eq!(queued,vec![claim_id.clone()],"proof withdrawal must leave the exact matching committed recheck");
+    let queues = queue_counts();
     let mut samples = Vec::new();
     for _ in 0..8 {
         assert_eq!(matching_rechecks(),queued,"matching obligations must remain queued at measurement");
+        assert_eq!(queue_counts(),queues,"all authentication queue counts must remain fixed");
         let mut pending = connection.prepare(SUBJECT_PENDING_QUERY).unwrap();
         assert!(pending.query_row([&subject],|row| row.get::<_,bool>(0)).unwrap());
         let subject_pending_sql_work = sql_work(smallclaims::sqlite::work::SqliteWork {
@@ -302,7 +382,7 @@ fn queued_subject_authentication(state: &AppState, connection: &rusqlite::Connec
         let operation = smallclaims::profile::Op::start("admission-bench/authenticate-queued",None).unwrap();
         let entered = operation.enter();
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();
-        let authenticated = api::client_v0::external_grants::authenticate(state,&digest,"http").unwrap();
+        let authenticated = api::client_v0::external_grants::authenticate(&state,&digest,"http").unwrap();
         let authentication_sql_work = sql_work(work.finish());
         drop(entered);
         operation.finish();
@@ -310,6 +390,8 @@ fn queued_subject_authentication(state: &AppState, connection: &rusqlite::Connec
         assert!(authenticated.is_none(),"queued proof work must deny authentication");
         let authentication_read_acquisitions = profile_reads(profile_log,from,"admission-bench/authenticate-queued");
         assert_eq!(matching_rechecks(),queued,"authentication must not consume queued work");
+        assert_eq!(queue_counts(),queues,"authentication must not alter queue counts");
+        assert_eq!(intact_records(),0,"measurement must not restore an intact proof route");
         samples.push(json!({"subject_pending_sql_work":subject_pending_sql_work,
             "authentication_sql_work":authentication_sql_work,
             "authentication_read_acquisitions":authentication_read_acquisitions,
@@ -318,7 +400,11 @@ fn queued_subject_authentication(state: &AppState, connection: &rusqlite::Connec
     }
     drop(writer);
     json!({"subject":subject,"claim_id":claim_id,"obligation_kind":"proof-recheck",
-        "queue_hold":"Store writer retained across committed withdrawal and all samples","samples":samples})
+        "fixture":"direct native same-origin Store receipt and handler; not worker self-sync",
+        "proof":{"writer":ORIGIN,"member_key":member_key,"sequence":sequence,
+            "envelope_hash":envelope_hash,"record_position":position},
+        "queue_counts":queues,
+        "queue_hold":"unsigned receiver Store writer retained across committed exact-record withdrawal and all samples","samples":samples})
 }
 
 // Real signed membership and replication, outside measured requests. Merely
