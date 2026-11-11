@@ -8368,13 +8368,13 @@ impl Store {
                 .collect::<Result<Vec<_>, _>>()?;
             (epoch, retry_hash_mismatches, retry_subject_references, envelopes)
         };
-        if budget_expired.is_some() {
-            if let Some((_, cursor)) = cursor.as_ref().filter(|(saved, _)| *saved == epoch) {
-                envelopes.retain(|(envelope, _)| {
-                    (envelope.writer.as_str(), envelope.sequence, envelope.hash.as_str())
-                        > (cursor.writer.as_str(), cursor.sequence, cursor.hash.as_str())
-                });
-            }
+        if budget_expired.is_some()
+            && let Some((_, cursor)) = cursor.as_ref().filter(|(saved, _)| *saved == epoch)
+        {
+            envelopes.retain(|(envelope, _)| {
+                (envelope.writer.as_str(), envelope.sequence, envelope.hash.as_str())
+                    > (cursor.writer.as_str(), cursor.sequence, cursor.hash.as_str())
+            });
         }
         let mut outcome = ReplicationAdmission::default();
         // A shard that takes its fleet from another store judges its envelopes by their bounds
