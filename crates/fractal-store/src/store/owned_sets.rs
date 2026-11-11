@@ -1487,7 +1487,8 @@ pub fn plan_tx(
     let bundle_digest = canonical_hash(&(&input.subjects, &input.missions)).map_err(internal)?;
     let prior_policy = old.as_ref().and_then(|v| v.receipt.policy.clone());
     let policy = resolve_policy(prior_policy.as_ref(), options.policy.as_ref())?;
-    // Every debt this set still carries; this publication converges and closes all of it.
+    // Every debt this set still carries; this publication converges and closes all of it, except
+    // an ad hoc terminal retirement of a member the source still declares.
     let open_debts = match &old {
         Some(old) => open_debt_records(transaction, Some(&old.id), None)?,
         None => Vec::new(),
@@ -1649,6 +1650,21 @@ pub fn plan_tx(
             } else {
                 adoptions.insert(s.clone(), tokens.clone());
             }
+        }
+        // Terminal retirement outranks the source: an agent retired ad hoc stays a retired member,
+        // and every publication still declaring it reports that instead of failing.
+        if s.starts_with("agent/")
+            && let Some(retirement) = retirements::record(transaction, s, None)?
+        {
+            intent.subjects.remove(s);
+            changes.insert(s.clone(), "retired".into());
+            effects.insert(s.clone(), format!(
+                "keep terminally retired by {}: {}; drop it from the source",
+                retirement.actor.as_deref().unwrap_or("unknown"),
+                retirement.body["fields"]["reason"].as_str().unwrap_or_default(),
+            ));
+            heads.insert(s.clone(), tokens);
+            continue;
         }
         let existing = old.as_ref().and_then(|v| v.receipt.members.get(s));
         changes.insert(
@@ -1883,16 +1899,24 @@ pub fn plan_tx(
         &intent,
         changes
             .iter()
-            .filter(|(_, change)| change.as_str() != "unchanged")
+            .filter(|(_, change)| !matches!(change.as_str(), "unchanged" | "retired"))
             .map(|(subject, _)| subject.as_str()),
         Some(current_index(transaction).map_err(internal)?),
     )?;
     // Publication converges every member to this bundle, so it closes all of the set's open
-    // debt and reports what each forced change becomes.
+    // debt and reports what each forced change becomes. An ad hoc retirement cannot be reverted:
+    // its debt stays open while the source declares the member and is adopted once it does not.
     let mut reverted_debts = Vec::new();
     if !noop {
         for record in &open_debts {
             let Some(mut debt) = debt_view(record) else { continue };
+            if debt.verb == Verb::Retire.as_str() {
+                if !live.contains_key(&debt.subject) {
+                    debt.outcome = Some("adopted".into());
+                    reverted_debts.push(debt);
+                }
+                continue;
+            }
             let forced = record.body["fields"]["revision"].as_str();
             let adopted = forced.is_some() && live.get(&debt.subject).map(String::as_str) == forced;
             debt.outcome = Some(match (forced.is_some(), adopted) {
@@ -2041,7 +2065,7 @@ pub fn commit_tx(
                     .get(s)
                     .and_then(|d| d.member.as_ref())
                     .is_some_and(|m| m.one_shot),
-                manual_rollout: if change == "retiring" {
+                manual_rollout: if change == "retiring" || change == "retired" {
                     plan.retired.get(s).is_some_and(|m| m.manual_rollout)
                 } else {
                     plan.intent
@@ -2054,7 +2078,7 @@ pub fn commit_tx(
                 revision: row.revision,
             }
         };
-        if change == "retiring" {
+        if change == "retiring" || change == "retired" {
             retired.insert(s.clone(), member);
         } else {
             members.insert(s.clone(), member);
@@ -2295,7 +2319,9 @@ impl Store {
 
     /// The follow-up of a gated runtime write to `subject`, run in that write's transaction: the
     /// gate is decided again there and records debt for a forced write (naming the write as its
-    /// request) or an audit record for a write an `enforce` set would refuse.
+    /// request) or an audit record for a write an `enforce` set would refuse. An audited terminal
+    /// retirement also records debt: no publication can revert it, so it stays open until the
+    /// source stops declaring the retired member.
     pub fn source_follow_up<'a>(
         &'a self,
         subject: &'a str,
@@ -2308,9 +2334,15 @@ impl Store {
             Gate::Force(view) => record_debt_tx(transaction, &self.origin, &view, subject, verb,
                 Forced::Request(&record.id), None, actor, force_reason.unwrap_or_default(), None)
                 .map(drop),
-            Gate::Audit(view, refused) => record_audit_tx(transaction, &self.origin, &view, subject,
-                verb, actor, &refused, None)
-                .map(drop),
+            Gate::Audit(view, refused) => {
+                record_audit_tx(transaction, &self.origin, &view, subject, verb, actor, &refused, None)?;
+                if verb == Verb::Retire {
+                    let reason = record.body["fields"]["reason"].as_str().unwrap_or_default();
+                    record_debt_tx(transaction, &self.origin, &view, subject, verb,
+                        Forced::Request(&record.id), None, actor, reason, None)?;
+                }
+                Ok(())
+            }
         }
     }
 
