@@ -374,20 +374,18 @@ impl ProgramEngine {
     /// The program asked for something the daemon refuses (a defect of the bundle): its step fails
     /// and the program stops, with what it already waits on.
     pub fn fail(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
-        {
-            let mut inner = self.lock();
-            let running = inner.running.get(step).filter(|running| running.dispatch.attempt == attempt);
-            if let Some(generation) = running.map(|running| running.generation)
-                && forget(&mut inner, step, attempt, generation)
-            {
-                send_to(&inner, generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
-            }
+        let generation = {
+            let inner = self.lock();
+            inner.running.get(step).filter(|running| running.dispatch.attempt == attempt).map(|running| running.generation)
+        };
+        // Held as ended until its failure is written: a pass with a view read before then must
+        // not start the attempt again.
+        if let Some(generation) = generation.filter(|&generation| self.end(step, attempt, generation, None)) {
+            send_to(&self.lock(), generation, &json!({"t": "cancel", "step": step, "attempt": attempt, "reason": reason}));
         }
         eprintln!("fractal: program {step} attempt {attempt} failed: {reason}");
         // The step's state first: a child started concurrently then sees it left (`waiting`).
-        if self.left(step, attempt)?.is_none() {
-            self.store.set_step_state_unless_terminal(step, "failed", Some(reason))?;
-        }
+        self.settle(step, attempt, || self.store.set_step_state_unless_terminal(step, "failed", Some(reason)))?;
         self.cancel_waits(step, attempt, reason)?;
         (self.wake)(step);
         Ok(())
