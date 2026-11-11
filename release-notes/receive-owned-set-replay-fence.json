@@ -1,8 +1,8 @@
 {
   "version": 1,
   "commits": [
-    "9e5a6f1cf3756104ae23370157a06a469703144e",
-    "e1cffdcb18a0ad095d77861b22785d05c9769717"
+    "aa5407bbf6639ed49c0fb260910ae61ce4da867f",
+    "60439183ada6dd7ed0fe3c6908a7cc2ea014254d"
   ],
   "summary": "Project received owned sets incrementally and park live graph faults instead of replaying the entire store",
   "replay": {"status": "changed", "detail": "Live receive/catch-up never falls back to full-store replay. Owned-set receipts, late member references and historical losing branches update only the affected ownership dependency closure. Explicit operator recovery, restore and existing migrations retain canonical replay."},
