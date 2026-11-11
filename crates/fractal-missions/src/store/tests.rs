@@ -5029,6 +5029,12 @@ fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() 
         .unwrap();
     assert_eq!(run_report_fields(&latest.body), None);
     assert_eq!(reports(), 3);
+    // Clearing it again writes nothing.
+    let again = store
+        .set_mission_run_report(run, "agent/ops/owner", None, None, None, false, "owner-clears-again")
+        .unwrap();
+    assert!(!again.changed);
+    assert_eq!(reports(), 3);
 
     // The creation claim is what the run started with, so declaring the run again exactly
     // as it was started is still a retry.

@@ -1272,7 +1272,7 @@ advertises `mission_program=1` on its `daemon.started` (`mission-program-unavail
 
 ## Run reports
 
-A run tells nobody about itself unless its mission or its start names an agent:
+A run's mission or its start names the agent that hears about the run:
 
 ```kdl
 version 2
@@ -1293,7 +1293,17 @@ fractal missions start release --report-to agent/ops/watcher --as person/operato
 `--report-to` replaces the mission's `report-to` for that run, and `--report-completed` adds the
 completed event. Only an agent can be named. A person is reached through their own agent. The
 choice is recorded on the run's creation claim, so a later revision of the mission does not
-change who a running run reports to. A run with neither writes nothing extra and is never reported.
+change who a running run reports to.
+
+A run that names neither still reports a stall, to a default reporter: its requester when that is
+an agent, else the first agent that a stuck agent is `under`. A stuck agent holds or is assigned a
+ready or held step; it is never told about itself. A person requester has no inbox, so it is
+skipped, and an agent that is not running is passed over without a fault. A run with no stuck
+agent, such as a schedule parent or an observer run that only waits on gates, gets no default. A
+run linked from a parent step is reported through its parent, which counts its stuck agents. The limit is 30 minutes, and a silence already past it when
+the default came on (daemon start, or the config) is not reported, so an upgrade sends no burst.
+Failures, cancellations and completions are reported only to a named reporter. Turn the default
+off with `default_stall_reports = false` under `[reconcile]`.
 
 A running run can be opted in, moved to another agent, or cleared without restarting it:
 
@@ -1308,7 +1318,7 @@ call states the whole report, as `missions start --report-to` would: `--stalled-
 to the mission's `stalled-after`, else 30 minutes; `--report-stalls true|false` defaults to the
 mission's `report-stalls`, else true; and the completed event is reported with
 `--report-completed` or when the mission asks for it. `--clear` reports the run to nobody, even
-when its mission names a reporter. The change is a `mission-run.report-to` claim on the run. Its
+when its mission names a reporter, and stops the default. The change is a `mission-run.report-to` claim on the run. Its
 latest one replaces what the creation claim recorded, and the creation claim itself is left
 alone, so declaring the run again as it was started is still a retry. A request that changes
 nothing writes nothing. The run reads it at its next evaluation. A stall is still measured from
@@ -1862,7 +1872,8 @@ A bare target inside a mission uses the same mission run. A full external agent 
 
 The relation is visible in `fractal agents ls --json`, status, and assigned work. It is suitable for a tree or graph UI.
 
-The relation does not create permission, lifecycle, scheduling, or mandatory reporting behavior.
+The relation does not create permission, lifecycle or scheduling behavior. It only picks who hears
+of a stall in a run that names no reporter (see [Run reports](#run-reports)).
 
 The target must be declared: a missing grouping target blocks publication. A top-level
 seat grouped under itself produces a warning. Grouping does not check for cycles.
