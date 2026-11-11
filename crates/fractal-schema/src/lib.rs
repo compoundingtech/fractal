@@ -1063,6 +1063,12 @@ fn build_registry() -> Registry {
             true,
         ),
         (
+            "job",
+            "job/ID",
+            "An inactive durable job history, not execution authority.",
+            true,
+        ),
+        (
             "checkpoint",
             "checkpoint/DAY",
             "A checkpoint that trims replicated history dated before a UTC day.",
@@ -1592,6 +1598,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::AuthorizedParticipant,
             Cardinality::Once,
             Some("attention"),
+            false,
+            &[],
+        ),
+        (
+            "job.recorded",
+            &["job"],
+            WritePolicy::AuthorizedParticipant,
+            Cardinality::StateTransition,
+            Some("jobs"),
             false,
             &[],
         ),
@@ -3202,6 +3217,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("person_id", required_string()),
         ],
         "person.delegation-set" => &[("actions", required_array())],
+        "job.recorded" => &[("record", required_object())],
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
             ("expires_at", string()),
@@ -5033,6 +5049,8 @@ mod tests {
         for kind in ["source.debt.recorded", "source.debt.closed", "source.audited"] {
             current.claims.remove(kind).unwrap();
         }
+        current.claims.remove("job.recorded").unwrap();
+        current.subjects.remove("job").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
@@ -5214,6 +5232,7 @@ mod tests {
             [
                 "attention.requested",
                 "attention.resolved",
+                "job.recorded",
                 "lane.approved",
                 "lane.joined",
                 "lane.left",
