@@ -333,9 +333,9 @@ mod tests {
         let mut instance = request(&pair, "ask/one");
         instance.instance = "main".into();
         assert!(enroll(&state, &operator, instance).is_err());
-        state.state_dir = root.join("ordinary-instance");
+        state.state_dir = root.path().join("ordinary-instance");
         assert!(enroll(&state, &operator, request(&pair, "ask/one")).is_err());
-        state.state_dir = root.join(".st-instance/client-control-fixture");
+        state.state_dir = root.path().join(".st-instance/client-control-fixture");
         enroll(&state, &operator, request(&pair, "ask/one")).unwrap();
         assert!(enroll(&state, &operator, request(&pair, "ask/two")).is_err());
     }
