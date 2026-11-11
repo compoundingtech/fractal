@@ -671,7 +671,7 @@ impl WriterConnection {
         let jobs = self.jobs.lock().unwrap_or_else(PoisonError::into_inner);
         let send = || jobs.as_ref()
             .expect("the writer queue is open while the store is")
-            .send(job);
+            .send(job).map_err(Box::new);
         match enqueued {
             Some(enqueued) => self.fifo.send_at(enqueued, send),
             None => send(),
@@ -748,7 +748,7 @@ impl WriterConnection {
                 };
                 self.fifo.send_at(enqueued, || jobs.as_ref()
                     .expect("the writer queue is open while the store is")
-                    .send(job))
+                    .send(job).map_err(Box::new))
                     .expect("the writer thread runs while the store is open");
             }
         }
