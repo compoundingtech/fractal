@@ -22,8 +22,8 @@ pub fn verify_dedicated(directory: &Path, pid: Option<u32>) -> Result<()> {
     }
     Ok(())
 }
-/// Remove only a caller-owned, already empty cgroup tree. No production caller.
-pub fn remove_empty_tree(directory: &Path) -> Result<()> {
+/// Remove only a caller-owned tree after stop, empty confirmation and sampling.
+fn remove_empty_tree(directory: &Path) -> Result<()> {
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() { remove_empty_tree(&entry.path())?; }
@@ -63,5 +63,64 @@ pub fn sample_exit(directory: &Path, host: &str) -> ExitUsage {
         Ok(usage) if directory.is_dir() => ExitUsage::Sample(Box::new(usage)),
         Ok(_) => ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished),
         Err(_) => ExitUsage::CountersUnavailable(CountersUnavailable::ReadFailed),
+    }
+}
+
+/// The sole J retirement path: kill, populated=0, sample, then remove.
+/// A vanished J reports unavailable counters without inventing zero usage.
+pub fn stop_and_sample(directory: &Path, host: &str) -> Result<ExitUsage> {
+    retirement_step(directory, kill_and_wait_empty(directory))?;
+    let usage = sample_exit(directory, host);
+    finish_retirement(directory, usage)
+}
+
+fn finish_retirement(directory: &Path, usage: ExitUsage) -> Result<ExitUsage> {
+    retirement_step(directory, remove_empty_tree(directory))?;
+    Ok(usage)
+}
+
+/// Only ENOENT accompanied by confirmed absence of J itself is terminal.
+/// Missing control files/children and every other cleanup error remain errors.
+fn retirement_step(directory: &Path, result: Result<()>) -> Result<()> {
+    match result {
+        Err(error) if error.downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            && fs::symlink_metadata(directory)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(()),
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+
+    #[test]
+    fn disappearance_during_retirement_preserves_typed_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let job = root.path().join("job");
+        fs::create_dir(&job).unwrap();
+        fs::write(job.join("cgroup.events"), "populated 0\n").unwrap();
+        retirement_step(&job, kill_and_wait_empty(&job)).unwrap();
+        fs::write(job.join("cpu.stat"), "usage_usec 20\n").unwrap();
+        let measured = sample_exit(&job, "fixture");
+        // J disappears while sampling, before the removal attempt.
+        fs::remove_dir_all(&job).unwrap();
+        let usage = sample_exit(&job, "fixture");
+        assert!(matches!(finish_retirement(&job, usage).unwrap(),
+            ExitUsage::CountersUnavailable(CountersUnavailable::CgroupVanished)));
+        let ExitUsage::Sample(sample) = finish_retirement(&job, measured).unwrap()
+            else { panic!("removal race discarded measured counters"); };
+        assert_eq!(sample.cpu_usage_usec.reading.value, Some(20));
+        // The same confirmed ENOENT is terminal if disappearance races stop.
+        retirement_step(&job, kill_and_wait_empty(&job)).unwrap();
+    }
+
+    #[test]
+    fn missing_control_file_is_not_a_vanished_job() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(retirement_step(root.path(), kill_and_wait_empty(root.path())).is_err());
+        let error = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(retirement_step(&root.path().join("absent"), Err(error.into())).is_err());
     }
 }

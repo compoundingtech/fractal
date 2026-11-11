@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive generation-local cgroup driver and B6 command construction (unit 7d)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission is not wired. Explicit launch capabilities have no scheduler, runtime activation or configuration defaults."},
+  "compatibility": {"status": "changed", "detail": "J is mkdir keeper/job-hash-generation, with atomic collision refusal. Unit-12 apply/readback is reused; the gated holder is attached only to an owner-writable J with empty subtree_control and no populated children or extra PIDs. B6 argv is gate-slot --class heavy --no-scope --job ID --outcome-file PATH -- LAUNCHER, covered by a command-construction test. Abort kills the gated child and J, waits populated=0, then removes J; it never stops the shared keeper."},
+  "downtime": {"status": "none", "detail": "No live behavior or deployment changes."},
+  "manual": {"status": "none", "detail": "No activation. Keeper and job cgroup roots are explicit capabilities; caps and heavy slice come from configuration."},
+  "recovery": {"status": "none", "detail": "No generation replacement or restart recovery. Unit 8 finds J by its stable generation-specific name."}
+}
