@@ -674,7 +674,7 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(infoDialog()).toBeNull())
 
-  // The queue count is its own target; a touch press opens the queue inside the frame.
+  // A touch press opens the queue inside the viewport, not the simulated phone's clipping frame.
   const trigger = within(designedRow(context.canvasElement, 'Port the upstream sidebar')).getByRole('button', { name: missionName('+2 more missions queued') })
   await expect(trigger.querySelector('[data-queued-count]')).toHaveTextContent('+2')
   await userEvent.pointer([{ keys: '[TouchA>]', target: trigger }, { keys: '[/TouchA]', target: trigger }])
@@ -683,7 +683,7 @@ const phonePlay: NonNullable<Story['play']> = async context => {
   await waitFor(() => {
     const box = rect(dialog)
     expect(box.left).toBeGreaterThanOrEqual(0)
-    expect(box.right).toBeLessThanOrEqual(Math.min(window.innerWidth, rect(frame).right))
+    expect(box.right).toBeLessThanOrEqual(window.innerWidth)
   })
   await waitFor(() => expect(dialog).toHaveFocus())
   await userEvent.keyboard('{Escape}')

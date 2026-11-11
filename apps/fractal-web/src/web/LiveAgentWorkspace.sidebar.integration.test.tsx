@@ -114,8 +114,8 @@ it('names a child mission by the hydrated title it paints rather than the agent 
     runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
     blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z',
     current_work: [
-      { id: 'work/example/primary', mission_id: primary.id, path: 'primary', title: 'Primary task', state: 'claimed', since: '2026-10-20T12:00:00Z' },
-      { id: 'work/example/release', mission_id: child.id, path: 'release', title: 'Run tests', state: 'claimed', since: '2026-10-20T12:00:00Z' },
+      { id: 'work/example/primary', mission_id: primary.id, mission_run_id: 'mission-run/example/primary', path: 'primary', title: 'Primary task', state: 'claimed', since: '2026-10-20T12:00:00Z' },
+      { id: 'work/example/release', mission_id: child.id, mission_run_id: 'mission-run/example/release', path: 'release', title: 'Run tests', state: 'claimed', since: '2026-10-20T12:00:00Z' },
     ],
   }))
   registry.set(agents, observed({ value: [seat] }))
