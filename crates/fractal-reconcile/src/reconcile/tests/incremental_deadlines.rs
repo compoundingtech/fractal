@@ -1437,7 +1437,10 @@ fn observed(subject: &str) -> ClaimInput {
         subject: subject.into(),
         kind: "resource.observed".into(),
         actor: None,
-        fields: BTreeMap::new(),
+        fields: BTreeMap::from([
+            ("kind".into(), Value::String("custom.st3.state".into())),
+            ("state".into(), Value::String("open".into())),
+        ]),
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: None,
