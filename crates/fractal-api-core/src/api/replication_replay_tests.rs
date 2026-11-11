@@ -5,6 +5,7 @@ fn state(root: &Path) -> AppState {
         browser_pairing_login: None, seat_admission: Default::default(),
         store: Arc::new(Store::open(&root.join("graph.db"), "replay-test").unwrap()),
         notify: Arc::new(Notify::new()), event_notify: tokio::sync::watch::channel(0u64).0,
+        api_socket: root.join("api.sock"),
         node: "replay-test".into(), state_dir: root.into(), pty_root: root.join("pty"),
         pty_binary: root.join("unused"), fleet_id: None, configured_peers: vec![],
         client_relay: None, native_session_home: None, planner_default: Default::default(),
