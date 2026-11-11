@@ -70,21 +70,22 @@ fn unrelated_replication_does_not_even_require_projection_tables() {
 fn canonical_refold_refuses_illegal_edges_and_conflicting_binding() {
     let mut connection = database();
     let tx = connection.transaction().unwrap();
-    let submitted = submission("job/fixture", "fixture");
+    let id = job_id("person/fixture", "fixture");
+    let submitted = submission(id.as_str(), "fixture");
     let JobRecord::Submitted { binding, .. } = &submitted else { unreachable!() };
-    insert(&tx, "job/fixture", "later", 3, &JobRecord::Transition {
+    insert(&tx, id.as_str(), "later", 3, &JobRecord::Transition {
         binding: binding.clone(), event: Event::Started });
-    insert(&tx, "job/fixture", "first", 1, &submitted);
-    insert(&tx, "job/fixture", "middle", 2, &JobRecord::Transition {
+    insert(&tx, id.as_str(), "first", 1, &submitted);
+    insert(&tx, id.as_str(), "middle", 2, &JobRecord::Transition {
         binding: binding.clone(), event: Event::LaunchIntent });
-    refold(&tx, "job/fixture").unwrap();
+    refold(&tx, id.as_str()).unwrap();
     let state: String = tx.query_row("SELECT state FROM jobs", [], |row| row.get(0)).unwrap();
     assert_eq!(serde_json::from_str::<JobState>(&state).unwrap(), JobState::Running);
     let mut conflict = binding.clone();
     conflict.execution_host = "different-host".into();
-    insert(&tx, "job/fixture", "conflict", 4, &JobRecord::Transition { binding: conflict, event: Event::HostLost });
-    insert(&tx, "job/fixture", "illegal", 5, &JobRecord::Transition { binding: binding.clone(), event: Event::Prepared });
-    refold(&tx, "job/fixture").unwrap();
+    insert(&tx, id.as_str(), "conflict", 4, &JobRecord::Transition { binding: conflict, event: Event::HostLost });
+    insert(&tx, id.as_str(), "illegal", 5, &JobRecord::Transition { binding: binding.clone(), event: Event::Prepared });
+    refold(&tx, id.as_str()).unwrap();
     let refusals: u64 = tx.query_row("SELECT count(*) FROM job_history WHERE refusal IS NOT NULL", [], |row| row.get(0)).unwrap();
     assert_eq!(refusals, 2);
     assert_eq!(tx.query_row("SELECT state FROM jobs", [], |row| row.get::<_, String>(0)).unwrap(), state);
@@ -101,4 +102,76 @@ fn oversized_subject_refuses_before_mutating_projection() {
     let before = tx.total_changes();
     assert!(refold(&tx, "job/large").unwrap_err().to_string().contains("job-refold-limit"));
     assert_eq!(tx.total_changes(), before);
+}
+
+#[test]
+fn receipts_are_atomic_isolated_and_refuse_changed_digest() {
+    let mut connection = database();
+    let id = job_id("person/fixture", "receipt");
+    let JobRecord::Submitted { identity, .. } = submission(&id, "receipt") else { unreachable!() };
+    {
+        let tx = connection.transaction().unwrap();
+        receipts::reserve_receipt(&tx, &identity, &id).unwrap();
+        receipts::reserve_receipt(&tx, &identity, &id).unwrap();
+        let mut changed = identity.clone();
+        changed.request_digest.0[0] ^= 1;
+        assert!(receipts::reserve_receipt(&tx, &changed, &id).unwrap_err().to_string()
+            .contains("idempotency-digest-mismatch"));
+        let mut other = identity.clone();
+        other.requester = "person/other".into();
+        let other_id = job_id(&other.requester, &other.key);
+        receipts::reserve_receipt(&tx, &other, &other_id).unwrap();
+        assert_ne!(id, other_id);
+        assert_eq!(receipt_for_key(&tx, &identity.requester, &identity.key).unwrap(),
+            Some((identity.request_digest, id.clone())));
+        // Rollback removes both reservations, just as a refused writer transaction does.
+    }
+    assert!(receipt_for_key(&connection, &identity.requester, &identity.key).unwrap().is_none());
+}
+
+#[test]
+fn additive_migration_and_replay_match_reverse_arrival_history() {
+    let mut connection = database();
+    create_schema(&connection).unwrap();
+    let tx = connection.transaction().unwrap();
+    let first_id = job_id("person/fixture", "first");
+    let second_id = job_id("person/fixture", "second");
+    insert(&tx, &second_id, "second", 20, &submission(&second_id, "second"));
+    insert(&tx, &first_id, "first", 10, &submission(&first_id, "first"));
+    open(&tx).unwrap();
+    let queue = queue_for_host(&tx, "fixture-host").unwrap();
+    assert_eq!(queue.iter().map(|job| &job.id).collect::<Vec<_>>(), [&first_id, &second_id]);
+    assert!(queue_for_host(&tx, "different-host").unwrap().is_empty());
+    let before = serde_json::to_value(history_by_job(&tx, &first_id).unwrap()).unwrap();
+    let receipt = receipt_for_key(&tx, "person/fixture", "first").unwrap();
+    rebuild(&tx).unwrap();
+    assert_eq!(serde_json::to_value(history_by_job(&tx, &first_id).unwrap()).unwrap(), before);
+    assert_eq!(receipt_for_key(&tx, "person/fixture", "first").unwrap(), receipt);
+    assert_eq!(job_by_id(&tx, &first_id).unwrap().unwrap().state, JobState::Queued);
+    assert!(job_by_id(&tx, "job/absent").unwrap().is_none());
+}
+
+#[test]
+fn canonical_receipt_wins_independently_of_arrival_order() {
+    let mut connection = database();
+    let tx = connection.transaction().unwrap();
+    let id = job_id("person/fixture", "repeat");
+    let original = submission(&id, "repeat");
+    let mut changed = original.clone();
+    let JobRecord::Submitted { identity, request, .. } = &mut changed else { unreachable!() };
+    request.command.argv.push("changed-input".into());
+    identity.request_digest = request.digest();
+    insert(&tx, &id, "later-changed", 20, &changed);
+    refold(&tx, &id).unwrap();
+    insert(&tx, &id, "earlier-original", 10, &original);
+    refold(&tx, &id).unwrap();
+    let JobRecord::Submitted { identity, .. } = &original else { unreachable!() };
+    assert_eq!(receipt_for_key(&tx, &identity.requester, &identity.key).unwrap(),
+        Some((identity.request_digest, id.clone())));
+    let history = history_by_job(&tx, &id).unwrap();
+    assert!(history[0].refusal.is_none());
+    assert!(history[1].refusal.as_ref().unwrap().contains("idempotency-digest-mismatch"));
+    let before = serde_json::to_value(&history).unwrap();
+    rebuild(&tx).unwrap();
+    assert_eq!(serde_json::to_value(history_by_job(&tx, &id).unwrap()).unwrap(), before);
 }
