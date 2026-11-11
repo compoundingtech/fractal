@@ -266,3 +266,9 @@ With v19 every fixed seed converges and trims (hosted run 42884923668), so the n
 empty. The never-trim set is characterized by hosted CI: seed runs on a loaded shared host or a
 lightly loaded burst runner diverge from CI at the same commit (#6210); burst run 42884913070
 leaves seeds 55 and 610 untrimmed.
+
+`claims-v20.json` captures the complete registry with the source-enforcement kinds
+`source.debt.recorded`, `source.debt.closed` and `source.audited`. Versions 1 through 19 stay
+frozen. Generate it from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v20.json`;
+do not hand-edit the snapshot. The simulation selects v20, and the draws use the generic append path.

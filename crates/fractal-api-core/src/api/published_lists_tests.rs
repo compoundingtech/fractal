@@ -130,7 +130,7 @@ fn published_missions_match_the_direct_fold_through_work_leases_failure_and_reti
 
     // A new mission, a retired one, and a rejected write that changes nothing.
     mission(&store, "garden/delta");
-    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma").unwrap();
+    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma", None).unwrap();
     assert!(store
         .work_action(&plant, "progress", &WorkRequest {
             wait_ms: None,

@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v19.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v20.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1873,10 +1873,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v19 adds `program.step` to kind selection, shifting the shared RNG schedule. Hosted run
-/// 42884923668 observed every fixed seed converge and trim once no seed writes a keyed-only claim.
-/// Burst run 42884913070 left seeds 55 and 610 untrimmed at the same commit: a lightly loaded
-/// runner diverges from hosted CI (#6210).
+/// Corpus v20 adds the three `source.*` kinds to kind selection, shifting the shared RNG schedule.
+/// The never-trim set is characterized by hosted CI; a lightly loaded runner diverges from it
+/// (#6210).
 const NEVER_TRIMS: &[u64] = &[];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);

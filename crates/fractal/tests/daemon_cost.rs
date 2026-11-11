@@ -737,6 +737,7 @@ const PROBES: &[Probe] = &[
     post("POST /v1/sets/apply", "/v1/sets/apply", |_, attempt| {
         owned_set_request(&format!("apply-{attempt}"))
     }),
+    get("GET /v1/source/status", "/v1/source/status"),
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {

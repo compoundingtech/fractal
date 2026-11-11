@@ -4371,6 +4371,7 @@ fn apply_request(state: &AppState, source: &str, actor: &str, key: &str) -> Appl
         idempotency_key: key.into(),
         actor: Some(actor.into()),
         program_bundles: Default::default(),
+        force_reason: None,
     }
 }
 
@@ -6817,6 +6818,7 @@ async fn preview_and_apply_with_bundles(
             idempotency_key: format!("apply-{}", hex::encode(Sha256::digest(kdl))),
             actor: Some("person/alex".into()),
             program_bundles,
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -7133,6 +7135,7 @@ mission "invalid-message" state="ready" {
             idempotency_key: "reject-invalid-nested-message".into(),
             actor: Some("person/alex".into()),
             program_bundles: Default::default(),
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -9576,7 +9579,7 @@ fn roster_fixture_draining_seats(fixture: &RosterClaimsFixture) -> Vec<String> {
             expected_set: store.owned_sets().unwrap().first()
                 .map_or("absent".into(), |set| set.revision.clone()),
             rollout: None, adopt: Default::default(), allow_empty: false,
-            confirm_retire: None, expected_subjects: Default::default(),
+            confirm_retire: None, policy: None, expected_subjects: Default::default(),
         };
         let preview = store.owned_set_preview(&input, &options).unwrap();
         assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
@@ -12502,6 +12505,7 @@ version 2
         serde_json::to_value(MissionRetireRequest {
             actor,
             idempotency_key: key.into(),
+            force_reason: None,
         })
         .unwrap()
     };
@@ -12770,6 +12774,7 @@ agent "example/other" {
         serde_json::to_value(MissionRetireRequest {
             actor: agent.into(),
             idempotency_key: "free-retire".into(),
+            force_reason: None,
         })
         .unwrap(),
     )
@@ -15131,7 +15136,7 @@ async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity()
             sha: format!("{:040x}", 1), sequence: 1,
         },
         expected_set: "absent".into(), rollout: None, adopt: Default::default(),
-        allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+        allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
     };
     let preview = state.store.owned_set_preview(&intent, &options).unwrap();
     assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
