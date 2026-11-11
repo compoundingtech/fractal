@@ -145,13 +145,13 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
   await expect(canvas.getByRole('separator', { name: 'Resize Changes' })).toBeVisible()
   await expect(canvas.queryByRole('separator', { name: 'Resize Details' })).toBeNull()
   await expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull()
-  // A remounted inspector starts on Details again, and so does its separator.
+  // A remounted inspector remembers its selected view, and its separator follows it.
   await userEvent.click(within(inspector).getByRole('button', { name: 'Close agent inspector' }))
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
   await userEvent.click(header.getByRole('button', { name: 'Toggle right panel' }))
   const reopened = await loadedInspector(canvasElement)
-  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
-  await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
+  await expect(reopened.tab('Changes')).toHaveAttribute('aria-selected', 'true')
+  await expect(canvas.getByRole('separator', { name: 'Resize Changes' })).toBeVisible()
 }
 
 /**
@@ -297,7 +297,7 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   return { canvas, sheet, opener, ...inspector }
 }
 /** The right sheet holds the agent inspector: Details first, Changes one tab away; the conversation actions stay in the header. */
-export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin Details-first inspector routing and the Changes tab inside the phone sheet.' } }, play: async ({ canvasElement }) => {
+export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin initial Details routing, Changes inside the phone sheet, and remembered inspector selection after reopening.' } }, play: async ({ canvasElement }) => {
   const { narrow } = await workspace(canvasElement)
   if (!narrow) return openWideDetails(canvasElement)
   const { canvas, sheet, inspector, views, tab, opener } = await openDetailsSheet(canvasElement)
@@ -326,11 +326,11 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   const headerTop = capturedHeader.getBoundingClientRect().top
   for (const row of rows) await expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(headerTop)
   await expect(changes.getBoundingClientRect().width).toBeLessThanOrEqual(sheet.getBoundingClientRect().width)
-  // A reopened sheet mounts a fresh inspector on Details.
+  // A reopened sheet remembers the selected Changes view.
   await userEvent.click(within(sheet).getByRole('button', { name: 'Close agent details' }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
   const reopened = await openDetailsSheet(canvasElement)
-  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
+  await expect(reopened.tab('Changes')).toHaveAttribute('aria-selected', 'true')
 } }
 /**
  * Explicitly closing the docked inspector unmounts the focused control; focus returns to the header's Toggle right
