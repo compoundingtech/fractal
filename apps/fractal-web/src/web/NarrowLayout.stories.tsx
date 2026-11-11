@@ -129,7 +129,7 @@ const assertWide = async (canvasElement: HTMLElement) => {
 const loadedInspector = async (scope: HTMLElement) => {
   const views = await within(scope).findByRole('tablist', { name: 'Agent inspector views' }, { timeout: 15000 })
   const inspector = views.closest<HTMLElement>('aside[aria-label="Agent inspector"]')!
-  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name }) }
+  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name: name === 'Changes' ? /^Changes(?:, \d+)?$/ : name }) }
 }
 /** The docked inspector opens on Details; its separator names the visible view and follows the tab selection. */
 const openWideDetails = async (canvasElement: HTMLElement) => {
