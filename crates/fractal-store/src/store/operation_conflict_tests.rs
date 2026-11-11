@@ -187,13 +187,20 @@ mission "bounded-run" state="ready" {
     FULL_REPLAYS.with(|count| count.set(0));
     // The production driver dispatches project_incremental_chunk, then final-drain work.
     // A conflict run must finish its bounded/savepoint attempt before that generic queue.
+    let projected_tables = || {
+        let mut tables = smallclaims::store::projection_digest::tables(&store.readers.get()).unwrap();
+        // Admission changes claim_sources even when every projected row stays frozen.
+        // Compare every derived table, not the root that also commits those new claims.
+        tables.remove("claim_sources");
+        tables
+    };
     let observed = std::cell::RefCell::new(None);
     let between = || {
         if observed.borrow().is_none() {
             let health = store.replication_status(false, None, &[]).unwrap();
             if let Some(row) = health.unhealthy.into_iter().find(|row| row.aggregate.contains(operation)
                 && row.error_code.as_deref() == Some("operation-conflict-refold-limit")) {
-                *observed.borrow_mut() = Some((graph_digest_of(&store), row.error_message));
+                *observed.borrow_mut() = Some((projected_tables(), row.error_message));
                 RUN_TREE_REBUILDS.with(|count| count.set(0));
             }
         }
@@ -212,7 +219,7 @@ mission "bounded-run" state="ready" {
     assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 0,
         "later ordinary claims must not rebuild an already-degraded run");
     let (before_graph, before_diagnostic) = observed.into_inner().unwrap();
-    assert_eq!(graph_digest_of(&store), before_graph);
+    assert_eq!(projected_tables(), before_graph);
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     let health = store.replication_status(false, None, &[]).unwrap();
     assert!(health.unhealthy.iter().any(|row| row.aggregate.contains(operation)
@@ -683,6 +690,7 @@ fn degraded_run_settles_sibling_pending_work_and_does_not_block_startup_repair()
     let store = Store::open_memory("fixture").unwrap();
     super::tests_shared_seats::publish_mission(&store, r#"version 2
 mission "pending-conflict" state="ready" {
+  concurrent-runs max=4
   goal "Drain independent run work."
   step "program" { agentless }
 }"#, "publish-pending-conflict");
