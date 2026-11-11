@@ -148,7 +148,7 @@ fn conversation_serializes_to_the_fixture() {
                 { "id": "PRRC_1", "body": "Should this read moisture once per bed, not once per run?", "createdAt": "2026-11-06T10:04:00Z", "url": "https://github.com/acme/garden/pull/7#discussion_r1001", "author": graph_user("grace") },
                 { "id": "PRRC_2", "body": "Yes, fixed in the next push.", "createdAt": "2026-11-06T11:00:00Z", "url": "https://github.com/acme/garden/pull/7#discussion_r1002", "author": graph_user("ada") }
             ] } },
-            { "id": "PRRT_kwDOB2", "path": "README.md", "line": null, "isResolved": true, "isOutdated": true, "comments": { "totalCount": 1, "nodes": [
+            { "id": "PRRT_kwDOB2", "path": "docs/garden-guide.md", "line": null, "isResolved": true, "isOutdated": true, "comments": { "totalCount": 1, "nodes": [
                 { "id": "PRRC_3", "body": "Typo: *wtaer*.", "createdAt": "2026-11-06T12:30:00Z", "url": "https://github.com/acme/garden/pull/7#discussion_r1003", "author": graph_user("linus") }
             ] } }
         ] }
@@ -310,7 +310,7 @@ fn path_values_are_typed() {
     for owner in ["", "-acme", "acme_garden", "acme.garden", "a/b", &"a".repeat(40), "ácme"] {
         assert!(!valid_owner(owner), "{owner}");
     }
-    for repo in ["garden", "garden.rs", ".github", "a_b-c", &"r".repeat(100)] {
+    for repo in ["garden", "garden.rs", ".garden", "a_b-c", &"r".repeat(100)] {
         assert!(valid_repo(repo), "{repo}");
     }
     for repo in ["", ".", "..", "a/b", "a b", "a%2f", &"r".repeat(101)] {
