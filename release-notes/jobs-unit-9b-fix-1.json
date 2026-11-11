@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use the integer multiple predicate for millisecond timeout rounding.",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema behavior changes."},
+  "rules": {"status": "none", "detail": "No rules behavior changes."},
+  "compatibility": {"status": "none", "detail": "Preserve exact sub-millisecond round-up and i32 timeout saturation without changing retirement behavior."},
+  "downtime": {"status": "none", "detail": "No downtime behavior changes."},
+  "manual": {"status": "none", "detail": "No manual behavior changes."},
+  "recovery": {"status": "none", "detail": "No recovery behavior changes."}
+}
