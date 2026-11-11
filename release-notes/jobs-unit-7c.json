@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive raw-pipe holder gate and transient user keeper adapter (unit 7c)",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Admission is not wired. No startup or launch caller. Gate EOF, short reads and non-release bytes abort with _exit before any holder exec; the pre_exec gate uses raw async-signal-safe IO only."},
+  "compatibility": {"status": "changed", "detail": "Only the shared keeper uses user-manager StartTransientUnit with PIDs, configured Slice, Delegate, MemoryAccounting, TasksAccounting and optional IOAccounting. No BindsTo or PartOf. Its pause-only process closes all FDs and is independent of daemon lifetime. Fixtures cover EOF/no-exec and explicit release; property tests prohibit daemon lifetime dependencies."},
+  "downtime": {"status": "none", "detail": "No live behavior or deployment changes."},
+  "manual": {"status": "none", "detail": "No activation or policy defaults. The daemon-delegated mkdir alternative was rejected because it required deployment changes."},
+  "recovery": {"status": "none", "detail": "Unit 8 owns restart decisions. Keeper child reaping does not stop a live keeper when the adapter or daemon exits."}
+}
