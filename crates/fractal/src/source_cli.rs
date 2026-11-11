@@ -290,9 +290,13 @@ pub(crate) async fn show(
                     .and_then(|frame| Some(located(map, &map.frame_location(frame)?, frame.precision)))
                     .or_else(|| Some(located(map, &map.span_location(node)?, Precision::Exact)))
                     .unwrap_or_default();
+                // A node without its own declaration frame is placed at its helper's span; that
+                // helper then adds nothing as a `via`.
                 let via = map
                     .via(node)
-                    .map(|(frame, location)| format!("via {}", located(map, &location, frame.precision)))
+                    .map(|(frame, location)| located(map, &location, frame.precision))
+                    .filter(|place| *place != declared)
+                    .map(|place| format!("via {place}"))
                     .collect::<Vec<_>>()
                     .join(" ");
                 (label, declared, via)
@@ -574,12 +578,12 @@ fn render_where(found: &Where) -> String {
                     .flat_map(|node| &node.via)
                     .map(|frame| {
                         let path = frame.path.strip_prefix(base).and_then(|rest| rest.strip_prefix('/')).filter(|_| !base.is_empty()).unwrap_or(&frame.path);
-                        format!("via {}", lines_label(path, frame.start, frame.end, frame.precision))
+                        lines_label(path, frame.start, frame.end, frame.precision)
                     })
                     .collect();
                 let mut row = format!("  {:<width$}  {}", subject.subject, labels.join(", "));
                 if !via.is_empty() {
-                    row.push_str(&format!("   {}", via.into_iter().collect::<Vec<_>>().join(" ")));
+                    row.push_str(&format!("   via {}", via.into_iter().collect::<Vec<_>>().join(", ")));
                 }
                 if subject.sha != file.reference.sha && subject.blob_hash != file.reference.blob_hash {
                     if subject.nodes.iter().any(|node| node.lines.is_none()) {
