@@ -2337,7 +2337,18 @@
           "required": ["kind", "mission_run_id", "generation_id", "definition_id", "path", "state", "attempt", "readiness_epoch", "goals", "constraints"],
           "properties": {
             "kind": { "const": "work" },
-            "gate_kind": { "enum": ["watch", "predicate", "command", "llm", "human", "mixed", "run", null] },
+            "gate_kind": { "enum": [
+              "watch",
+              "predicate",
+              "command",
+              "llm",
+              "human",
+              "mixed",
+              "run",
+              "program",
+              null
+            ] },
+            "program": { "oneOf": [{ "$ref": "#/$defs/WorkProgram" }, { "type": "null" }], "description": "A program step's innermost open journal key and journal timing; null for other work." },
             "mission_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }], "description": "The mission this work's run belongs to." },
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "generation_id": { "$ref": "#/$defs/Id" },
@@ -2369,6 +2380,17 @@
           }
         }
       ]
+    },
+    "WorkProgram": {
+      "type": "object",
+      "required": ["stalled_after_ms"],
+      "properties": {
+        "open_key": { "type": ["string", "null"], "description": "The most recently started journal key without a result: the innermost open key." },
+        "open_since_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
+        "child": { "type": ["string", "null"], "description": "The child mission run or ask subject the open key waits on." },
+        "last_entry_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
+        "stalled_after_ms": { "type": "integer", "minimum": 1, "x-st-codec": "duration-ms", "description": "How long the journal may go without a new entry before the step has made no progress." }
+      }
     },
     "AgentWorkspace": {
       "type": "object",
