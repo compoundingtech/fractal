@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::JobsConfig;
 use fractal_jobs::{JobPriority, host_authority::JobHostBinding, identity::*};
-use fractal_store::store::jobs::{self as projection, JobRecord, JobRow, JobsProjectionStale};
+use fractal_store::jobs::{self as projection, JobRecord, JobRow, JobsProjectionStale};
 use smallclaims::fleet::MemberState;
 
 /// Every jobs method is requester-private, including reads and future intent routes.
@@ -106,7 +106,7 @@ pub async fn submit(
             authority_declaration: member.admitted_claim.clone(),
         }))
     })??;
-    let record = JobRecord::Submitted { binding, identity: identity.clone(), request: submission.request };
+    let record = JobRecord::Submitted { binding, identity: identity.clone(), request: Box::new(submission.request) };
     record_submission(&state, &identity, &id, record)?;
     Ok(response(own_job(&state, &session.actor, &id)?))
 }

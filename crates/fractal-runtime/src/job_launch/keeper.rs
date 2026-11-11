@@ -113,8 +113,8 @@ pub fn ensure_keeper(
         replenish_keeper(manager, &scope)?;
         Ok(())
     })();
-    if verified.is_err() {
-        if let Some(pid) = fresh_pid { manager.kill_idle(pid)?; }
+    if verified.is_err() && let Some(pid) = fresh_pid {
+        manager.kill_idle(pid)?;
     }
     verified.context(LaunchRefusal::KeeperUnavailable)?;
     if let Some(pid) = fresh_pid { manager.commit_idle(pid)?; }

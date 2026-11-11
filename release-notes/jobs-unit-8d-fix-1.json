@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Box recovery samples without changing durable JSON; preserve keep-running checks and import the holder outcome fixture type.",
+  "replay": {"status": "changed", "detail": "Replay covers pending, intent-only, J-created/unconfirmed-holder, released, running and outcome-written phases. Same-node restart retains job ID, admitted host pin and running holder, then records the B6 terminal outcome without another launch."},
+  "schema": {"status": "none", "detail": "No new tables or forbidden shared-writer changes. Existing jobs history retains measured exit usage or typed counters-unavailable with recovery records."},
+  "rules": {"status": "none", "detail": "INACTIVE: no runtime.rs boot hook or production caller. 4c-2 and explicit activation must supply the post-sealing authenticated recovery/window adapter. No policy defaults or boot-time host re-pin."},
+  "compatibility": {"status": "changed", "detail": "ExecRuntime::recover_job has no launch/release capability. Unconfirmed J is stopped before resolution. Authenticated unchanged admission plus the confirmed holder process identity keeps a running J; missing keeper/J or unprovable outcomes become unknown-after-host-loss, never failed-and-rerun."},
+  "downtime": {"status": "none", "detail": "No reachable runtime behavior changes."},
+  "manual": {"status": "none", "detail": "Activation design: recover pinned nonterminal jobs before new work, continuously poll kept jobs, and run the separate keeper watcher. Cargo, native systemd/cgroup execution and pilot not run."},
+  "recovery": {"status": "changed", "detail": "Uses unit 7's shared stop_and_sample: cgroup.kill, populated=0, sample, then rmdir. Recovery records retain the sample; vanished J retains counters-unavailable. Receipts require exact job, holder and hierarchy identity and consistent holderOutcome, never exit status. Failed stop leaves intent unresolved. Replay fixtures also reject unauthenticated recovery and mismatched receipts."}
+}
