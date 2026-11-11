@@ -1715,12 +1715,14 @@ replication RPC timeout (120 seconds for both graph and shard receive/export),
 not the shorter receive budget.
 
 The network worker still answers at 28 seconds. The exact deadline-503 semantics
-are: **outcome unknown, retry safe; a late commit is kept, and the retry gets the
-duplicate result**. This is not proof that no receipt exists. If the deadline expires
-before reverse export can start, no new seal/judge commit starts: the network
-answers 503, the committed receipt's normal wake still runs, and a retry gets the
-duplicate receipt with a normal full reply export. There is no fabricated empty
-reply or separate read-only export path.
+are: **outcome unknown, retry safe; a late commit is kept, and a later retry gets
+the duplicate result; an identical retry can first consume the retained deadline
+response** (existing exchange-job reuse, `worker.rs:2892-2894` and `:3070-3088`).
+This is not proof that no receipt exists. If the deadline expires before reverse
+export can start, no new seal/judge commit starts: the network answers 503 and
+the committed receipt's normal wake still runs. After any retained deadline
+response is consumed, a later retry gets the duplicate receipt with a normal full
+reply export. There is no fabricated empty reply or separate read-only export path.
 
 Ingress uses string codes, not new closed-enum variants:
 
@@ -1747,7 +1749,9 @@ failures.
 ### Sender handling
 
 For a sender, a `replication-ingress/receive-deadline` 503 means **outcome unknown,
-retry safe; a late commit is kept, and the retry gets the duplicate result**.
+retry safe; a late commit is kept, and a later retry gets the duplicate result;
+an identical retry can first consume the retained deadline response**
+(existing exchange-job reuse, `worker.rs:2892-2894` and `:3070-3088`).
 The code is never terminal and never creates a park. Reply export preparation
 uses the same deadline-aware seal/judge loans as receive follow-ups, including
 the trusted local Unix budget header; ordinary outbound export is unchanged.
