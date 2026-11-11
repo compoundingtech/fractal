@@ -6,7 +6,9 @@
 
 export interface SourcePosition { readonly line: number; readonly column: number }
 export interface SourceSpan { readonly file: number; readonly start: SourcePosition; readonly end: SourcePosition }
-export interface SourceFrame extends SourceSpan { readonly role: string; readonly precision: string }
+/** A wire enum: a known word, or a newer emitter's word the client decoded as `Unknown`. */
+export type OpenWord = string | { readonly _tag: 'Unknown'; readonly raw: string }
+export interface SourceFrame extends SourceSpan { readonly role: OpenWord; readonly precision: OpenWord }
 export interface SourceNode { readonly kdl: string; readonly span: SourceSpan; readonly frames: readonly SourceFrame[] }
 export interface SourceFile { readonly repository: string; readonly path: string; readonly blob_hash: string }
 export interface SourceMap {
@@ -185,8 +187,10 @@ export const nodeLabel = (path: string): string =>
 
 export interface StripFrame { readonly file: number; readonly start: number; readonly end: number; readonly role: string; readonly precision: 'exact' | 'enclosing' }
 
-const lineFrame = (span: SourceSpan, role: string, precision: string): StripFrame =>
-  ({ file: span.file, start: span.start.line, end: span.end.line, role, precision: precision === 'enclosing' ? 'enclosing' : 'exact' })
+const word = (value: OpenWord): string => typeof value === 'string' ? value : value.raw
+
+const lineFrame = (span: SourceSpan, role: OpenWord, precision: OpenWord): StripFrame =>
+  ({ file: span.file, start: span.start.line, end: span.end.line, role: word(role), precision: word(precision) === 'enclosing' ? 'enclosing' : 'exact' })
 
 /** declaration › helper › value, outermost first; a node without frames is its own declaration. */
 export const frameStrip = (node: SourceNode): readonly StripFrame[] =>
