@@ -2583,7 +2583,7 @@ mod tests {
                 holder: crate::windows::holds::Holder::current(),
                 enqueued,
                 done,
-            })).unwrap();
+            }).map_err(Box::new)).unwrap();
             callers.push((label, operation, answer));
         }
         let first = receiver.recv().unwrap();
@@ -2676,7 +2676,7 @@ mod tests {
                     true
                 }),
                 profile: None, wait: None, holder: crate::windows::holds::Holder::current(), enqueued, done,
-            })).unwrap();
+            }).map_err(Box::new)).unwrap();
             answers.push(answer);
         }
         let observed = fifo.clone();
