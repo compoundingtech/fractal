@@ -1741,6 +1741,17 @@ fn append_generated_claim(
     if input.kind == "daemon.diagnostic" {
         return store.append_as_older_build_for_test(input);
     }
+    if input.kind == "doc.bound" {
+        let key = input.idempotency_key.as_deref().unwrap();
+        let bytes = format!("Convergence document {key}\n");
+        let expected = store.latest_document_token(&input.subject).unwrap();
+        let version = store.put_document_as(
+            &input.subject, bytes.as_bytes(), &expected, key, input.actor.as_deref(),
+        )?;
+        return Ok(store.claim_by_id(&version.binding_claim_id)
+            .expect("read generated document binding")
+            .expect("document API wrote the generated binding"));
+    }
     if input.kind != "mission.published" {
         return store.append_claim(input);
     }
@@ -1796,6 +1807,53 @@ fn generated_message_expiry_is_admitted_and_replicates() {
     assert_eq!(expiry.id, claim.id);
     world.tap(0);
     assert!(claims(&world.oracle).contains_key(&claim.id));
+    assert!(world.failures.is_empty(), "{}", world.report());
+}
+
+#[test]
+fn generated_document_bindings_replicate_without_recovery() {
+    let mut world = World::new(2, Sabotage::None);
+    let mut input = world.claim_of(&corpus()["doc.bound"], 0).unwrap();
+    input.actor = Some(PERSON.into());
+    for publication in 0..2 {
+        input.idempotency_key = Some(format!("generated-document-{publication}"));
+        let claim = append_generated_claim(&world.nodes[0].store, &input).unwrap();
+        assert_eq!(claim.kind, "doc.bound");
+        assert_eq!(claim.body["name"], json!(input.subject));
+        assert!(claim.body["hash"].as_str().is_some());
+        assert!(claim.body.get("fields").is_none());
+        assert_eq!(world.nodes[0].store.latest_document_token(&input.subject).unwrap(),
+            Some(claim.id.clone()));
+        world.tap(0);
+        assert!(world.oracle.project_replication_backlog().unwrap());
+        assert!(!world.oracle.replication_projection_recovery_required().unwrap());
+        assert_eq!(world.oracle.claim_by_id(&claim.id).unwrap().unwrap().body, claim.body);
+        assert_eq!(world.oracle.latest_document_token(&input.subject).unwrap(),
+            Some(claim.id));
+    }
+    assert!(world.failures.is_empty(), "{}", world.report());
+}
+
+#[test]
+fn malformed_generated_document_binding_parks_without_automatic_repair() {
+    let mut world = World::new(2, Sabotage::None);
+    assert!(world.oracle.project_replication_backlog().unwrap());
+    let frontier = world.oracle.index().unwrap();
+    let mut input = world.claim_of(&corpus()["doc.bound"], 0).unwrap();
+    input.actor = Some(PERSON.into());
+    input.fields.clear();
+    let claim = world.nodes[0].store.append_claim(&input).unwrap();
+    assert!(claim.body.get("name").is_none());
+    world.tap(0);
+    let parked = world.oracle.projection_recovery().unwrap().unwrap();
+    assert_eq!(parked.reason_code, "invalid-document-claim");
+    assert_eq!(parked.frontier, Some(frontier));
+    assert!(parked.message.as_deref().unwrap().contains(&claim.id));
+    assert!(!world.oracle.project_replication_backlog().unwrap());
+    let still_parked = world.oracle.projection_recovery().unwrap().unwrap();
+    assert_eq!(still_parked.frontier, parked.frontier);
+    assert_eq!(still_parked.reason_code, parked.reason_code);
+    assert_eq!(still_parked.message, parked.message);
     assert!(world.failures.is_empty(), "{}", world.report());
 }
 

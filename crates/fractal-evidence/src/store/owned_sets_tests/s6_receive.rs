@@ -84,7 +84,7 @@ fn t1_generated_owned_set_arrivals_match_full_replay_effective_held_view() {
                 let preview = branch.owned_set_preview(&input, &opts).unwrap();
                 opts.expected_subjects = preview.expected_subjects;
                 opts.confirm_retire = Some(preview.digest);
-                branch.apply_owned_set(&input, &opts, &format!("generated-{revision}"), "person/operator").unwrap();
+                branch.apply_owned_set(&input, &opts, &format!("generated-{}-{revision}", branch.origin), "person/operator").unwrap();
                 arrivals.push((branch.origin.clone(), exchange_from(branch, &Default::default())));
             }
         }
@@ -106,6 +106,64 @@ fn t1_generated_owned_set_arrivals_match_full_replay_effective_held_view() {
         assert!(target.owned_sets().unwrap()[0].blockers.is_empty());
         assert_replay_parity(&target, seed, arrivals.len() + 1);
     }
+}
+
+#[test]
+fn independent_publishers_reusing_a_global_request_key_park_without_losing_receipts() {
+    let base = Store::open_memory("base").unwrap();
+    apply(&base, &bundle("initial", false), 1);
+    let target = Store::open_memory("target").unwrap();
+    receive_and_project(&target, "base", &exchange_from(&base, &target.replication_inventory().unwrap()));
+    let branches = ["amber", "cobalt"].map(|origin| {
+        let branch = Store::open_memory(origin).unwrap();
+        share(&base, &branch);
+        let input = bundle(origin, false);
+        let mut opts = options(&branch, 10);
+        let preview = branch.owned_set_preview(&input, &opts).unwrap();
+        opts.expected_subjects = preview.expected_subjects;
+        opts.confirm_retire = Some(preview.digest);
+        branch.apply_owned_set(&input, &opts, "generated-0", "person/operator").unwrap();
+        branch
+    });
+    let operation_id = smallclaims::store::opaque_cache_key("owned-set:garden:generated-0");
+    let claims = branches.iter().map(|branch| {
+        let (_, claim_id, state) = smallclaims::store::operation_tx(
+            &branch.readers.get(), &operation_id,
+        ).unwrap().unwrap();
+        assert_eq!(state, "active");
+        branch.claim_by_id(&claim_id).unwrap().unwrap()
+    }).collect::<Vec<_>>();
+    assert_eq!(claims[0].operation_id.as_deref(), Some("cache/511eb8217295350bdad7a9e1959bbe466b13ba15c444a42ce96d7688a4b8778a"));
+    assert_eq!(claims[0].operation_id, claims[1].operation_id);
+    assert!(claims.iter().all(|claim| claim.request_digest.is_some()));
+    assert_ne!(claims[0].request_digest, claims[1].request_digest);
+    receive_and_project(&target, "amber", &exchange_from(&branches[0], &target.replication_inventory().unwrap()));
+    let physical = || {
+        target.readers.get().query_row(
+            "SELECT claim_id,revision,body,member FROM desired WHERE subject='agent/garden/orchard'",
+            [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)),
+        ).unwrap()
+    };
+    let last_good = physical();
+    let frontier = target.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get::<_, Option<u64>>(0),
+    ).unwrap();
+    let exchange = exchange_from(&branches[1], &target.replication_inventory().unwrap());
+    target.receive_replication_exchange("cobalt", TEST_FLEET, &exchange).unwrap();
+    target.validate_replication_backlog().unwrap();
+    target.apply_replication_repairs().unwrap();
+    smallclaims::store::FULL_REPLAYS.with(|count| count.set(0));
+    assert!(!target.project_replication_backlog().unwrap());
+    let parked = target.projection_recovery().unwrap().unwrap();
+    assert_eq!(parked.reason_code, "operation-conflict");
+    assert_eq!(parked.frontier, frontier);
+    assert_eq!(physical(), last_good);
+    assert!(target.claim_by_id(&claims[1].id).unwrap().is_some());
+    assert!(!target.project_replication_backlog().unwrap());
+    assert_eq!(physical(), last_good);
+    assert_eq!(smallclaims::store::FULL_REPLAYS.with(std::cell::Cell::get), 0);
 }
 
 #[test]

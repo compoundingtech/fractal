@@ -3088,6 +3088,23 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
             transaction.commit().unwrap();
             claim
         };
+        let rollback_snapshot = || {
+            let root = graph_digest_of(&controller);
+            let connection = controller.readers.get();
+            let mut statement = connection.prepare("SELECT * FROM step_runs WHERE subject=?1").unwrap();
+            let columns = statement.column_count();
+            let step_row = statement.query_row(/* sqlite-large-value: allow-for-now lv-h51558fdbd57b owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ [&step], |row| {
+                (0..columns).map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+            }).unwrap();
+            let operation_row = operation_tx(&connection, operation).unwrap();
+            let frontier = connection.query_row(
+                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| row.get::<_, Option<u64>>(0),
+            ).unwrap();
+            (root, step_row, operation_row, frontier)
+        };
+        let admitted = rollback_snapshot();
         FULL_REPLAYS.with(|count| count.set(0));
         let mut lines = Vec::new();
         assert!(
@@ -3097,7 +3114,7 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
         );
         assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
         assert!(controller.replication_projection_recovery_required().unwrap());
-        assert_eq!(incremental, graph_digest_of(&controller));
+        assert_eq!(admitted, rollback_snapshot());
         let detail: Value = serde_json::from_str(
             lines
                 .iter()
