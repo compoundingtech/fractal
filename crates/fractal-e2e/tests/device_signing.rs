@@ -1509,6 +1509,7 @@ fn state_on(root: &Path, store: Store) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "signing-node".into(),
+        runtime_dir: root.to_path_buf(),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused-pty"),

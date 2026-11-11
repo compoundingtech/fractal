@@ -53,6 +53,7 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: name.into(),
+        runtime_dir: root.clone(),
         state_dir: root.clone(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),

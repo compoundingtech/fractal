@@ -140,6 +140,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
         notify: Arc::new(Notify::new()),
         event_notify: events.clone(),
         node: "orchid".into(),
+        runtime_dir: root.path().into(),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: "pty".into(),

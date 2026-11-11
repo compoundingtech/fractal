@@ -438,6 +438,7 @@ impl Node {
             notify,
             event_notify: watch::channel(0).0,
             node: name.into(),
+            runtime_dir: root.path().into(),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),

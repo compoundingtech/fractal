@@ -50,6 +50,7 @@ impl Daemon {
             notify: Arc::new(Notify::new()),
             event_notify: daemon.event_notify.clone(),
             node: "wait-node".into(),
+            runtime_dir: root.join("daemon"),
             state_dir: root.join("daemon"),
             pty_root: root.join("pty"),
             pty_binary: PathBuf::from("pty"),
