@@ -109,6 +109,23 @@ pub fn queue_for_host(connection: &Transaction<'_>, host: &str) -> Result<Vec<Jo
     Ok(statement.query_map([host], job_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Requester history uses canonical submission order, not receiver arrival time.
+pub fn jobs_for_requester(connection: &Transaction<'_>, requester: &str) -> Result<Vec<JobRow>> {
+    // A pending submission can introduce a requester absent from the current rows.
+    let pending: Option<String> = connection.query_row(
+        "SELECT subject FROM job_pending ORDER BY subject LIMIT 1", [],
+        |row| row.get(0),
+    ).optional()?;
+    if let Some(subject) = pending {
+        return Err(JobsProjectionStale { subject }.into());
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,requester,idempotency_key,request_digest,binding,state,created_at,updated_at
+         FROM jobs INDEXED BY jobs_requester WHERE requester=?1 ORDER BY queue_order,id",
+    )?;
+    Ok(statement.query_map([requester], job_row)?.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn history_by_job(connection: &Transaction<'_>, id: &str) -> Result<Vec<HistoryRow>> {
     ensure_current(connection, id)?;
     let mut statement = connection.prepare(

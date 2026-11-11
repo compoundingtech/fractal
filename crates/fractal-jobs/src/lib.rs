@@ -9,6 +9,14 @@ pub mod host_authority;
 pub mod identity;
 pub mod launch;
 
+/// A declaration only: background sorts before normal; neither grants admission or preemption.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobPriority {
+    Background,
+    Normal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobRequest {
@@ -21,7 +29,7 @@ pub struct JobRequest {
     pub expected_duration_ms: u64,
     /// Optional hard execution clock, independent of the estimate.
     pub run_timeout_ms: Option<u64>,
-    pub priority: i32,
+    pub priority: JobPriority,
     pub requested_class: String,
     pub storage_request: Option<StorageRequest>,
     pub delegated_reservations: Option<DelegatedReservations>,

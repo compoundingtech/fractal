@@ -23,7 +23,7 @@ async fn browser_admission_matrix() {
         kdl: source.into(), source_name: None,
     }).unwrap();
     state.store.apply_as(&intent, &preview.subject_tokens, "web-budget-fixture", Some("person/robin")).unwrap();
-    let server = tokio::spawn(prepared.serve(state, Default::default()));
+    let server = tokio::spawn(prepared.serve(state, Default::default(), Default::default()));
     let client = Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let url = format!("http://{address}");
     assert_eq!(client.get(&url).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
