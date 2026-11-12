@@ -4044,6 +4044,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("signal", string()),
             ("reason", string()),
             ("fresh_session", boolean()),
+            ("from_stale_handoff", boolean()),
             ("ignore_fit", boolean()),
         ],
         "runtime.action.succeeded"
@@ -5151,6 +5152,8 @@ mod tests {
         for kind in availability::KINDS {
             current.claims.remove(kind).unwrap();
         }
+        current.claims.get_mut("runtime.action.requested").unwrap()
+            .fields.remove("from_stale_handoff").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
