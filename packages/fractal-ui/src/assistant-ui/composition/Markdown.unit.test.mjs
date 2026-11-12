@@ -148,6 +148,37 @@ test('delimiter and error fallback text applies HTML policy without stripping co
   assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
 })
 
+test('a caught renderer failure keeps hidden HTML out of the real fallback DOM', async () => {
+  const { JSDOM } = await import('jsdom')
+  const { createRoot } = await import('react-dom/client')
+  const { act } = await import('react')
+  const dom = new JSDOM('<!doctype html><div id="root"></div>')
+  const names = ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'IS_REACT_ACT_ENVIRONMENT']
+  const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)])
+  for (const name of names) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: name === 'IS_REACT_ACT_ENVIRONMENT' ? true : dom.window[name] })
+  const caught = []
+  const container = document.getElementById('root')
+  const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
+  try {
+    const source = 'src/x.ts <!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <a href="javascript:x">safe</a> <details>Visible</details>'
+    await act(async () => root.render(h(Markdown, {
+      text: markdownBlock(source),
+      renderInlineReference: path => { if (path === 'src/x.ts') throw new Error('expected renderer failure'); return undefined },
+    })))
+    assert.deepEqual(caught, ['expected renderer failure'])
+    assert.equal(container.querySelector('script,img,a,details'), null)
+    assert.doesNotMatch(container.textContent, /HIDDEN|SECRET/)
+    assert.match(container.textContent, /Visible/)
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor === undefined) delete globalThis[name]
+      else Object.defineProperty(globalThis, name, descriptor)
+    }
+  }
+})
+
 test('raw pre with explicit code has one code holder and keeps its text', () => {
   for (const source of ['<pre><code>x</code></pre>', '<pre><code>x &lt; y\nsecond</code></pre>']) {
     const html = block(source)
