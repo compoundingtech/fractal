@@ -128,6 +128,7 @@ export type Agent = ResourceHeader & {
 
 } | null;
   lifecycle?: AgentLifecycle;
+  live_model?: string | null;
   mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
