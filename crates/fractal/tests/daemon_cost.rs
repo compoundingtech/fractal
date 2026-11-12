@@ -44,6 +44,10 @@
 //! Every sample starts without a registration for POST and with one for DELETE; fixture writes
 //! and row-count assertions stay outside the measured request.
 //!
+//! Retry samples create independent runs from one failed terminal source in a concurrent-runs
+//! mission. Each attempt uses its own stable key, so every measured request writes a new run
+//! rather than measuring idempotent replay; source preparation is outside the counted region.
+//!
 //! - `ST_COST_SCALES` sets the two generated scales, smaller first. The default is `0.01,0.1`.
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
@@ -1450,6 +1454,16 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
+    post(
+        "POST /v1/mission-runs/{run}/retry",
+        "/v1/mission-runs/{retry_run}/retry",
+        |_, attempt| json!({
+            "actor": "person/bench-operator",
+            "same_revision": false,
+            "reason": "Retry the invented failed work.",
+            "idempotency_key": format!("cost-mission-retry-{attempt}"),
+        }),
+    ),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
     post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
@@ -3533,6 +3547,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
         }
+        if probe.route == "POST /v1/mission-runs/{run}/retry" {
+            prepare_retry(&store, &mut fixture, root);
+        }
         if probe.route == "GET /v1/client/conversations/search" {
             // The cold build owns all SQL work through the worker's explicit completion,
             // not merely until its first 503 or a quiet interval between reader admissions.
@@ -3634,6 +3651,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     client.clone()
                 };
                 let expected_publication = &publication;
+                let expected_retry_source = fixture.items.get("retry_subject");
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
@@ -3655,6 +3673,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                                 anyhow::ensure!(
                                     value["published"] == true,
                                     "the transport cost probe must publish an attributed endpoint announcement",
+                                );
+                            }
+                            if probe.route == "POST /v1/mission-runs/{run}/retry" {
+                                let source = expected_retry_source.expect("retry source is prepared");
+                                anyhow::ensure!(
+                                    value["retry_of"].as_str() == Some(source.as_str())
+                                        && value["subject"].as_str().is_some_and(|subject| subject != source.as_str())
+                                        && value["steps"].as_array().is_some_and(|steps| {
+                                            !steps.is_empty() && steps.iter().all(|step| {
+                                                step["status"] == "pending" && step["attempt"] == 1
+                                            })
+                                        }),
+                                    "the retry cost probe must create a fresh linked run with pending steps",
                                 );
                             }
                             if probe.route == "GET /v1/client/quota" {
@@ -3695,6 +3726,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     "SELECT COUNT(*) FROM local_push_registrations", [], |row| row.get(0),
                 ).unwrap();
                 assert_eq!(rows, u64::from(probe.body.is_some()));
+            }
+            if probe.route == "POST /v1/mission-runs/{run}/retry" {
+                let source = store.mission_run(&fixture.items["retry_subject"]).unwrap().unwrap();
+                assert_eq!(source.status, "failed", "retry must leave its source terminal");
+                assert!(source.steps.iter().all(|step| step.status == "failed"));
+                assert_eq!(source.retried_by.len(), attempt + 1, "each sample must write a new retry");
             }
             if attempt > 0 {
                 samples.push(cost);
@@ -4104,6 +4141,34 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         peer_inventory: Value::Null,
         peer_exchange: Value::Null,
     }
+}
+
+/// Keep the source terminal and permit all four independent retries without bypassing admission.
+fn prepare_retry(store: &Store, fixture: &mut Fixture, workspace: &Path) {
+    let kdl = r#"version 2
+mission "cost-retry" state="ready" {
+  concurrent-runs
+  input "value" kind="text"
+  goal "Retry independent invented work."
+  step "review" { assigned-to "person/bench-operator" }
+}"#;
+    let intent = fractal_daemon::parse_intent(kdl, NODE).unwrap();
+    store.apply_internal(&intent, "cost-retry-definition").unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "cost-retry".into(),
+        revision: None,
+        workspace: workspace.display().to_string(),
+        requester: Some("person/bench-operator".into()),
+        mode: None,
+        inputs: BTreeMap::from([("value".into(), "Invented retry input".into())]),
+        idempotency_key: "cost-retry-source".into(),
+    }).unwrap();
+    for step in &source.steps {
+        store.set_step_state(&step.subject, "failed", Some("Invented failure")).unwrap();
+    }
+    store.set_mission_run_state(&source.id, "failed", "terminal", Some("Invented failure")).unwrap();
+    fixture.items.insert("retry_run", source.id);
+    fixture.items.insert("retry_subject", source.subject);
 }
 
 /// Set up fresh writes outside the measured region. A handoff releases its sender before the

@@ -1859,6 +1859,8 @@
       "properties": {
         "id": { "$ref": "#/$defs/MissionRunId" },
         "generation_id": { "$ref": "#/$defs/RunGenerationId" },
+        "retry_of": { "$ref": "#/$defs/MissionRunId", "description": "Source run for this new-run retry; omitted for an ordinary start." },
+        "retried_by": { "type": "array", "items": { "$ref": "#/$defs/MissionRunId" }, "description": "New runs created by retrying this run; omitted when empty." },
         "requester": { "$ref": "#/$defs/ActorRef" },
         "status": { "type": "string" },
         "phase": { "type": "string" },

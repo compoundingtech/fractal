@@ -23033,6 +23033,7 @@ pub fn mission_run_view_and_definition_tx(
     view.loops = loop_run_views_tx(connection, &view)?;
     view.outcome = mission_run_outcome_tx(connection, &view)?;
     if presentation {
+        (view.retry_of, view.retried_by) = mission_run_retry_links_tx(connection, &view.subject)?;
         view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
         if !view.steps.is_empty()
             && let Some(mission) = definitions.of(connection, &view.generation)?
@@ -23092,6 +23093,29 @@ fn run_outcome_from_claim(
     })
 }
 
+pub fn mission_run_retry_links_tx(
+    connection: &Connection,
+    subject: &str,
+) -> rusqlite::Result<(Option<String>, Vec<String>)> {
+    let mut statement = connection.prepare_cached(
+        "SELECT json_extract(body, '$.fields.source'), json_extract(body, '$.fields.retry')
+         FROM claims WHERE subject=?1 AND kind='mission-run.retry-linked'
+         ORDER BY json_extract(body, '$.fields.retry')",
+    )?;
+    let mut retry_of = None;
+    let mut retried_by = Vec::new();
+    for link in statement.query_map([subject], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+        let (source, retry) = link?;
+        if retry == subject {
+            retry_of = Some(source);
+        } else if source == subject {
+            retried_by.push(retry);
+        }
+    }
+    retried_by.dedup();
+    Ok((retry_of, retried_by))
+}
+
 pub const MISSION_RUN_HEADER_SELECT: &str =
         "SELECT mission_runs.id, mission_runs.mission_id, mission_runs.initial_revision,
                 mission_runs.current_generation_id, run_generations.revision,
@@ -23145,6 +23169,8 @@ pub fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         status: row.get(14)?,
         phase: row.get(15)?,
         outcome: None,
+        retry_of: None,
+        retried_by: Vec::new(),
         created_at_unix_ms: created.parse().unwrap_or(0),
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         steps: Vec::new(),
