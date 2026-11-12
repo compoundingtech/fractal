@@ -11,11 +11,10 @@
 //! column and the open messages a reminder winner is picked from, and nothing else: never a
 //! revision, an `updated_at`, a message view's status or `message_index`.
 //!
-//! A read that hears a close queues it ([`queue`]) and goes on; it never waits for the writer. The
-//! queue holds at most [`QUEUED`] closes, and one past that is dropped: the next read that hears
-//! it queues it again. A background writer records at most [`BATCH`] in each transaction, and the
-//! selectors fold them at its commit, so a list shows a close one read after the read that heard
-//! it.
+//! Daemon maintenance discovers closes independently of reads and queues them ([`queue`]).
+//! The queue holds at most [`QUEUED`] closes; a later maintenance sweep retries any dropped close.
+//! A background writer records at most [`BATCH`] in each transaction, and the selectors fold
+//! them at its commit. Read answers remain in memory and never start or feed this writer.
 //!
 //! A build without this table never reads it. Its rows and trigger stay inert there, and headers
 //! already folded closed stay closed until their next fold, which fails safe.
@@ -80,10 +79,9 @@ pub struct Queue {
 
 /// Queue the closes among `closes` that this member would record (of a message it holds open and
 /// has not recorded or closed), and start a background writer when none is draining. A close of
-/// mail not yet here is left for a read after it arrives, so it never takes a place in the queue
-/// the writer would only drop. A read only takes the queue's lock: it never waits for the writer,
-/// and a close past [`QUEUED`] is dropped for a later read to queue again. Without a runtime to
-/// start the writer on, the closes wait for the next read that has one.
+/// mail not yet here is left for a maintenance sweep after it arrives. This call never waits
+/// for the writer; a close past [`QUEUED`] is dropped for a later sweep to queue again. Without
+/// a runtime to start the writer on, the closes wait for the next maintenance turn that has one.
 pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
     if closes.is_empty() {
         return Ok(());
@@ -111,7 +109,6 @@ pub fn queue(store: &Arc<Store>, closes: Vec<RelayedClose>) -> Result<()> {
         let mut pending = queue.pending.lock();
         for close in fresh {
             if pending.len() >= QUEUED && !pending.contains_key(&close.message) {
-                tracing::debug!(message = %close.message, "relayed close queue is full; a later read queues it again");
                 continue;
             }
             pending.insert(close.message.clone(), close);
@@ -128,7 +125,6 @@ pub fn queued(store: &Store) -> usize {
 }
 
 /// Whether no close waits and no writer is recording a batch it took.
-#[cfg(any(test, feature = "test-support"))]
 pub fn idle(store: &Store) -> bool {
     let queue = store.extension::<Queue>();
     let pending = queue.pending.lock();
@@ -154,9 +150,11 @@ fn start(store: &Arc<Store>, queue: &Queue) {
 }
 
 /// Record the queued closes, [`BATCH`] at a time, until the queue is empty. A batch the writer
-/// refuses is dropped; a later read queues its closes again.
+/// refuses is dropped; a later maintenance sweep queues its closes again.
 fn drain(store: &Arc<Store>) {
     let queue = store.extension::<Queue>();
+    let mut failed = 0;
+    let mut first_error = None;
     loop {
         let batch = {
             let mut pending = queue.pending.lock();
@@ -168,12 +166,17 @@ fn drain(store: &Arc<Store>) {
             if batch.is_empty() {
                 // Under the lock, so a close queued after this sees no writer and starts one.
                 queue.draining.store(false, Ordering::Release);
+                drop(pending);
+                if let Some(error) = first_error {
+                    tracing::warn!(%error, closes = failed, "could not record relayed closes");
+                }
                 return;
             }
             batch
         };
         if let Err(error) = record(store, &batch) {
-            tracing::warn!(error = %format!("{error:#}"), closes = batch.len(), "could not record relayed closes");
+            failed += batch.len();
+            first_error.get_or_insert_with(|| format!("{error:#}"));
         }
     }
 }

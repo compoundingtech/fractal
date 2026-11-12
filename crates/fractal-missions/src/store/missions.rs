@@ -4394,7 +4394,13 @@ impl MissionsStore for Store {
                 ))
             }
         };
-        let changed = desired != current_run_report_tx(transaction, &current.subject)?;
+        let changed = match &desired {
+            // Clearing a run that never named a reporter is recorded too: it also stops the
+            // default stall report.
+            None => latest_claim_of_kind_tx(transaction, &current.subject, RUN_REPORT_KIND)?
+                .is_none_or(|claim| run_report_fields(&claim.body).is_some()),
+            Some(_) => desired != current_run_report_tx(transaction, &current.subject)?,
+        };
         if changed {
             let mut fields = serde_json::Map::new();
             if let Some((report_to, stalled_after_ms, completed, stalls)) = &desired {
