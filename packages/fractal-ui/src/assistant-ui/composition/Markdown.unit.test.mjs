@@ -379,3 +379,26 @@ test('a link calls its hooks before any early return, and an unsafe href never r
   assert.deepEqual(seen, ['https://example.test/a'])
   assert.match(html, /bad/)
 })
+
+// R8: code block header (path, language, diff counts, one menu) and nested lists without a rail.
+test('a code fence names its file from the fence title or a path as its info', async () => {
+  const { codeFenceLabel, diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  assert.deepEqual(codeFenceLabel('ts', 'title=src/x.ts'), { language: 'ts', path: 'src/x.ts' })
+  assert.deepEqual(codeFenceLabel('ts', 'title="src/a b.ts"'), { language: 'ts', path: 'src/a b.ts' })
+  assert.deepEqual(codeFenceLabel('src/model.rs', null), { language: 'rs', path: 'src/model.rs' })
+  assert.deepEqual(codeFenceLabel('python', null), { language: 'python' })
+  assert.deepEqual(codeFenceLabel('', null), { language: 'text' })
+  assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n-old\n+new\n+more\n context'), { added: 2, removed: 1 })
+})
+
+test('the code header shows path, language and diff counts, with Wrap, Copy and Open in one menu', () => {
+  const html = block('```diff title=src/model.ts\n--- a/src/model.ts\n+++ b/src/model.ts\n@@ -1 +1,2 @@\n-old\n+new\n+next\n```')
+  assert.match(html, /data-testid="markdown-code-path"[^>]*>src\/model\.ts</)
+  assert.match(html, /data-testid="markdown-code-language"[^>]*>diff</)
+  assert.match(html, /data-testid="markdown-code-diffstat"[^>]*>[\s\S]*\+2[\s\S]*−1/)
+  assert.match(html, /aria-label="Copy path"/)
+  assert.match(html, /aria-label="Code actions"/)
+  assert.match(html, /aria-label="Copy code"/)
+  assert.doesNotMatch(html, />Wrap</)
+  assert.doesNotMatch(block('```ts\nconst a = 1\n```'), /markdown-code-path|markdown-code-diffstat/)
+})
