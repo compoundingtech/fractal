@@ -934,7 +934,14 @@ fn set_mission_run_state_tx(
         return Ok(!claim_ids.is_empty());
     }
     if current_status == status && current_phase == phase {
-        return Ok(false);
+        // A blocked run can acquire retained exit evidence without changing state.
+        // Keep the reason durable too, while unchanged running/no-reason passes stay cheap.
+        if reason.is_none()
+            || latest_claim_of_kind_tx(transaction, &subject, "mission-run.state")?
+                .is_some_and(|claim| claim.body.pointer("/fields/reason").and_then(Value::as_str) == reason)
+        {
+            return Ok(false);
+        }
     }
     if (current_phase.starts_with("cleanup-") && phase != "terminal")
         || (current_phase == "final-cancelled"
