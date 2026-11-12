@@ -6,7 +6,10 @@
 // The property key is a string, not a unique symbol, so packages/fractal-ui can declare the same
 // type without depending on this package.
 
+/** Intentionally opaque, not a string: all consumers are private in-repo packages checked by the gate.
+ * Use markdownSource to cross the source-text boundary; nullable fields keep this same contract. */
 export type MarkdownBlock = { readonly '~fractal/markdown': 'block' };
+/** Intentionally opaque like MarkdownBlock; use markdownSource when a string is required. */
 export type MarkdownInline = { readonly '~fractal/markdown': 'inline' };
 export type MarkdownText = MarkdownBlock | MarkdownInline;
 
