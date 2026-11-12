@@ -41,6 +41,8 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'BareFence:primitive',
+  'ChangesPanel:primitive',
+  'ChangesPanelLightNarrow:primitive',
   'Compact:primitive',
   'HoverCardPreview:primitive',
   'HoverCardPreviewLight:primitive',
