@@ -2438,3 +2438,158 @@ async fn source_maps_record_once_per_revision_with_deduplicated_texts() {
         }
     }
 }
+
+const HARVEST_TS: &str = "import { policy } from '../../../lib/policy'\nexport default mission({\n  id: 'garden/harvest',\n  goal: policy.goal,\n  steps: [step({\n    id: 'work',\n    gate: exists('resource/garden/report'),\n  })],\n})\n";
+
+/// The garden set with the harvest mission, whose goal comes from `lib/policy.ts`.
+fn harvest_bundle(goal: &str) -> String {
+    format!(
+        "{}mission \"garden/harvest\" state=\"ready\" {{\n goal \"{goal}\"\n step \"work\" {{\n  assigned-to \"agent/garden/orchard\"\n  gate \"the report exists\" {{ exists \"resource/garden/report\" }}\n }}\n}}\n",
+        bundle("orchard", false)
+    )
+}
+
+/// The map of that bundle: `policy` is `lib/policy.ts`, whose goal is on `goal_line`.
+fn harvest_map(policy: &str, goal_line: u32) -> fractal_schema::source_map::SourceMap {
+    let span = |file: usize, start: u32, end: u32| json!({"file": file, "start": {"line": start, "column": 1}, "end": {"line": end, "column": 3}});
+    let frame = |file: usize, line: u32, role: &str| json!({"file": file, "start": {"line": line, "column": 3}, "end": {"line": line, "column": 9}, "role": role, "precision": "exact"});
+    serde_json::from_value(json!({
+        "schema": "fractal.source-map/v1",
+        "files": [
+            map_file("graph/garden/harvest/mission.ts", Some(HARVEST_TS), None),
+            map_file("lib/policy.ts", Some(policy), None),
+            map_file("graph/garden/orchard/agent.ts", Some("export default agent({\n  id: 'garden/orchard',\n})\n"), None),
+        ],
+        "subjects": {
+            "mission/garden/harvest": {"declaration": 0, "inputs": [0, 1], "nodes": [
+                {"kdl": "mission[garden/harvest]", "kdlLines": [1, 7], "span": span(0, 2, 9), "frames": []},
+                {"kdl": "mission[garden/harvest]/goal[0]", "kdlLines": [2, 2], "span": span(1, goal_line, goal_line),
+                 "frames": [frame(0, 4, "declaration"), frame(1, goal_line, "value")]},
+                {"kdl": "mission[garden/harvest]/step[work]", "kdlLines": [3, 6], "span": span(0, 5, 8), "frames": [frame(0, 5, "declaration")]},
+                {"kdl": "mission[garden/harvest]/step[work]/gate[the report exists]", "kdlLines": [5, 5], "span": span(0, 7, 7), "frames": []},
+            ]},
+            "agent/garden/orchard": {"declaration": 2, "inputs": [2], "nodes": [
+                {"kdl": "agent[garden/orchard]", "kdlLines": [2, 6], "span": span(2, 1, 3), "frames": []},
+            ]},
+        },
+    }))
+    .unwrap()
+}
+
+async fn publish_mapped(d: &Daemon, sequence: u64, kdl: String, map: fractal_schema::source_map::SourceMap) {
+    let mut publication = request(d, sequence, kdl).await;
+    preview(d, &mut publication).await;
+    publication.source_map = Some(map);
+    d.client.post::<_, Value>("/v1/sets/apply", &publication).await.unwrap();
+}
+
+async fn source_cli(d: &Daemon, args: &[&str]) -> (bool, String) {
+    let socket = d.client.socket_path().unwrap().to_path_buf();
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    let output = tokio::task::spawn_blocking(move || {
+        fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+            .arg("--endpoint").arg(socket)
+            .args(args)
+            .output().unwrap()
+    }).await.unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), text)
+}
+
+/// The CLI reads recorded maps: a subject's declared nodes, one node's frames, a step run through
+/// the revision its run pinned, the live subjects a file line feeds, and why two revisions differ.
+/// Failure text names the declaring line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_cli_shows_finds_and_diffs_mapped_revisions() {
+    use fractal_daemon::MissionsStore;
+    let root = tempfile::tempdir().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    let d = daemon(root.path(), "amber", key.clone(), &key).await;
+    let policy_v1 = "export const policy = {\n  goal: 'Harvest',\n}\n";
+    publish_mapped(&d, 10, harvest_bundle("Harvest"), harvest_map(policy_v1, 2)).await;
+    let first = d.store.mission_spec("garden/harvest", None).unwrap().unwrap().revision;
+    let run = d
+        .store
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
+            mission: "garden/harvest".into(),
+            revision: None,
+            workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()),
+            mode: Some("run".into()),
+            inputs: Default::default(),
+            idempotency_key: "harvest-run".into(),
+        })
+        .unwrap();
+    let step = run.steps.iter().find(|step| step.step == "work").unwrap().subject.clone();
+    // The next commit moves the goal into a commented policy file: a new mission revision.
+    let policy_v2 = "// the garden's policy\nexport const policy = {\n  goal: 'Harvest early',\n}\n";
+    publish_mapped(&d, 11, harvest_bundle("Harvest early"), harvest_map(policy_v2, 3)).await;
+    let second = d.store.mission_spec("garden/harvest", None).unwrap().unwrap().revision;
+    assert_ne!(first, second);
+
+    let (ok, shown) = source_cli(&d, &["subject", "show", "mission/garden/harvest", "--source"]).await;
+    assert!(ok, "{shown}");
+    assert_contains(&shown, &[
+        "MISSION   garden/harvest",
+        &format!("SOURCE    acme/garden@{}  graph/garden/harvest/mission.ts:2-9", &format!("{:040x}", 11)[..7]),
+        &format!("https://github.com/acme/garden/blob/{:040x}/graph/garden/harvest/mission.ts#L2-L9", 11),
+        "DECLARES",
+        "step work",
+        "gate the report exists",
+        "USES  lib/policy.ts",
+    ]);
+    let (ok, node) = source_cli(&d, &["subject", "show", "mission/garden/harvest", "--source", "--node", "goal"]).await;
+    assert!(ok, "{node}");
+    assert_contains(&node, &["NODE      mission[garden/harvest]/goal[0]", "3 |   goal: 'Harvest early',", "declared", "mission.ts:4", "value", "lib/policy.ts:3"]);
+    let (ok, json) = source_cli(&d, &["--json", "subject", "show", "mission/garden/harvest", "--source", "--revision", &first]).await;
+    assert!(ok, "{json}");
+    let json: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!((json["revision"].as_str(), json["source"]["sequence"].as_u64()), (Some(first.as_str()), Some(10)));
+    assert_eq!(json["uses"], json!([{"repository": "acme/garden", "path": "lib/policy.ts"}]));
+
+    // A step run resolves through the revision its run pinned, not the newest one.
+    let (ok, pinned) = source_cli(&d, &["subject", "show", &step, "--source"]).await;
+    assert!(ok, "{pinned}");
+    assert_contains(&pinned, &[&format!("REVISION  {} · seq 10", &first[..7]), "NODE      mission[garden/harvest]/step[work]"]);
+    assert_eq!(
+        d.store.source_declared_at(&step, Some("the report exists")).unwrap().as_deref(),
+        Some(format!("graph/garden/harvest/mission.ts:7 (acme/garden@{})", &format!("{:040x}", 10)[..7]).as_str())
+    );
+    assert_eq!(d.store.source_declared_at(&step, None).unwrap().unwrap(), format!("graph/garden/harvest/mission.ts:5-8 (acme/garden@{})", &format!("{:040x}", 10)[..7]));
+
+    let (ok, line) = source_cli(&d, &["source", "where", "lib/policy.ts:3", "--repository", "acme/garden"]).await;
+    assert!(ok, "{line}");
+    assert_contains(&line, &["lib/policy.ts:3    goal: 'Harvest early',", "FEEDS(1 subjects, 2 nodes)", "mission/garden/harvest", "Editing this line can change 1 subject on the next publish."]);
+    let (ok, none) = source_cli(&d, &["source", "where", "lib/policy.ts:1"]).await;
+    assert!(ok, "{none}");
+    assert_contains(&none, &["No live subject reads lib/policy.ts:1"]);
+    let (ok, declared) = source_cli(&d, &["--json", "source", "where", "https://github.com/acme/garden/blob/main/graph/garden/orchard/agent.ts"]).await;
+    assert!(ok, "{declared}");
+    let declared: Value = serde_json::from_str(&declared).unwrap();
+    assert_eq!(declared["files"][0]["subjects"][0]["subject"], "agent/garden/orchard");
+    assert_eq!(declared["files"][0]["subjects"][0]["declares"], true);
+
+    let revisions: Value = d.client.get("/v1/source-maps/revisions?subject=mission%2Fgarden%2Fharvest").await.unwrap();
+    assert_eq!(revisions["current"], second);
+    assert_eq!(revisions["revisions"].as_array().unwrap().iter().map(|entry| entry["revision"].clone()).collect::<Vec<_>>(), [json!(second), json!(first)]);
+    let orchard = member_revision(&d, "agent/garden/orchard");
+    let kdl: Value = d.client.get(&format!("/v1/source-maps/declaration?subject=agent%2Fgarden%2Forchard&revision={orchard}")).await.unwrap();
+    assert!(kdl["kdl"].as_str().unwrap().contains("garden/orchard"), "{kdl}");
+
+    let (ok, diff) = source_cli(&d, &["source", "diff", "mission/garden/harvest"]).await;
+    assert!(ok, "{diff}");
+    assert_contains(&diff, &[
+        &format!("mission/garden/harvest  {} → {}", &first[..7], &second[..7]),
+        "WHY       dependency: The mission file did not change. The change comes from policy.ts, which this mission uses.",
+        "M lib/policy.ts",
+        "+// the garden's policy",
+        "-  goal: 'Harvest',",
+        "KDL  +1 −1",
+        "+    goal \"Harvest early\"",
+    ]);
+    let (ok, json) = source_cli(&d, &["--json", "source", "diff", "mission/garden/harvest", &format!("{}..{}", &first[..8], &second[..8])]).await;
+    assert!(ok, "{json}");
+    let json: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!((json["why"]["kind"].as_str(), json["kdl"]["added"].as_u64()), (Some("dependency"), Some(1)));
+}
