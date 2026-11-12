@@ -1029,11 +1029,11 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
                 let failed = cancelled && step(tx, origin).map_err(internal)?
                     .map(|view| runs_program(tx, &view)).transpose().map_err(internal)? == Some(false);
                 let reason = failed.then(|| format!("ask cancelled by {}", claim.actor.as_deref().unwrap_or_default()));
-                tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h4a39c8232ed5 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?5,blocked_reason=?6,
+                tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8c515cfc602a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?5,blocked_reason=?6,
                     readiness_epoch=readiness_epoch+CASE WHEN ?5='ready' THEN 1 ELSE 0 END,
                     activated_at_unix_ms=CASE WHEN ?5='ready' THEN ?3 ELSE activated_at_unix_ms END,
                     updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4").map_err(internal)?.execute(
-                    /* sqlite-large-value: allow-for-now lv-hfe5b780e197e owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject,
+                    /* sqlite-large-value: allow-for-now lv-h109f5388a001 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject,
                         if failed { "failed" } else { "ready" }, reason]).map_err(internal)?;
             }
         }

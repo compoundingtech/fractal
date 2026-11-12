@@ -19241,7 +19241,7 @@ pub fn project_mission_run_update(
             for predecessor in &claim.predecessors {
                 if transaction.prepare_cached(
                     "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1 AND kind='work.person-cancelled')",
-                ).map_err(internal)?.query_row([predecessor], |row| row.get::<_, bool>(0)).map_err(internal)?
+                ).map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hc9b442dfc294 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [predecessor], |row| row.get::<_, bool>(0)).map_err(internal)?
                 {
                     return Ok(());
                 }
