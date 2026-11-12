@@ -121,8 +121,8 @@ command = "/absolute/path/to/fractal-mcp"
 args = ["--socket", "/absolute/path/to/fractal-client.sock", "--credential-file", "/absolute/path/to/mcp-token"]
 ```
 
-The eleven tools are `fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
-`fractal_missions_list`, `fractal_agents_list`, `fractal_conversations_list`,
+The twelve tools are `fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
+`fractal_missions_list`, `fractal_agents_list`, `fractal_availability_get`, `fractal_conversations_list`,
 `fractal_conversation_detail`, `fractal_conversation_timeline`, `fractal_conversation_search`,
 `fractal_conversation_read`, and `fractal_message_send`. Each declares an `outputSchema`
 and returns a `structuredContent` envelope with a text mirror for older clients.
@@ -302,12 +302,13 @@ Reject missing owner configuration, remote, agent, non-owner, absent-consent, un
 
 ## B. Explicit proof-gated reads
 
-Use native snapshot/page envelope semantics and typed generated clients, never CLI output, KDL, arbitrary claim parsing, or prose scraping. The six scopes are closed and unrelated person scopes are not accepted:
+Use native snapshot/page envelope semantics and typed generated clients, never CLI output, KDL, arbitrary claim parsing, or prose scraping. The seven read scopes are closed and unrelated person scopes are not accepted:
 The attention, missions, and agents pages retain the optional native `sync` notice during replication catch-up or divergence. Its closed `SyncNotice` contract is shared with ordinary pages and decoded by the generated SDKs.
 
 | GET route under `/v1/client/assistant/` | Scope | Allowed fields, in addition to snapshot/page metadata |
 | --- | --- | --- |
 | `summary` | `read.assistant.summary` | Counts of the configured owner's attention, agent states, mission states; `as_of` |
+| `availability` | `read.assistant.availability` | `kind: "person-availability"`, the configured owner's own `PersonAvailability` (effective status and source, override expiry, interruptions, deadline clock with since/until; `presence` and `presence_observed_at` are null because raw device presence is person-only), and their current `DirectiveNote` or null; no other person's availability or note |
 | `attention` | `read.assistant.attention` | ID, attention-kind enum, person fixed to the configured owner, agent/mission references, revision/episode, waiting-since; no title, body, options |
 | `missions` | `read.assistant.missions` | Mission/run/agent IDs, phase, step counts, blocked count, revision, updated-at; no authored goal or status prose |
 | `agents` | `read.assistant.agents` | Agent ID, lifecycle/runtime-state enums, current mission/run IDs, updated-at; no paths, environment, conversation previews |
@@ -355,6 +356,7 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | Route | Query | Response value |
 | --- | --- | --- |
 | `summary` | `max_response_bytes` | `AssistantSummary`: `kind`, `as_of`, `counts` only |
+| `availability` | `max_response_bytes` | `kind: "person-availability"`, `availability` (`PersonAvailability` without raw presence; an assistant is not the person) and `directive_note` (`DirectiveNote` or null) |
 | `attention`, `missions`, `agents` | `cursor`, `limit`, `max_response_bytes` | `AssistantAttentionPage`, `AssistantMissionPage`, `AssistantAgentPage`: the native page shape with collection `assistant.<route>` and empty `filters` |
 | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-conversation-content"` |
 | `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |
@@ -367,11 +369,14 @@ Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgR
 
 The response budget covers the entire JSON envelope. Without a query budget, the proof must name the pinned default (4096 unless lowered); an explicit `max_response_bytes` must equal the proof value. Neither may exceed the pinned maximum (16384 unless lowered). Assistant list pages return the largest ordered prefix of whole items that fits, up to `limit`; `page.next_cursor` resumes after the last returned item in the same cached snapshot. The cursor retains the requested item limit, so page lengths may vary with item sizes. If not even one item and its envelope fit, the read fails with 413 `response-budget-exceeded` naming that item's ID. Other responses or native source records over budget also fail with 413 `response-budget-exceeded`; non-UTF-8 content fails with 422 `content-not-text`. A forged, expired, or changed conversation reference returns 410 `conversation-content-invalidated`; a conversation revision mismatch, a session that is not the agent's current session, or a terminal incarnation/screen mismatch returns 409 `stale-fence`.
 
-The MCP adapter advertises exactly eleven canonical tools:
+The MCP adapter advertises exactly twelve canonical tools:
 `fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
-`fractal_missions_list`, `fractal_agents_list`, `fractal_conversations_list`,
+`fractal_missions_list`, `fractal_agents_list`, `fractal_availability_get`, `fractal_conversations_list`,
 `fractal_conversation_detail`, `fractal_conversation_timeline`,
 `fractal_conversation_search`, `fractal_conversation_read`, and `fractal_message_send`.
+`fractal_availability_get` reads the `availability` projection and needs the optional
+`read.assistant.availability` scope; assistants park blocking asks while the person is
+away or interruptions is `none`.
 The corresponding `st_*` names are deprecated, callable aliases for the adapter's
 0.1.0 release only and are removed in `fractal-chatgpt` 0.2.0. They are hidden from
 `tools/list` so refreshed clients discover only canonical names while Johannes's

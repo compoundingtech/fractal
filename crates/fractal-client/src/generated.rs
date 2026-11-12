@@ -5489,6 +5489,8 @@ pub enum AssistantScope {
     CustomReply,
     #[serde(rename = "write.assistant.answers")]
     Answers,
+    #[serde(rename = "read.assistant.availability")]
+    Availability,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
