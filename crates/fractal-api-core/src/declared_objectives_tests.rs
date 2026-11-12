@@ -444,32 +444,48 @@ fn a_count_is_no_data_until_its_first_event_and_an_empty_window_is_then_a_real_z
     assert_eq!((stopped["status"].as_str(), stopped["remaining_percent"].as_f64()), (Some("missed"), Some(0.0)));
 }
 
-#[test]
-fn a_subject_counts_once_at_its_earliest_event_whoever_writes_it() {
-    let store = store_with(&count_declaration("", "1h", "max=10", ""));
-    merged(&store, "a", 10 * MINUTE, json!({}));
-    // A retry, and a second producer.
-    merged(&store, "a", 5 * MINUTE, json!({}));
-    merged(&store, "a", 10 * MINUTE, json!({}));
-    // First merged before the window; a later claim does not move it in.
-    merged(&store, "b", 2 * 60 * MINUTE, json!({}));
-    merged(&store, "b", 30 * MINUTE, json!({}));
-    assert_eq!(evaluate(&store)[THROUGHPUT]["current"], "1 in the last 1h (1.00 an hour)");
-    // Pruned with its window, a subject is still never counted again.
-    merged(&store, "b", MINUTE, json!({}));
-    let row = &evaluate(&store)[THROUGHPUT];
-    assert_eq!(row["current"], "1 in the last 1h (1.00 an hour)");
-    assert!(row["explain"].as_str().unwrap().contains("Each subject under custom/acme/change/ counts once, at its earliest custom.acme.change-merged claim."));
+/// The subjects a count holds in memory.
+fn held(store: &Store) -> Vec<String> {
+    let evaluations = store.fractal.extensions.get::<Evaluations>();
+    let tracked = evaluations.0.lock().unwrap();
+    tracked.values().flat_map(|tracked| tracked.events.keys().cloned()).collect()
 }
 
 #[test]
-fn an_event_leaves_the_count_when_it_leaves_the_window() {
+fn a_subject_counts_once_at_its_earliest_event_whoever_writes_it() {
+    let store = store_with(&count_declaration("", "1h", "max=10", ""));
+    // A producer, its retry and a second producer all carry the merge's time.
+    for _ in 0..3 {
+        merged(&store, "a", 10 * MINUTE, json!({}));
+    }
+    // A claim with a later time does not move it.
+    merged(&store, "a", 5 * MINUTE, json!({}));
+    // Merged before the window: read, not counted, not held.
+    merged(&store, "b", 2 * 60 * MINUTE, json!({}));
+    let row = &evaluate(&store)[THROUGHPUT];
+    assert_eq!(row["current"], "1 in the last 1h (1.00 an hour)");
+    assert!(row["explain"].as_str().unwrap().contains("Each subject under custom/acme/change/ counts once, at its earliest custom.acme.change-merged claim."));
+    assert_eq!(held(&store), [s("custom/acme/change/a")]);
+    // A retry inside the window is deduplicated; one of b after the window carries its old time.
+    merged(&store, "a", 10 * MINUTE, json!({}));
+    merged(&store, "b", 2 * 60 * MINUTE, json!({}));
+    assert_eq!(evaluate(&store)[THROUGHPUT]["current"], "1 in the last 1h (1.00 an hour)");
+    assert_eq!(held(&store), [s("custom/acme/change/a")]);
+}
+
+#[test]
+fn an_event_leaves_the_count_and_memory_when_it_leaves_the_window() {
     let store = store_with(&count_declaration("", "1h", "max=10", ""));
     merged(&store, "a", 50 * MINUTE, json!({}));
     merged(&store, "b", 10 * MINUTE, json!({}));
     assert_eq!(evaluate(&store)[THROUGHPUT]["current"], "2 in the last 1h (2.00 an hour)");
     let later = rows(&store, *NOW + 20 * MINUTE).unwrap();
     assert_eq!(later[0]["current"], "1 in the last 1h (1.00 an hour)");
+    assert_eq!(held(&store), [s("custom/acme/change/b")], "memory holds only the subjects in the window");
+    // A retry of the pruned subject carries its time, before the window: ignored.
+    merged(&store, "a", 50 * MINUTE, json!({}));
+    assert_eq!(rows(&store, *NOW + 20 * MINUTE).unwrap()[0]["current"], "1 in the last 1h (1.00 an hour)");
+    assert_eq!(held(&store), [s("custom/acme/change/b")]);
 }
 
 #[test]

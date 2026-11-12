@@ -39,7 +39,8 @@ export interface Interval {
 /** Events in claims per hour, one per subject under `subjectPrefix` at its earliest `event` claim. */
 export interface Count {
   readonly subjectPrefix: string
-  readonly event: ClaimEvent
+  /** `at` is required: a retry carries the same time, so it is deduplicated or before the window. */
+  readonly event: ClaimEvent & { readonly at: string }
   /** Fields of the event claim that split the rows. */
   readonly labels?: readonly string[]
   /** Leave out an event whose claim has one of `values` in `field`. */
@@ -271,11 +272,12 @@ const parseCount = ({ value, fail }: { readonly value: Fields; readonly fail: Fa
   if (value.subjectPrefix === undefined) fail('a count needs `subjectPrefix`')
   checkPrefix({ value, fail })
   if (value.event === undefined) fail('a count needs `event`')
-  event({ value: value.event, name: 'event', extra: [], fail })
+  const counted = event({ value: value.event, name: 'event', extra: [], fail })
+  if (counted.at === undefined) fail('`event` needs `at`: a retry carries the same time, so it never counts twice')
   checkLabels({ value, fail })
   // Every field was checked above.
   const count = value as unknown as IndicatorOf<'count'>
-  return freeze({ kind: 'count', subjectPrefix: count.subjectPrefix, event: freeze(eventOf(count.event)), ...labelsAndExcludes(count) })
+  return freeze({ kind: 'count', subjectPrefix: count.subjectPrefix, event: freeze({ kind: count.event.kind, at: count.event.at }), ...labelsAndExcludes(count) })
 }
 
 const parseInterval = ({ value, fail }: { readonly value: Fields; readonly fail: Fail }): IndicatorOf<'interval'> => {
@@ -645,7 +647,7 @@ const indicatorChildren = (indicator: Indicator): Node[] => {
     case 'count':
       return [
         node({ name: 'subject-prefix', args: [indicator.subjectPrefix] }),
-        node({ name: 'event', args: [indicator.event.kind], props: indicator.event.at === undefined ? {} : { at: indicator.event.at } }),
+        node({ name: 'event', args: [indicator.event.kind], props: { at: indicator.event.at } }),
         ...(indicator.labels ?? []).map((label) => node({ name: 'label', args: [label] })),
         ...(indicator.exclude ?? []).map(({ field, values }) => node({ name: 'exclude', args: [field, ...values] })),
       ]

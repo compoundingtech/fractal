@@ -124,14 +124,12 @@ fn a_count_reads_its_event() {
     assert_eq!(objective.window, Some(Window { ms: 86_400_000, min_samples: 1 }));
     let Indicator::Count(count) = &objective.indicator else { panic!() };
     assert_eq!(count.subject_prefix, "custom/factory/merged-pr/");
-    assert_eq!(count.event, Event { kind: "custom.factory.pr-merged".into(), at: Some("merged_at".into()) });
+    assert_eq!((count.event.as_str(), count.at.as_str()), ("custom.factory.pr-merged", "merged_at"));
     assert_eq!(count.labels, ["repository"]);
     assert_eq!(count.excludes, [Exclude { field: "author".into(), values: vec!["renovate".into(), "dependabot".into()] }]);
     assert_eq!(objective.target("per-hour", false).map(|target| target.bound), Some(Bound::Min(10.0)));
-    let flakes = one(&COUNT.replace("min=10", "max=0.5").replace(" at=\"merged_at\"", "")).unwrap();
+    let flakes = one(&COUNT.replace("min=10", "max=0.5")).unwrap();
     assert_eq!(flakes.target("per-hour", false).map(|target| target.bound), Some(Bound::Max(0.5)));
-    let Indicator::Count(count) = &flakes.indicator else { panic!() };
-    assert_eq!(count.event.at, None, "without `at`, the claim's accepted time");
 }
 
 #[test]
@@ -141,6 +139,7 @@ fn a_nonsensical_count_is_refused_never_defaulted() {
         COUNT.replace(replace, with)
     };
     for (text, says) in [
+        (count(" at=\"merged_at\"", ""), "`event` needs `at=FIELD`"),
         (count("min=10", "min=10 max=20"), "needs one bound"),
         (count("min=10", ""), "needs one bound"),
         (count("min=10", "min=0"), "no target `per-hour`"),
@@ -155,7 +154,7 @@ fn a_nonsensical_count_is_refused_never_defaulted() {
         (count("    subject-prefix \"custom/factory/merged-pr/\"\n", ""), "needs `subject-prefix`"),
         (count("subject-prefix \"custom/factory/merged-pr/\"", "subject-prefix \"custom/factory/merged-pr\""), "end with `/`"),
         (count("    event \"custom.factory.pr-merged\" at=\"merged_at\"\n", ""), "needs `event`"),
-        (count("event \"custom.factory.pr-merged\" at=\"merged_at\"", "event \"custom.factory.pr-merged\" at=\"merged_at\"\n    event \"custom.factory.pr-closed\""), "repeats `event`"),
+        (count("event \"custom.factory.pr-merged\" at=\"merged_at\"", "event \"custom.factory.pr-merged\" at=\"merged_at\"\n    event \"custom.factory.pr-closed\" at=\"closed_at\""), "repeats `event`"),
         (count("at=\"merged_at\"", "at=\"merged_at\" set=\"hosts\""), "set"),
         (count("    label \"repository\"\n", "    label \"repository\"\n    label \"repository\"\n"), "is repeated"),
         (count("exclude \"author\" \"renovate\" \"dependabot\"", "exclude \"author\""), "`exclude` needs a field"),

@@ -144,7 +144,7 @@ objective "factory/work-throughput" {
 | Child | Meaning |
 |---|---|
 | `subject-prefix "P"` | The event subjects, as for an interval. |
-| `event KIND at=FIELD` | A subject's event is at its earliest such claim, its time read as an interval's `at`. Retries and a second producer of the same subject never count twice, and a subject counted once is never counted again for the revision, even after its event left the window. |
+| `event KIND at=FIELD` | A subject's event is at its earliest such claim, its time read from `FIELD` as an interval's `at`. `at` is required: the event's own time, which every retry and every producer of the subject repeats, so a retry inside the window is the same event and one after it is before the window and ignored. Retries and a second producer never count twice. |
 | `label "FIELD"` | Also one row per value of `FIELD` on the event claim: `factory/work-throughput{repository=fractal}`. |
 | `exclude "FIELD" "A" "B"` | An event whose claim has one of these values is excluded: counted apart, never in the rate. |
 
@@ -168,8 +168,8 @@ A claim whose time cannot be read is counted as unreadable and changes nothing. 
 says the events counted and excluded in the window, the rate, the unreadable claims, and the
 subject and revision.
 
-Each evaluation reads only the event claims newer than the last it read; an event before the window
-is dropped from memory, and the subjects counted are remembered.
+Each evaluation reads only the event claims newer than the last it read, and keeps only the events
+in the window: an event before it is dropped from memory, and a claim timed before it is not kept.
 
 ### Ratio over Prometheus metrics
 

@@ -109,7 +109,11 @@ pub struct Exclude {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Count {
     pub subject_prefix: String,
-    pub event: Event,
+    /// The event claim kind.
+    pub event: String,
+    /// The field holding the event's time, required: a retry carries the same time, so an event
+    /// is deduplicated inside the window and ignored once it is before it.
+    pub at: String,
     /// Fields of the event claim that split the rows.
     pub labels: Vec<String>,
     /// Leave out an event whose claim has one of the values in the field.
@@ -514,7 +518,9 @@ fn parse_count(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Result
                 if kind.is_empty() {
                     return Err(fail("`event` names no claim kind".into()));
                 }
-                if event.replace(Event { kind: kind.to_owned(), at: field_property(kid, "at", fail)? }).is_some() {
+                let at = field_property(kid, "at", fail)?
+                    .ok_or_else(|| fail("`event` needs `at=FIELD`: a retry carries the same time, so it never counts twice".into()))?;
+                if event.replace((kind.to_owned(), at)).is_some() {
                     return Err(repeated());
                 }
             }
@@ -523,9 +529,11 @@ fn parse_count(kids: &[&Value], fail: &dyn Fn(String) -> FractalError) -> Result
             other => return Err(fail(format!("indicator `count` has an unknown child `{other}`"))),
         }
     }
+    let (event, at) = event.ok_or_else(|| fail("a count needs `event`".into()))?;
     Ok(Count {
         subject_prefix: prefix.ok_or_else(|| fail("a count needs `subject-prefix`".into()))?,
-        event: event.ok_or_else(|| fail("a count needs `event`".into()))?,
+        event,
+        at,
         labels,
         excludes,
     })

@@ -126,8 +126,8 @@ objective "factory/work-throughput" {
   target "per-hour" min=10
 }
 `)
-    const flakes = { ...throughput, name: 'factory/flakes', indicator: Fractal.indicator.count({ subjectPrefix: 'custom/factory/flake/', event: { kind: 'custom.factory.flake' } }), targets: [{ stat: 'per-hour', max: 0.5 }] }
-    expect(render(flakes)).toContain('  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake"\n  }\n  window "24h"\n  target "per-hour" max=0.5\n')
+    const flakes = { ...throughput, name: 'factory/flakes', indicator: Fractal.indicator.count({ subjectPrefix: 'custom/factory/flake/', event: { kind: 'custom.factory.flake', at: 'seen_at' } }), targets: [{ stat: 'per-hour', max: 0.5 }] }
+    expect(render(flakes)).toContain('  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake" at="seen_at"\n  }\n  window "24h"\n  target "per-hour" max=0.5\n')
   })
 
   const native: ReadonlyArray<{
@@ -264,6 +264,7 @@ describe('Fractal.objective validation', () => {
     { name: 'a count without a window', input: { ...throughput, window: undefined }, message: /a `count` indicator needs a `window`/ },
     { name: 'a count window with a sample minimum', input: { ...throughput, window: { span: '24h', minSamples: 5 } }, message: /takes no `minSamples`/ },
     { name: 'a count without an event', input: { ...throughput, indicator: { ...throughput.indicator, event: undefined } }, message: /a count needs `event`/ },
+    { name: 'a count event without a time field', input: { ...throughput, indicator: { ...throughput.indicator, event: { kind: 'custom.factory.pr-merged' } } }, message: /`event` needs `at`/ },
     { name: 'a count with an interval child', input: { ...throughput, indicator: { ...throughput.indicator, start: { kind: 'k' } } }, message: /indicator `count` has an unknown field `start`/ },
     { name: 'a count prefix without a slash', input: { ...throughput, indicator: { ...throughput.indicator, subjectPrefix: 'custom' } }, message: /must name subjects/ },
     { name: 'a min on native telemetry', input: { name: 'x', about: 'a', indicator: { kind: 'ci-count', series: 'ci/flakes' }, targets: [{ stat: 'per-hour', min: 1 }] }, message: /no target `per-hour` with that bound/ },

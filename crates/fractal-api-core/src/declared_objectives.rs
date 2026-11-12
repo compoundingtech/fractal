@@ -5,8 +5,8 @@
 //! the store index of the newest claim it has read; an evaluation reads only the claims after it,
 //! through `claims_kind_index`. A new revision of the declaration starts again from the claims. A
 //! sample that stopped or was cancelled before the window is dropped from memory, as is an event
-//! before the window; a count remembers the subjects it has counted, so a late retry of an old
-//! event never counts again.
+//! before the window: a count's event time is a field its retries repeat, so a retry is either
+//! deduplicated inside the window or ignored before it.
 //!
 //! An open sample is censored, not dropped: for each target it enters the percentile at its age
 //! once that age is over the target's `within`, since it is certain to be over.
@@ -46,8 +46,8 @@ struct Tracked {
     samples: BTreeMap<String, Sample>,
     /// A count's events in the window, by subject.
     events: BTreeMap<String, Counted>,
-    /// Every subject a count has read an event of, in the window or before it.
-    counted: BTreeSet<String>,
+    /// Whether a count has read an event claim for this revision.
+    seen: bool,
     /// Claims of the indicator's kinds whose time, set or member could not be read.
     unreadable: u64,
     /// The rows the last evaluation produced, for the breach response.
@@ -146,8 +146,8 @@ pub fn rows(store: &Store, now: u64) -> anyhow::Result<Vec<Value>> {
                 entry.rows(&declaration.subject, interval, window, now, &response)
             }
             Measure::Count(count) => {
-                entry.read(store, &[count.event.kind.as_str()], &count.subject_prefix, |entry, claim| entry.observe_count(count, claim))?;
                 let horizon = now.saturating_sub(window.ms);
+                entry.read(store, &[count.event.as_str()], &count.subject_prefix, |entry, claim| entry.observe_count(count, claim, horizon))?;
                 entry.events.retain(|_, event| event.at >= horizon);
                 entry.count_rows(&declaration.subject, count, window, &response)
             }
@@ -213,7 +213,7 @@ impl Tracked {
             cursor: 0,
             samples: BTreeMap::new(),
             events: BTreeMap::new(),
-            counted: BTreeSet::new(),
+            seen: false,
             unreadable: 0,
             ids: BTreeSet::new(),
         }
@@ -240,28 +240,26 @@ impl Tracked {
         }
     }
 
-    /// Fold one event claim in: a subject counts once, at its earliest event claim. A claim whose
-    /// time cannot be read is unreadable and changes nothing.
-    fn observe_count(&mut self, count: &Count, claim: &ClaimRecord) {
+    /// Fold one event claim in: a subject counts once, at its earliest event claim, and an event
+    /// before `horizon` is not kept. A claim whose time cannot be read is unreadable and changes
+    /// nothing.
+    fn observe_count(&mut self, count: &Count, claim: &ClaimRecord, horizon: u64) {
         let fields = claim.body.get("fields").and_then(Value::as_object);
-        let at = match &count.event.at {
-            Some(field) => fields.and_then(|fields| fields.get(field)).and_then(time_ms),
-            None => u64::try_from(claim.accepted_at_unix_ms).ok(),
-        };
-        let Some(at) = at else {
+        let Some(at) = fields.and_then(|fields| fields.get(&count.at)).and_then(time_ms) else {
             self.unreadable += 1;
             return;
         };
-        let first = self.counted.insert(claim.subject.clone());
+        self.seen = true;
+        if at < horizon {
+            return;
+        }
         let event = Counted { at, fields: kept_fields(&count.labels, &count.excludes, fields) };
         match self.events.get_mut(&claim.subject) {
             Some(earliest) if at < earliest.at => *earliest = event,
             Some(_) => {}
-            // A subject counted before and pruned with its window is never counted again.
-            None if first => {
+            None => {
                 self.events.insert(claim.subject.clone(), event);
             }
-            None => {}
         }
     }
 
@@ -563,10 +561,10 @@ impl Tracked {
             self.unreadable,
             if self.unreadable == 1 { "claim" } else { "claims" },
             count.subject_prefix,
-            count.event.kind,
+            count.event,
         );
         let mut row = json!({ "id": id, "kind": "objective", "about": about, "target": target, "window": span });
-        if self.counted.is_empty() {
+        if !self.seen {
             row["current"] = json!("no events yet");
             row["remaining_percent"] = Value::Null;
             row["status"] = json!("no-data");
