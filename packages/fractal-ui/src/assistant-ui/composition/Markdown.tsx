@@ -9,6 +9,7 @@ import type { Root } from 'hast'
 import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { createLazyChunk } from '../../lazy-chunk'
+import { MarkdownLinkPreviewContext } from './markdownLinkPreview.ts'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
@@ -32,6 +33,7 @@ export interface MarkdownImageOptions {
   readonly renderInlineReference?: InlineReferenceRenderer
 }
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
+export { MarkdownLinkPreviewContext, type MarkdownLinkPreview } from './markdownLinkPreview.ts'
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
 /**
  * `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes.
@@ -132,7 +134,11 @@ function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'>
   if (href === undefined || href === '') return <>{children}</>
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const preview = React.useContext(MarkdownLinkPreviewContext)
+  const linkWith = (linkTitle: string | undefined) => <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={linkTitle} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const previewed = !imageLink && href !== undefined && preview !== undefined ? preview(href, linkWith(undefined)) : undefined
+  if (previewed !== undefined) return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{previewed}</ReferenceContext.Provider>
+  const link = linkWith(title)
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
