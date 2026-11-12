@@ -247,8 +247,8 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
     .await?
 }
 
-/// The grant person's own availability, with raw presence because the person is the reader,
-/// and their current directive note, from one store snapshot.
+/// The grant person's effective availability and current directive note, from one store
+/// snapshot. The assistant is not the person, so raw device presence is withheld.
 async fn availability(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> {
     use fractal_store::store::availability::AvailabilityStore as _;
     let person = owner(state)?;
@@ -257,7 +257,7 @@ async fn availability(state: &AppState) -> Result<(ClientSnapshot, Value), ApiEr
         reader.store.read_snapshot(|index| {
             let snapshot = client_snapshot_at(&reader, index);
             let now = client_snapshot_time(&snapshot);
-            let availability = reader.store.person_availability(&person, now)?;
+            let availability = reader.store.person_availability(&person, now)?.without_presence();
             let note = fractal_store::store::directive_notes::current(&reader.store.readers.get(), &person, now)?;
             Ok((snapshot, json!({
                 "kind": "person-availability", "availability": availability, "directive_note": note,

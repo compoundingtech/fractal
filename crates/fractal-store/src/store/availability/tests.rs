@@ -100,6 +100,20 @@ fn unchanged_reports_are_recorded_once_per_refresh_interval() {
 }
 
 #[test]
+fn a_late_flushed_report_does_not_swallow_a_fresh_one() {
+    let store = store();
+    let count = |store: &Store| store.claims_for(ADA, Some(fractal_schema::availability::PRESENCE_KIND)).unwrap().len();
+    {
+        let _clock = Clock::at(T0);
+        store.report_person_presence(ADA, "mac", Presence::Present, T0 - 12 * MINUTE, T0).unwrap();
+    }
+    report(&store, "mac", Presence::Present, T0 + MINUTE);
+    assert_eq!(count(&store), 2, "the recorded report was observed too long ago to count as unchanged");
+    let later = store.person_availability(ADA, T0 + 4 * MINUTE).unwrap();
+    assert_eq!((later.status, later.presence), (Status::Available, Some(Presence::Present)));
+}
+
+#[test]
 fn interruptions_and_the_deadline_clock_expire_to_their_defaults() {
     let store = store();
     let initial = store.person_availability(ADA, T0).unwrap();
