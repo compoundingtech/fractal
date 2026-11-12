@@ -4227,6 +4227,81 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_start_uses_the_declared_workspace_on_a_remote_placement() {
+    // A declared agent placed on another member keeps its declaration's workspace when a
+    // different member starts it: the caller's own directory must not leak into the agent.
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve_creation_api(root.path(), None).await;
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
+    let source = root.path().join("remote.kdl");
+    std::fs::write(
+        &source,
+        format!(
+            "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"omp\" {{}}\n  restart always\n }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    value(
+        &run_cli(
+            &socket,
+            &["apply", "--no-gate-check", source.to_str().unwrap(),
+            "--as",
+            "person/avery",],
+        )
+        .await,
+    );
+    let subject = "agent/dotfiles/build-capacity";
+    let original = agent_declaration(&socket, subject).await;
+    assert_eq!(
+        original.member.as_ref().map(|member| member.host.as_str()),
+        Some("distant")
+    );
+    // The fixture daemon answers as another member, so the declared placement is remote and
+    // the declared workspace does not exist on this machine.
+    assert!(!std::path::Path::new(declared).exists());
+    let preview = run_cli(
+        &socket,
+        &["agents", "start", subject, "--as", "person/avery", "--print-kdl"],
+    )
+    .await;
+    assert!(preview.status.success(), "{preview:?}");
+    let intent =
+        fractal_daemon::parse_intent(&String::from_utf8(preview.stdout).unwrap(), "client-v0-cli")
+            .unwrap();
+    assert_eq!(intent.subjects[subject].member, original.member);
+    value(&run_cli(&socket, &["agents", "start", subject, "--as", "person/avery"]).await);
+    assert_eq!(
+        agent_declaration(&socket, subject).await.member,
+        original.member
+    );
+    // A workspace override names a path on the placement host: it is published as written
+    // even when the caller's machine has no such path.
+    let missing = root.path().join("not-created-on-the-caller");
+    assert!(!missing.exists());
+    value(
+        &run_cli(
+            &socket,
+            &[
+                "agents",
+                "start",
+                subject,
+                "--as",
+                "person/avery",
+                "--workspace",
+                missing.to_str().unwrap(),
+            ],
+        )
+        .await,
+    );
+    let changed = agent_declaration(&socket, subject).await;
+    let mut expected = original.member.unwrap();
+    expected.workspace = missing.to_str().unwrap().into();
+    expected.cwd = expected.workspace.clone();
+    assert_eq!(changed.member, Some(expected));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve_creation_api(root.path(), None).await;
@@ -4354,6 +4429,14 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         let kdl = String::from_utf8(preview.stdout).unwrap();
         let intent = fractal_daemon::parse_intent(&kdl, "client-v0-cli").unwrap();
         assert!(intent.subjects.contains_key(subject), "{kdl}");
+        // No member can reach the named placement, so the start falls back to this
+        // daemon's own default workspace for the agent rather than failing the call.
+        let member = intent.subjects[subject].member.as_ref().unwrap();
+        assert_eq!(member.host.as_str(), "placement");
+        assert!(
+            member.workspace.ends_with(&format!("agents/{}", subject.replace('/', "."))),
+            "{kdl}",
+        );
     }
     for preview in [false, true] {
         let mut args = vec![
