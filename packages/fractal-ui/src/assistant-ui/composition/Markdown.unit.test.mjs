@@ -317,3 +317,23 @@ test('the suite runs on the parser it names', { skip: !usePulldown }, () => {
   assert.match(block('**x**'), /<strong/)
 })
 
+// fixtures/clients/markdown-cases.json: the cases and HTML policy every client shares (write-markdown-fixtures.mjs).
+test('shared client fixtures: the policy matches and every case renders as specified', async () => {
+  const shared = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-cases.json', import.meta.url), 'utf8'))
+  const { HTML_POLICY } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  assert.deepEqual(shared.policy, JSON.parse(JSON.stringify(HTML_POLICY)), 'regenerate with packages/fractal-ui/scripts/write-markdown-fixtures.mjs')
+  const visible = html => html.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, '&')
+  const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  for (const spec of shared.cases) {
+    const html = spec.kind === 'inline' ? renderToStaticMarkup(h(InlineMarkdown, { text: markdownInline(spec.markdown) })) : spec.kind === 'prompt' ? prompt(spec.markdown) : block(spec.markdown)
+    const words = visible(html)
+    for (const code of spec.code ?? []) assert.match(html, new RegExp(`<code[^>]*>${escape(code)}</code>`), `${spec.name}: code ${code}`)
+    for (const text of spec.text ?? []) assert.ok(words.includes(text), `${spec.name}: shows ${text}`)
+    for (const text of spec.absent ?? []) assert.ok(!words.includes(text), `${spec.name}: hides ${text}`)
+    if (spec.links !== undefined) assert.deepEqual([...html.matchAll(/<a\b[^>]*href="([^"]*)"/g)].map(match => match[1]), spec.links, `${spec.name}: links`)
+    if (spec.lineBreaks !== undefined) assert.equal((html.match(/<br/g) ?? []).length, spec.lineBreaks, `${spec.name}: line breaks`)
+    if (spec.disclosure !== undefined) assert.match(html, new RegExp(`<details[^>]*><summary[^>]*>${escape(spec.disclosure)}</summary>`), `${spec.name}: disclosure`)
+    if (spec.remoteImages !== undefined) assert.equal((html.match(/<img/g) ?? []).length, spec.remoteImages, `${spec.name}: images`)
+    if (spec.maxQuoteDepth !== undefined) assert.ok((html.match(/<blockquote/g) ?? []).length <= spec.maxQuoteDepth, `${spec.name}: depth`)
+  }
+})
