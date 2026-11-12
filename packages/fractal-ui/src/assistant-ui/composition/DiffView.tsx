@@ -1,12 +1,14 @@
 /**
  * The kit's one diff renderer: @pierre/diffs (diffs.com) behind a lazy chunk, themed by
  * `syntaxVars` and the surface tokens. Before the chunk arrives, or if it fails, the same lines
- * render as plain monospace text at the same line height, so nothing shifts.
+ * render as plain monospace text at the same line height, so nothing shifts. Each file swaps to
+ * Pierre only when Pierre's post-render notification shows it drew diff lines; a renderer error
+ * is reported and shown, never replaced silently. `data-diff-state` on the host says which.
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { createLazyChunk } from '../../lazy-chunk'
-import { surfaceVars as surface, textVars as text, borderVars as border, interactionVars as interaction, syntaxVars as syntax, typeVars as t, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, borderVars as border, interactionVars as interaction, statusVars as status, syntaxVars as syntax, typeVars as t, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { collapseWhitespaceChanges, normalizePatch, truncatePatch, type NormalizedDiffFile } from './diff-patch'
 import type { PierrePatchProps } from './DiffView.pierre'
 
@@ -43,12 +45,6 @@ let pierreFailed = false
 const pierreChunk = createLazyChunk({
   // fractal-ui targets ES2022, before Promise.withResolvers. Defer past the plain first paint.
   load: () => new Promise<PierreModule>((resolve, reject) => {
-    // Pierre's custom element adopts a constructed stylesheet (`new CSSStyleSheet().replaceSync`) in its
-    // constructor; where that API is missing (jsdom, pre-16.4 Safari) creating the element throws.
-    if (typeof CSSStyleSheet === 'undefined' || typeof CSSStyleSheet.prototype.replaceSync !== 'function') {
-      reject(new Error('Constructable stylesheets are unavailable; the diff stays plain'))
-      return
-    }
     requestAnimationFrame(() => setTimeout(() => { import('./DiffView.pierre').then(resolve, reject) }, 0))
   }),
 })
@@ -65,10 +61,44 @@ const serverSnapshot = () => undefined
 /** Preload ahead of a likely diff (hover, opening the Changes panel). */
 export const preloadDiffView = () => { void pierreChunk.load().catch(() => {}) }
 
-class PierreBoundary extends React.Component<{ readonly fallback: React.ReactNode; readonly children: React.ReactNode }, { failed: boolean }> {
-  override state = { failed: false }
-  static getDerivedStateFromError() { return { failed: true } }
-  override render() { return this.state.failed ? this.props.fallback : this.props.children }
+/** What paints one file; the default is the lazy Pierre renderer. Stories substitute renderers that never paint, throw or draw nothing. */
+export const DiffRendererContext = React.createContext<React.ComponentType<PierrePatchProps> | undefined>(undefined)
+
+type FileOutcome = 'rendering' | 'rendered' | 'failed'
+type ReportOutcome = (key: string, outcome: FileOutcome) => void
+
+/** Pierre catches its own render errors and paints them into the shadow root, then still notifies; read what it actually drew. */
+function paintOutcome(node: HTMLElement, collapsed: boolean): 'rendered' | Error {
+  const root = node.shadowRoot
+  const error = root?.querySelector('[data-error-message]')
+  if (error) return new Error(`The diff renderer failed: ${error.textContent ?? ''}`)
+  if (!collapsed && !root?.querySelector('[data-line]')) return new Error('The diff renderer finished without drawing any diff line')
+  return 'rendered'
+}
+
+/**
+ * Contains one file's renderer failure: React reports the caught error (the root's onCaughtError,
+ * console.error by default), the host reports `render-failed`, and the plain lines stay under a
+ * visible notice. A new patch for the file retries.
+ */
+class RenderBoundary extends React.Component<{ readonly fileKey: string; readonly patch: string; readonly report: ReportOutcome; readonly plain: React.ReactNode; readonly children: React.ReactNode }, { readonly error: Error | undefined; readonly patch: string }> {
+  override state: { readonly error: Error | undefined; readonly patch: string } = { error: undefined, patch: this.props.patch }
+  // oxlint-disable-next-line overeng/named-args -- React's required getDerivedStateFromProps ABI supplies props and state positionally.
+  static getDerivedStateFromProps(props: { readonly patch: string }, state: { readonly patch: string }) {
+    return props.patch === state.patch ? null : { error: undefined, patch: props.patch }
+  }
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error : new Error(String(error)) }
+  }
+  override componentDidCatch() { this.props.report(this.props.fileKey, 'failed') }
+  override render() {
+    const { error } = this.state
+    if (error === undefined) return this.props.children
+    return <>
+      <p role="alert" data-diff-error {...stylex.props(styles.failure)}>Diff highlighting failed: {error.message}. Showing plain lines.</p>
+      {this.props.plain}
+    </>
+  }
 }
 
 function schemeOf(node: HTMLElement): 'light' | 'dark' {
@@ -123,29 +153,21 @@ function PlainDiff({ file, wrap }: { readonly file: NormalizedDiffFile; readonly
 }
 
 /**
- * Pierre paints asynchronously (an empty frame first). Keep the plain lines in the same grid cell
- * until Pierre has height, so the swap never collapses the region.
+ * Pierre paints asynchronously (an empty frame first). The plain lines hold the same grid cell, and
+ * stay the visible content, until Pierre's post-render notification shows drawn diff lines; then
+ * the cells swap, so the region never collapses. A notification without lines throws into the
+ * boundary instead of swapping.
  */
-function SwapWhenPainted({ fallback, children }: { readonly fallback: React.ReactNode; readonly children: React.ReactNode }) {
-  const [painted, setPainted] = React.useState(false)
-  const rendered = React.useRef<HTMLDivElement>(null)
-  React.useLayoutEffect(() => {
-    const node = rendered.current
-    if (!node || painted) return
-    // Pierre's custom element exists before its shadow root has lines; wait for real content.
-    const hasLines = () => [...node.querySelectorAll('*')].some(element => (element.shadowRoot?.textContent ?? '').trim() !== '')
-    let frame = 0
-    let frames = 0
-    const check = () => {
-      if ((node.getBoundingClientRect().height > 0 && hasLines()) || frames++ > 180) { setPainted(true); return }
-      frame = requestAnimationFrame(check)
-    }
-    check()
-    return () => cancelAnimationFrame(frame)
-  }, [painted])
+function RenderedFile({ Renderer, fileKey, report, plain, props }: { readonly Renderer: React.ComponentType<PierrePatchProps>; readonly fileKey: string; readonly report: ReportOutcome; readonly plain: React.ReactNode; readonly props: Omit<PierrePatchProps, 'onRendered'> }) {
+  const [outcome, setOutcome] = React.useState<'rendering' | 'rendered' | Error>('rendering')
+  const collapsed = props.collapsed === true
+  const onRendered = React.useCallback((node: HTMLElement) => setOutcome(paintOutcome(node, collapsed)), [collapsed])
+  React.useLayoutEffect(() => { if (!(outcome instanceof Error)) report(fileKey, outcome) }, [fileKey, outcome, report])
+  if (outcome instanceof Error) throw outcome
+  const painted = outcome === 'rendered'
   return <div {...stylex.props(styles.swap)}>
-    {painted ? null : <div aria-hidden {...stylex.props(styles.swapCell)}>{fallback}</div>}
-    <div ref={rendered} {...stylex.props(styles.swapCell, !painted && styles.swapPending)}>{children}</div>
+    {painted ? null : <div {...stylex.props(styles.swapCell)}>{plain}</div>}
+    <div {...stylex.props(styles.swapCell, !painted && styles.swapPending)}><Renderer {...props} onRendered={onRendered} /></div>
   </div>
 }
 
@@ -155,6 +177,9 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   const host = React.useRef<HTMLDivElement>(null)
   const scheme = useScheme(host)
   const pierre = React.useSyncExternalStore(subscribe, snapshot, serverSnapshot)
+  const substitute = React.useContext(DiffRendererContext)
+  const [outcomes, setOutcomes] = React.useState<ReadonlyMap<string, FileOutcome>>(() => new Map())
+  const report = React.useCallback<ReportOutcome>((key, outcome) => setOutcomes(previous => previous.get(key) === outcome ? previous : new Map(previous).set(key, outcome)), [])
   const prepared = React.useMemo(() => {
     let hidden = 0
     let files = suppliedFiles ?? (deferredPatch ? normalizePatch(deferredPatch, { path }) : [])
@@ -173,12 +198,17 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   }, [suppliedFiles, deferredPatch, path, hideWhitespace, maxLines])
   const added = prepared.files.reduce((sum, file) => sum + file.added, 0)
   const removed = prepared.files.reduce((sum, file) => sum + file.removed, 0)
-  const Pierre = pierre === 'failed' || pierre === undefined ? undefined : pierre.default
-  return <div ref={host} role={density === 'compact' ? undefined : 'region'} aria-label={density === 'compact' ? undefined : label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} tabIndex={density === 'compact' ? undefined : 0} data-testid={testId} data-diff-state={Pierre ? 'rendered' : pierre === 'failed' ? 'plain-failed' : 'plain'} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
+  const Renderer = substitute ?? (pierre === 'failed' || pierre === undefined ? undefined : pierre.default)
+  const keys = prepared.files.map((file, index) => `${file.path}:${index}`)
+  const state = Renderer === undefined ? (pierre === 'failed' ? 'plain-failed' : 'plain')
+    : keys.some(key => outcomes.get(key) === 'failed') ? 'render-failed'
+    : keys.every(key => outcomes.get(key) === 'rendered') ? 'rendered' : 'rendering'
+  return <div ref={host} role={density === 'compact' ? undefined : 'region'} aria-label={density === 'compact' ? undefined : label ?? (prepared.files.length === 1 ? `Diff of ${prepared.files[0]!.path}` : 'Diff')} aria-busy={state === 'plain' || state === 'rendering' ? true : undefined} tabIndex={density === 'compact' ? undefined : 0} data-testid={testId} data-diff-state={state} data-added={added} data-removed={removed} data-density={density} {...stylex.props(styles.host, density === 'compact' && styles.compact, tone === 'muted' && styles.muted)}>
     {prepared.files.length === 0 ? <p {...stylex.props(styles.empty)}>No diff lines.</p> : prepared.files.map((file, index) => {
+      const key = keys[index]!
       const plain = <PlainDiff file={file} wrap={wrap} />
-      return <div key={`${file.path}:${index}`} data-diff-file={file.path} {...stylex.props(styles.file)}>
-        {Pierre ? <PierreBoundary fallback={plain}><SwapWhenPainted fallback={plain}><Pierre file={file} layout={layout} wrap={wrap} focusable={density !== 'compact'} header={header} lineNumbers={lineNumbers ?? (density !== 'compact' && !file.excerpt)} scheme={scheme} collapsed={collapsed} /></SwapWhenPainted></PierreBoundary> : plain}
+      return <div key={key} data-diff-file={file.path} {...stylex.props(styles.file)}>
+        {Renderer ? <RenderBoundary fileKey={key} patch={file.patch} report={report} plain={plain}><RenderedFile Renderer={Renderer} fileKey={key} report={report} plain={plain} props={{ file, layout, wrap, focusable: density !== 'compact', header, lineNumbers: lineNumbers ?? (density !== 'compact' && !file.excerpt), scheme, collapsed }} /></RenderBoundary> : plain}
       </div>
     })}
     {prepared.hidden > 0 ? <p data-diff-more {...stylex.props(styles.more)}>{prepared.hidden} more {prepared.hidden === 1 ? 'line' : 'lines'}</p> : null}
@@ -247,4 +277,5 @@ const styles = stylex.create({
   plainRemoved: { backgroundColor: 'color-mix(in srgb, var(--fractal-diff-deletion) 12%, transparent)' },
   more: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, fontFamily: t.fontSans, fontSize: t.denseSize, color: text.fgMuted, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
   empty: { margin: 0, padding: s.md, fontFamily: t.fontSans, fontSize: t.metaSize, color: text.fgMuted },
+  failure: { margin: 0, paddingInline: s.sm, paddingBlock: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, color: status.dangerFg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
 })

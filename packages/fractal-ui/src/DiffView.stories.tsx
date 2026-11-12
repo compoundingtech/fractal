@@ -1,10 +1,11 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, waitFor } from 'storybook/test'
+import { expect, spyOn, waitFor } from 'storybook/test'
 import { surfaceVars as surface, textVars as text, typeVars as type, spaceVars as space, borderVars as border } from './assistant-ui/composition-tokens.stylex'
 import { lightTheme } from './assistant-ui/composition-theme'
-import { DiffView } from './assistant-ui/composition/DiffView'
+import { DiffRendererContext, DiffView } from './assistant-ui/composition/DiffView'
+import type { PierrePatchProps } from './assistant-ui/composition/DiffView.pierre'
 import { samplePatch } from './assistant-ui/composition/diff-sample'
 import { EmbraceDiffPreview } from './assistant-ui/EmbraceToolPreview'
 import { DiffPanel } from './assistant-ui/composition/DiffPanel'
@@ -48,6 +49,9 @@ export const scenarioExemptions: readonly string[] = [
   'HoverCardPreviewLight:primitive',
   'Narrow:primitive',
   'NarrowLight:primitive',
+  'RendererDrawsNothing:primitive',
+  'RendererNeverPaints:primitive',
+  'RendererThrows:primitive',
   'SchemeSwitch:primitive',
   'Split:primitive',
   'SplitFocusRing:primitive',
@@ -60,10 +64,13 @@ export const scenarioExemptions: readonly string[] = [
 ]
 type Story = StoryObj<typeof meta>
 
+/** The real Pierre notification completed the swap: rendered state, drawn lines, the plain copy gone. */
 const rendered = async (canvasElement: HTMLElement) => {
   const view = canvasElement.querySelector<HTMLElement>('[data-testid="diff-view"]')!
   await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
   await waitFor(() => expect(shadowText(view)).toContain('retained row'), { timeout: 10_000 })
+  await expect(view.querySelector('[data-diff-plain]')).toBeNull()
+  await expect(view.hasAttribute('aria-busy')).toBe(false)
   return view
 }
 
@@ -231,6 +238,72 @@ export const SchemeSwitch: Story = {
     await userEvent.click(canvasElement.querySelector('button')!)
     await waitFor(() => expect(getComputedStyle(pierreHost()).colorScheme).toBe('dark'), { timeout: 5_000 })
   },
+}
+
+/** Mounts a DiffView painted by a substitute renderer on demand, so a play's console spy is in place before React reports a caught error. */
+function SubstituteRenderer({ renderer, scheme, width }: { readonly renderer: React.ComponentType<PierrePatchProps>; readonly scheme: 'dark' | 'light'; readonly width: number }) {
+  const [shown, setShown] = React.useState(false)
+  return <Canvas scheme={scheme} width={width}>
+    <button type="button" onClick={() => setShown(true)}>Show diff</button>
+    {shown ? <DiffRendererContext.Provider value={renderer}><DiffView patch={samplePatch} /></DiffRendererContext.Provider> : null}
+  </Canvas>
+}
+const NeverPaints = () => <div data-renderer-stub />
+const Throws = (): React.ReactNode => { throw new Error('Injected renderer failure') }
+function DrawsNothing({ onRendered }: PierrePatchProps) {
+  const node = React.useRef<HTMLDivElement>(null)
+  React.useLayoutEffect(() => { onRendered(node.current!) }, [onRendered])
+  return <div ref={node} data-renderer-stub />
+}
+const showDiff = async (canvasElement: HTMLElement) => {
+  await userEvent.click(canvasElement.querySelector('button')!)
+  return await waitFor(() => { const view = canvasElement.querySelector<HTMLElement>('[data-testid="diff-view"]'); expect(view).not.toBeNull(); return view! })
+}
+
+/** A renderer that never reports a paint: the plain first paint stays the visible content and the host stays busy, however many frames pass. */
+export const RendererNeverPaints: Story = {
+  render: ({ scheme, width }) => <SubstituteRenderer renderer={NeverPaints} scheme={scheme} width={width} />,
+  play: async ({ canvasElement }) => {
+    const view = await showDiff(canvasElement)
+    // Longer than any frame-count deadline a fallback could hide behind.
+    for (let frame = 0; frame < 240; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
+    await expect(view.dataset.diffState).toBe('rendering')
+    await expect(view.getAttribute('aria-busy')).toBe('true')
+    const plain = view.querySelector<HTMLElement>('[data-diff-plain]')!
+    await expect(plain.textContent).toContain('retained row')
+    await expect(getComputedStyle(plain).visibility).toBe('visible')
+    await expect(plain.getBoundingClientRect().height).toBeGreaterThan(0)
+    await expect(getComputedStyle(view.querySelector<HTMLElement>('[data-renderer-stub]')!).visibility).toBe('hidden')
+    await expect(view.querySelector('[role="alert"]')).toBeNull()
+  },
+}
+
+const failsVisibly = (message: string) => async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  const reported = spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    const view = await showDiff(canvasElement)
+    await waitFor(() => expect(view.dataset.diffState).toBe('render-failed'))
+    await expect(view.querySelector('[role="alert"]')?.textContent).toBe(`Diff highlighting failed: ${message}. Showing plain lines.`)
+    await expect(view.querySelector('[data-diff-plain]')?.textContent).toContain('retained row')
+    await expect(view.querySelector('[data-renderer-stub]')).toBeNull()
+    await expect(view.hasAttribute('aria-busy')).toBe(false)
+    // React reported the caught error (the root's onCaughtError logs it); nothing was swallowed.
+    await expect(reported.mock.calls.some(args => args.some(arg => String(arg instanceof Error ? arg.message : arg).includes(message)))).toBe(true)
+  } finally {
+    reported.mockRestore()
+  }
+}
+
+/** A renderer that throws: the error is reported, the host says `render-failed`, and a visible notice sits over the plain lines. */
+export const RendererThrows: Story = {
+  render: ({ scheme, width }) => <SubstituteRenderer renderer={Throws} scheme={scheme} width={width} />,
+  play: failsVisibly('Injected renderer failure'),
+}
+
+/** A post-render notification with no diff lines drawn is a failure, never a swap. */
+export const RendererDrawsNothing: Story = {
+  render: ({ scheme, width }) => <SubstituteRenderer renderer={DrawsNothing} scheme={scheme} width={width} />,
+  play: failsVisibly('The diff renderer finished without drawing any diff line'),
 }
 
 const styles = stylex.create({

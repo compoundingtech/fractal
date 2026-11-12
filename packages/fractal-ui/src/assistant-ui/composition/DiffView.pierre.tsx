@@ -48,9 +48,14 @@ export interface PierrePatchProps {
   readonly scheme: 'light' | 'dark'
   readonly collapsed?: boolean
   readonly renderHeaderMetadata?: () => React.ReactNode
+  /** Called after every completed paint (Pierre's post-render, mount and update) with the custom element. */
+  readonly onRendered: (node: HTMLElement) => void
 }
 
-export default function PierrePatch({ file, layout, wrap, focusable, header, lineNumbers, scheme, collapsed, renderHeaderMetadata }: PierrePatchProps) {
+export default function PierrePatch({ file, layout, wrap, focusable, header, lineNumbers, scheme, collapsed, renderHeaderMetadata, onRendered }: PierrePatchProps) {
+  // The options object is Pierre's identity for re-rendering; read the latest callback through a ref.
+  const rendered = React.useRef(onRendered)
+  React.useLayoutEffect(() => { rendered.current = onRendered }, [onRendered])
   const options = React.useMemo(() => ({
     theme: { dark: `${FRACTAL_DIFF_THEME}-dark`, light: `${FRACTAL_DIFF_THEME}-light` },
     themeType: scheme,
@@ -64,11 +69,13 @@ export default function PierrePatch({ file, layout, wrap, focusable, header, lin
     lineDiffType: 'word' as const,
     collapsed: collapsed ?? false,
     unsafeCSS,
-    // Each split column scrolls independently inside Pierre's shadow root.
-    onPostRender: (node: HTMLElement) => {
+    onPostRender: (node: HTMLElement, _instance: unknown, phase: 'mount' | 'update' | 'unmount') => {
+      if (phase === 'unmount') return
+      // Each split column scrolls independently inside Pierre's shadow root.
       for (const code of node.shadowRoot?.querySelectorAll<HTMLElement>('[data-code]') ?? []) {
         code.tabIndex = !wrap && focusable ? 0 : -1
       }
+      rendered.current(node)
     },
   }), [layout, wrap, focusable, header, lineNumbers, scheme, collapsed])
   return <PatchDiff patch={file.patch} options={options} renderHeaderMetadata={renderHeaderMetadata} />
