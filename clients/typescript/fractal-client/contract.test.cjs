@@ -334,7 +334,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'resources.list': return [{}, {}, options];
             case 'agent-declaration.get': return ['agent/example', undefined, false, options];
             case 'publication.definition': return ['mission/example', options];
-            case 'mission-declaration.get': return ['mission/example', undefined, options];
+            case 'mission-declaration.get': case 'source-map.get': return ['mission/example', undefined, options];
+            case 'source-blob.get': return ['ab'.repeat(32), 'mission/example', 'revision', options];
             case 'subject.definition': return ['mission/example', false, options];
             case 'conversation-content.chunk': return ['session/example', 'reference', 0, options];
             case 'conversation.changes': case 'timeline.list': return ['session/example', {}, options];
@@ -1159,6 +1160,21 @@ test('mission declaration read encodes exact revisions and preserves served text
     assert.equal(calls.at(-1), 'https://example.test/v1/client/mission-declaration?mission=' + encodeURIComponent(value.mission) + '&revision=' + encodeURIComponent(value.revision));
     await client.missionDeclarationGet(value.mission);
     assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
+});
+
+test('source map reads take the subject and revision as a query; a blob is read by its sha256 within one mapped revision', async () => {
+    const calls = [];
+    const hash = 'ab'.repeat(32);
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : url.includes('/source-blobs/') ? { hash, text: 'export {}\n' } : { subject: 'mission/example' }));
+    } });
+    await client.sourceMapGet('mission/example/readback', 'revision/one&two');
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/source-maps?subject=' + encodeURIComponent('mission/example/readback') + '&revision=' + encodeURIComponent('revision/one&two'));
+    await client.sourceMapGet('agent/example');
+    assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
+    assert.deepEqual((await client.sourceBlobGet(hash, 'mission/example/readback', 'revision/one&two')).value, { hash, text: 'export {}\n' });
+    assert.equal(calls.at(-1), `https://example.test/v1/client/source-blobs/${hash}?subject=` + encodeURIComponent('mission/example/readback') + '&revision=' + encodeURIComponent('revision/one&two'));
 });
 
 test('mission detail run read names the requested run and leaves the plain detail unbounded by it', async () => {
