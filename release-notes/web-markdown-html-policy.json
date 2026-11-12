@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Markdown applies a GitHub-like HTML policy: allowed elements render, other raw HTML becomes text or is dropped, comments are hidden, details/summary disclose, links are limited to http(s) and document references, raw images wait for consent, and nesting is capped at 32",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web UI only; no wire, protocol, runtime or client changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous rendering."
+  }
+}
