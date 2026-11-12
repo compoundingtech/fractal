@@ -256,6 +256,11 @@ recorded at once. Both writes answer the person's full `PersonAvailability`; inv
 [read fixture](fixtures/person-availability.json) and
 [write fixture](fixtures/availability-set.json).
 
+`fractal availability [show] [--person person/NAME]`, `fractal availability set`, `clear` and
+`presence` call the same generated Rust methods over the local socket, acting as `--actor`, the
+harness agent or the configured person. The CLI refuses an agent's write before any request.
+See the [attention guide](../../site/concepts/attention.md#availability).
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
