@@ -6996,6 +6996,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(timeout) = fields.get("shutdown_timeout_ms") {
                 observed_fields.insert("shutdown_timeout_ms".into(), timeout.clone());
             }
+            self.retain_exit_evidence(
+                &subject.subject,
+                runtime_id,
+                terminal,
+                observation.incarnation_id.as_deref(),
+                &mut observed_fields,
+            )?;
             self.record_once(&subject.subject, "runtime.observed", observed_fields)?;
         }
         // A run's end never stops a seat that still has someone's mail or another run's work.
@@ -22562,6 +22569,21 @@ mission "exit-evidence" state="ready" {
         assert_eq!(actual_field(&replicated, "exit_evidence"), actual_field(&actual, "exit_evidence"));
         let replicated = replica.mission_run(&run.id).unwrap().unwrap();
         assert_eq!(replicated.steps[0].blocked_reason, step.blocked_reason);
+        // A replacement discovered while desired is still stop also clears the predecessor.
+        let stopped = store.desired_subjects().unwrap().into_iter()
+            .find(|item| item.subject == subject.subject).unwrap();
+        let replacement = RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+            exit_code: None, incarnation_id: Some("worker-two".into()),
+        };
+        reconciler.reconcile_stop(
+            &stopped,
+            Some(&HashMap::from([(member.runtime_id.clone(), replacement)])),
+        ).unwrap();
+        let replacement = store.latest_actual_value(&subject.subject).unwrap().unwrap();
+        assert!(actual_field(&replacement, "exit_evidence").is_none_or(Value::is_null));
+        assert!(actual_field(&replacement, "exit_code").is_none_or(Value::is_null));
+        assert!(actual_field(&replacement, "exit_signal").is_none_or(Value::is_null));
         // A new live incarnation cannot inherit the previous registered exit fields.
         reconciler.record_member(&subject, &RuntimeObservation {
             runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
