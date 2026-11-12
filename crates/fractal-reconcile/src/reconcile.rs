@@ -4745,11 +4745,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .pointer("/fields/restart_at_unix_ms")
             .and_then(Value::as_str)
             .and_then(|value| value.parse::<u128>().ok());
-        let ready = crate::handoff::acknowledged_since(
-            &self.store,
-            subject,
-            prepare.accepted_at_unix_ms,
-        )?;
+        let acknowledged = if require_handoff {
+            crate::handoff::acknowledged_handoff_since
+        } else {
+            crate::handoff::acknowledged_since
+        };
+        let ready = acknowledged(&self.store, subject, prepare.accepted_at_unix_ms)?;
         if !ready && (require_handoff || deadline.is_some_and(|deadline| now < deadline)) {
             if !require_handoff && let Some(deadline) = deadline {
                 self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
@@ -9195,6 +9196,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // cannot complete a new request that has not admitted any start yet.
         if let Some(observation) = observation
             && (attempted.is_some() || !previous.is_empty())
+            // Crash recovery may replace the incumbent while a fresh request waits.
+            // Only this request's launch attempt proves that its fresh session was started.
+            && (request.body["fields"]["fresh_session"] != true || attempted.is_some())
             && observation.status != "unknown"
             && observation
                 .incarnation_id

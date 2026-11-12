@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Accept fresh-session restarts with stale or missing handoffs as pending until the seat acknowledges preparation; add a person-only --from-stale-handoff override and keep --now from bypassing fresh-session acknowledgement.",
+  "summary": "Accept fresh-session restarts with stale or missing handoffs as pending until the seat acknowledges a readable handoff; add a person-only --from-stale-handoff override, keep --now from bypassing acknowledgement, and require the request's own fresh-session launch before completion even if crash recovery replaced the incumbent while waiting.",
   "replay": {
     "status": "none",
     "detail": "No historical replay or recovery wait is introduced. Fresh-session restart requests remain runtime.action.requested claims; the optional from_stale_handoff boolean records an explicit person's override on new requests. Existing requests are not rewritten."

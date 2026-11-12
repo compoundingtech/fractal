@@ -4417,3 +4417,61 @@ async fn the_cli_accepts_now_and_fresh_session_without_a_handoff_and_returns_pen
     assert_eq!(starts.len(), 2);
     assert_eq!(continued(&starts[1]), None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_restart_review_ready_without_a_document_stays_pending() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    bind_session(&fixture, &subject, "fixture:1", "session-one").await;
+    mark_ready(&fixture, &subject, "fixture:1");
+    let request = fixture.request_fresh_session(&subject, "missing-document").await.unwrap();
+    pass(&fixture, 3);
+    let socket = fixture.root.path().join("st3.sock");
+    succeeded(&st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await);
+    pass(&fixture, 4);
+    assert!(fixture.runtime.stops.lock().unwrap().is_empty());
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
+    assert_eq!(prepare_decisions(&fixture, &subject), ["prepare"]);
+    assert!(fixture.store.operation_claim(&format!("agent-restart-completed:{}", request.id)).unwrap().is_none());
+
+    write_handoff(&fixture, &subject, "Resume the parser test.", "actual-handoff");
+    pass(&fixture, 4);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(continued(&starts[1]), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_restart_review_crash_replacement_cannot_complete_the_request() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for policy in ["always", "on-failure"] {
+        let (fixture, subject) = Fixture::claude(Shape::TopLevel, policy).await;
+        bind_session(&fixture, &subject, "fixture:1", "session-one").await;
+        mark_ready(&fixture, &subject, "fixture:1");
+        let request = fixture.request_fresh_session(&subject, "crash-during-prepare").await.unwrap();
+        pass(&fixture, 3);
+        hang_up(&fixture);
+        pass(&fixture, 4);
+        let starts = fixture.runtime.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 2, "ordinary crash recovery remains available");
+        assert_eq!(continued(&starts[1]), Some("session-one"));
+        mark_ready(&fixture, &subject, "fixture:2");
+        write_handoff(&fixture, &subject, "Continue after the crash.", "replacement-handoff");
+        pass(&fixture, 4);
+        let starts = fixture.runtime.starts.lock().unwrap().clone();
+        assert_eq!(starts.len(), 3, "the pending request must launch its own fresh session");
+        assert_eq!(continued(&starts[2]), None);
+        assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:2"]);
+        assert!(fixture.store.operation_claim(&format!("agent-restart-attempt:{}", request.id)).unwrap().is_some());
+        assert!(fixture.store.operation_claim(&format!("agent-restart-completed:{}", request.id)).unwrap().is_none());
+        mark_ready(&fixture, &subject, "fixture:3");
+        pass(&fixture, 3);
+        assert_eq!(restart_result(&fixture, &request).body["fields"]["incarnation_id"], "fixture:3");
+        let message = session_start(&fixture, &subject, "fixture:3");
+        assert!(message.content.contains("Continue after the crash."), "{}", message.content);
+    }
+}

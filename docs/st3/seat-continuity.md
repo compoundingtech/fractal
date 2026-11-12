@@ -64,9 +64,13 @@ the last one. If the seat has written or marked its handoff ready (`fractal agen
 since its last turn began, it restarts without asking for one again. Otherwise the API accepts
 the request, even with `--now`, and the CLI returns a pending message (or the request claim with
 `--json`) rather than waiting for a new incarnation. Fractal asks the seat to prepare and waits
-for a handoff write or readiness acknowledgement after the request. A missing handoff is accepted
-too. The two-minute deadline never forces this fresh-session restart: an unacknowledged request
-stays pending, including when the seat cannot answer.
+for a handoff write or readiness acknowledgement of an existing handoff after preparation.
+A request without a handoff is accepted as pending, but a readiness claim alone cannot
+release it until a handoff document exists. The two-minute deadline never forces this
+fresh-session restart: an unacknowledged request stays pending, including when the seat
+cannot answer. Ordinary crash recovery can continue the previous native session while
+waiting; it does not complete the pending fresh restart. After acknowledgement, that
+request launches its own fresh session.
 
 A person may explicitly accept the existing handoff, even if stale or absent, with
 `fractal agents restart AGENT --fresh-session --from-stale-handoff --as person/operator`.

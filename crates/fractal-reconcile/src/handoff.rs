@@ -164,6 +164,24 @@ pub fn acknowledged_since(store: &Store, agent: &str, since_unix_ms: u128) -> Re
         }))
 }
 
+/// A fresh session needs both acknowledgement and a readable handoff document.
+/// Readiness by itself can acknowledge an ordinary restart, but cannot create its
+/// replacement session's context.
+pub fn acknowledged_handoff_since(store: &Store, agent: &str, since_unix_ms: u128) -> Result<bool> {
+    if !acknowledged_since(store, agent, since_unix_ms)? {
+        return Ok(false);
+    }
+    let Some(name) = document_name(agent) else {
+        return Ok(false);
+    };
+    let Some(version) = store.list_documents(Some(&name), false, 1)?
+        .into_iter().find(|version| version.latest)
+    else {
+        return Ok(false);
+    };
+    Ok(store.get_document(&version.name, &version.hash)?.is_some())
+}
+
 /// Whether the seat has a handoff that it wrote or marked ready since its last turn began, so
 /// the session after it can start from that handoff alone. A seat that has not taken a turn
 /// since its handoff was written counts: nothing happened that the handoff does not cover.
