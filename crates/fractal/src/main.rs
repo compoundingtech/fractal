@@ -12465,6 +12465,7 @@ async fn list_outcomes(
         path.push_str(&format!("&mission={}", urlencoding::encode(mission)));
     }
     let mut page: Value = client.get(&path).await?;
+    require_mission_echo(&page, filter.mission.as_deref())?;
     if let Some(before) = page["next_before"].as_u64() {
         filter.before = before;
         let next = format!(
@@ -12520,6 +12521,16 @@ async fn list_outcomes(
     if partial {
         fractal_daemon::gate_report::note_partial_listing(shown);
     }
+    Ok(())
+}
+
+/// Daemons that predate `--mission` ignore the parameter and answer the fleet-wide page, so a
+/// mission-filtered request is trusted only when the page echoes the mission back.
+fn require_mission_echo(page: &Value, mission: Option<&str>) -> Result<()> {
+    anyhow::ensure!(
+        mission.is_none() || page["mission"].is_string(),
+        "this daemon does not support --mission; upgrade the daemon"
+    );
     Ok(())
 }
 

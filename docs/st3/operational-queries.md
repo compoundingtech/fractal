@@ -175,6 +175,15 @@ other missions' runs never appear. Running and waiting runs are not terminal tra
 never appear in this history: read `/v1/mission-runs?mission=...` for the active runs.
 
 These are events, so retries preserve earlier failures and a run can appear more than once.
+Times are the graph claims' accepted timestamps. `--as` on work also filters by the recorded
+actor or step assignment. Pages contain reasons and their claim IDs; the continuation printed
+by the command fixes the original time window and `--mission`. Resume using that command without
+repeating relative time filters. JSON includes `next_cursor`, and an exhausted page has `has_more=false`.
+History cursors and page order are local to the serving daemon, like raw claim-history cursors;
+they are not shared state folds. Reason selection uses canonical claim order, including recovery
+from an earlier transition, so replicated arrival order cannot choose a different reason.
+A daemon that predates `--mission` answers the unfiltered page; the command refuses it with
+"this daemon does not support --mission; upgrade the daemon" instead of mislabelling it.
 
 Native lease polling uses `GET /v1/work?actor=...&view=renewal`: only the actor's
 currently held claimed/working/verifying/blocked steps, with owner and lease validity applied. This view
