@@ -9648,13 +9648,16 @@ fn render_now_page(
         output.push_str(&render_sync_notice(sync, now_ms()));
     }
     // Who the reader may wait on, before what waits on the reader.
-    for person in people {
+    // Only availability that departs from the default; `work ask` always names it.
+    let mut named = false;
+    for person in people.iter().filter(|person| availability::worth_showing(person)) {
         output.push_str(&availability::summary_line(person));
         output.push('\n');
+        named = true;
     }
     // `N alerts` and the alerts, then updates; nothing at all when nothing waits.
     let alerts = render_alert_sections(&needs_you, None, continuation_command);
-    if !people.is_empty() && !alerts.is_empty() {
+    if named && !alerts.is_empty() {
         output.push('\n');
     }
     output.push_str(&alerts);

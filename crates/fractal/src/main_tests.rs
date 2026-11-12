@@ -4288,9 +4288,17 @@ fn now_page_names_availability_before_alerts() {
         "{output}"
     );
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), &[away], "fractal now"),
+        render_now_page(&fixture_product_page(&[], false), &[away.clone()], "fractal now"),
         "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\nWork: fractal work ls · Health: fractal doctor\n"
-    );
+    );    let unknown = fractal_client::PersonAvailability {
+        status_source: "presence".into(),
+        status_until: None,
+        presence: Some("unknown".into()),
+        interruptions: "all".into(),
+        ..away
+    };
+    let quiet = render_now_page(&fixture_product_page(&["attention"], false), &[unknown], "fractal now");
+    assert!(quiet.starts_with("1 alert\n"), "unknown presence alone prints nothing: {quiet}");
 }
 
 #[test]

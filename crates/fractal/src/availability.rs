@@ -177,6 +177,16 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
 
 /// One line for someone about to wait on the person: the status always, the rest only when it
 /// differs from the default.
+/// Whether `fractal now` should name this availability: only when something departs from the
+/// default. Presence-derived away with unknown presence says nothing a reader can act on.
+pub(super) fn worth_showing(availability: &PersonAvailability) -> bool {
+    availability.status_source == "override"
+        || (availability.status == "away"
+            && matches!(availability.presence.as_deref(), Some("idle" | "locked")))
+        || availability.deadline_clock != "run"
+        || availability.interruptions != "all"
+}
+
 pub(super) fn summary_line(availability: &PersonAvailability) -> String {
     let at = |label: &str, time: &Option<String>| {
         time.as_deref().map(|time| format!(" {label} {time}")).unwrap_or_default()
@@ -412,6 +422,18 @@ mod tests {
             deadline_clock_until: None,
         };
         assert_eq!(summary_line(&available), "person/ada is available");
+        assert!(!worth_showing(&available));
+        let unknown_away = PersonAvailability {
+            status: "away".into(),
+            presence: Some("unknown".into()),
+            ..available.clone()
+        };
+        assert!(!worth_showing(&unknown_away), "unknown presence alone says nothing");
+        assert!(worth_showing(&PersonAvailability { presence: Some("idle".into()), ..unknown_away.clone() }));
+        assert!(worth_showing(&PersonAvailability { presence: Some("locked".into()), ..unknown_away }));
+        assert!(worth_showing(&PersonAvailability { status_source: "override".into(), ..available.clone() }));
+        assert!(worth_showing(&PersonAvailability { interruptions: "urgent".into(), ..available.clone() }));
+        assert!(worth_showing(&PersonAvailability { deadline_clock: "hold-routine".into(), ..available.clone() }));
         let away = PersonAvailability {
             status: "away".into(),
             status_source: "override".into(),
@@ -423,6 +445,7 @@ mod tests {
             deadline_clock_until: Some("2026-11-12T18:00:00.000Z".into()),
             ..available
         };
+        assert!(worth_showing(&away));
         assert_eq!(
             summary_line(&away),
             "person/ada is away until 2026-11-12T18:00:00.000Z; interruptions: urgent until 2026-11-12T18:00:00.000Z; deadline clock: hold-all since 2026-11-12T17:00:00.000Z until 2026-11-12T18:00:00.000Z"
