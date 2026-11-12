@@ -35,11 +35,12 @@ objective "ops/change-rollout" {
 - `about` says what is measured, in one sentence.
 - `indicator` says how a sample is measured. Each kind is below.
 - `target STAT BOUND` bounds one statistic. `STAT` is what the indicator reports (`p50`, `p99`,
-  `max`, `cores`, ...) and the bound is `within=DURATION`, `max=NUMBER` or `min-percent=NUMBER`.
-  Each indicator names its rows (table below). A percentile over claims or CI is the row
-  `NAME/pNN` (`ops/change-rollout/p95`), one per target.
-- `window` is the span the budget is measured over, and `min-samples` the samples it needs before it
-  is met or missed; with fewer it is `no-data`. Only an indicator over claims takes a window.
+  `max`, `cores`, `per-hour`, ...) and the bound is `within=DURATION`, `max=NUMBER`, `min=NUMBER`
+  or `min-percent=NUMBER`. Each indicator names its rows (table below). A percentile over claims or
+  CI is the row `NAME/pNN` (`ops/change-rollout/p95`), one per target.
+- `window` is the span the budget is measured over, and `min-samples` the samples an interval needs
+  before it is met or missed; with fewer it is `no-data`. Only an indicator over claims takes a
+  window.
   Native telemetry keeps its own windows, below.
 - `on-breach` is what happens when a row is missed. It is optional; without it a miss is shown and
   nothing is delivered.
@@ -121,6 +122,55 @@ is `no-data` and spends no budget; with none it reads `no samples`.
 Each evaluation reads only the claims newer than the last it read, keeping each objective's samples
 in memory; a sample closed, cancelled or excluded before the window is dropped from memory.
 
+### Count over claims
+
+`count` counts events that processes write as claims, such as pull requests merged or flaky tests
+seen, per hour over the window. Each subject under `subject-prefix` is at most one event.
+
+```kdl
+objective "factory/work-throughput" {
+  about "Factory-authored pull requests merged into the roster's default branches"
+  indicator "count" {
+    subject-prefix "custom/factory/merged-pr/"
+    event "custom.factory.pr-merged" at="merged_at"
+    label "repository"
+    exclude "author" "renovate"
+  }
+  window "24h"
+  target "per-hour" min=10
+}
+```
+
+| Child | Meaning |
+|---|---|
+| `subject-prefix "P"` | The event subjects, as for an interval. |
+| `event KIND at=FIELD` | A subject's event is at its earliest such claim, its time read as an interval's `at`. Retries and a second producer of the same subject never count twice, and a subject counted once is never counted again for the revision, even after its event left the window. |
+| `label "FIELD"` | Also one row per value of `FIELD` on the event claim: `factory/work-throughput{repository=fractal}`. |
+| `exclude "FIELD" "A" "B"` | An event whose claim has one of these values is excluded: counted apart, never in the rate. |
+
+The objective takes one target, `per-hour` with `max=N` (at most N an hour, N ≥ 0) or `min=N` (at
+least N an hour, N > 0), and a `window` without `min-samples`. The row `NAME` reports the events in
+the window and the rate, events ÷ window hours:
+
+```
+factory/work-throughput  met  ≥ 10 an hour  312 in the last 24h (13.00 an hour)  24h  23%
+```
+
+- `max=N` is met when the rate is at most N, and the budget left is `100 × (1 − rate ÷ N)` as the
+  shipped `ci-count` rows: with `max=0` it is 100% while met and 0% once missed.
+- `min=N` is met when the rate is at least N, and the budget left is `100 × (1 − N ÷ rate)`, the
+  share of the rate above the minimum, as a `share`'s budget is the share of its allowed remainder:
+  0% at the minimum or below, nearing 100% as the rate grows.
+
+The row is `no-data` until the objective has read one event claim for its revision; from then on an
+empty window is a real 0, so a producer that stopped shows as a missed minimum rather than hiding.
+A claim whose time cannot be read is counted as unreadable and changes nothing. `fractal slo explain`
+says the events counted and excluded in the window, the rate, the unreadable claims, and the
+subject and revision.
+
+Each evaluation reads only the event claims newer than the last it read; an event before the window
+is dropped from memory, and the subjects counted are remembered.
+
 ### Ratio over Prometheus metrics
 
 There is none: Fractal does not read Prometheus. It exports its native readings as OTLP gauges
@@ -171,5 +221,6 @@ A declaration this build cannot read, as one replicated from a newer build, is t
 
 `GET /v1/claims` filters by `kind`, by `subject_prefix` or by an exact `subject`, and pages by store
 index. `fractal claims ls --kind KIND --subject-prefix PREFIX` prints them. Both read through the
-claims' kind and subject indexes. The interval indicator reads its claims the same way, keeping each
-objective's samples in memory and reading only claims newer than the last it saw.
+claims' kind and subject indexes. The interval and count indicators read their claims the same way,
+keeping each objective's samples or events in memory and reading only claims newer than the last it
+saw.
