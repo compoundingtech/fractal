@@ -1,15 +1,19 @@
 //! A missed CI objective is a fault for the fleet's fault agent.
 //!
 //! The objectives `slo/objectives.kdl` ships for CI (each `ci-duration` and `ci-count`) are
-//! read from the rows the SLO history samples once a minute. An objective whose row is missed
-//! opens one `operational.failure` on this member's `daemon/NODE` subject, addressed to the fleet
-//! fault agent and never to a person; it stays one episode until the row is met again, when an
-//! `operational.recovered` ends it. A row with no data, as after a restart before the observer
-//! has read any runs, neither opens nor ends one. With no fleet fault agent, nothing opens.
+//! read from the rows the SLO history samples once a minute. Every member computes those rows
+//! from the same replicated Workspace CI reading, so only the member whose observer recorded it
+//! opens a fault: an objective whose row is missed there opens one `operational.failure` on that
+//! member's `daemon/NODE` subject, addressed to the fleet fault agent and never to a person; it
+//! stays one episode until the row is met again, when an `operational.recovered` ends it, on any
+//! member that has one open. A row with no data, as before any member has recorded runs or once
+//! the reading is stale, neither opens nor ends one. With no fleet fault agent, nothing opens.
 //!
 //! It stays cheap: a check whose rows hold no met or missed CI objective reads nothing, and one
 //! that does reads this member's objective faults once through the claims' subject and kind
-//! index. It writes only to open or end a fault.
+//! index, and, when one is missed, which member recorded the reading. It writes only to open or
+//! end a fault.
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,7 +55,8 @@ pub fn episode(local: &str, id: &str) -> String {
 /// its rows whatever this finds.
 pub fn check_and_report(store: &Store, rows: &[Value]) {
     static FAILING: AtomicBool = AtomicBool::new(false);
-    match check(store, rows, &ci_objectives(crate::slo::targets())) {
+    let objectives = ci_objectives(crate::slo::targets());
+    match rows_here(store, rows, &objectives).and_then(|rows| check(store, &rows, &objectives)) {
         Ok(_) => FAILING.store(false, Ordering::Relaxed),
         Err(error) => {
             if !FAILING.swap(true, Ordering::Relaxed) {
@@ -59,6 +64,20 @@ pub fn check_and_report(store: &Store, rows: &[Value]) {
             }
         }
     }
+}
+
+/// `rows` as this member acts on them: without the missed CI rows unless this member's observer
+/// recorded the reading they come from, so the members computing the same rows open one fault.
+fn rows_here<'a>(store: &Store, rows: &'a [Value], objectives: &BTreeSet<String>) -> Result<Cow<'a, [Value]>, FractalError> {
+    let missed = |row: &Value| row["status"] == "missed" && row["id"].as_str().is_some_and(|id| objectives.contains(id));
+    if !rows.iter().any(missed) {
+        return Ok(Cow::Borrowed(rows));
+    }
+    let reading = crate::objectives::ci_reading(store).map_err(internal)?;
+    if reading.is_some_and(|reading| reading.member == store.origin()) {
+        return Ok(Cow::Borrowed(rows));
+    }
+    Ok(Cow::Owned(rows.iter().filter(|row| !missed(row)).cloned().collect()))
 }
 
 /// Open a fault for each objective in `objectives` that `rows` shows missed and that has no open
