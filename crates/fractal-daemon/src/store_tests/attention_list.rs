@@ -489,10 +489,11 @@ assert!(!revisions.has_changed().unwrap());
 
 /// The asked person's deadline clock moves an ask's deadline, and each change is a claim, so it
 /// folds the published list: the home serves no deadline while the clock is held, and the
-/// stored deadline plus the time held once it runs again.
+/// stored deadline plus the time held once it runs again. The person's status, interruptions
+/// and presence move nothing attention shows, so they fold nothing.
 #[test]
 fn the_published_list_follows_the_asked_persons_deadline_clock() {
-use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock};
+use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock, Interruptions, Presence, Status};
 let (store, _, mut request) = fixture();
 store.start_attention_list_refresher().unwrap();
 store.set_ask_deadlines(true);
@@ -520,6 +521,18 @@ let served_after_run = set(DeadlineClock::Run);
 let changes = store.claims_for("person/avery", Some("person.deadline-clock-set")).unwrap();
 let held = changes[1].accepted_at_unix_ms - changes[0].accepted_at_unix_ms;
 assert_eq!(served_after_run, at(deadline + held));
+let published = refresh_and_check(&store);
+store.set_person_availability("person/avery", &[
+    AvailabilityChange::Status(Some(Status::Away), None),
+    AvailabilityChange::Interruptions(Interruptions::Urgent, None),
+], now_ms()).unwrap();
+store.report_person_presence("person/avery", "host/alder", Presence::Present, now_ms(), now_ms()).unwrap();
+assert!(store.index().unwrap() > published.cut);
+assert_eq!(
+    store.read_snapshot(|index| store.attention_list_delta(&published, index, now_ms())).unwrap(),
+    AttentionDelta::Unchanged(None),
+    "status, interruptions and presence fold nothing"
+);
 }
 
 #[test]
