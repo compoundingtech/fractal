@@ -175,6 +175,49 @@ pub(super) fn render_block(availability: &PersonAvailability) -> String {
     block
 }
 
+/// Whether `fractal now` should name this availability: only when something departs from the
+/// default. Non-self readers (agents) never see raw presence (`presence` is `None`), so a
+/// presence-derived away always shows for them: the person is effectively away and the agent
+/// should park. Only the person's own view can tell an unknown presence (no fresh device
+/// report) apart, and that says nothing they can act on.
+pub(super) fn worth_showing(availability: &PersonAvailability) -> bool {
+    availability.status_source == "override"
+        || (availability.status == "away"
+            && matches!(availability.presence.as_deref(), None | Some("idle" | "locked")))
+        || availability.deadline_clock != "run"
+        || availability.interruptions != "all"
+}
+
+/// One line for someone about to wait on the person: the status always, the rest only when it
+/// differs from the default.
+pub(super) fn summary_line(availability: &PersonAvailability) -> String {
+    let at = |label: &str, time: &Option<String>| {
+        time.as_deref().map(|time| format!(" {label} {time}")).unwrap_or_default()
+    };
+    let mut line = format!(
+        "{} is {}{}",
+        availability.person,
+        availability.status,
+        at("until", &availability.status_until)
+    );
+    if availability.interruptions != "all" {
+        line.push_str(&format!(
+            "; interruptions: {}{}",
+            availability.interruptions,
+            at("until", &availability.interruptions_until)
+        ));
+    }
+    if availability.deadline_clock != "run" {
+        line.push_str(&format!(
+            "; deadline clock: {}{}{}",
+            availability.deadline_clock,
+            at("since", &availability.deadline_clock_since),
+            at("until", &availability.deadline_clock_until)
+        ));
+    }
+    line
+}
+
 pub(super) async fn run(
     endpoint: &Endpoint,
     configured_person: Option<&str>,
@@ -364,5 +407,55 @@ mod tests {
         );
         let other = PersonAvailability { presence: None, presence_observed_at: None, ..own };
         assert!(!render_block(&other).contains("presence"));
+    }
+
+    #[test]
+    fn availability_summary_names_status_always_and_only_non_default_rest() {
+        let available = PersonAvailability {
+            person: "person/ada".into(),
+            status: "available".into(),
+            status_source: "presence".into(),
+            status_until: None,
+            presence: None,
+            presence_observed_at: None,
+            interruptions: "all".into(),
+            interruptions_until: None,
+            deadline_clock: "run".into(),
+            deadline_clock_since: None,
+            deadline_clock_until: None,
+        };
+        assert_eq!(summary_line(&available), "person/ada is available");
+        assert!(!worth_showing(&available));
+        let unknown_away = PersonAvailability {
+            status: "away".into(),
+            presence: Some("unknown".into()),
+            ..available.clone()
+        };
+        assert!(!worth_showing(&unknown_away), "unknown presence alone says nothing");
+        assert!(worth_showing(&PersonAvailability { presence: Some("idle".into()), ..unknown_away.clone() }));
+        assert!(worth_showing(&PersonAvailability { presence: Some("locked".into()), ..unknown_away.clone() }));
+        assert!(
+            worth_showing(&PersonAvailability { presence: None, ..unknown_away }),
+            "a non-self reader sees no raw presence, so presence-derived away must still show"
+        );
+        assert!(worth_showing(&PersonAvailability { status_source: "override".into(), ..available.clone() }));
+        assert!(worth_showing(&PersonAvailability { interruptions: "urgent".into(), ..available.clone() }));
+        assert!(worth_showing(&PersonAvailability { deadline_clock: "hold-routine".into(), ..available.clone() }));
+        let away = PersonAvailability {
+            status: "away".into(),
+            status_source: "override".into(),
+            status_until: Some("2026-11-12T18:00:00.000Z".into()),
+            interruptions: "urgent".into(),
+            interruptions_until: Some("2026-11-12T18:00:00.000Z".into()),
+            deadline_clock: "hold-all".into(),
+            deadline_clock_since: Some("2026-11-12T17:00:00.000Z".into()),
+            deadline_clock_until: Some("2026-11-12T18:00:00.000Z".into()),
+            ..available
+        };
+        assert!(worth_showing(&away));
+        assert_eq!(
+            summary_line(&away),
+            "person/ada is away until 2026-11-12T18:00:00.000Z; interruptions: urgent until 2026-11-12T18:00:00.000Z; deadline clock: hold-all since 2026-11-12T17:00:00.000Z until 2026-11-12T18:00:00.000Z"
+        );
     }
 }
