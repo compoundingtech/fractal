@@ -250,8 +250,8 @@ with `403` even though a local agent session holds every scope. `PUT /v1/client/
 names its `value` and optional future `until`, and an absent axis is unchanged. A status
 `value` of `null` clears the override and takes no `until`. `POST /v1/client/presence`
 (`presence.report`, scope `write.presence`) takes a `PresenceReport` of `present`, `idle` or
-`locked` and its `observed_at`, which must be within the last 15 minutes and not ahead of
-this member's clock. The client decides idleness with its own threshold. The daemon assigns
+`locked` and its `observed_at`, which must be within the last 15 minutes and at most 2 minutes
+ahead of this member's clock. The client decides idleness with its own threshold. The daemon assigns
 the source: the exact pairing grant for a paired device, otherwise `host/<member>`. An
 unchanged report from one source is recorded at most once every 5 minutes; a change is
 recorded at once. Both writes answer the person's full `PersonAvailability`; invalid input is
@@ -2053,8 +2053,8 @@ This narrows output pagination, not native publication scanning, and adds no rea
 
 `availability` needs `read.assistant.availability` and accepts only `max_response_bytes`.
 It returns `{kind: "person-availability", availability, directive_note}`: the grant
-issuer's own full `PersonAvailability` (raw presence included, because the person is the
-reader) and their current `DirectiveNote` or null, from one snapshot. No query selects
+issuer's own `PersonAvailability` without raw presence (`presence` and
+`presence_observed_at` are null; an assistant is not the person) and their current `DirectiveNote` or null, from one snapshot. No query selects
 another person. `fractal_availability_get` reads it.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
