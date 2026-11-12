@@ -21,10 +21,20 @@ const extension = (path: string): string | undefined => /\.(\w{1,8})$/.exec(path
 export function diffStats(patch: string): { readonly added: number; readonly removed: number } {
   let added = 0
   let removed = 0
+  let oldRemaining = 0
+  let newRemaining = 0
   for (const line of patch.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---')) continue
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line)
+    if (hunk !== null) { oldRemaining = Number(hunk[1] ?? 1); newRemaining = Number(hunk[2] ?? 1); continue }
+    const inHunk = oldRemaining > 0 || newRemaining > 0
+    if (!inHunk && (line.startsWith('+++') || line.startsWith('---'))) continue
     if (line.startsWith('+')) added++
     else if (line.startsWith('-')) removed++
+    if (inHunk) {
+      if (line.startsWith('+')) newRemaining--
+      else if (line.startsWith('-')) oldRemaining--
+      else if (line.startsWith(' ')) { oldRemaining--; newRemaining-- }
+    }
   }
   return { added, removed }
 }

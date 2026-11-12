@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Markdown parses with pulldown-cmark compiled to WebAssembly (committed module with sha256 manifest and licenses), loaded lazily after the first Markdown mounts; a failed load keeps the JavaScript parser, and policy, highlighting and components are shared",
+  "summary": "Markdown lazily loads pulldown-cmark WebAssembly and keeps the shared HTML policy on JavaScript fallback; balanced autolink parentheses keep their destination, long labels and resource references scan linearly without discarding text, diff headers count hunk content correctly, and tests isolate both parsers",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."

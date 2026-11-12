@@ -156,18 +156,34 @@ function renderReference(path: string, options: ReferenceOptions): React.ReactNo
   return resource === undefined ? undefined : <ResourceChip resource={resource} onOpen={options.onOpenResource} />
 }
 
-const REFERENCE_SCAN_MAX = 4096
+/** Maximal path-shaped tokens have no ambiguous slash partition: each source character is scanned once. */
+const PATH_TOKEN = /[\w.-]+(?:\/[\w.-]+)*/g
 /** Only text leaves are substituted: parsed emphasis, links, and list structure stay intact. */
 function InlineText({ children }: { children: React.ReactNode }) {
   const references = React.useContext(ReferenceContext)
   return React.Children.map(children, child => {
-    // Paths are looked up only when a host renders references, and only in runs short enough that the path pattern's
-    // backtracking stays cheap (a 32k-character run of `a/` took seconds).
-    if (typeof child !== 'string' || child.length > REFERENCE_SCAN_MAX || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
-    return child.split(/(\b(?:[\w.-]+\/)+[\w.-]+\.[\w]+\b)/g).map((part, index) => {
-      const rendered = renderReference(part, references)
-      return <React.Fragment key={index}>{rendered === undefined ? part : rendered}</React.Fragment>
-    })
+    if (typeof child !== 'string' || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
+    const parts: React.ReactNode[] = []
+    let at = 0
+    for (const match of child.matchAll(PATH_TOKEN)) {
+      const token = match[0]
+      const slash = token.lastIndexOf('/')
+      if (slash === -1) continue
+      let end = token.length
+      while (end > slash + 1 && !/\w/.test(token[end - 1]!)) end--
+      const dot = token.lastIndexOf('.', end - 1)
+      if (dot <= slash + 1 || !/^\w+$/.test(token.slice(dot + 1, end))) continue
+      const start = token.search(/\w/)
+      if (start === -1 || start >= slash) continue
+      const index = match.index + start
+      if (index > at) parts.push(child.slice(at, index))
+      const path = token.slice(start, end)
+      const rendered = renderReference(path, references)
+      parts.push(<React.Fragment key={index}>{rendered === undefined ? path : rendered}</React.Fragment>)
+      at = match.index + end
+    }
+    if (at < child.length) parts.push(child.slice(at))
+    return parts
   })
 }
 

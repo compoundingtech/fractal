@@ -61,8 +61,12 @@ test('the CPU-time budget still catches a scan that restarts at every bracket', 
 })
 
 const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: usePulldown ? [pulldown.remarkPulldown] : [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
-const prompt = (text, props = {}) => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props }))
-const block = text => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) }))
+const assertParser = html => {
+  assert.match(html, new RegExp(`data-parser="${usePulldown ? 'pulldown' : 'remark'}"`))
+  return html
+}
+const prompt = (text, props = {}) => assertParser(renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props })))
+const block = text => assertParser(renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) })))
 
 const FRAGMENTS = [
   'A paragraph with `code` and *emphasis*.', 'Two lines\nof one paragraph.', '# Heading', 'Setext\n---', '---',
@@ -411,20 +415,74 @@ test('policy final pass: fake fences, nested images, raw pre blocks and commente
   assert.doesNotMatch(block('<svg>\n<!-- </svg> -->\n\nLEAK\n\n</svg>'), /LEAK/)
 })
 
-test('the WebAssembly parser builds the tree remark builds for everyday Markdown', async () => {
-  await pulldown.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
-  const html = plugins => source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
-  const remark = html([remarkGfm])
-  const wasm = html([pulldown.remarkPulldown])
-  // Accepted differences: pulldown's footnote markup, and bare-URL edge cases GFM resolves differently.
-  for (const source of FRAGMENTS.filter(fragment => !fragment.includes('[^1]')).concat(['- [x] done\n- [ ] open', 'See https://example.test/a_b and www.example.test.', '1. one\n2. two\n\n   nested para', '| a | b |\n|:-|-:|\n| 1 | 2 |'])) {
-    assert.equal(wasm(source), remark(source), source)
-  }
+test('the WebAssembly parser builds the tree remark builds without changing the suite parser', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const html = plugins => source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
+    const remark = html([remarkGfm])
+    const wasm = html([parity.remarkPulldown])
+    for (const source of FRAGMENTS.filter(fragment => !fragment.includes('[^1]')).concat([
+      '- [x] done\n- [ ] open', 'See https://example.test/a_b and www.example.test.', '1. one\n2. two\n\n   nested para', '| a | b |\n|:-|-:|\n| 1 | 2 |',
+      'https://example.test/a(b)', 'https://example.test/a(b)).', 'https://example.test/a((b))',
+    ])) assert.equal(wasm(source), remark(source), source)
+    for (const [source, expected] of [
+      ['https://example.test/a(b)', 'https://example.test/a(b)'],
+      ['https://example.test/a(b)).', 'https://example.test/a(b)'],
+      ['https://example.test/a((b))', 'https://example.test/a((b))'],
+    ]) assert.equal(/href="([^"]+)"/.exec(wasm(source))?.[1], expected)
+  } finally { await isolated.close() }
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+  assertParser(block('**x**'))
 })
 
-test('the suite runs on the parser it names', { skip: !usePulldown }, () => {
-  assert.equal(pulldown.pulldownReady(), true)
+test('the suite runs on the parser it names after parity', () => {
+  assert.equal(pulldown.pulldownReady(), usePulldown)
   assert.match(block('**x**'), /<strong/)
+})
+
+test('deferred and failed WebAssembly loads keep the HTML-filtered JavaScript parser', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parser = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    const { Markdown: DeferredMarkdown } = await isolated.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+    // Node cannot fetch the local file URL. This exercises the real loader's failed-load path without a fake transport.
+    const loading = parser.loadPulldown()
+    const source = '<script>SECRET</script>\n\n<img src=x onerror=alert(1)>\n\n<a href="javascript:x">safe</a><details onclick="evil"><summary>More</summary>Visible</details>'
+    const render = () => {
+      const html = renderToStaticMarkup(h(DeferredMarkdown, { text: markdownBlock(source) }))
+      assert.match(html, /data-parser="remark"/)
+      assert.doesNotMatch(html, /<script|<img|SECRET|onerror=|onclick=|href="javascript:/)
+      assert.match(html, /Visible/)
+    }
+    render()
+    assert.equal(await loading, false)
+    render()
+  } finally { await isolated.close() }
+})
+
+test('plain labels keep the entire long source, including formatted suffixes', async () => {
+  const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+  const prefix = 'ordinary words '.repeat(1000)
+  assert.equal(markdownPlainText(prefix + '**TAIL** [last](https://example.test) `literal **code**`'), prefix + 'TAIL last literal **code**')
+  assert.equal(markdownPlainText('[IPv6](https://[::1]/path)'), 'IPv6')
+  const hostile = markdownPlainText(prefix + '<img src=x onerror=alert(1)><script>SECRET</script>')
+  assert.doesNotMatch(renderToStaticMarkup(h('span', null, hostile)), /<img|<script/)
+})
+
+test('short references remain actionable inside long prose, with bounded path scanning', () => {
+  const path = 'src/model.ts'
+  const html = prompt('ordinary words '.repeat(1000) + path + ' <script>SECRET</script><!-- HIDDEN --> <img src=x onerror=alert(1)>', { resources: [{ path, added: 0, removed: 0 }] })
+  assert.match(html, /<button\b/)
+  assert.match(html, /src\/model\.ts/)
+  assert.doesNotMatch(html, /<script|<img|SECRET|HIDDEN|onerror=/)
+  for (const source of ['a/'.repeat(32000) + 'x', 'a.'.repeat(32000) + 'x']) {
+    let calls = 0
+    const { milliseconds } = cpuMilliseconds(() => prompt(source, { renderInlineReference: () => { calls++; return undefined } }))
+    assert.equal(calls, 0)
+    assert.ok(milliseconds < 1000, `reference scan took ${milliseconds}ms`)
+  }
 })
 
 // fixtures/clients/markdown-cases.json: the cases and HTML policy every client shares (write-markdown-fixtures.mjs).
@@ -458,8 +516,9 @@ test('policy fourth pass: long paths, image alt formatting, quoted closes, task 
   assert.match(block('<div title="a > </div>">\n\nBODY\n\n</div>'), /<div[^>]*>(?:(?!<\/div>)[\s\S])*BODY/)
   assert.match(block('- [x] done'), /<input[^>]*type="checkbox"[^>]*disabled/)
   const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
-  for (const label of ['x ' + '`'.repeat(64000) + ' x', '['.repeat(64000)]) {
-    const { milliseconds } = cpuMilliseconds(() => markdownPlainText(label))
+  for (const label of ['x ' + '`'.repeat(64000) + ' x', '['.repeat(64000), '[x]('.repeat(16000), ' '.repeat(64000) + 'suffix']) {
+    const { result, milliseconds } = cpuMilliseconds(() => markdownPlainText(label))
+    assert.equal(result, label.trim())
     assert.ok(milliseconds < 200, `${milliseconds}ms`)
   }
 })
@@ -484,6 +543,11 @@ test('a code fence names its file from the fence title or a path as its info', a
   assert.deepEqual(codeFenceLabel('python', null), { language: 'python' })
   assert.deepEqual(codeFenceLabel('', null), { language: 'text' })
   assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n-old\n+new\n+more\n context'), { added: 2, removed: 1 })
+})
+
+test('diff stats distinguish file headers from repeated plus and minus hunk content', async () => {
+  const { diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n---counter\n+++counter\n-plain\n+plain\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n---x\n+++x'), { added: 3, removed: 3 })
 })
 
 test('the code header shows path, language and diff counts, with Wrap, Copy and Open in one menu', () => {

@@ -114,22 +114,85 @@ export function remarkHardBreaks() {
  * Inline Markdown as the words it renders to, for one-line labels that cannot carry formatting (rows, titles, accessible
  * names) and must not load the parser. Code keeps its text, emphasis and link markers go, an image keeps its alt text.
  */
-const PLAIN_TEXT_MAX = 2048
 export function markdownPlainText(markdown: string): string {
   const code: string[] = []
-  // A label is one line: past this length nothing more shows, and the patterns below stay cheap.
-  return markdown.slice(0, PLAIN_TEXT_MAX)
-    .replace(/\s*\n\s*/g, ' ')
-    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, '')
-    .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, _fence: string, text: string) => `\u0000${code.push(text.trim()) - 1}\u0001`)
-    .replace(/\\([\\`*_{}[\]()#+\-.!|<>~])/g, (_, character: string) => `\u0000${code.push(character) - 1}\u0001`)
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
-    .replace(/(^|[^\w*])([*_])(?=\S)([^*_]*?\S)\2(?![\w*])/g, '$1$3')
-    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
-    .replace(/\u0000(\d+)\u0001/g, (_, index: string) => code[Number(index)] ?? '')
-    .trim()
+  const protect = (value: string): string => `\u0000${code.push(value) - 1}\u0001`
+  const source = markdown.split('\n').map(line => line.trim()).join(' ')
+    .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, '')
+  const runs = [...source.matchAll(/`+/g)]
+  const next = new Map<number, number>()
+  const closing = new Map<number, number>()
+  for (let index = runs.length - 1; index >= 0; index--) {
+    const run = runs[index]!
+    const end = next.get(run[0].length)
+    if (end !== undefined) closing.set(run.index, end)
+    next.set(run[0].length, run.index)
+  }
+  const pieces: string[] = []
+  let at = 0
+  for (const match of source.matchAll(/\\[\\`*_{}[\]()#+\-.!|<>~&]|`+/g)) {
+    if (match.index < at) continue
+    pieces.push(source.slice(at, match.index))
+    const token = match[0]
+    const end = token[0] === '`' ? closing.get(match.index) : undefined
+    if (token[0] === '\\') { pieces.push(protect(token[1]!)); at = match.index + 2 }
+    else if (end !== undefined) { pieces.push(protect(source.slice(match.index + token.length, end).trim())); at = end + token.length }
+    else { pieces.push(token); at = match.index + token.length }
+  }
+  pieces.push(source.slice(at))
+  let text = pieces.join('')
+  // Destinations may contain '[' (IPv6, for example). Index the next ')' instead of retrying a destination scan at
+  // every opening label when the document has no closing parenthesis.
+  const closeParen = new Int32Array(text.length + 1)
+  let end = -1
+  for (let index = text.length; index >= 0; index--) {
+    if (text[index] === ')') end = index
+    closeParen[index] = end
+  }
+  const links: string[] = []
+  at = 0
+  for (const match of text.matchAll(/!?\[([^[\]]*)\]\(/g)) {
+    if (match.index < at || (match[1] === '' && match[0][0] !== '!')) continue
+    const close = closeParen[match.index + match[0].length]!
+    if (close === -1) continue
+    links.push(text.slice(at, match.index), match[1]!)
+    at = close + 1
+  }
+  links.push(text.slice(at))
+  text = stripPairs(links.join(''), /\*\*|__/g, false)
+  text = stripPairs(text, /[*_]/g, true)
+  text = stripPairs(text, /~~/g, false)
+  return text.replace(/\u0000(\d+)\u0001/g, (_, index: string) => code[Number(index)] ?? '').trim()
+}
+
+/** Three bounded passes replace the old backtracking emphasis expressions; unmatched syntax remains literal. */
+function stripPairs(text: string, pattern: RegExp, single: boolean): string {
+  const pending = new Map<string, number>()
+  const removed = new Uint8Array(text.length)
+  for (const match of text.matchAll(pattern)) {
+    const token = match[0]
+    const index = match.index
+    const before = text[index - 1] ?? ''
+    const after = text[index + token.length] ?? ''
+    const opening = pending.get(token)
+    if (opening !== undefined && index > opening + token.length && /\S/.test(before) && (!single || !/[\w*]/.test(after))) {
+      removed[opening] = token.length
+      removed[index] = token.length
+      pending.delete(token)
+      continue
+    }
+    if (single) pending.clear()
+    if (/\S/.test(after) && (!single || !/[\w*]/.test(before)) && (single || opening === undefined)) pending.set(token, index)
+  }
+  const pieces: string[] = []
+  let at = 0
+  for (let index = 0; index < removed.length; index++) {
+    if (removed[index] === 0) continue
+    pieces.push(text.slice(at, index))
+    at = index + removed[index]!
+  }
+  pieces.push(text.slice(at))
+  return pieces.join('')
 }
 
 const MAX_CONTAINER_MARKERS = 32

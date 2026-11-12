@@ -144,7 +144,7 @@ export function pulldownTree(source: string): MdastNode {
   return root
 }
 
-const LITERAL = /\b(?:https?:\/\/|www\.)[^\s<]*[^\s<?!.,:;*_~'")\]]/g
+const LITERAL = /\b(?:https?:\/\/|www\.)[^\s<]+/g
 /** GFM's autolink literals (`https://…`, `www.…`), which pulldown-cmark leaves as text. */
 function linkLiterals(parent: MdastNode): void {
   if (parent.children === undefined || parent.type === 'link' || parent.type === 'linkReference') return
@@ -153,9 +153,18 @@ function linkLiterals(parent: MdastNode): void {
     const parts: MdastNode[] = []
     let at = 0
     for (const match of child.value!.matchAll(LITERAL)) {
-      let url = match[0]
-      // A closing parenthesis ends the link unless the link opened one.
-      while (url.endsWith(')') && (url.match(/\(/g)?.length ?? 0) < (url.match(/\)/g)?.length ?? 0)) url = url.slice(0, -1)
+      const candidate = match[0]
+      let balance = 0
+      for (const character of candidate) { if (character === '(') balance++; else if (character === ')') balance-- }
+      let end = candidate.length
+      while (end > 0) {
+        const last = candidate[end - 1]!
+        if (last === ')' && balance < 0) { balance++; end--; continue }
+        if (/[?!.,:;*_~'"\]]/.test(last)) { end--; continue }
+        break
+      }
+      const url = candidate.slice(0, end)
+      if (url.length <= (candidate.startsWith('www.') ? 4 : candidate.startsWith('https://') ? 8 : 7)) continue
       if (match.index > at) parts.push({ type: 'text', value: child.value!.slice(at, match.index) })
       parts.push({ type: 'link', url: url.startsWith('www.') ? `http://${url}` : url, title: null, children: [{ type: 'text', value: url }] })
       at = match.index + url.length
