@@ -6,7 +6,10 @@
 // The property key is a string, not a unique symbol, so packages/fractal-ui can declare the same
 // type without depending on this package.
 
+/** Intentionally opaque, not a string: all consumers are private in-repo packages checked by the gate.
+ * Use markdownSource to cross the source-text boundary; nullable fields keep this same contract. */
 export type MarkdownBlock = { readonly '~fractal/markdown': 'block' };
+/** Intentionally opaque like MarkdownBlock; use markdownSource when a string is required. */
 export type MarkdownInline = { readonly '~fractal/markdown': 'inline' };
 export type MarkdownText = MarkdownBlock | MarkdownInline;
 
@@ -24,7 +27,7 @@ export const blockFromInline = (inline: MarkdownInline): MarkdownBlock => inline
 export const markdownBlock = (source: string): MarkdownBlock => source as unknown as MarkdownBlock;
 export const markdownInline = (source: string): MarkdownInline => source as unknown as MarkdownInline;
 
-const ESCAPED = /[\\`*_{}[\]()#+\-.!|<>~]/g;
+const ESCAPED = /[\\`*_{}[\]()#+\-.!|<>~&]/g;
 
 /** Literal text as Markdown that renders to exactly those characters, line breaks kept. */
 export const markdownFromPlain = (plain: string): MarkdownBlock =>

@@ -1453,7 +1453,11 @@ fn ts_type(value: &Value) -> Result<String> {
     if let Some(types) = value.get("type").and_then(Value::as_array) {
         return Ok(types
             .iter()
-            .map(|kind| ts_type(&serde_json::json!({"type": kind})))
+            .map(|kind| {
+                let mut member = value.clone();
+                member["type"] = kind.clone();
+                ts_type(&member)
+            })
             .collect::<Result<Vec<_>>>()?
             .join(" | "));
     }
@@ -2032,6 +2036,23 @@ mod tests {
         assert!(rendered.contains("kind: string"));
         assert!(rendered.contains("person_id?: never"));
         assert!(rendered.contains(" & "));
+    }
+
+    #[test]
+    fn typescript_nullable_markdown_keeps_text_metadata() {
+        for (annotation, expected) in [
+            ("markdown-block", "MarkdownBlock | null"),
+            ("markdown-inline", "MarkdownInline | null"),
+        ] {
+            let schema = serde_json::json!({
+                "type": ["string", "null"], "x-st-text": annotation
+            });
+            assert_eq!(ts_type(&schema).unwrap(), expected);
+        }
+        let schema = serde_json::json!({
+            "type": ["array", "null"], "items": { "type": "integer" }
+        });
+        assert_eq!(ts_type(&schema).unwrap(), "Array<number> | null");
     }
 
     fn temporary_output(name: &str) -> PathBuf {

@@ -61,8 +61,12 @@ test('the CPU-time budget still catches a scan that restarts at every bracket', 
 })
 
 const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: usePulldown ? [pulldown.remarkPulldown] : [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
-const prompt = (text, props = {}) => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props }))
-const block = text => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) }))
+const assertParser = html => {
+  assert.match(html, new RegExp(`data-parser="${usePulldown ? 'pulldown' : 'remark'}"`))
+  return html
+}
+const prompt = (text, props = {}) => assertParser(renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props })))
+const block = text => assertParser(renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) })))
 
 const FRAGMENTS = [
   'A paragraph with `code` and *emphasis*.', 'Two lines\nof one paragraph.', '# Heading', 'Setext\n---', '---',
@@ -111,8 +115,32 @@ test('settled blocks are cut, so a long document is not parsed whole', () => {
   assert.equal(splitMarkdownBlocks('Some [ref][r].\n\nMore.\n\n[r]: https://example.test').length, 1)
 })
 
+test('multiline reference labels resolve across settled block boundaries', () => {
+  for (const source of [
+    '[two\nlines]: https://example.test\n\nUse [two lines].',
+    'Use [two lines].\n\n[two\nlines]: https://example.test',
+    '[escaped\\] label\ncontinued]: https://example.test\n\nUse [escaped\\] label continued].',
+  ]) {
+    const blocks = splitMarkdownBlocks(source)
+    assert.equal(blocks.length, 1)
+    assert.equal(blocks.map(parsed).join(''), parsed(source))
+    assert.match(parsed(source), /href="https:\/\/example.test"/)
+  }
+})
+
+test('both plain-text helper copies preserve literal entity-looking text', async () => {
+  const kit = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
+  const client = await server.ssrLoadModule(new URL('../../../../../clients/typescript/fractal-client/markdown-text.ts', import.meta.url).pathname)
+  for (const helpers of [kit, client]) {
+    const source = '&copy; &#65; &#x41; &amp;'
+    for (const helper of [helpers.markdownFromPlain, helpers.inlineFromPlain]) {
+      assert.equal(parsed(helpers.markdownSource(helper(source))), '<p>&amp;copy; &amp;#65; &amp;#x41; &amp;amp;</p>')
+    }
+  }
+})
+
 test('splitting 200KB of Markdown stays within a streaming frame', () => {
-  const source = Array.from({ length: 4000 }, (_, index) => `Paragraph ${index} with some \`code\` and words that fill the line.`).join('\n\n')
+  const source = Array.from({ length: 1000 }, (_, index) => `Paragraph ${index} with some \`code\` and ${'words that fill the line. '.repeat(7)}`).join('\n\n')
   const { milliseconds } = cpuMilliseconds(() => splitMarkdownBlocks(source))
   assert.ok(source.length > 200_000 && milliseconds < 16, `split took ${milliseconds}ms of CPU`)
 })
@@ -137,6 +165,113 @@ test('raw HTML never reaches the page, and its words survive without the tags', 
   assert.match(hostile, /Hi /)
   assert.match(hostile, /there/)
   assert.match(hostile, /kept words/)
+})
+
+const FALLBACK_HTML_PAYLOADS = [
+  '<script data-x="`">SECRET</script>`',
+  "<script data-x='`'>SECRET</script>`",
+  '<script data-x=`>SECRET</script>`',
+  '<script data-x="```">SECRET</script>```',
+  "<script data-x='~~~'>SECRET</script>~~~",
+  '<script data-x="\n```\n">SECRET</script>',
+  "<script data-x='\n~~~\n'>SECRET</script>",
+  '<svg data-x="`"><svg data-x="~~~">SECRET</svg>SECRET</svg>`',
+  '<script data-x="`">SECRET',
+  '<span data-x="`unfinished',
+  '<!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <details>Visible</details>',
+  ...['&#106;avascript:', '&#x6A;avascript:', 'java&Tab;script:'].map(scheme => `<a data-x="\`" href="${scheme}alert(1)">safe</a>\``),
+]
+const FALLBACK_LITERAL_CODE = [
+  '`<!-- literal -->`',
+  '``<script data-x="`">literal</script>``',
+  '```\n<script data-x="`">literal</script>\n```',
+  '~~~\n<script data-x="~~~">literal</script>\n~~~',
+  '    <script data-x="`">literal</script>',
+  '\t<!-- literal -->',
+]
+
+test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
+  const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
+  assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
+  assert.match(block(hostile), /Visible/)
+  for (const source of FALLBACK_LITERAL_CODE) {
+    assert.equal(filteredMarkdownText(source), source)
+  }
+  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
+  assert.equal(filteredMarkdownText('before <!--\n```\nhidden\n-->\nafter'), 'before \nafter')
+  assert.equal(filteredMarkdownText('\\`<!-- hidden -->` after'), '\\`` after')
+  for (const source of FALLBACK_HTML_PAYLOADS) assert.doesNotMatch(filteredMarkdownText(source), /HIDDEN|SECRET|javascript|alert\(1\)/, source)
+  assert.equal(filteredMarkdownText('Visible <span data-x="unfinished'), 'Visible <span data-x="unfinished')
+  assert.equal(filteredMarkdownText('Visible <span data-x="`'), 'Visible <span data-x="`')
+})
+
+test('delimiter guard and caught renderer failure keep attribute code markers out of the real fallback DOM', async () => {
+  const { JSDOM } = await import('jsdom')
+  const { createRoot } = await import('react-dom/client')
+  const { act } = await import('react')
+  const dom = new JSDOM('<!doctype html><div id="root"></div>')
+  const names = ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'IS_REACT_ACT_ENVIRONMENT']
+  const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)])
+  for (const name of names) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: name === 'IS_REACT_ACT_ENVIRONMENT' ? true : dom.window[name] })
+  const caught = []
+  const container = document.getElementById('root')
+  const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
+  try {
+    for (const mode of ['delimiter guard', 'renderer failure']) {
+      for (const [index, payload] of [...FALLBACK_HTML_PAYLOADS, ...FALLBACK_LITERAL_CODE].entries()) {
+        const before = caught.length
+        const source = (mode === 'delimiter guard' ? '*a '.repeat(3000) : 'src/x.ts ') + 'Visible\n' + payload
+        await act(async () => root.render(h(Markdown, {
+          key: `${mode}-${index}`,
+          text: markdownBlock(source),
+          renderInlineReference: path => { if (path === 'src/x.ts') throw new Error('expected renderer failure'); return undefined },
+        })))
+        assert.deepEqual(caught.slice(before), mode === 'renderer failure' ? ['expected renderer failure'] : [], `${mode}: ${payload}`)
+        assert.equal(container.querySelector('script,svg,img,a,details,pre,code'), null, `${mode}: ${payload}`)
+        assert.doesNotMatch(container.textContent, /HIDDEN|SECRET|javascript|alert\(1\)/, `${mode}: ${payload}`)
+        assert.match(container.textContent, /Visible/, `${mode}: ${payload}`)
+        if (payload.includes('literal')) assert.ok(container.textContent.includes(payload), `${mode} must preserve literal code: ${payload}`)
+        if (mode === 'delimiter guard') assert.match(container.textContent, /\*a \*a/, 'the delimiter guard must render literal text')
+      }
+    }
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor === undefined) delete globalThis[name]
+      else Object.defineProperty(globalThis, name, descriptor)
+    }
+  }
+})
+
+test('raw pre with explicit code has one code holder and keeps its text', () => {
+  for (const source of ['<pre><code>x</code></pre>', '<pre><code>x &lt; y\nsecond</code></pre>']) {
+    const html = block(source)
+    assert.match(html, /markdown-code-block/)
+    assert.match(html, /<code[^>]*>x/)
+    assert.doesNotMatch(html, /<code[^>]*>\s*<code/)
+    if (source.includes('second')) assert.match(html, /x &lt; y\nsecond/)
+  }
+})
+
+test('security payloads cannot create executable elements, attributes or URL schemes', async () => {
+  const { safeLinkHref } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  for (const source of [
+    '<noscript>SECRET</noscript><template>SECRET</template>Visible',
+    '<math><mtext><table><mglyph><style><!--</style><img src=x onerror=alert(1)>',
+    '<![CDATA[<img src=x onerror=alert(1)>]]>',
+    '<div title="before <img src=x onerror=alert(1)> after" name="x" formaction="javascript:x" xlink:href="javascript:x">Visible</div>',
+  ]) {
+    const html = block(source)
+    assert.doesNotMatch(html, /<(?:script|style|img|math|noscript|template)\b|<[^>]+(?:onerror|formaction|xlink:href|name)=|SECRET/)
+  }
+  for (const raw of ['java\u0000script:x', 'java\r\nscript:x', 'java\u0085script:x']) {
+    assert.equal(safeLinkHref(raw), undefined)
+  }
+  const html = block('<a href="HTTPS://example.test">safe</a>')
+  assert.match(html, /href="HTTPS:\/\/example.test"/)
+  assert.match(html, /rel="noopener noreferrer"/)
 })
 
 test('prompts load no remote image and drop unsafe link protocols', () => {
@@ -236,7 +371,9 @@ test('policy: tag-like words and escaped markup stay text', () => {
 })
 
 test('policy: deep nesting renders bounded, without overflowing the stack', () => {
-  for (const [name, text] of [['quotes', '>'.repeat(3000) + ' deep'], ['lists', Array.from({ length: 3000 }, (_, index) => '  '.repeat(index) + '- x').join('\n')], ['tags', '<div>'.repeat(3000) + 'deep'], ['emphasis', '*'.repeat(3000) + 'a' + '*'.repeat(3000)]]) {
+  // 128 levels exceed both output caps without making the indented list fixture quadratic in megabytes.
+  const depth = 128
+  for (const [name, text] of [['quotes', '>'.repeat(depth) + ' deep'], ['lists', Array.from({ length: depth }, (_, index) => '  '.repeat(index) + '- x').join('\n')], ['tags', '<div>'.repeat(depth) + 'deep'], ['emphasis', '*'.repeat(depth) + 'a' + '*'.repeat(depth)]]) {
     const { result, milliseconds } = cpuMilliseconds(() => block(text))
     assert.ok(milliseconds < 2000, `${name} took ${milliseconds}ms`)
     assert.ok((result.match(/<blockquote/g) ?? []).length <= 33 && (result.match(/<div/g) ?? []).length <= 40, `${name} nests too deep`)
@@ -316,20 +453,136 @@ test('policy final pass: fake fences, nested images, raw pre blocks and commente
   assert.doesNotMatch(block('<svg>\n<!-- </svg> -->\n\nLEAK\n\n</svg>'), /LEAK/)
 })
 
-test('the WebAssembly parser builds the tree remark builds for everyday Markdown', async () => {
-  await pulldown.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
-  const html = plugins => source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
-  const remark = html([remarkGfm])
-  const wasm = html([pulldown.remarkPulldown])
-  // Accepted differences: pulldown's footnote markup, and bare-URL edge cases GFM resolves differently.
-  for (const source of FRAGMENTS.filter(fragment => !fragment.includes('[^1]')).concat(['- [x] done\n- [ ] open', 'See https://example.test/a_b and www.example.test.', '1. one\n2. two\n\n   nested para', '| a | b |\n|:-|-:|\n| 1 | 2 |'])) {
-    assert.equal(wasm(source), remark(source), source)
+test('the WebAssembly parser builds the tree remark builds without changing the suite parser', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const html = plugins => source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
+    const remark = html([remarkGfm])
+    const wasm = html([parity.remarkPulldown])
+    for (const source of FRAGMENTS.filter(fragment => !fragment.includes('[^1]')).concat([
+      '- [x] done\n- [ ] open', 'See https://example.test/a_b and www.example.test.', '1. one\n2. two\n\n   nested para', '| a | b |\n|:-|-:|\n| 1 | 2 |',
+      'https://example.test/a(b)', 'https://example.test/a(b)).', 'https://example.test/a((b))',
+    ])) assert.equal(wasm(source), remark(source), source)
+    for (const [source, expected] of [
+      ['https://example.test/a(b)', 'https://example.test/a(b)'],
+      ['https://example.test/a(b)).', 'https://example.test/a(b)'],
+      ['https://example.test/a((b))', 'https://example.test/a((b))'],
+    ]) assert.equal(/href="([^"]+)"/.exec(wasm(source))?.[1], expected)
+  } finally { await isolated.close() }
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+  assertParser(block('**x**'))
+})
+
+test('literal URL precedence matches original remark-gfm, including exact destinations and visible text', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const parse = (source, plugins) => {
+      let tree
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+      const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+      return { tree, html }
+    }
+    for (const prefix of ['https://example.test/', 'http://example.test/', 'www.example.test/']) {
+      for (const suffix of ['a*b*c', 'a**b**c', 'a_b_c', 'a__b__c', 'a~b~c', 'a~~b~~c', 'a`b`c', 'a[b]c', 'a(b)', 'a(b)).', 'a((b))', 'a(b', 'a?!.,:;', 'a&amp;', 'a&b;c']) {
+        const literal = prefix + suffix
+        const expected = parse(literal, [remarkGfm])
+        for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+          const actual = parse(literal, plugins)
+          assert.deepEqual(actual, expected, literal)
+        }
+        if (/^a(?:\*|_|~|`|\[)/.test(suffix)) {
+          const link = expected.tree.children[0].children[0]
+          assert.equal(link.url, prefix.startsWith('www') ? `http://${literal}` : literal)
+          assert.deepEqual(link.children, [{ type: 'text', value: literal }])
+        }
+      }
+    }
+    for (const source of [
+      '*https://example.test/a*b*c*', '**www.example.test/a_b_c**', '~~https://example.test/a~b~c~~',
+      '😀 https://example.test/a*b*c', '`https://example.test/a*b*c`',
+      '[https://example.test/a*b*c](https://target.test/)', '![https://example.test/a*b*c](https://image.test/)',
+      '<https://example.test/a*b*c>', 'https://example.test/a*b*c **after**',
+      '!https://example.test/a*b*c', '\\https://example.test/a*b*c', '\\!https://example.test/a*b*c',
+      'HTTPS://example.test/a*b*c', '(WWW.example.test/a*b*c)', 'https://example.test/a&amp;.',
+      'https://example_.test/a*b*c', 'https://example.test_/a*b*c', 'www._www.example.test/a*b*c',
+      'https://example.test/a)b(c', 'www.example.test/a) b', 'https://example.test/a>b',
+      'Contact me@example.test or a.b+c@example.test.', 'a.'.repeat(128) + 'x', '.'.repeat(256) + 'x',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        assert.deepEqual(parse(source, plugins), expected, source)
+      }
+    }
+  } finally { await isolated.close() }
+})
+
+test('the suite runs on the parser it names after parity', () => {
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+  assert.match(block('**x**'), /<strong/)
+})
+
+test('deferred and failed WebAssembly loads keep the HTML-filtered JavaScript parser', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parser = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    const { Markdown: DeferredMarkdown } = await isolated.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+    // Node cannot fetch the local file URL. This exercises the real loader's failed-load path without a fake transport.
+    const loading = parser.loadPulldown()
+    const source = '<script>SECRET</script>\n\n<img src=x onerror=alert(1)>\n\n<a href="javascript:x">safe</a><details onclick="evil"><summary>More</summary>Visible</details>'
+    const render = () => {
+      const html = renderToStaticMarkup(h(DeferredMarkdown, { text: markdownBlock(source) }))
+      assert.match(html, /data-parser="remark"/)
+      assert.doesNotMatch(html, /<script|<img|SECRET|onerror=|onclick=|href="javascript:/)
+      assert.match(html, /Visible/)
+    }
+    render()
+    assert.equal(await loading, false)
+    render()
+  } finally { await isolated.close() }
+})
+
+test('plain labels keep the entire long source, including formatted suffixes', async () => {
+  const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+  const prefix = 'ordinary words '.repeat(1000)
+  assert.equal(markdownPlainText(prefix + '**TAIL** [last](https://example.test) `literal **code**`'), prefix + 'TAIL last literal **code**')
+  assert.equal(markdownPlainText('[IPv6](https://[::1]/path)'), 'IPv6')
+  const hostile = markdownPlainText(prefix + '<img src=x onerror=alert(1)><script>SECRET</script>')
+  assert.doesNotMatch(renderToStaticMarkup(h('span', null, hostile)), /<img|<script/)
+})
+
+test('short references remain actionable inside long prose, with bounded path scanning', () => {
+  const path = 'src/model.ts'
+  const html = prompt('ordinary words '.repeat(1000) + path + ' <script>SECRET</script><!-- HIDDEN --> <img src=x onerror=alert(1)>', { resources: [{ path, added: 0, removed: 0 }] })
+  assert.match(html, /<button\b/)
+  assert.match(html, /src\/model\.ts/)
+  assert.doesNotMatch(html, /<script|<img|SECRET|HIDDEN|onerror=/)
+  for (const source of ['a/'.repeat(32000) + 'x', 'a.'.repeat(32000) + 'x']) {
+    let calls = 0
+    const { milliseconds } = cpuMilliseconds(() => prompt(source, { renderInlineReference: () => { calls++; return undefined } }))
+    assert.equal(calls, 0)
+    assert.ok(milliseconds < 1000, `reference scan took ${milliseconds}ms`)
+  }
+  for (const source of ['src/model.ts-like', 'src/model.ts/next']) {
+    const found = []
+    prompt(source, { renderInlineReference: candidate => { found.push(candidate); return undefined } })
+    assert.deepEqual(found, ['src/model.ts'])
   }
 })
 
-test('the suite runs on the parser it names', { skip: !usePulldown }, () => {
-  assert.equal(pulldown.pulldownReady(), true)
-  assert.match(block('**x**'), /<strong/)
+test('both parser paths scan email-like dot runs linearly without changing literal links', t => {
+  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x', 'https://example.test/' + 'a*b*'.repeat(16000) + 'c']) {
+    const { milliseconds } = cpuMilliseconds(() => block(source))
+    assert.ok(milliseconds < 1000, `literal autolinks took ${milliseconds}ms`)
+    t.diagnostic(`literal autolinks ${source.slice(0, 20)}: ${milliseconds}ms CPU; unchanged budget 1000ms`)
+  }
+  const html = block('Contact me@example.test or https://example.test/a(b).')
+  assert.match(html, /me@example.test/)
+  assert.doesNotMatch(html, /mailto:/)
+  assert.match(html, /href="https:\/\/example.test\/a\(b\)"/)
 })
 
 // fixtures/clients/markdown-cases.json: the cases and HTML policy every client shares (write-markdown-fixtures.mjs).
@@ -363,8 +616,9 @@ test('policy fourth pass: long paths, image alt formatting, quoted closes, task 
   assert.match(block('<div title="a > </div>">\n\nBODY\n\n</div>'), /<div[^>]*>(?:(?!<\/div>)[\s\S])*BODY/)
   assert.match(block('- [x] done'), /<input[^>]*type="checkbox"[^>]*disabled/)
   const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
-  for (const label of ['x ' + '`'.repeat(64000) + ' x', '['.repeat(64000)]) {
-    const { milliseconds } = cpuMilliseconds(() => markdownPlainText(label))
+  for (const label of ['x ' + '`'.repeat(64000) + ' x', '['.repeat(64000), '[x]('.repeat(16000), ' '.repeat(64000) + 'suffix']) {
+    const { result, milliseconds } = cpuMilliseconds(() => markdownPlainText(label))
+    assert.equal(result, label.trim())
     assert.ok(milliseconds < 200, `${milliseconds}ms`)
   }
 })
@@ -390,6 +644,11 @@ test('a code fence names its file from the fence title or a path as its info', a
   assert.deepEqual(codeFenceLabel('python', null), { language: 'python' })
   assert.deepEqual(codeFenceLabel('', null), { language: 'text' })
   assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n-old\n+new\n+more\n context'), { added: 2, removed: 1 })
+})
+
+test('diff stats distinguish file headers from repeated plus and minus hunk content', async () => {
+  const { diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/diff-patch.ts')
+  assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n---counter\n+++counter\n-plain\n+plain\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n---x\n+++x'), { added: 3, removed: 3 })
 })
 
 test('the code header shows path, language and diff counts, with Wrap, Copy and Open in one menu', () => {

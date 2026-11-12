@@ -19,8 +19,8 @@ import { DiffView } from './DiffView'
 import { diffStats } from './diff-patch'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
-import { remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
-import { loadPulldown, pulldownReady, remarkPulldown } from './markdown-pulldown'
+import { filteredMarkdownText, remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
+import { loadPulldown, pulldownReady, remarkLinearAutolinks, remarkPulldown } from './markdown-pulldown'
 import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
@@ -44,8 +44,8 @@ export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_
  */
 export interface MarkdownProps { text: MarkdownBlock; streaming?: boolean; hardBreaks?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
-const REMARK_PLUGINS = [remarkGfm, remarkHtmlPolicy]
-const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkHtmlPolicy, remarkHardBreaks]
+const REMARK_PLUGINS = [remarkGfm, remarkLinearAutolinks, remarkHtmlPolicy]
+const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkLinearAutolinks, remarkHtmlPolicy, remarkHardBreaks]
 // pulldown-cmark replaces only the parse step; GFM tables, task lists, strikethrough and footnotes are its own options.
 type RemarkPlugins = NonNullable<MarkdownOptions['remarkPlugins']>
 const PULLDOWN_PLUGINS = [remarkPulldown, remarkHtmlPolicy] as RemarkPlugins
@@ -79,7 +79,7 @@ function markStreamingTail() {
  * bracket counts twice (at most 1,024 per block); code (fences and inline spans) never counts.
  */
 const DELIMITER_LIMIT = 2048
-const PlainBlock = ({ source }: { readonly source: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{source}</p>
+const PlainBlock = ({ source }: { readonly source: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{filteredMarkdownText(source)}</p>
 /** A block the parser cannot handle shows as its text, never as a broken transcript. */
 class BlockFallback extends React.Component<{ readonly source: string; readonly children: React.ReactNode }, { readonly failed: boolean }> {
   override state = { failed: false }
@@ -158,18 +158,41 @@ function renderReference(path: string, options: ReferenceOptions): React.ReactNo
   return resource === undefined ? undefined : <ResourceChip resource={resource} onOpen={options.onOpenResource} />
 }
 
-const REFERENCE_SCAN_MAX = 4096
+/** Maximal path-shaped tokens have no ambiguous slash partition: each source character is scanned once. */
+const PATH_TOKEN = /[\w.-]+(?:\/[\w.-]+)*/g
 /** Only text leaves are substituted: parsed emphasis, links, and list structure stay intact. */
 function InlineText({ children }: { children: React.ReactNode }) {
   const references = React.useContext(ReferenceContext)
   return React.Children.map(children, child => {
-    // Paths are looked up only when a host renders references, and only in runs short enough that the path pattern's
-    // backtracking stays cheap (a 32k-character run of `a/` took seconds).
-    if (typeof child !== 'string' || child.length > REFERENCE_SCAN_MAX || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
-    return child.split(/(\b(?:[\w.-]+\/)+[\w.-]+\.[\w]+\b)/g).map((part, index) => {
-      const rendered = renderReference(part, references)
-      return <React.Fragment key={index}>{rendered === undefined ? part : rendered}</React.Fragment>
-    })
+    if (typeof child !== 'string' || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
+    const parts: React.ReactNode[] = []
+    let at = 0
+    for (const match of child.matchAll(PATH_TOKEN)) {
+      const token = match[0]
+      const firstSlash = token.indexOf('/')
+      if (firstSlash === -1) continue
+      let segmentStart = firstSlash + 1
+      let end = -1
+      for (let index = segmentStart; index < token.length; index++) {
+        if (token[index] === '/') { segmentStart = index + 1; continue }
+        if (token[index] !== '.' || index === segmentStart || !/\w/.test(token[index + 1] ?? '')) continue
+        let wordEnd = index + 1
+        while (wordEnd < token.length && /\w/.test(token[wordEnd]!)) wordEnd++
+        end = wordEnd
+        index = wordEnd - 1
+      }
+      const start = token.search(/\w/)
+      const pathSlash = token.indexOf('/', start)
+      if (end === -1 || start === -1 || pathSlash === -1 || pathSlash >= end) continue
+      const index = match.index + start
+      if (index > at) parts.push(child.slice(at, index))
+      const path = token.slice(start, end)
+      const rendered = renderReference(path, references)
+      parts.push(<React.Fragment key={index}>{rendered === undefined ? path : rendered}</React.Fragment>)
+      at = match.index + end
+    }
+    if (at < child.length) parts.push(child.slice(at))
+    return parts
   })
 }
 

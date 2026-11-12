@@ -17,4 +17,5 @@ export function codeFenceLabel(language: string, meta: string | null | undefined
 
 const extension = (path: string): string | undefined => /\.(\w{1,8})$/.exec(path)?.[1]?.toLowerCase()
 
+
 export const isDiffLanguage = (language: string): boolean => language === 'diff' || language === 'patch'
