@@ -1,3 +1,4 @@
+import { markdownInline } from './markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import * as Aria from 'react-aria-components'
@@ -113,11 +114,11 @@ function OptionRow({ option, index, on, any, disabled, touch }: { readonly optio
     <span aria-hidden="true" {...stylex.props(styles.key, any && styles.keySquare, on && styles.keyOn)}>{any ? (on ? <Icon name="check" size={12} /> : null) : index < 9 ? index + 1 : null}</span>
     <span {...stylex.props(styles.optionText)}>
       <span {...stylex.props(styles.optionTop)}>
-        <span {...stylex.props(styles.optionLabel, option.danger === true && styles.optionDanger)}><InlineMarkdown text={option.label} /></span>
+        <span {...stylex.props(styles.optionLabel, option.danger === true && styles.optionDanger)}><InlineMarkdown text={markdownInline(option.label)} /></span>
         {option.recommended === undefined ? null : <span {...stylex.props(styles.badge)}>Recommended</span>}
       </span>
-      {option.recommended?.reason === undefined ? null : <span {...stylex.props(styles.reason)}><InlineMarkdown text={option.recommended.reason} /></span>}
-      {option.rationale === undefined ? null : <span {...stylex.props(styles.rationale)}>{typeof option.rationale === 'string' ? <InlineMarkdown text={option.rationale} /> : option.rationale}</span>}
+      {option.recommended?.reason === undefined ? null : <span {...stylex.props(styles.reason)}><InlineMarkdown text={markdownInline(option.recommended.reason)} /></span>}
+      {option.rationale === undefined ? null : <span {...stylex.props(styles.rationale)}>{typeof option.rationale === 'string' ? <InlineMarkdown text={markdownInline(option.rationale)} /> : option.rationale}</span>}
     </span>
   </span>
   return any
@@ -153,7 +154,7 @@ function Row({ card, send, pager, touch }: { readonly card: DecisionCardProps; r
   const chosen = card.options?.filter(option => card.selected?.includes(option.id)).map(option => option.label).join(', ')
   return <div {...stylex.props(styles.row, touch && styles.rowTouch)}>
     <span {...stylex.props(styles.rowText)}>
-      <span {...stylex.props(styles.rowHeading)}>{card.resolved ?? (card.headingText === undefined ? card.heading : <InlineMarkdown text={card.headingText} />)}</span>
+      <span {...stylex.props(styles.rowHeading)}>{card.resolved ?? (card.headingText === undefined ? card.heading : <InlineMarkdown text={markdownInline(card.headingText)} />)}</span>
       {card.resolved !== undefined || chosen === undefined || chosen === '' ? null : <span {...stylex.props(styles.rowChosen)}>{chosen}</span>}
     </span>
     {card.status === undefined ? null : <span role={card.status.tone === 'error' ? 'alert' : 'status'} {...stylex.props(styles.rowStatus, card.status.tone === 'error' && styles.statusError)}>{card.status.text}</span>}
@@ -266,7 +267,7 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
         <div role="heading" aria-level={2} {...stylex.props(styles.heading, full && styles.headingFull)}>{card.heading}</div>
         {full && card.contextFull !== undefined
           ? <div {...stylex.props(styles.contextFull)}>{card.contextFull}</div>
-          : card.context === undefined || (open && !full && card.contextFull !== undefined) ? null : <p {...stylex.props(styles.context)}><InlineMarkdown text={card.context} /></p>}
+          : card.context === undefined || (open && !full && card.contextFull !== undefined) ? null : <p {...stylex.props(styles.context)}><InlineMarkdown text={markdownInline(card.context)} /></p>}
         {full
           ? card.more === undefined ? null : <div {...stylex.props(styles.more)}>{card.more}</div>
           : !hasMore ? null : <>

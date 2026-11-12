@@ -1,3 +1,4 @@
+import { markdownInline } from './markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import * as Aria from 'react-aria-components'
@@ -41,7 +42,7 @@ const TOKEN = /(~?\/[\w.~-]+(?:\/[\w.~-]+)+|\b[\w.-]+(?:\/[\w.-]+){2,}\b|\b(?=[0
 /** A sentence with its raw ids, hashes and paths set apart: a whole long id is a chip to copy, anything shorter goes muted. */
 /** Prose runs of inline Markdown quiet their ids and paths; inline code keeps its own look. */
 function QuietMarkdown({ text }: { readonly text: string }): React.ReactNode {
-  return <InlineMarkdown text={text} renderText={quietRefs} />
+  return <InlineMarkdown text={markdownInline(text)} renderText={quietRefs} />
 }
 function quietRefs(text: string): React.ReactNode {
   return <>{text.split(TOKEN).map((part, index) => {
@@ -56,7 +57,7 @@ function SubjectRow({ subject }: { readonly subject: DecisionSubject }) {
   const touch = React.useContext(NarrowLayoutContext)
   const inner = <>
     <span {...stylex.props(styles.subjectIcon)}><Icon name={subject.icon} size={14} /></span>
-    <span {...stylex.props(styles.subjectLabel)}><InlineMarkdown text={subject.label} /></span>
+    <span {...stylex.props(styles.subjectLabel)}><InlineMarkdown text={markdownInline(subject.label)} /></span>
     {subject.kind === undefined ? null : <span {...stylex.props(styles.subjectKind)}>{subject.kind}</span>}
   </>
   const open = <span aria-hidden="true" {...stylex.props(styles.subjectGo)}><Icon name="chevron-right" size={12} /></span>

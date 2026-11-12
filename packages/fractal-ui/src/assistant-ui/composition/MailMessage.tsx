@@ -1,3 +1,4 @@
+import { markdownBlock } from './markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { MessagePrimitive } from '@assistant-ui/react'
@@ -46,7 +47,7 @@ export function MailMessage({ item, participants }: { readonly item: MessageItem
     </p>
     {text === undefined
       ? <p data-testid="mail-body-missing" {...stylex.props(styles.missing)}>Message body not loaded</p>
-      : <div id={bodyId} data-testid="mail-body" {...stylex.props(styles.body, involving && styles.bodyInvolving, long && !expanded && styles.clamp)}><Markdown text={text} /></div>}
+      : <div id={bodyId} data-testid="mail-body" {...stylex.props(styles.body, involving && styles.bodyInvolving, long && !expanded && styles.clamp)}><Markdown text={markdownBlock(text)} /></div>}
     {long && <Button aria-expanded={expanded} aria-controls={bodyId} data-testid="mail-read" onPress={() => setExpanded(!expanded)} {...stylex.props(styles.read)}>{expanded ? 'Hide message' : 'Read message'}</Button>}
     {item.attachments !== undefined && item.attachments.length > 0 && <TranscriptAttachments attachments={item.attachments} messageId={item.id} />}
   </MessagePrimitive.Root>

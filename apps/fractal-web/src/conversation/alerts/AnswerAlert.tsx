@@ -1,3 +1,4 @@
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
 import { markdownSource, optionalSource } from '@fractal/client/markdown'
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
@@ -23,10 +24,10 @@ import { contextOf, firstLine, isPlainHeading, markdownLine, repeatsHeading, sam
 /** A request's question: a JSON report as its telling fields, anything else as Markdown. */
 const Question = ({ text }: { readonly text: string }): React.ReactNode => {
   const shown = report(text)
-  if (shown === null) return <div {...stylex.props(styles.prose)}><Markdown text={spaced(text)} /></div>
+  if (shown === null) return <div {...stylex.props(styles.prose)}><Markdown text={markdownBlock(spaced(text))} /></div>
   return (
     <div {...stylex.props(styles.prose)}>
-      {shown.before ? <Markdown text={shown.before} /> : null}
+      {shown.before ? <Markdown text={markdownBlock(shown.before)} /> : null}
       <dl {...stylex.props(styles.report)}>
         {shown.rows.map((row) => (
           <React.Fragment key={row.key}>
@@ -43,17 +44,17 @@ const Question = ({ text }: { readonly text: string }): React.ReactNode => {
 /** What a launch would start, as its planner previewed it: goal, steps, agents and gates. */
 const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode => {
   if (Option.isNone(alert.preview)) {
-    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? <> <InlineMarkdown text={cleanMessageText(markdownSource(alert.detail))} /></> : ''}</div>
+    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? <> <InlineMarkdown text={markdownInline(cleanMessageText(markdownSource(alert.detail)))} /></> : ''}</div>
   }
   const preview = alert.preview.value
   return (
     <>
-      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: <InlineMarkdown text={markdownSource(preview.request_excerpt)} /></div> : null}
+      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: <InlineMarkdown text={markdownInline(markdownSource(preview.request_excerpt))} /></div> : null}
       {preview.steps.length > 0 ? (
         <ol {...stylex.props(styles.list)} aria-label="Steps">
           {preview.steps.map((step) => (
             <li key={step.path}>
-              <InlineMarkdown text={step.title} />
+              <InlineMarkdown text={markdownInline(step.title)} />
               {Option.isSome(step.assignee) ? <span {...stylex.props(styles.soft)}> · {step.assignee.value.replace(/^agent\//, '')}</span> : null}
               {step.depends.length > 0 ? <span {...stylex.props(styles.soft)}> · after {step.depends.join(', ')}</span> : null}
             </li>
@@ -174,9 +175,9 @@ export const AnswerAlert = ({
   const evidence = [...(alert.because ? [`Because ${markdownSource(alert.because)}`] : []), ...(request?.reasons ?? []).map(markdownSource)]
   const related = subjectRows(alert, onOpenRef, opensRef)
   const full = density === 'full'
-  const contextFull = overflows ? <div {...stylex.props(styles.prose)}><Markdown text={spaced(contextSource)} /></div> : undefined
+  const contextFull = overflows ? <div {...stylex.props(styles.prose)}><Markdown text={markdownBlock(spaced(contextSource))} /></div> : undefined
   // A differing title is context the heading does not carry. Full density shows the long context beside More's parts already.
-  const shownContext = title === undefined && (full || contextFull === undefined) ? undefined : <>{title === undefined ? null : <p {...stylex.props(styles.titleLine)}><InlineMarkdown text={title} /></p>}{full ? null : contextFull}</>
+  const shownContext = title === undefined && (full || contextFull === undefined) ? undefined : <>{title === undefined ? null : <p {...stylex.props(styles.titleLine)}><InlineMarkdown text={markdownInline(title)} /></p>}{full ? null : contextFull}</>
   const more = why !== undefined || evidence.length > 0 || related.length > 0 || shownContext !== undefined
     ? <DecisionMore clamp={!full} evidence={evidence} related={related} {...(why === undefined ? {} : { why })} {...(shownContext === undefined ? {} : { context: shownContext })} />
     : undefined
@@ -199,7 +200,7 @@ export const AnswerAlert = ({
     label={firstLine(alert.title)}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[from, KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
-    heading={<InlineMarkdown text={headingText} />}
+    heading={<InlineMarkdown text={markdownInline(headingText)} />}
     headingText={markdownLine(headingText)}
     {...(line === '' ? {} : { context: line })}
     {...(contextFull === undefined ? {} : { contextFull })}

@@ -1,3 +1,4 @@
+import { markdownBlock } from './assistant-ui/composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { flushSync } from 'react-dom'
@@ -48,7 +49,7 @@ const requireElement = <T extends Element>(root: Element, selector: string): T =
 function streamingTailStory(text: string, terminalSelector: string): Story {
   return {
     ...contractFixture,
-    render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={text} streaming /></div></ThemePortal></main>,
+    render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.lane)}><Markdown text={markdownBlock(text)} streaming /></div></ThemePortal></main>,
     play: async ({ canvasElement }) => {
       await document.fonts.ready
       const markdown = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown"]')
