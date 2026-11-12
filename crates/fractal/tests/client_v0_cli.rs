@@ -4429,6 +4429,14 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         let kdl = String::from_utf8(preview.stdout).unwrap();
         let intent = fractal_daemon::parse_intent(&kdl, "client-v0-cli").unwrap();
         assert!(intent.subjects.contains_key(subject), "{kdl}");
+        // No member can reach the named placement, so the start falls back to this
+        // daemon's own default workspace for the agent rather than failing the call.
+        let member = intent.subjects[subject].member.as_ref().unwrap();
+        assert_eq!(member.host.as_str(), "placement");
+        assert!(
+            member.workspace.ends_with(&format!("agents/{subject}")),
+            "{kdl}",
+        );
     }
     for preview in [false, true] {
         let mut args = vec![

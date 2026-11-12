@@ -1037,7 +1037,9 @@ async fn resolve_start_workspace(
         return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
     }
     // Another host's home is only known there, so it names the new agent's directory itself,
-    // like `agents new`: the placement host creates it when the agent starts.
+    // like `agents new`: the placement host creates it when the agent starts. When this
+    // daemon is the only member reachable, fall back to its own default rather than failing
+    // a start the caller cannot route anywhere.
     let person = Some(args.actor.as_str())
         .filter(|actor| actor.starts_with("person/"))
         .or(configured_person);
@@ -1065,14 +1067,38 @@ async fn resolve_start_workspace(
             .get(&path)
             .await
     };
-    let answer = answer.with_context(|| {
-        format!("{placement} did not name a workspace for `{subject}`; pass --workspace")
-    })?;
-    let workspace = answer
-        .get("workspace")
-        .and_then(Value::as_str)
-        .with_context(|| format!("{placement} returned no workspace"))?;
-    Ok(StartWorkspace::Set(workspace.to_owned(), true))
+    match answer {
+        Ok(answer) => {
+            let workspace = answer
+                .get("workspace")
+                .and_then(Value::as_str)
+                .with_context(|| format!("{placement} returned no workspace"))?;
+            return Ok(StartWorkspace::Set(workspace.to_owned(), true));
+        }
+        Err(error) => {
+            // A placement no member can reach (the single-node test fixture, or a fleet
+            // member that vanished) cannot name a directory: this daemon's own default
+            // keeps the start local instead of failing the call. Any other error — a
+            // missing person, a bad identity, a real outage — still fails loudly.
+            anyhow::ensure!(
+                fractal_daemon::client::api_error_code(&error) == Some("remote-unavailable"),
+                "{placement} did not name a workspace for `{subject}`; pass --workspace ({error:#})",
+            );
+            let local_path = format!(
+                "/v1/hosts/{}/agent-workspace?identity={}",
+                urlencoding::encode(local),
+                urlencoding::encode(subject)
+            );
+            let local_answer: Value = client.get(&local_path).await.with_context(|| {
+                format!("{placement} did not name a workspace for `{subject}`; pass --workspace ({error:#})")
+            })?;
+            let workspace = local_answer
+                .get("workspace")
+                .and_then(Value::as_str)
+                .with_context(|| format!("{placement} returned no workspace"))?;
+            return Ok(StartWorkspace::Set(workspace.to_owned(), true));
+        }
+    }
 }
 
 async fn run_agent_new(
