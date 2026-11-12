@@ -187,7 +187,7 @@ const styles = stylex.create({
     display: 'flex', flexDirection: 'column', minWidth: 0,
     backgroundColor: surface.canvas,
     outlineStyle: 'none',
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusOffset})` },
   },
   muted: { opacity: 0.8 },
   file: { minWidth: 0 },
