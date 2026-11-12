@@ -340,6 +340,42 @@ async fn an_unclaimed_worker_gate_alerts_and_accepts_approval_without_duplicate_
 }
 
 #[tokio::test]
+async fn two_human_gates_for_one_reviewer_remain_answerable_in_declaration_order() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    let source = RELEASE.replace(
+        "    }\n  }\n}",
+        "    }\n    gate \"publish\" type=\"human\" {\n      reviewer \"person/avery\"\n      question \"Publish the approved release?\"\n    }\n  }\n}",
+    );
+    apply(&store, &source, "two-reviews");
+    let run = start(&store, "release", "two-reviews-run");
+    let step = run.steps[0].subject.clone();
+    let reconciler = reconciler(&store);
+    reconcile_until(&reconciler, "the first gate asked", || {
+        store.gate_request_for_owner(&step).unwrap().is_some()
+    });
+    let first = store.gate_request_for_owner(&step).unwrap().unwrap();
+    assert_eq!(first.body["fields"]["question"], "Ship this release?");
+    let app = fractal_daemon::api::router(state);
+    assert!(card(&app, "person/avery", &step).await.is_some());
+    let (status, approved) = review(&app, &step, "approved", "person/avery", None).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    reconcile_until(&reconciler, "the second gate asked", || {
+        store.gate_request_for_owner(&step).unwrap().is_some_and(|request| request.id != first.id)
+    });
+    let second = store.gate_request_for_owner(&step).unwrap().unwrap();
+    assert_eq!(second.body["fields"]["question"], "Publish the approved release?");
+    assert!(card(&app, "person/avery", &step).await.is_some());
+    let (status, approved) = review(&app, &step, "approved", "person/avery", None).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    reconcile_until(&reconciler, "both approvals complete the step", || {
+        step_status(&store, &step) == "completed"
+    });
+    assert!(card(&app, "person/avery", &step).await.is_none());
+}
+
+#[tokio::test]
 async fn a_person_approves_a_human_gate_through_client_actions_with_its_attention_fence() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());

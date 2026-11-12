@@ -354,24 +354,6 @@ pub struct PersonAskPass {
     pub next_deadline: Option<u128>,
 }
 
-/// Whether `step`'s definition in its generation's revision runs a program.
-fn runs_program(tx: &Transaction<'_>, step: &StepRunView) -> Result<bool> {
-    let body: Option<String> = tx
-        .query_row(
-            "SELECT r.body FROM run_generations g
-             JOIN mission_runs m ON m.id=?2
-             JOIN mission_revisions r ON r.mission_id=m.mission_id AND r.revision=g.revision
-             WHERE g.id=?1",
-            params![generation_id_from_subject(&step.generation), step.run.strip_prefix("mission-run/").unwrap_or(&step.run)],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(body) = body else { return Ok(false) };
-    let mission: crate::model::MissionSpec = serde_json::from_str(&body)?;
-    Ok(fractal_store::store::flatten_mission_step_specs(&mission)
-        .into_iter()
-        .any(|spec| spec.path == step.step && spec.program.is_some()))
-}
 
 pub trait PersonWorkStore {
     /// A daemon-owned approval ask, projected in the same transaction as its durable claim.
@@ -517,7 +499,7 @@ impl PersonWorkStore for Store {
                 !origin.agentless
                     || !matches!(origin.status.as_str(), "ready" | "working" | "blocked" | "waiting-person")
                     || input.incarnation.as_deref() != Some(origin.attempt.to_string().as_str())
-                    || !runs_program(tx, &origin).map_err(internal)?
+                    || !fractal_store::store::person_work::runs_program(tx, &origin).map_err(internal)?
             } else {
                 !declaration_live(tx, &input.actor).map_err(internal)?
                     || (!legacy_origin && (!matches!(origin.status.as_str(), "claimed" | "working")
@@ -734,8 +716,8 @@ impl PersonWorkStore for Store {
                 && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline)) {
                 return Err(FractalError::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
             }
-            // Projection releases the waiting origin. Remember its exact episode first so
-            // cancellation cannot fail a different attempt or an already-resumed step.
+            // Projection applies cancellation with the exact ask fence. Keep the derived
+            // origin claim as a notification so local and replicated run invalidation wakes.
             let waiting_origin = ask.as_ref().and_then(|ask| ask.body["fields"]["origin_step"].as_str()
                 .map(|origin| (ask, origin))).map(|(ask, origin)| {
                     step(tx, origin).map(|view| view.filter(|view| view.status == "waiting-person"
@@ -747,10 +729,8 @@ impl PersonWorkStore for Store {
                 send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
             }
             if let Some(origin_view) = waiting_origin {
-                // Programs receive AskCancelled through their durable result and may catch it.
-                // Native steps have no typed handler: cancellation is an ordinary step failure,
-                // letting the reconciler apply retries and the mission's finally handling.
-                let failed = cancel && !runs_program(tx, &origin_view).map_err(internal)?;
+                let failed = cancel && step(tx, &origin_view.subject).map_err(internal)?
+                    .is_some_and(|view| view.status == "failed");
                 let reason = if failed { format!("ask cancelled by {}", input.actor) } else { format!("Person response: {summary}") };
                 let response = append_claim_tx(tx, &self.origin, &origin_view.subject, "step-run.state", Some("daemon/runtime"),
                     &json!({"fields": {"status": if failed { "failed" } else { "ready" }, "attempt": origin_view.attempt,

@@ -15707,14 +15707,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             let GateSpec::Human { mode, .. } = gate else {
                 continue;
             };
-            if let GateOutcome::Fail(reason) = self.evaluate_mission_gate(run, step, view, gate)? {
-                return self.store.set_step_state(&view.subject, "failed", Some(&reason));
+            let outcome = self.evaluate_mission_gate(run, step, view, gate)?;
+            if let GateOutcome::Fail(reason) = &outcome {
+                return self.store.set_step_state(&view.subject, "failed", Some(reason));
             }
             if mode.as_deref() == Some("feedback")
                 && self.store.step_run_fenced(&view.subject)?.is_some_and(|step| step.attempt != view.attempt)
             {
                 // Feedback has started another attempt; do not execute the stale view.
                 return Ok(true);
+            }
+            if !matches!(outcome, GateOutcome::Pass) {
+                // Requests on one step/reviewer share a review episode. Keep the
+                // completion loop's declaration order so a later question cannot
+                // supersede the unanswered question that still gates this step.
+                break;
             }
         }
         Ok(false)
