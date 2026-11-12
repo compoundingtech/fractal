@@ -37,6 +37,19 @@ attention or availability collection stream.
   is written, given an expiry or cleared here. A change shows only once Fractal
   returns the folded result (`PUT v1/client/availability`, `PUT v1/client/notes`),
   or Fractal's refusal.
+- **Presence** (`POST v1/client/presence`): this Mac reports its raw state
+  (`active`; `inactive` while another login session is in front; `locked`;
+  `sleeping`) with its last keyboard, mouse or trackpad input, and Fractal
+  derives presence the same way for every device; the tray applies no idle
+  threshold and sends no heartbeat. Lock, unlock, session and sleep/wake changes
+  are system notifications and are reported at once. While active, one
+  non-repeating timer fires at Fractal's `report_again_at` (when it would read
+  the Mac as idle without newer input) and reports the current last input from
+  the HID idle counter (no permission needed). Once Fractal reads the Mac as
+  idle, a global mouse monitor (no Accessibility grant) reports the return at
+  once; keyboard-only returns show within a minute. A failed report is retried
+  after a minute, never while asleep. Reports and failures are logged once per
+  change.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
