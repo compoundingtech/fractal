@@ -5,6 +5,7 @@ import * as Aria from 'react-aria-components'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { InlineMarkdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { useAlertAnswersStore } from '../conversation/alerts/alertAnswers.ts'
@@ -79,7 +80,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined
                   ? <p {...stylex.props(styles.goneText)}>Nothing else needs you.</p>
-                  : <Aria.Link onPress={() => onOpenAlert(next.id)} {...stylex.props(styles.goneLink)}>Next: {next.title}</Aria.Link>}
+                  : <Aria.Link onPress={() => onOpenAlert(next.id)} {...stylex.props(styles.goneLink)}>Next: <InlineMarkdown text={next.title} /></Aria.Link>}
               </div>}
       </div>
     </div>
