@@ -52,6 +52,7 @@ pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
 pub mod mission_declaration;
+pub mod source_maps;
 pub mod raw_terminal;
 pub mod private_notes;
 pub mod quota;
@@ -145,6 +146,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
         .route("/v1/client/publication-definition", get(publication_definition))
         .route("/v1/client/mission-declaration", get(mission_declaration::get))
+        .route("/v1/client/source-maps", get(source_maps::get))
+        .route("/v1/client/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -3513,6 +3516,7 @@ fn mission_resources_filtered(
                     Ok::<Value, anyhow::Error>(json!({
                         "id": run.subject,
                         "generation_id": run.generation,
+                        "revision": run.revision,
                         "requester": run.requester,
                         "status": run.status,
                         "phase": run.phase,

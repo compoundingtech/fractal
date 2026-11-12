@@ -11,7 +11,7 @@ import type {
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
-    MissionDeclaration,
+    MissionDeclaration, SubjectSourceMap, SourceBlob,
     GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
@@ -712,6 +712,8 @@ export class FractalClient {
     async documentReferencesGet(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentReferences>> { return this.get('/v1/client/document-references' + query({ subject }), undefined, requestOptions); }
     async publicationDefinition(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PublicationDefinition>> { return this.get('/v1/client/publication-definition' + query({ subject }), undefined, requestOptions); }
     async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MissionDeclaration>> { return this.get('/v1/client/mission-declaration' + query({ mission, revision }), undefined, requestOptions); }
+    async sourceMapGet(subject: string, revision?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectSourceMap>> { return this.get('/v1/client/source-maps' + query({ subject, revision }), undefined, requestOptions); }
+    async sourceBlobGet(hash: string, subject: string, revision: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SourceBlob>> { return this.get(`/v1/client/source-blobs/${encodeURIComponent(hash)}` + query({ subject, revision }), undefined, requestOptions); }
     async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectDefinition>> { return this.get('/v1/client/subject-definition' + query({ subject, show_env_values: showEnvValues }), undefined, requestOptions); }
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }

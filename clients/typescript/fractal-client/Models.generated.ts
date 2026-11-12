@@ -1852,7 +1852,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -2876,6 +2876,7 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  revision?: Revision;
   started_at?: number | null;
   state_since: Timestamp;
   status: string;
@@ -3973,6 +3974,68 @@ export type Snapshot = {
 
 export type SnapshotId = string;
 
+export type SourceBlob = {
+  hash: string;
+  text: string;
+};
+
+export type SourceMapClaim = {
+  declaration: number;
+  files: Array<SourceMapFile>;
+  inputs: Array<number>;
+  nodes: Array<SourceMapNode>;
+  ref: string;
+  repository: string;
+  revision: Revision;
+  sequence: number;
+  set_revision: string;
+  sha: string;
+  subject: string;
+};
+
+export type SourceMapFile = {
+  blob: string;
+  blob_hash: string;
+  path: string;
+  repository: string;
+};
+
+export type SourceMapFrame = {
+  end: SourceMapPosition;
+  file: number;
+  precision: ("exact" | "enclosing" | string);
+  role: ("declaration" | "helper" | "value" | "constructor" | "fragment" | string);
+  start: SourceMapPosition;
+};
+
+export type SourceMapNode = {
+  frames: Array<SourceMapFrame>;
+  kdl: string;
+  kdlLines: Array<number>;
+  span: SourceMapSpan;
+};
+
+export type SourceMapPosition = {
+  column: number;
+  line: number;
+};
+
+export type SourceMapRevision = {
+  recorded_at_unix_ms: number;
+  ref: string;
+  repository: string;
+  revision: Revision;
+  sequence: number;
+  set_revision: string;
+  sha: string;
+};
+
+export type SourceMapSpan = {
+  end: SourceMapPosition;
+  file: number;
+  start: SourceMapPosition;
+};
+
 export type StatusHistory = {
   complete: boolean;
   items: Array<StatusTransition>;
@@ -4045,6 +4108,15 @@ export type SubjectDefinition = {
   desired_token: string;
   kdl: string;
   kind: "subject-definition";
+  subject: string;
+};
+
+export type SubjectSourceMap = {
+  current?: Revision;
+  kdl: string;
+  map: SourceMapClaim;
+  revision: Revision;
+  revisions: Array<SourceMapRevision>;
   subject: string;
 };
 
