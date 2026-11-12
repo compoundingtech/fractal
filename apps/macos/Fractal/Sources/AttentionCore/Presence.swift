@@ -11,6 +11,11 @@ public enum DeviceState: String, Sendable, Equatable {
   case sleeping
 }
 
+/// This Mac's presence as Fractal derives it from this device's reports.
+public enum PresenceState: String, Sendable, Equatable {
+  case present, idle, locked
+}
+
 /// What the Mac told the tray. Lock, unlock, session switches, sleep and wake arrive as system
 /// notifications; `check` is a timer firing or input after idleness, which only re-reads the
 /// HID idle time.
@@ -103,6 +108,17 @@ public struct PresenceMachine: Sendable {
   /// A report did not reach Fractal: try again shortly, unless asleep.
   public func failed(now: Date) -> Date? {
     asleep ? nil : now.addingTimeInterval(Self.retryAfter)
+  }
+
+  /// This Mac's presence as Fractal derives it: present while active until the instant Fractal
+  /// last named, idle past it or with another session in front, else locked.
+  public func presence(now: Date) -> PresenceState {
+    switch state {
+    case .locked, .sleeping: .locked
+    case .inactive: .idle
+    case .active:
+      if accepted?.state == .active, let again = reportAgainAt, now < again { .present } else { .idle }
+    }
   }
 }
 

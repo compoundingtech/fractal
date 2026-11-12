@@ -59,6 +59,7 @@ final class PresenceReporter {
   private func handle(_ signal: PresenceSignal) {
     let now = Date.now
     let decision = machine.handle(signal, lastInputAt: now.addingTimeInterval(-Self.idleSeconds()), now: now)
+    model.macPresence = machine.presence(now: now)
     schedule(decision.nextCheck)
     watchInput(decision.watchInput)
     if let report = decision.report { send(report) }

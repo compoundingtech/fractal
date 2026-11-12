@@ -6,16 +6,21 @@ struct TrayConfiguration: Sendable {
   let endpoint: URL
   let credential: String
   let fractalURL: URL
+  /// `ATTENTION_SPEECH_SOCKET`: the local speech service; unset leaves speech off.
+  let speechSocket: String?
 
   enum ConfigurationError: Error, CustomStringConvertible {
     case missing(String)
     case invalidURL(String)
+    case relativePath(String)
     var description: String {
       switch self {
       case .missing(let key):
         "Set \(key) explicitly before launching AttentionTray. No default endpoint is used."
       case .invalidURL(let key):
         "\(key) must be an absolute HTTP(S) URL without credentials, query or fragment."
+      case .relativePath(let key):
+        "\(key) must be an absolute path when set."
       }
     }
   }
@@ -38,10 +43,13 @@ struct TrayConfiguration: Sendable {
       }
       return url
     }
+    let speechSocket = environment["ATTENTION_SPEECH_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
+    if let speechSocket, !speechSocket.hasPrefix("/") { throw ConfigurationError.relativePath("ATTENTION_SPEECH_SOCKET") }
     return try Self(
       endpoint: url("ATTENTION_FRACTAL_ENDPOINT"),
       credential: value("ATTENTION_FRACTAL_CREDENTIAL"),
-      fractalURL: url("ATTENTION_FRACTAL_URL"))
+      fractalURL: url("ATTENTION_FRACTAL_URL"),
+      speechSocket: speechSocket)
   }
 }
 
