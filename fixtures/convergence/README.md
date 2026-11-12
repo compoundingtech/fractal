@@ -294,3 +294,10 @@ admission and that the oracle receives the claim with its text.
 With v22 every fixed seed converges; seed 34 is the exact never-trim set, observed by hosted
 linux-tests (run 43045279669) and the st-test-all linux gate (burst run 43045420319). Burst
 cargo-test run 43045414076 also left seed 74 untrimmed, a runner divergence (#6210).
+
+`claims-v23.json` adds the person-availability kinds `person.status-set`,
+`person.interruptions-set`, `person.deadline-clock-set` and `person.presence-observed`. Versions 1
+through 22 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v23.json`;
+do not hand-edit it. The simulation selects v23. Draws use the generic append path: only the
+subject person's own claims are admitted, as on every admission path.
