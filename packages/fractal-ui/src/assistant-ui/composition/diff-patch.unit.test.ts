@@ -77,6 +77,31 @@ test('whitespace-only change pairs collapse into context lines, keeping hunk cou
   assert(collapsed.patch.includes('@@ -1,3 +1,3 @@\n a\n-b\n+c\n z'), collapsed.patch)
 })
 
+test('an unpaired blank addition is hidden; the rest of the hunk keeps its real new-side numbers', () => {
+  const [file] = normalizePatch(['--- a/w.ts', '+++ b/w.ts', '@@ -1,2 +1,3 @@ fn w', ' a', '+', ' b', '@@ -10,2 +11,2 @@', ' c', '-d', '+e'].join('\n'))
+  const collapsed = collapseWhitespaceChanges(file!)
+  equal([collapsed.added, collapsed.removed], [1, 1], 'only the later real change remains')
+  equal(collapsed.patch.split('\n').filter(line => line.startsWith('@@')), ['@@ -1,1 +1,1 @@ fn w', '@@ -2,1 +3,1 @@', '@@ -10,2 +11,2 @@'], 'split ranges, later hunk untouched')
+  assert(!collapsed.patch.split('\n').includes('+'), collapsed.patch)
+})
+
+test('an unpaired whitespace-only deletion is hidden; the rest of the hunk keeps its real old-side numbers', () => {
+  const [file] = normalizePatch(['--- a/w.ts', '+++ b/w.ts', '@@ -1,3 +1,2 @@', ' a', '-  ', ' b', '@@ -10,2 +9,2 @@', ' c', '-d', '+e'].join('\n'))
+  const collapsed = collapseWhitespaceChanges(file!)
+  equal([collapsed.added, collapsed.removed], [1, 1], 'only the later real change remains')
+  equal(collapsed.patch.split('\n').filter(line => line.startsWith('@@')), ['@@ -1,1 +1,1 @@', '@@ -3,1 +2,1 @@', '@@ -10,2 +9,2 @@'], 'split ranges, later hunk untouched')
+  assert(!collapsed.patch.split('\n').includes('-  '), collapsed.patch)
+})
+
+test('a file whose only changes are blank lines keeps no hunks and counts nothing', () => {
+  const [file] = normalizePatch(['--- a/w.ts', '+++ b/w.ts', '@@ -1,1 +1,1 @@', '-', '+  '].join('\n'))
+  const paired = collapseWhitespaceChanges(file!)
+  equal([paired.added, paired.removed], [0, 0], 'a blank pair collapses to context')
+  const [only] = normalizePatch(['--- a/w.ts', '+++ b/w.ts', '@@ -0,0 +1,1 @@', '+ '].join('\n'))
+  const hidden = collapseWhitespaceChanges(only!)
+  equal([hidden.added, hidden.removed, hidden.patch], [0, 0, '--- a/w.ts\n+++ b/w.ts\n'], 'nothing left to draw')
+})
+
 test('truncatePatch keeps the first body lines and reports what it hid', () => {
   const [file] = normalizePatch(['--- a/t.ts', '+++ b/t.ts', '@@ -1,4 +1,4 @@', ' a', '-b', '+c', ' d', ' e'].join('\n'))
   const { file: short, hidden } = truncatePatch(file!, 3)

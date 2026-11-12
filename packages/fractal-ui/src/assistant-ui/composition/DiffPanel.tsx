@@ -40,10 +40,11 @@ export interface DiffPanelProps {
 }
 
 function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hideWhitespace, revealRequest, onOpenFile }: { file: DiffFile; landmarkContext?: string; collapsed: boolean; onToggle: () => void; layout: 'unified' | 'split'; wrap: boolean; hideWhitespace: boolean; revealRequest?: DiffRevealRequest; onOpenFile?: (path: string) => void }) {
-  // One normalized patch per file; whitespace-only pairs collapse to context (counts stay valid).
+  // One normalized patch per file. Hiding whitespace collapses equal-up-to-whitespace pairs to context and
+  // drops blank-only changes; a file left with no hunk has nothing to draw.
   const files = React.useMemo(() => {
     const normalized = normalizePatch(file.diff.join('\n'), { path: file.path })
-    return hideWhitespace ? normalized.map(collapseWhitespaceChanges) : normalized
+    return hideWhitespace ? normalized.map(collapseWhitespaceChanges).filter(entry => /^@@/m.test(entry.patch)) : normalized
   }, [file.diff, file.path, hideWhitespace])
   const changed = files.some(entry => entry.added + entry.removed > 0)
   const codeId = React.useId()

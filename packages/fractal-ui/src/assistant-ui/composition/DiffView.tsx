@@ -158,7 +158,7 @@ export const DiffView = React.memo(function DiffView({ patch, files: suppliedFil
   const prepared = React.useMemo(() => {
     let hidden = 0
     let files = suppliedFiles ?? (deferredPatch ? normalizePatch(deferredPatch, { path }) : [])
-    if (hideWhitespace) files = files.map(collapseWhitespaceChanges)
+    if (hideWhitespace) files = files.map(collapseWhitespaceChanges).filter(file => /^@@/m.test(file.patch))
     if (maxLines !== undefined) {
       let budget = maxLines
       files = files.flatMap(file => {

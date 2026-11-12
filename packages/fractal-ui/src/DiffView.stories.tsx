@@ -169,20 +169,29 @@ export const TranscriptToolDiff: Story = {
 }
 export const TranscriptToolDiffLightNarrow: Story = { args: { scheme: 'light', width: 440 }, render: TranscriptToolDiff.render, play: TranscriptToolDiff.play }
 
-/** The Changes panel: each file's body is a DiffView; the toolbar's layout, wrap and whitespace toggles drive it. */
+/**
+ * The Changes panel: each file's body is a DiffView; the toolbar's layout, wrap and whitespace toggles drive it.
+ * Hiding whitespace removes a reindented pair, an unpaired blank addition and an unpaired blank deletion.
+ */
 export const ChangesPanel: Story = {
   render: ({ scheme, width }) => <Canvas scheme={scheme} width={width}><div style={{ height: 640, display: 'flex' }}><DiffPanel open title="Changes" showSurfaceTabs={false} branchFiles={[
     { path: 'src/rows.ts', diff: samplePatch.split('\n').slice(4), added: 3, removed: 2 },
-    { path: 'src/space.ts', diff: ['@@ -1,2 +1,2 @@', '-const  a = 1', '+const a = 1', ' const b = 2'], added: 1, removed: 1 },
+    { path: 'src/space.ts', diff: ['@@ -1,5 +1,5 @@', '-const  a = 1', '+const a = 1', ' const b = 2', '+', ' const c = 3', '-  ', ' const d = 4'], added: 2, removed: 2 },
+    { path: 'src/blank.ts', diff: ['@@ -1,1 +1,2 @@', ' const e = 5', '+'], added: 1, removed: 0 },
   ]} /></div></Canvas>,
   play: async ({ canvasElement }) => {
     const views = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="diff-code"]')]
-    await expect(views().length).toBe(2)
+    await expect(views().length).toBe(3)
     for (const view of views()) await waitFor(() => expect(view.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
     await expect(views()[0]!.getAttribute('aria-label')).toBe('Diff lines for src/rows.ts')
+    await expect([views()[1]!.dataset.added, views()[1]!.dataset.removed]).toEqual(['2', '2'])
     await userEvent.click(canvasElement.querySelector<HTMLElement>('[aria-label="Hide whitespace-only changes"]')!)
-    await waitFor(() => expect(views()[1]!.dataset.added).toBe('0'))
-    await expect(canvasElement.textContent).toContain('No non-whitespace changes.')
+    // The reindent and both unpaired blank lines leave space.ts; the blank-only file has nothing left to draw.
+    await waitFor(() => expect(views().map(view => view.getAttribute('aria-label'))).toEqual(['Diff lines for src/rows.ts', 'Diff lines for src/space.ts']))
+    await expect([views()[1]!.dataset.added, views()[1]!.dataset.removed]).toEqual(['0', '0'])
+    await waitFor(() => expect(views()[1]!.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+    await waitFor(() => expect(shadowText(views()[1]!)).toContain('const d = 4'), { timeout: 10_000 })
+    await expect(canvasElement.querySelector('section[aria-label^="src/blank.ts"]')?.textContent).toContain('No non-whitespace changes.')
   },
 }
 export const ChangesPanelLightNarrow: Story = { args: { scheme: 'light', width: 440 }, render: ChangesPanel.render, play: ChangesPanel.play }

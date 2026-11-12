@@ -148,33 +148,68 @@ function mapHunks(file: NormalizedDiffFile, transform: (body: readonly string[],
 }
 
 /**
- * Turn each whitespace-only `-`/`+` pair into one context line (new text). Nothing is deleted, so
- * old and new hunk counts stay valid.
+ * Hide whitespace-only changes: each `-`/`+` pair equal up to whitespace becomes one context line
+ * (new text), and an unpaired change whose text is blank is dropped. A dropped line ends its hunk
+ * and the rest continues as a new hunk one line further on that side, so every hunk range and
+ * every later line number stays the file's real one.
  */
 export function collapseWhitespaceChanges(file: NormalizedDiffFile): NormalizedDiffFile {
-  return mapHunks(file, body => {
-    const out: string[] = []
-    let index = 0
-    while (index < body.length) {
-      if (!body[index]!.startsWith('-') && !body[index]!.startsWith('+')) { out.push(body[index++]!); continue }
+  const lines = file.patch.replace(/\n$/, '').split('\n')
+  const out: string[] = []
+  let index = 0
+  while (index < lines.length && !(lines[index]!.startsWith('@@') && out.some(line => line.startsWith('+++ ')))) out.push(lines[index++]!)
+  while (index < lines.length) {
+    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(lines[index++]!)
+    const body: string[] = []
+    while (index < lines.length && !lines[index]!.startsWith('@@')) body.push(lines[index++]!)
+    if (!header) continue
+    let oldLine = Number(header[1]), newLine = Number(header[2])
+    let segment = { old: oldLine, new: newLine, body: [] as string[] }
+    let suffix = header[3]!
+    const close = () => {
+      if (segment.body.length === 0) return
+      const { oldCount, newCount } = counts(segment.body)
+      out.push(`@@ -${segment.old},${oldCount} +${segment.new},${newCount} @@${suffix}`, ...segment.body)
+      suffix = ''
+    }
+    const keep = (line: string) => {
+      // A `\ No newline` marker belongs to the line before it; a dropped line takes its marker along.
+      if (line.startsWith('\\') && segment.body.length === 0) return
+      segment.body.push(line)
+      if (line.startsWith('-') || line.startsWith(' ')) oldLine++
+      if (line.startsWith('+') || line.startsWith(' ')) newLine++
+    }
+    const change = (line: string) => {
+      if (line.slice(1).trim() !== '') { keep(line); return }
+      close()
+      if (line.startsWith('-')) oldLine++
+      else newLine++
+      segment = { old: oldLine, new: newLine, body: [] }
+    }
+    let at = 0
+    while (at < body.length) {
+      if (!body[at]!.startsWith('-') && !body[at]!.startsWith('+')) { keep(body[at++]!); continue }
       const removed: string[] = [], added: string[] = []
-      while (index < body.length && body[index]!.startsWith('-')) removed.push(body[index++]!)
-      while (index < body.length && body[index]!.startsWith('+')) added.push(body[index++]!)
-      const pairs = Math.max(removed.length, added.length)
-      const tailAdded: string[] = []
-      for (let pair = 0; pair < pairs; pair++) {
+      while (at < body.length && body[at]!.startsWith('-')) removed.push(body[at++]!)
+      while (at < body.length && body[at]!.startsWith('+')) added.push(body[at++]!)
+      const pending: string[] = []
+      for (let pair = 0; pair < Math.max(removed.length, added.length); pair++) {
         const old = removed[pair], next = added[pair]
         if (old !== undefined && next !== undefined && old.slice(1).replace(/\s/g, '') === next.slice(1).replace(/\s/g, '')) {
-          out.push(...tailAdded.splice(0), ` ${next.slice(1)}`)
+          pending.splice(0).forEach(change)
+          keep(` ${next.slice(1)}`)
           continue
         }
-        if (old !== undefined) out.push(old)
-        if (next !== undefined) tailAdded.push(next)
+        if (old !== undefined) change(old)
+        if (next !== undefined) pending.push(next)
       }
-      out.push(...tailAdded)
+      pending.forEach(change)
     }
-    return out
-  })
+    close()
+  }
+  const [normalized] = normalizePatch(`${out.join('\n')}\n`, { path: file.path, excerpt: file.excerpt })
+  // Every change was whitespace-only and blank: only the file header remains.
+  return normalized ?? { ...file, patch: `${out.join('\n')}\n`, added: 0, removed: 0 }
 }
 
 /** Keep the first `maxLines` body lines (a compact preview) and say how many were hidden. */
