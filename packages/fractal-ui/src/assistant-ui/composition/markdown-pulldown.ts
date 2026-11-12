@@ -84,7 +84,16 @@ export function pulldownTree(source: string): MdastNode {
     if (node.type === 'text' && previous?.type === 'text') { previous.value += node.value!; return }
     parent.children!.push(node)
   }
+  // Inside an image everything is its alt text: nested emphasis, code and breaks add words, not nodes.
+  let inImage = 0
   for (const [kind, ...fields] of events(source)) {
+    if (inImage > 0) {
+      if (kind === 's') inImage += 1
+      else if (kind === 'e') { inImage -= 1; if (inImage === 0) stack.pop() }
+      else if (kind === 't' || kind === 'c') top().alt += fields[0]!
+      else if (kind === 'sb' || kind === 'hb') top().alt += ' '
+      continue
+    }
     switch (kind) {
       case 's': {
         const [type, first, second] = fields as [string, string | undefined, string | undefined]
@@ -103,6 +112,7 @@ export function pulldownTree(source: string): MdastNode {
         if (type === 'paragraph' && top().type === 'listItem') top().spread = true
         if (type !== 'span') append(node)
         stack.push(node)
+        if (type === 'image') inImage = 1
         break
       }
       case 'e': {

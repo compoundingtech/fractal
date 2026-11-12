@@ -337,3 +337,19 @@ test('shared client fixtures: the policy matches and every case renders as speci
     if (spec.maxQuoteDepth !== undefined) assert.ok((html.match(/<blockquote/g) ?? []).length <= spec.maxQuoteDepth, `${spec.name}: depth`)
   }
 })
+
+test('policy fourth pass: long paths, image alt formatting, quoted closes, task boxes and long labels', async () => {
+  for (const source of ['a/'.repeat(32000) + 'x', 'a.'.repeat(32000) + 'x']) {
+    const { milliseconds } = cpuMilliseconds(() => block(source))
+    assert.ok(milliseconds < 1000, `${source.slice(0, 4)}: ${milliseconds}ms`)
+  }
+  assert.match(block('![*hello* `x`](https://example.test/a)'), /hello/)
+  assert.doesNotMatch(block('<svg title="x > </svg>">\n\nLEAK\n\n</svg>'), /LEAK/)
+  assert.match(block('<div title="a > </div>">\n\nBODY\n\n</div>'), /<div[^>]*>(?:(?!<\/div>)[\s\S])*BODY/)
+  assert.match(block('- [x] done'), /<input[^>]*type="checkbox"[^>]*disabled/)
+  const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+  for (const label of ['x ' + '`'.repeat(64000) + ' x', '['.repeat(64000)]) {
+    const { milliseconds } = cpuMilliseconds(() => markdownPlainText(label))
+    assert.ok(milliseconds < 200, `${milliseconds}ms`)
+  }
+})

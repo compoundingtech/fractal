@@ -148,11 +148,14 @@ function renderReference(path: string, options: ReferenceOptions): React.ReactNo
   return resource === undefined ? undefined : <ResourceChip resource={resource} onOpen={options.onOpenResource} />
 }
 
+const REFERENCE_SCAN_MAX = 4096
 /** Only text leaves are substituted: parsed emphasis, links, and list structure stay intact. */
 function InlineText({ children }: { children: React.ReactNode }) {
   const references = React.useContext(ReferenceContext)
   return React.Children.map(children, child => {
-    if (typeof child !== 'string') return child
+    // Paths are looked up only when a host renders references, and only in runs short enough that the path pattern's
+    // backtracking stays cheap (a 32k-character run of `a/` took seconds).
+    if (typeof child !== 'string' || child.length > REFERENCE_SCAN_MAX || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
     return child.split(/(\b(?:[\w.-]+\/)+[\w.-]+\.[\w]+\b)/g).map((part, index) => {
       const rendered = renderReference(part, references)
       return <React.Fragment key={index}>{rendered === undefined ? part : rendered}</React.Fragment>
