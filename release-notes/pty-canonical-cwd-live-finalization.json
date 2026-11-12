@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "PTY launches resolve every working directory to a canonical absolute directory on the launching host before publication. Runtime inventory also finalizes ended producers after applied starts leave pending-start cleanup, without requiring a daemon restart.",
+  "summary": "PTY launches resolve every working directory to a canonical absolute directory on the launching host before publication. A separate producer-maintenance worker finalizes ended producers after applied starts leave pending-start cleanup, without requiring a daemon restart or adding work to registry snapshots and publication polls.",
   "replay": {
     "status": "none",
     "detail": "No claim or projection changes."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Ambiguous or live producers remain pending. Closure uses the existing durable idempotent closure record and publication_pending=false owner transition."
+    "detail": "Ambiguous or live producers remain pending. Closure uses the existing durable idempotent closure record and publication_pending=false owner transition. Background maintenance runs every 30 seconds, advances at most 32 directory entries and attempts at most one pending-operation closure per pass, with existing scope timeouts. Closed ownership paths are cached and not reopened; dropping the last external runtime clone stops the worker."
   }
 }

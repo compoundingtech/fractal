@@ -80,6 +80,21 @@ fn durable_json(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+// Maintenance is deliberately separate from registry snapshots/publication polls.
+// Each pass advances at most 32 directory entries and attempts closure of at
+// most one pending operation. Scope observations retain their own timeout.
+const PRODUCER_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const PRODUCER_SCAN_BUDGET: usize = 32;
+
+#[derive(Default)]
+struct ProducerSweep {
+    roots: Option<std::fs::ReadDir>,
+    entries: Option<std::fs::ReadDir>,
+    closed: std::collections::HashSet<PathBuf>,
+    #[cfg(test)]
+    owner_reads: usize,
+}
+
 impl PtyRuntime {
     pub(super) fn producer_directory(&self, id: &str, operation: &str) -> PathBuf {
         let digest = Sha256::digest(operation.as_bytes());
@@ -265,9 +280,10 @@ impl PtyRuntime {
         Ok(true)
     }
 
-    /// Reconcile durable producers at startup and on runtime inventory, including
-    /// applied starts that no longer enter pending-start cleanup.
+    /// Startup recovery includes applied starts outside pending-start cleanup.
     pub(super) fn reconcile_producers(&self) -> Result<()> {
+        #[cfg(test)]
+        self.producer_scans.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let roots = match std::fs::read_dir(self.spawn_state_directory()) {
             Ok(roots) => roots,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -291,6 +307,95 @@ impl PtyRuntime {
                 if let Err(error) = result {
                     tracing::warn!(path = %directory.display(), error = %error,
                         "refusing ambiguous PTY producer reconciliation");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn start_producer_reconciler(&mut self) -> Result<()> {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            return Ok(());
+        }
+        // The worker's clone must not retain its own sender: dropping the last
+        // external runtime clone disconnects the receiver and stops maintenance.
+        let mut worker = self.clone();
+        worker.producer_worker = None;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::Builder::new().name("pty-producer-maintenance".into()).spawn(move || {
+            let mut sweep = ProducerSweep::default();
+            while matches!(receiver.recv_timeout(PRODUCER_MAINTENANCE_INTERVAL),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+            {
+                if let Err(error) = worker.reconcile_producers_pass(&mut sweep) {
+                    tracing::warn!(error = %error, "PTY producer maintenance incomplete");
+                }
+            }
+        })?;
+        self.producer_worker = Some(std::sync::Arc::new(sender));
+        Ok(())
+    }
+
+    fn reconcile_producers_pass(&self, sweep: &mut ProducerSweep) -> Result<()> {
+        #[cfg(test)]
+        self.producer_scans.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if sweep.roots.is_none() {
+            sweep.roots = match std::fs::read_dir(self.spawn_state_directory()) {
+                Ok(roots) => Some(roots),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+        }
+        for _ in 0..PRODUCER_SCAN_BUDGET {
+            let directory = if let Some(entries) = &mut sweep.entries {
+                match entries.next() {
+                    Some(entry) => entry?.path(),
+                    None => {
+                        sweep.entries = None;
+                        continue;
+                    }
+                }
+            } else {
+                match sweep.roots.as_mut().context("missing producer scan cursor")?.next() {
+                    Some(root) => {
+                        let root = root?;
+                        if root.file_name().to_string_lossy().ends_with(".producers") {
+                            sweep.entries = Some(std::fs::read_dir(root.path())?);
+                        }
+                        continue;
+                    }
+                    None => {
+                        sweep.roots = None;
+                        break;
+                    }
+                }
+            };
+            if sweep.closed.contains(&directory) {
+                continue;
+            }
+            let result = (|| -> Result<bool> {
+                #[cfg(test)]
+                { sweep.owner_reads += 1; }
+                let owner: ProducerOwnership =
+                    serde_json::from_reader(File::open(directory.join("owner.json"))?)?;
+                anyhow::ensure!(directory == self.producer_directory(&owner.runtime_id, &owner.operation),
+                    "producer directory identity changed");
+                if !owner.publication_pending {
+                    sweep.closed.insert(directory.clone());
+                    return Ok(false);
+                }
+                if self.start_operation_closed(&owner.runtime_id, &owner.operation)? {
+                    sweep.closed.insert(directory.clone());
+                }
+                Ok(true)
+            })();
+            match result {
+                Ok(false) => continue,
+                Ok(true) => break,
+                Err(error) => {
+                    tracing::warn!(path = %directory.display(), error = %error,
+                        "refusing ambiguous PTY producer maintenance");
+                    break;
                 }
             }
         }
@@ -351,12 +456,14 @@ mod tests {
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        let runtime = PtyRuntime::new(root.path().join("registry"));
+        let mut runtime = PtyRuntime::new(root.path().join("registry"));
+        runtime.producer_worker = None;
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
         let pid = child.id();
         let token = crate::process_start_token(pid).unwrap();
         let directory = startup_fixture(&runtime, "inventory-vanished-start", pid, token);
-        runtime.snapshot().unwrap();
+        let mut sweep = ProducerSweep::default();
+        runtime.reconcile_producers_pass(&mut sweep).unwrap();
         assert!(!directory.join("closure.json").exists(), "live producer remains pending");
         child.kill().unwrap();
         child.wait().unwrap();
@@ -364,6 +471,10 @@ mod tests {
         // No registry row or pending start remains to drive cleanup, and this
         // same runtime was constructed before the producer existed.
         runtime.snapshot().unwrap();
+        assert!(!directory.join("closure.json").exists(), "snapshot must not run maintenance");
+        for _ in 0..3 {
+            runtime.reconcile_producers_pass(&mut sweep).unwrap();
+        }
         let owner = std::fs::read(directory.join("owner.json")).unwrap();
         let closure = std::fs::read(directory.join("closure.json")).unwrap();
         let owner_record: ProducerOwnership = serde_json::from_slice(&owner).unwrap();
@@ -372,8 +483,67 @@ mod tests {
         assert_eq!(closure_record["publication_pending"], false);
         assert_eq!(closure_record["reason"], "runtime-vanished");
         runtime.snapshot().unwrap();
+        for _ in 0..3 {
+            runtime.reconcile_producers_pass(&mut sweep).unwrap();
+        }
+        assert!(sweep.closed.contains(&directory), "closed records leave the pending scan");
         assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), owner);
         assert_eq!(std::fs::read(directory.join("closure.json")).unwrap(), closure);
+    }
+
+    #[test]
+    fn snapshot_does_not_scan_producers_or_observe_scopes() {
+        let root = tempfile::tempdir().unwrap();
+        let mut runtime = PtyRuntime::new(root.path().join("registry"));
+        runtime.producer_worker = None;
+        runtime.producer_scans.store(0, std::sync::atomic::Ordering::Relaxed);
+        let producers = runtime.spawn_state_path("work", "producers");
+        std::fs::create_dir_all(producers.parent().unwrap()).unwrap();
+        // Traversing this deliberately unreadable producer inventory would fail.
+        // Neither owner reads nor the scope-observation path may be entered.
+        std::fs::write(producers, b"not a producer directory").unwrap();
+        for _ in 0..3 {
+            assert!(runtime.snapshot().unwrap().is_empty());
+        }
+        assert_eq!(runtime.producer_scans.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn producer_maintenance_has_a_directory_budget_and_skips_closed_records() {
+        let root = tempfile::tempdir().unwrap();
+        let mut runtime = PtyRuntime::new(root.path().join("registry"));
+        runtime.producer_worker = None;
+        let mut directories = Vec::new();
+        for index in 0..(PRODUCER_SCAN_BUDGET * 2) {
+            let operation = format!("closed-{index}");
+            let directory = runtime.producer_directory("work", &operation);
+            std::fs::create_dir_all(&directory).unwrap();
+            durable_json(&directory.join("owner.json"), &ProducerOwnership {
+                version: 1, runtime_id: "work".into(), operation,
+                scope: "closed.scope".into(), launcher_acknowledged: true,
+                publication_pending: false,
+            }).unwrap();
+            directories.push(directory);
+        }
+        let mut sweep = ProducerSweep::default();
+        runtime.reconcile_producers_pass(&mut sweep).unwrap();
+        assert!(!sweep.closed.is_empty());
+        assert!(sweep.closed.len() < directories.len(), "one pass must not scan every owner");
+        for _ in 0..4 {
+            runtime.reconcile_producers_pass(&mut sweep).unwrap();
+        }
+        assert_eq!(sweep.closed.len(), directories.len());
+        let reads = sweep.owner_reads;
+        // Already-closed records need no further opens, even if their sidecars
+        // are no longer readable. These paths are immutable operation identities.
+        for directory in &directories {
+            std::fs::remove_file(directory.join("owner.json")).unwrap();
+        }
+        for _ in 0..4 {
+            runtime.reconcile_producers_pass(&mut sweep).unwrap();
+        }
+        assert_eq!(sweep.closed.len(), directories.len());
+        assert_eq!(sweep.owner_reads, reads, "closed owners must not be reopened");
     }
 
     #[cfg(target_os = "linux")]

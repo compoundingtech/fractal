@@ -270,6 +270,9 @@ pub struct PtyRuntime {
     command_environment: Option<BTreeMap<String, String>>,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
     registry_snapshot: std::sync::Arc<Mutex<registry_snapshot::RegistrySnapshot>>,
+    producer_worker: Option<std::sync::Arc<std::sync::mpsc::Sender<()>>>,
+    #[cfg(test)]
+    producer_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -286,7 +289,7 @@ impl std::fmt::Debug for PtyRuntime {
 impl PtyRuntime {
     pub fn new(root: PathBuf) -> Self {
         crate::warn_if_degraded("st3");
-        let runtime = Self {
+        let mut runtime = Self {
             binary: "pty".into(),
             root,
             spawn_timeout: SPAWN_PUBLICATION_TIMEOUT,
@@ -294,9 +297,15 @@ impl PtyRuntime {
             command_environment: None,
             unlaned_seat: None,
             registry_snapshot: std::sync::Arc::default(),
+            producer_worker: None,
+            #[cfg(test)]
+            producer_scans: std::sync::Arc::default(),
         };
         if let Err(error) = runtime.reconcile_producers() {
             tracing::warn!(error = %error, "PTY producer startup reconciliation incomplete");
+        }
+        if let Err(error) = runtime.start_producer_reconciler() {
+            tracing::warn!(error = %error, "PTY producer maintenance could not start");
         }
         runtime
     }
@@ -332,9 +341,6 @@ impl PtyRuntime {
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
         crate::procfs::require_matching_procfs()?;
-        // Applied starts no longer enter pending-start cleanup. Inventory must
-        // still retire their durable producers after the server generation ends.
-        self.reconcile_producers()?;
         self.registry_snapshot.lock().map_err(|_| anyhow::anyhow!("PTY snapshot lock poisoned"))?
             .sessions(&self.root)?.into_iter().map(observation).collect()
     }
