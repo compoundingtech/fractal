@@ -10,6 +10,16 @@ A mission is an immutable definition in the claims graph. Publishing a mission d
 
 A mission run has one stable subject. Each immutable run generation binds that run to one exact mission revision.
 
+## Retrying a failed run
+
+`fractal missions retry RUN [--same-revision] [--reason REASON] --as ACTOR` creates a new run from a failed, terminal source. A person or the owning agent must have ordinary run-start authority. The trusted API is `POST /v1/mission-runs/{run}/retry`, with `actor`, `same_revision` (default `false`), optional `reason`, and a stable `idempotency_key`. Repeating the same idempotency key must not create another run.
+
+By default the new run selects the latest published revision of the source mission. `--same-revision` selects the source's current revision, including an explicitly revised generation. Both modes preserve the source's exact resolved inputs and workspace. Incompatible latest-revision inputs refuse with the source revision, selected revision, and reason; there is no fallback to the source revision and no substitution of new input defaults.
+
+All steps and the program start from the top under new run and generation identities. No successful work or program journal is carried from the source. Steps must be idempotent with respect to effects already present in the workspace or external systems; retry does not roll them back.
+
+The source's status, generation, and execution history are immutable. Append-only `mission-run.retry-linked` claims link source and retry on both subjects, with `source`, `retry`, and optional `reason`; they do not rewrite source state. Run views and `missions show` expose `retry_of` on the new run and `retried_by` on the source. Ordinary starts omit `retry_of`; an empty `retried_by` may be omitted from JSON.
+
 ## First readiness under load
 
 The origin-local reconciler evaluates active mission runs with all-pending current generations

@@ -1597,6 +1597,12 @@ pub struct Mission {
 pub struct MissionRunSummary {
     pub id: String,
     pub generation_id: Option<String>,
+    /// Source run for a new-run retry; absent for an ordinary start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// New runs created by retrying this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
     pub requester: String,
     pub status: String,
     pub phase: String,
