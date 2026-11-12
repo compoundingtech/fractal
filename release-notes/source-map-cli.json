@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No replay change; the new reads derive from existing source.mapped claims and their blobs at request time."},
   "schema": {"status": "none", "detail": "No SQL migration and no new claim kind. Fault and gate-failure reasons gain a trailing declaring location when the run's revision is mapped."},
   "rules": {"status": "none", "detail": "No admission or reconciliation rule changes; the declaring line is presentation only."},
-  "compatibility": {"status": "changed", "detail": "Additive HTTP routes and CLI subcommands. An older daemon answers the new routes with 404, which the CLI reports. Revisions published without a source map show no SOURCE row."},
+  "compatibility": {"status": "changed", "detail": "Additive HTTP routes and CLI subcommands. An older daemon answers the new routes with 404, which the CLI reports. Against an older daemon, step-run SOURCE lookups (which the old daemon answers as an unknown subject) show no SOURCE row instead of an error. Revisions published without a source map show no SOURCE row."},
   "downtime": {"status": "none", "detail": "No downtime or coordinated restart."},
   "manual": {"status": "none", "detail": "No action required."},
   "recovery": {"status": "none", "detail": "Read-only feature; rolling back removes the commands and routes without touching state."}
