@@ -224,57 +224,61 @@ export function remarkHtmlPolicy() {
  */
 export function filteredMarkdownText(source: string): string {
   const children: Node[] = []
-  const prose = (value: string): void => {
-    const runs = [...value.matchAll(/`+/g)]
-    const comments = [...value.matchAll(/<!--[\s\S]*?(?:-->|$)/g)]
-    let comment = 0
-    const next = new Map<number, number>()
-    const closing = new Map<number, number>()
-    for (let index = runs.length - 1; index >= 0; index--) {
-      const run = runs[index]!
-      const end = next.get(run[0].length)
-      if (end !== undefined) closing.set(run.index, end)
-      next.set(run[0].length, run.index)
-    }
-    let at = 0
-    for (const run of runs) {
-      if (run.index < at) continue
-      while (comments[comment] !== undefined && (comments[comment]!.index < at || comments[comment]!.index + comments[comment]![0].length <= run.index)) comment++
-      if (comments[comment] !== undefined && comments[comment]!.index <= run.index) continue
-      const end = closing.get(run.index)
-      if (end === undefined) continue
-      children.push({ type: 'html', value: value.slice(at, run.index) })
-      at = end + run[0].length
-      children.push({ type: 'inlineCode', value: value.slice(run.index, at) })
-    }
-    children.push({ type: 'html', value: value.slice(at) })
+  const runs = [...source.matchAll(/`+/g)]
+  const next = new Map<number, number>()
+  const closing = new Map<number, number>()
+  for (let index = runs.length - 1; index >= 0; index--) {
+    const run = runs[index]!
+    const end = next.get(run[0].length)
+    if (end !== undefined) closing.set(run.index, end + run[0].length)
+    next.set(run[0].length, run.index)
   }
   let at = 0
   let plainStart = 0
   let fence: { marker: string; start: number } | undefined
   while (at < source.length) {
-    const newline = source.indexOf('\n', at)
-    const end = newline === -1 ? source.length : newline + 1
-    const line = source.slice(at, end)
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)/.exec(line)
-    if (fence !== undefined) {
-      if (marker !== null && marker[1]![0] === fence.marker[0] && marker[1]!.length >= fence.marker.length && marker[2]!.trim() === '') {
-        children.push({ type: 'code', value: source.slice(fence.start, end) })
-        fence = undefined
-        plainStart = end
+    if (at === 0 || source[at - 1] === '\n') {
+      const newline = source.indexOf('\n', at)
+      const end = newline === -1 ? source.length : newline + 1
+      const line = source.slice(at, end)
+      const marker = /^ {0,3}(`{3,}|~{3,})(.*)/.exec(line)
+      if (fence !== undefined) {
+        if (marker !== null && marker[1]![0] === fence.marker[0] && marker[1]!.length >= fence.marker.length && marker[2]!.trim() === '') {
+          children.push({ type: 'code', value: source.slice(fence.start, end) })
+          fence = undefined
+          plainStart = end
+        }
+        at = end
+        continue
       }
-    } else if (marker !== null && !(marker[1]![0] === '`' && marker[2]!.includes('`'))) {
-      prose(source.slice(plainStart, at))
-      fence = { marker: marker[1]!, start: at }
-    } else if (/^(?: {4}|\t)/.test(line)) {
-      prose(source.slice(plainStart, at))
-      children.push({ type: 'code', value: line })
-      plainStart = end
+      if (marker !== null && !(marker[1]![0] === '`' && marker[2]!.includes('`'))) {
+        children.push({ type: 'html', value: source.slice(plainStart, at) })
+        fence = { marker: marker[1]!, start: at }
+        at = end
+        continue
+      }
+      if (/^(?: {4}|\t)/.test(line)) {
+        children.push({ type: 'html', value: source.slice(plainStart, at) }, { type: 'code', value: line })
+        at = plainStart = end
+        continue
+      }
     }
-    at = end
+    // Comment contents cannot open a code island; otherwise a fake fence would hide the visible suffix as well.
+    if (source.startsWith('<!--', at)) {
+      const end = source.indexOf('-->', at + 4)
+      at = end === -1 ? source.length : end + 3
+      continue
+    }
+    if (source[at] === '`') {
+      const end = closing.get(at)
+      if (end !== undefined) {
+        children.push({ type: 'html', value: source.slice(plainStart, at) }, { type: 'inlineCode', value: source.slice(at, end) })
+        at = plainStart = end
+      } else while (source[at] === '`') at++
+    } else at++
   }
   if (fence !== undefined) children.push({ type: 'code', value: source.slice(fence.start) })
-  else prose(source.slice(plainStart))
+  else children.push({ type: 'html', value: source.slice(plainStart) })
   const tree: Node = { type: 'paragraph', children }
   remarkHtmlPolicy()(tree)
   const values: string[] = []
