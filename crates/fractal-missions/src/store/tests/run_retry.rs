@@ -1,7 +1,7 @@
 use super::*;
 use crate::model::MissionRunRetryRequest;
 
-const ORIGINAL: &str = r#"version 2
+pub(super) const ORIGINAL: &str = r#"version 2
 mission "retry-work" state="ready" {
   concurrent-runs
   input "value" kind="text"
@@ -13,7 +13,7 @@ mission "retry-work" state="ready" {
   }
 }"#;
 
-fn start(store: &Store) -> MissionRunView {
+pub(super) fn start(store: &Store) -> MissionRunView {
     store.create_mission_run(&MissionRunRequest {
         mission: "retry-work".into(), revision: None, workspace: "/work/retry".into(),
         requester: Some("person/requester".into()), mode: None,

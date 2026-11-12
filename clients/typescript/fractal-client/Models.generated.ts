@@ -2880,6 +2880,9 @@ export type MissionRunSummary = {
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
+  superseded_by?: MissionRunId;
+  supersedes?: MissionRunId;
+  supersession_fault?: string;
 };
 
 export type MissionState = (

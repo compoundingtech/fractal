@@ -1603,6 +1603,15 @@ pub struct MissionRunSummary {
     /// New runs created by retrying this run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retried_by: Vec<String>,
+    /// Predecessor replaced by this fresh run after publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// Fresh replacement created after a newer revision was published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Replacement admission refusal; the source remains active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
     pub requester: String,
     pub status: String,
     pub phase: String,

@@ -1453,8 +1453,7 @@ fn mission_run_steps_view_tx(
         .collect::<Result<Vec<_>, _>>()?;
     apply_step_states_tx(connection, &mut view.steps, summaries)?;
     view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
-    (view.retry_of, view.retried_by) =
-        fractal_store::store::mission_run_retry_links_tx(connection, &view.subject)?;
+    fractal_store::store::enrich_mission_run_lineage_tx(connection, &mut view)?;
     Ok(view)
 }
 
@@ -3238,8 +3237,7 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         apply_step_states_tx(&connection, &mut run.steps, summaries)?;
         run.scheduler_fault = first_readiness_fault_tx(&connection, &run.subject)?;
-        (run.retry_of, run.retried_by) =
-            fractal_store::store::mission_run_retry_links_tx(&connection, &run.subject)?;
+        fractal_store::store::enrich_mission_run_lineage_tx(&connection, &mut run)?;
         Ok(run)
     }
 
@@ -3941,7 +3939,7 @@ impl MissionsStore for Store {
         let connection = self.connection.write();
         let run_id = connection
             .query_row(
-                "SELECT id FROM mission_runs WHERE parent_step_run=?1 ORDER BY created_at_unix_ms DESC LIMIT 1",
+                "SELECT id FROM mission_runs WHERE parent_step_run=?1 ORDER BY created_at_unix_ms DESC, id DESC LIMIT 1",
                 [step],
                 |row| row.get::<_, String>(0),
             )
@@ -3958,16 +3956,26 @@ impl MissionsStore for Store {
     fn step_has_active_child_runs(&self, step: &str) -> Result<bool> {
         let step = normalize_step_run(step);
         smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT 'mission-run/' || id, status FROM mission_runs WHERE parent_step_run=?1",
-        )?;
-        let rows = statement.query_map([step], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (subject, status) = row?;
-            smallclaims::touched::note_read(|| subject);
+        let subjects = {
+            let connection = self.readers.get();
+            let subjects = connection
+                .prepare_cached("SELECT 'mission-run/' || id FROM mission_runs WHERE parent_step_run=?1")?
+                .query_map([step], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            subjects
+        };
+        let mut seen = BTreeSet::new();
+        for subject in subjects {
+            let successor = self.mission_run_supersession_successor(&subject)?;
+            if !seen.insert(successor.clone()) {
+                continue;
+            }
+            let connection = self.readers.get();
+            let status: String = connection.query_row(
+                "SELECT status FROM mission_runs WHERE id=?1",
+                [successor.trim_start_matches("mission-run/")],
+                |row| row.get(0),
+            )?;
             if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
                 return Ok(true);
             }
@@ -4966,7 +4974,11 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h488727939c7c owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &open_mission_run_headers_query())?
-            .query_map([], mission_run_header_from_row)?
+            .query_map([], |row| {
+                let mut view = mission_run_header_from_row(row)?;
+                fractal_store::store::enrich_mission_run_lineage_tx(&connection, &mut view)?;
+                Ok(view)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -5002,7 +5014,9 @@ impl MissionsStore for Store {
                 let identity = row.get::<_, String>(19)?;
                 let blocked = row.get::<_, Option<String>>(20)?;
                 let header = if blocked.is_none() && row.get_ref(0)?.data_type() != rusqlite::types::Type::Null {
-                    Some(mission_run_header_from_row(row)?)
+                    let mut view = mission_run_header_from_row(row)?;
+                    fractal_store::store::enrich_mission_run_lineage_tx(&connection, &mut view)?;
+                    Some(view)
                 } else {
                     None
                 };

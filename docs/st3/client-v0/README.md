@@ -259,7 +259,7 @@ completion audit is retained. Unmarked legacy challenges have a bounded
 five-minute lifetime. See [assistant verifier recovery](../external-assistants.md#pairing-verifier-and-recovery)
 for secret storage, logical-backup exclusions, and restart/downgrade guidance.
 
-### Mission run retry links
+### Mission run lineage
 
 Mission `run_details[]` summaries expose optional `retry_of` (a mission-run ID) and
 `retried_by` (an array of mission-run IDs). Ordinary starts omit `retry_of`; a run
@@ -273,6 +273,16 @@ revisions and a reason, and restarts all steps and the program from the top.
 The source's status, generation, and execution history do not change. These links
 are navigation and attribution, not a signal to hide the source or reuse its work.
 See [the runtime contract](../mission-graph-runtime.md#retrying-a-failed-run).
+
+New-revision publication automatically supersedes already-active stale runs after
+replacement admission succeeds. List, detail, and history `run_details[]` include
+optional `supersedes` and `superseded_by` mission-run IDs and optional string
+`supersession_fault`. Absent strings are omitted, never null; older servers omit
+them. A refusal names both revisions and the incompatibility while leaving the
+source active. A replacement waits for predecessor cleanup to reach terminal,
+then restarts all steps and programs without adopting journals. Republish alone
+does nothing; an explicit same-revision retry after publication is not caught by
+a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
 
 ### Mission run timing
 

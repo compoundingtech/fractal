@@ -245,8 +245,8 @@ impl Store {
         self.create_mission_run_with_retry(&request, None, None, None, Some((&source, options)))
     }
 
-    pub fn enrich_mission_run_retry_links(&self, run: &mut MissionRunView) -> Result<()> {
-        (run.retry_of, run.retried_by) = mission_run_retry_links_tx(&self.readers.get(), &run.subject)?;
+    pub fn enrich_mission_run_lineage(&self, run: &mut MissionRunView) -> Result<()> {
+        enrich_mission_run_lineage_tx(&self.readers.get(), run)?;
         Ok(())
     }
 
@@ -268,7 +268,66 @@ impl Store {
         latest_ref: Option<(&str, &str)>,
         retry: Option<(&MissionRunView, &MissionRunRetryRequest)>,
     ) -> Result<MissionRunView, FractalError> {
-        let mission_identity = mission_storage_id(&self.readers.get(), &request.mission)?;
+        self.create_mission_run_context(
+            request, child, occurrence_subject, latest_ref, retry, None, None,
+        )
+    }
+
+    pub(super) fn create_superseding_mission_run_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        source: &MissionRunView,
+        publication: &str,
+    ) -> Result<MissionRunView, FractalError> {
+        let (starter, selector): (Option<String>, Option<String>) = transaction
+            .query_row(
+                "SELECT actor, json_extract(body,'$.fields.default_selector')
+                 FROM claims WHERE subject=?1 AND kind='mission-run.created'
+                 ORDER BY store_index LIMIT 1",
+                [&source.subject],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(internal)?;
+        let child = source.parent_step_run.as_ref().map(|parent_step_run| {
+            Ok::<_, FractalError>(ChildMissionContext {
+                root_revision: source.root_revision.clone(),
+                root_run_id: source.root_mission_run
+                    .trim_start_matches("mission-run/").to_owned(),
+                parent_step_run: parent_step_run.clone(),
+                default_selector: selector.as_deref()
+                    .map(serde_json::from_str).transpose().map_err(internal)?,
+                started_by: starter.clone(),
+            })
+        }).transpose()?;
+        let request = MissionRunRequest {
+            mission: source.mission.clone(),
+            revision: None,
+            workspace: source.workspace.clone(),
+            requester: Some(source.requester.clone()),
+            mode: Some(source.mode.clone()),
+            inputs: source.inputs.iter()
+                .map(|(name, input)| (name.clone(), input.value.clone())).collect(),
+            idempotency_key: format!("mission-supersede:{}:{publication}", source.subject),
+        };
+        self.create_mission_run_context(
+            &request, child, None, None, None, Some((source, publication)), Some(transaction),
+        )
+    }
+
+    fn create_mission_run_context(
+        &self,
+        request: &MissionRunRequest,
+        child: Option<ChildMissionContext>,
+        occurrence_subject: Option<&str>,
+        latest_ref: Option<(&str, &str)>,
+        retry: Option<(&MissionRunView, &MissionRunRetryRequest)>,
+        supersession: Option<(&MissionRunView, &str)>,
+        provided_transaction: Option<&Transaction<'_>>,
+    ) -> Result<MissionRunView, FractalError> {
+        let mission_identity = match provided_transaction {
+            Some(transaction) => mission_storage_id(transaction, &request.mission)?,
+            None => mission_storage_id(&self.readers.get(), &request.mission)?,
+        };
         let mission_id = mission_identity.as_str();
         // Normalize only the name, not the run key, revision or generation. Retrying
         // through a historical or current spelling hashes the same physical request.
@@ -302,12 +361,15 @@ impl Store {
         if let Some((source, options)) = retry {
             request_identity["retry"] = json!((&source.subject, options));
         }
+        if let Some((source, publication)) = supersession {
+            request_identity["supersession"] = json!((&source.subject, publication));
+        }
         let request_hash = hex::encode(Sha256::digest(
             serde_json::to_vec(&request_identity).map_err(internal)?,
         ));
         // Admission and capacity decisions see all pending run parts under one writer fence.
         let stages = holds::Stages::begin();
-        self.with_all_runs_fenced(|transaction| {
+        let create = |transaction: &Transaction<'_>| {
         let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
             self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
         });
@@ -379,23 +441,32 @@ impl Store {
         if mission.state != MissionState::Ready {
             return Err(FractalError::new("mission-not-ready", format!("mission `{mission_id}` is not ready")));
         }
+        let after = supersession.and_then(|(source, _)| source.after.as_deref());
+        let mission = crate::mission::run_mission(mission, after)?;
         if let Some((resource, discovery)) = latest_ref
             && let Some(reason) = stale_ref_request_tx(transaction, resource, discovery).map_err(internal)? {
             return Err(FractalError::new("stale-ref-head", reason));
         }
         stages.enter("inputs");
+        let input_source = retry.map(|(source, _)| source)
+            .or_else(|| supersession.map(|(source, _)| source));
         let incompatible = |cause: FractalError| {
-            let Some((source, _)) = retry else { return cause };
+            let Some(source) = input_source else { return cause };
+            let (code, verb) = if supersession.is_some() {
+                ("mission-supersession-incompatible", "supersede")
+            } else {
+                ("mission-retry-incompatible", "retry")
+            };
             FractalError::new(
-                "mission-retry-incompatible",
-                format!("cannot retry `{}` from revision {} on revision {}: {}",
+                code,
+                format!("cannot {verb} `{}` from revision {} on revision {}: {}",
                     source.subject, source.revision, mission.revision, cause.message),
             )
             .with_detail("source_revision", source.revision.clone())
             .with_detail("target_revision", mission.revision.clone())
             .with_detail("cause", json!({"code": cause.code, "message": cause.message, "details": cause.details}))
         };
-        if let Some((source, _)) = retry {
+        if let Some(source) = input_source {
             for (name, input) in &source.inputs {
                 if let Some(declaration) = mission.inputs.get(name)
                     && declaration.kind != input.kind
@@ -444,7 +515,9 @@ impl Store {
             }
         }
         stages.enter("capacity");
-        enforce_mission_run_capacity(transaction, &mission)?;
+        enforce_mission_run_capacity_excluding(
+            transaction, &mission, supersession.map(|(source, _)| source.id.as_str()),
+        )?;
         stages.enter("run-rows");
         let run_id = subject.trim_start_matches("mission-run/").to_owned();
         let generation_key = occurrence_subject.map_or_else(
@@ -506,15 +579,28 @@ impl Store {
         }
         extend_loop_variables(&mut variables, &inputs);
         let now = now_ms();
+        let phase = if supersession.is_some() { "supersession-waiting" } else { "normal" };
+        let admission_publication: Option<String> = transaction.query_row(
+            "SELECT claim_id FROM mission_definitions WHERE mission_id=?1",
+            [&mission.id], |row| row.get(0),
+        ).optional().map_err(internal)?;
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h32d92a921bc0 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', 'normal', ?12, ?12)",
-                params![run_id, mission.id, mission.revision, generation_id, root_revision, root_run_id, parent_step_run, request.workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, now.to_string()],
+                /* sqlite-large-value: allow-for-now lv-h0116cd447a86 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?13, ?12, ?12)",
+                params![run_id, mission.id, mission.revision, generation_id, root_revision, root_run_id, parent_step_run, request.workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, now.to_string(), phase],
             )
             .map_err(internal)?;
-        let deadline_at_unix_ms =
-            insert_mission_deadline_tx(transaction, &run_id, mission.timeout_ms, Some(now))?;
+        if let Some(after) = after {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hf65d172e23b9 owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_run_after(run_id, after_run) VALUES (?1, ?2)",
+                params![run_id, after],
+            ).map_err(internal)?;
+        }
+        let deadline_at_unix_ms = insert_mission_deadline_tx(
+            transaction, &run_id, mission.timeout_ms,
+            (after.is_none() && supersession.is_none()).then_some(now),
+        )?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h84ce21b8d58b owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
@@ -568,6 +654,9 @@ impl Store {
         let body = json!({
             "fields": {
                 "status": "running",
+                "phase": phase,
+                "admission_publication": admission_publication,
+                "after": after,
                 "mission": mission.subject,
                 "revision": mission.revision,
                 "initial_revision": mission.revision,
@@ -634,6 +723,17 @@ impl Store {
                 ).map_err(smallclaims::error::typed)?;
             }
         }
+        if let Some((source, publication)) = supersession {
+            let body = json!({"fields": {
+                "source": source.subject, "replacement": subject, "publication": publication,
+            }});
+            for endpoint in [&source.subject, &subject] {
+                append_claim_tx(
+                    transaction, &self.origin, endpoint, "mission-run.supersede-linked",
+                    None, &body, &[], None,
+                ).map_err(smallclaims::error::typed)?;
+            }
+        }
         stages.enter("view");
         let view = created_mission_run_view_tx(transaction, &run_id).map_err(internal)?;
         stages.enter("idempotency-record");
@@ -653,7 +753,11 @@ impl Store {
             )
             .map_err(internal)?;
         Ok(view)
-        })
+        };
+        match provided_transaction {
+            Some(transaction) => create(transaction),
+            None => self.with_all_runs_fenced(create),
+        }
     }
 
     pub fn mission_run(&self, run: &str) -> Result<Option<MissionRunView>> {

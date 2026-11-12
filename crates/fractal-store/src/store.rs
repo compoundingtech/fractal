@@ -22,6 +22,7 @@ mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+mod mission_supersession;
 pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
@@ -4406,6 +4407,14 @@ impl Store {
                 owned_sets::project_tx(transaction)?;
                 identities::flush(transaction).map_err(internal)?;
                 ordered_membership::flush(transaction).map_err(internal)?;
+                // Publication cutover follows explicit generation revisions in this same
+                // transaction, so a run already revised to the new head is not replaced.
+                if !intent.missions.is_empty() {
+                    let missions = intent.missions.values()
+                        .map(|mission| mission.id.clone()).collect::<Vec<_>>();
+                    self.supersede_published_missions_tx(transaction, &missions)?;
+                }
+                self.supersede_mission_publications_tx(transaction)?;
                 let store_index = current_index_tx(transaction).map_err(internal)?;
                 let response = ApplyResponse {
                     changed: true,
@@ -7823,6 +7832,10 @@ fn create_declared_mission_run_tx(
     }
     extend_loop_variables(&mut variables, &inputs);
     let now = now_ms();
+    let admission_publication: Option<String> = transaction.query_row(
+        "SELECT claim_id FROM mission_definitions WHERE mission_id=?1",
+        [&mission.id], |row| row.get(0),
+    ).optional().map_err(internal)?;
     transaction
         .execute(
             /* sqlite-large-value: allow-for-now lv-h6af1f0797610 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
@@ -7915,6 +7928,7 @@ fn create_declared_mission_run_tx(
     let mut body = json!({
         "fields": {
             "status": "running",
+            "admission_publication": admission_publication,
             "mission": mission.subject,
             "revision": mission.revision,
             "initial_revision": mission.revision,
@@ -8891,6 +8905,14 @@ pub fn enforce_mission_run_capacity(
     transaction: &Connection,
     requested: &MissionSpec,
 ) -> Result<(), FractalError> {
+    enforce_mission_run_capacity_excluding(transaction, requested, None)
+}
+
+fn enforce_mission_run_capacity_excluding(
+    transaction: &Connection,
+    requested: &MissionSpec,
+    excluded_run: Option<&str>,
+) -> Result<(), FractalError> {
     let mut statement = transaction
         .prepare(
             "SELECT mission_runs.id, run_generations.revision
@@ -8899,11 +8921,12 @@ pub fn enforce_mission_run_capacity(
              WHERE mission_runs.mission_id=?1
                AND mission_runs.status IN ('running','standing','blocked')
                AND mission_runs.phase NOT IN ('final-cancelled','cleanup-cancelled')
+               AND (?2 IS NULL OR mission_runs.id<>?2)
              ORDER BY mission_runs.created_at_unix_ms, mission_runs.id",
         )
         .map_err(internal)?;
     let active = statement
-        .query_map([&requested.id], |row| {
+        .query_map(params![&requested.id, excluded_run], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(internal)?
@@ -18997,11 +19020,18 @@ pub fn project_mission_run_created(
     let generation_id = generation_id_from_subject(generation_subject);
     let after = fields.get("after").and_then(Value::as_str);
     let mission = crate::mission::run_mission(mission, after)?;
+    let phase = fields.get("phase").and_then(Value::as_str).unwrap_or("normal");
+    if !matches!(phase, "normal" | "supersession-waiting") {
+        return Err(FractalError::new(
+            "invalid-mission-run-claim",
+            format!("claim `{}` has invalid initial phase `{phase}`", claim.id),
+        ));
+    }
     transaction
         .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-ha72ce7d5f839 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', 'normal', ?12, ?12)").map_err(internal)?.execute(
-            /* sqlite-large-value: allow-for-now lv-ha5b0b3825013 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, mission_id, revision, generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string()],
+            /* sqlite-large-value: allow-for-now lv-h29c5ff904189 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mission_runs(id, mission_id, initial_revision, current_generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, inputs, mode, status, phase, created_at_unix_ms, updated_at_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?13, ?12, ?12)").map_err(internal)?.execute(
+            /* sqlite-large-value: allow-for-now lv-h4fbcd7c9b486 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, mission_id, revision, generation_id, root_revision, root_run_id, parent_step_run, workspace, requester, serde_json::to_string(&inputs).map_err(internal)?, mode, mission_run_creation_time(fields, claim.accepted_at_unix_ms).to_string(), phase],
         )
         .map_err(internal)?;
     if let Some(after) = after {
@@ -19183,6 +19213,11 @@ pub fn project_mission_run_update(
                 /* sqlite-large-value: allow-for-now lv-he4b8f413eb73 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, status, phase, claim.accepted_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
+        if phase == "normal"
+            && fields.get("previous_phase").and_then(Value::as_str) == Some("supersession-waiting")
+        {
+            mission_supersession::arm_deadline_tx(transaction, run_id, claim.accepted_at_unix_ms)?;
+        }
         if is_terminal_run_state(status) || phase == "terminal" {
             terminalize_projected_run_tree_tx(
                 transaction,
@@ -23019,7 +23054,7 @@ pub fn mission_run_view_and_definition_tx(
     view.loops = loop_run_views_tx(connection, &view)?;
     view.outcome = mission_run_outcome_tx(connection, &view)?;
     if presentation {
-        (view.retry_of, view.retried_by) = mission_run_retry_links_tx(connection, &view.subject)?;
+        enrich_mission_run_lineage_tx(connection, &mut view)?;
         view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
         if !view.steps.is_empty()
             && let Some(mission) = definitions.of(connection, &view.generation)?
@@ -23079,27 +23114,82 @@ fn run_outcome_from_claim(
     })
 }
 
-pub fn mission_run_retry_links_tx(
-    connection: &Connection,
-    subject: &str,
-) -> rusqlite::Result<(Option<String>, Vec<String>)> {
-    let mut statement = connection.prepare_cached(
-        "SELECT json_extract(body, '$.fields.source'), json_extract(body, '$.fields.retry')
-         FROM claims WHERE subject=?1 AND kind='mission-run.retry-linked'
-         ORDER BY json_extract(body, '$.fields.retry')",
-    )?;
-    let mut retry_of = None;
-    let mut retried_by = Vec::new();
-    for link in statement.query_map([subject], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
-        let (source, retry) = link?;
-        if retry == subject {
-            retry_of = Some(source);
-        } else if source == subject {
-            retried_by.push(retry);
+/// Bounded lineage metadata for an exact run, independent of its steps and work history.
+#[derive(Default)]
+pub struct MissionRunLineage {
+    pub retry_of: Option<String>,
+    pub retried_by: Vec<String>,
+    pub supersedes: Option<String>,
+    pub superseded_by: Option<String>,
+    pub supersession_fault: Option<String>,
+}
+
+impl MissionRunLineage {
+    pub fn apply(self, run: &mut MissionRunView) {
+        run.retry_of = self.retry_of;
+        run.retried_by = self.retried_by;
+        run.supersedes = self.supersedes;
+        run.superseded_by = self.superseded_by;
+        run.supersession_fault = self.supersession_fault;
+    }
+
+    pub fn insert_into(self, value: &mut Value) {
+        value["retried_by"] = json!(self.retried_by);
+        for (name, field) in [
+            ("retry_of", self.retry_of),
+            ("supersedes", self.supersedes),
+            ("superseded_by", self.superseded_by),
+            ("supersession_fault", self.supersession_fault),
+        ] {
+            if let Some(field) = field {
+                value[name] = Value::String(field);
+            }
         }
     }
-    retried_by.dedup();
-    Ok((retry_of, retried_by))
+}
+
+pub fn enrich_mission_run_lineage_tx(
+    connection: &Connection,
+    run: &mut MissionRunView,
+) -> rusqlite::Result<()> {
+    mission_run_lineage_tx(connection, &run.subject)?.apply(run);
+    Ok(())
+}
+
+pub fn mission_run_lineage_tx(
+    connection: &Connection,
+    subject: &str,
+) -> rusqlite::Result<MissionRunLineage> {
+    smallclaims::touched::note_read(|| subject.to_owned());
+    let mut lineage = MissionRunLineage::default();
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h713d89bf75ea owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT kind, json_extract(body, '$.fields.source'),
+                COALESCE(json_extract(body, '$.fields.retry'), json_extract(body, '$.fields.replacement'))
+         FROM claims WHERE subject=?1
+           AND kind IN ('mission-run.retry-linked', 'mission-run.supersede-linked')
+         ORDER BY CANONICAL_ASC(claims)",
+    ))?;
+    for link in statement.query_map([subject], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })? {
+        let (kind, source, replacement) = link?;
+        if kind == "mission-run.retry-linked" {
+            if replacement == subject {
+                lineage.retry_of = Some(source);
+            } else if source == subject {
+                lineage.retried_by.push(replacement);
+            }
+        } else if replacement == subject {
+            lineage.supersedes = Some(source);
+        } else if source == subject {
+            lineage.superseded_by = Some(replacement);
+        }
+    }
+    lineage.retried_by.sort_unstable();
+    lineage.retried_by.dedup();
+    lineage.supersession_fault = reconcile_fault_tx(connection, subject, "mission/supersession")?
+        .filter(|reason| !reason.is_empty());
+    Ok(lineage)
 }
 
 pub const MISSION_RUN_HEADER_SELECT: &str =
@@ -23157,6 +23247,9 @@ pub fn mission_run_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<
         outcome: None,
         retry_of: None,
         retried_by: Vec::new(),
+        supersedes: None,
+        superseded_by: None,
+        supersession_fault: None,
         created_at_unix_ms: created.parse().unwrap_or(0),
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         steps: Vec::new(),
