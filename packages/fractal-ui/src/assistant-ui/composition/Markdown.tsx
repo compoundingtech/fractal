@@ -167,14 +167,21 @@ function InlineText({ children }: { children: React.ReactNode }) {
     let at = 0
     for (const match of child.matchAll(PATH_TOKEN)) {
       const token = match[0]
-      const slash = token.lastIndexOf('/')
-      if (slash === -1) continue
-      let end = token.length
-      while (end > slash + 1 && !/\w/.test(token[end - 1]!)) end--
-      const dot = token.lastIndexOf('.', end - 1)
-      if (dot <= slash + 1 || !/^\w+$/.test(token.slice(dot + 1, end))) continue
+      const firstSlash = token.indexOf('/')
+      if (firstSlash === -1) continue
+      let segmentStart = firstSlash + 1
+      let end = -1
+      for (let index = segmentStart; index < token.length; index++) {
+        if (token[index] === '/') { segmentStart = index + 1; continue }
+        if (token[index] !== '.' || index === segmentStart || !/\w/.test(token[index + 1] ?? '')) continue
+        let wordEnd = index + 1
+        while (wordEnd < token.length && /\w/.test(token[wordEnd]!)) wordEnd++
+        end = wordEnd
+        index = wordEnd - 1
+      }
       const start = token.search(/\w/)
-      if (start === -1 || start >= slash) continue
+      const pathSlash = token.indexOf('/', start)
+      if (end === -1 || start === -1 || pathSlash === -1 || pathSlash >= end) continue
       const index = match.index + start
       if (index > at) parts.push(child.slice(at, index))
       const path = token.slice(start, end)

@@ -485,6 +485,11 @@ test('short references remain actionable inside long prose, with bounded path sc
     assert.equal(calls, 0)
     assert.ok(milliseconds < 1000, `reference scan took ${milliseconds}ms`)
   }
+  for (const source of ['src/model.ts-like', 'src/model.ts/next']) {
+    const found = []
+    prompt(source, { renderInlineReference: candidate => { found.push(candidate); return undefined } })
+    assert.deepEqual(found, ['src/model.ts'])
+  }
 })
 
 // fixtures/clients/markdown-cases.json: the cases and HTML policy every client shares (write-markdown-fixtures.mjs).
