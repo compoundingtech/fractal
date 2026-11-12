@@ -1,8 +1,10 @@
 # Attention tray
 
 A native macOS 14+ SwiftUI menu-bar client for one person's Fractal: the
-attention inbox and the objectives every Fractal client reads. It reads only
-Fractal, through `FractalClient`, at launch and every 30 seconds.
+attention inbox, the person's availability and directive note, and the
+objectives every Fractal client reads. It reads only Fractal, through
+`FractalClient`, at launch and every 30 seconds; `FractalClient` has no
+attention or availability collection stream.
 
 - **Asks** (all attention pages, classified as Fractal web's
   `data/attention.ts` does) are answered in the panel: a decision's or choice's
@@ -25,8 +27,18 @@ Fractal, through `FractalClient`, at launch and every 30 seconds.
 - **Objectives** (`GET v1/client/slo`): rows by Fractal's served tone, missed
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   The menu bar adds a gauge when any objective is missed or budget nearly spent.
-- Asks and objectives refresh independently: one failing keeps its last data
-  with its own stale note and never blanks the other.
+- **Availability** (`GET v1/client/availability`, `GET v1/client/notes`): status
+  (available or away, by hand or from device presence; "no device reporting"
+  when Fractal reads it as `unreported`), interruptions (all, urgent only, none)
+  and the deadline clock (run, hold routine asks, hold all asks), each changed
+  with an until preset (1 hour, 4 hours, tomorrow 9:00, until changed);
+  returning an axis to its default (follow presence, all, run) takes no until.
+  A word a newer Fractal adds is shown verbatim. The directive note agents read
+  is written, given an expiry or cleared here. A change shows only once Fractal
+  returns the folded result (`PUT v1/client/availability`, `PUT v1/client/notes`),
+  or Fractal's refusal.
+- Asks, availability and objectives refresh independently: one failing keeps its
+  last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
   identity; launch and each change of refresh outcome are logged to stderr.
 
