@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "GitHub watch excerpts drop HTML comments, script and style content and real HTML tags before cutting at the 600-character bound, and close a code fence the cut leaves open",
+  "summary": "GitHub watch excerpts remove hidden HTML and real element tags only in Markdown prose, preserving inline, fenced and indented code; preprocessing scans repeated script/style elements linearly before the 600-character cut",
   "replay": {
     "status": "none",
     "detail": "No replay; new excerpts are computed when watches observe GitHub items."

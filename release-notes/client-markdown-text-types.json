@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Markdown wire fields carry x-st-text (markdown-block or markdown-inline) in the client-v0 schema, and the generated TypeScript client types them as opaque MarkdownBlock or MarkdownInline text; a guard rejects plain text spliced into Markdown templates unescaped",
+  "summary": "Markdown wire fields carry x-st-text (markdown-block or markdown-inline) in the client-v0 schema, including nullable progress fields; generated TypeScript preserves their opaque Markdown types, literal-text helpers escape entity ampersands, and multiline reference definitions stay in one document",
   "replay": {
     "status": "none",
     "detail": "Web UI only; no replay or rebuild."

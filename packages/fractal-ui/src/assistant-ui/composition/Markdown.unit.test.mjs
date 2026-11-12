@@ -111,6 +111,30 @@ test('settled blocks are cut, so a long document is not parsed whole', () => {
   assert.equal(splitMarkdownBlocks('Some [ref][r].\n\nMore.\n\n[r]: https://example.test').length, 1)
 })
 
+test('multiline reference labels resolve across settled block boundaries', () => {
+  for (const source of [
+    '[two\nlines]: https://example.test\n\nUse [two lines].',
+    'Use [two lines].\n\n[two\nlines]: https://example.test',
+    '[escaped\\] label\ncontinued]: https://example.test\n\nUse [escaped\\] label continued].',
+  ]) {
+    const blocks = splitMarkdownBlocks(source)
+    assert.equal(blocks.length, 1)
+    assert.equal(blocks.map(parsed).join(''), parsed(source))
+    assert.match(parsed(source), /href="https:\/\/example.test"/)
+  }
+})
+
+test('both plain-text helper copies preserve literal entity-looking text', async () => {
+  const kit = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
+  const client = await server.ssrLoadModule(new URL('../../../../../clients/typescript/fractal-client/markdown-text.ts', import.meta.url).pathname)
+  for (const helpers of [kit, client]) {
+    const source = '&copy; &#65; &#x41; &amp;'
+    for (const helper of [helpers.markdownFromPlain, helpers.inlineFromPlain]) {
+      assert.equal(parsed(helpers.markdownSource(helper(source))), '<p>&amp;copy; &amp;#65; &amp;#x41; &amp;amp;</p>')
+    }
+  }
+})
+
 test('splitting 200KB of Markdown stays within a streaming frame', () => {
   const source = Array.from({ length: 4000 }, (_, index) => `Paragraph ${index} with some \`code\` and words that fill the line.`).join('\n\n')
   const { milliseconds } = cpuMilliseconds(() => splitMarkdownBlocks(source))
@@ -137,6 +161,77 @@ test('raw HTML never reaches the page, and its words survive without the tags', 
   assert.match(hostile, /Hi /)
   assert.match(hostile, /there/)
   assert.match(hostile, /kept words/)
+})
+
+test('delimiter and error fallback text applies HTML policy without stripping code islands', async () => {
+  const { filteredMarkdownText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  const hostile = '*a '.repeat(3000) + '<!-- HIDDEN `tick` -->Visible<script>SCRIPT</script><style>STYLE</style>'
+  assert.doesNotMatch(block(hostile), /HIDDEN|SCRIPT|STYLE/)
+  assert.match(block(hostile), /Visible/)
+  for (const source of ['`<!-- literal -->`', '```\n<script>literal</script>\n```', '    <!-- literal -->']) {
+    assert.equal(filteredMarkdownText(source), source)
+  }
+  assert.equal(filteredMarkdownText('before <!-- hidden `x` --> after'), 'before  after')
+})
+
+test('a caught renderer failure keeps hidden HTML out of the real fallback DOM', async () => {
+  const { JSDOM } = await import('jsdom')
+  const { createRoot } = await import('react-dom/client')
+  const { act } = await import('react')
+  const dom = new JSDOM('<!doctype html><div id="root"></div>')
+  const names = ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'IS_REACT_ACT_ENVIRONMENT']
+  const descriptors = names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)])
+  for (const name of names) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: name === 'IS_REACT_ACT_ENVIRONMENT' ? true : dom.window[name] })
+  const caught = []
+  const container = document.getElementById('root')
+  const root = createRoot(container, { onCaughtError: error => caught.push(error.message) })
+  try {
+    const source = 'src/x.ts <!-- HIDDEN --> <script>SECRET</script> <img src=x onerror=alert(1)> <a href="javascript:x">safe</a> <details>Visible</details>'
+    await act(async () => root.render(h(Markdown, {
+      text: markdownBlock(source),
+      renderInlineReference: path => { if (path === 'src/x.ts') throw new Error('expected renderer failure'); return undefined },
+    })))
+    assert.deepEqual(caught, ['expected renderer failure'])
+    assert.equal(container.querySelector('script,img,a,details'), null)
+    assert.doesNotMatch(container.textContent, /HIDDEN|SECRET/)
+    assert.match(container.textContent, /Visible/)
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor === undefined) delete globalThis[name]
+      else Object.defineProperty(globalThis, name, descriptor)
+    }
+  }
+})
+
+test('raw pre with explicit code has one code holder and keeps its text', () => {
+  for (const source of ['<pre><code>x</code></pre>', '<pre><code>x &lt; y\nsecond</code></pre>']) {
+    const html = block(source)
+    assert.match(html, /markdown-code-block/)
+    assert.match(html, /<code[^>]*>x/)
+    assert.doesNotMatch(html, /<code[^>]*>\s*<code/)
+    if (source.includes('second')) assert.match(html, /x &lt; y\nsecond/)
+  }
+})
+
+test('security payloads cannot create executable elements, attributes or URL schemes', async () => {
+  const { safeLinkHref } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  for (const source of [
+    '<noscript>SECRET</noscript><template>SECRET</template>Visible',
+    '<math><mtext><table><mglyph><style><!--</style><img src=x onerror=alert(1)>',
+    '<![CDATA[<img src=x onerror=alert(1)>]]>',
+    '<div title="before <img src=x onerror=alert(1)> after" name="x" formaction="javascript:x" xlink:href="javascript:x">Visible</div>',
+  ]) {
+    const html = block(source)
+    assert.doesNotMatch(html, /<(?:script|style|img|math|noscript|template)\b|<[^>]+(?:onerror|formaction|xlink:href|name)=|SECRET/)
+  }
+  for (const raw of ['java\u0000script:x', 'java\r\nscript:x', 'java\u0085script:x']) {
+    assert.equal(safeLinkHref(raw), undefined)
+  }
+  const html = block('<a href="HTTPS://example.test">safe</a>')
+  assert.match(html, /href="HTTPS:\/\/example.test"/)
+  assert.match(html, /rel="noopener noreferrer"/)
 })
 
 test('prompts load no remote image and drop unsafe link protocols', () => {

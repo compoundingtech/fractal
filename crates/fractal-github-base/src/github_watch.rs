@@ -731,9 +731,10 @@ fn excerpts() -> &'static Mutex<HashMap<(String, String, u64), Option<String>>> 
 /// neither spends the excerpt nor leaves a half tag or an open `<!--` at the cut. A code fence the cut leaves open is
 /// closed, so the quote renders as the comment does.
 pub fn quote(text: &str) -> Option<String> {
-    let visible = without_html_tags(&without_html_comments(text));
-    let text = visible.trim();
-    if text.is_empty() {
+    let visible = without_html_tags(text);
+    // Indentation is Markdown syntax, not disposable whitespace.
+    let text = visible.trim_matches(['\n', '\r']);
+    if text.trim().is_empty() {
         return None;
     }
     let mut cut = text.chars().take(EXCERPT_CHARS).collect::<String>();
@@ -754,20 +755,6 @@ pub fn quote(text: &str) -> Option<String> {
     )
 }
 
-/// `text` without its HTML comments; an unterminated one hides the rest, as GitHub renders it.
-fn without_html_comments(text: &str) -> String {
-    let mut visible = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("<!--") {
-        visible.push_str(&rest[..start]);
-        match rest[start + 4..].find("-->") {
-            Some(end) => rest = &rest[start + 4 + end + 3..],
-            None => return visible,
-        }
-    }
-    visible.push_str(rest);
-    visible
-}
 
 /// HTML element names whose tags an excerpt drops. A tag-like word outside them (`Array<string>`) stays.
 const HTML_ELEMENTS: &[&str] = &[
@@ -778,13 +765,93 @@ const HTML_ELEMENTS: &[&str] = &[
     "video", "audio", "iframe", "wbr",
 ];
 
-/// `text` without the tags of real HTML elements; script and style elements go with their content.
+/// Code islands, scanned once so HTML-looking code remains literal. Matching backtick runs are indexed from the
+/// end: an unmatched run never scans the remaining document again.
+fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'`' { at += 1; continue; }
+        let start = at;
+        while at < bytes.len() && bytes[at] == b'`' { at += 1; }
+        runs.push((start, at - start));
+    }
+    let mut next = HashMap::new();
+    let mut closing = HashMap::new();
+    for (start, length) in runs.into_iter().rev() {
+        if let Some(end) = next.insert(length, start) { closing.insert(start, end + length); }
+    }
+    let mut ranges = Vec::new();
+    let mut fence: Option<(u8, usize, usize)> = None;
+    at = 0;
+    while at < bytes.len() {
+        if at == 0 || bytes[at - 1] == b'\n' {
+            let end = text[at..].find('\n').map_or(bytes.len(), |end| at + end + 1);
+            let line = &text[at..end];
+            let trimmed = line.trim_start_matches(' ');
+            let indent = line.len() - trimmed.len();
+            let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
+            let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
+            if let Some((character, width, start)) = fence {
+                if indent <= 3 && marker == character && length >= width && trimmed[length..].trim().is_empty() {
+                    ranges.push((start, end));
+                    fence = None;
+                }
+                at = end;
+                continue;
+            }
+            if indent <= 3 && matches!(marker, b'`' | b'~') && length >= 3
+                && !(marker == b'`' && trimmed[length..].contains('`'))
+            {
+                fence = Some((marker, length, at));
+                at = end;
+                continue;
+            }
+            if indent >= 4 || line.starts_with('\t') {
+                ranges.push((at, end));
+                at = end;
+                continue;
+            }
+        }
+        // A comment owns its entire span, even if it contains code-looking delimiters.
+        if bytes[at..].starts_with(b"<!--") {
+            at = text[at + 4..].find("-->").map_or(bytes.len(), |end| at + 4 + end + 3);
+        } else if bytes[at] == b'`' {
+            if let Some(end) = closing.get(&at) {
+                ranges.push((at, *end));
+                at = *end;
+            } else {
+                while at < bytes.len() && bytes[at] == b'`' { at += 1; }
+            }
+        } else { at += 1; }
+    }
+    if let Some((_, _, start)) = fence { ranges.push((start, bytes.len())); }
+    ranges
+}
+
+/// Strip HTML only in prose. Every search consumes its prefix and compares fixed-size ASCII windows in place,
+/// keeping repeated hidden elements linear without allocating lowercase copies of the remaining document.
 fn without_html_tags(text: &str) -> String {
+    let ranges = markdown_code_ranges(text);
+    let mut range = 0;
     let mut visible = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('<') {
+        let absolute = text.len() - rest.len() + start;
+        while range < ranges.len() && ranges[range].1 <= absolute { range += 1; }
+        if range < ranges.len() && ranges[range].0 <= absolute {
+            let end = ranges[range].1 - (text.len() - rest.len());
+            visible.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
         visible.push_str(&rest[..start]);
         let tag = &rest[start..];
+        if let Some(comment) = tag.strip_prefix("<!--") {
+            rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
+            continue;
+        }
         let Some(end) = tag[1..].find(['<', '>']).map(|end| end + 1) else {
             visible.push_str(tag);
             return visible;
@@ -793,22 +860,24 @@ fn without_html_tags(text: &str) -> String {
             .trim_start_matches('/')
             .split(|c: char| c.is_whitespace() || c == '/')
             .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
+            .unwrap_or("");
         if tag.as_bytes()[end] != b'>' {
             visible.push('<');
             rest = &tag[1..];
             continue;
         }
-        if matches!(name.as_str(), "script" | "style") && !tag[1..].starts_with('/') {
-            let close = format!("</{name}");
-            rest = match tag.to_ascii_lowercase().find(&close) {
-                Some(close) => tag[close..].find('>').map_or("", |end| &tag[close + end + 1..]),
+        if (name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style")) && !tag[1..].starts_with('/') {
+            let close = if name.eq_ignore_ascii_case("script") { "</script" } else { "</style" };
+            rest = match text.as_bytes()[absolute + end + 1..].windows(close.len()).position(|candidate| candidate.eq_ignore_ascii_case(close.as_bytes())) {
+                Some(close) => {
+                    let closing = absolute + end + 1 + close;
+                    text[closing..].find('>').map_or("", |end| &text[closing + end + 1..])
+                }
                 None => "",
             };
             continue;
         }
-        if HTML_ELEMENTS.contains(&name.as_str()) {
+        if HTML_ELEMENTS.iter().any(|element| name.eq_ignore_ascii_case(element)) {
             rest = &tag[end + 1..];
         } else {
             visible.push_str(&tag[..=end]);
@@ -1525,5 +1594,42 @@ mod tests {
         let quoted = quote(&code).unwrap();
         assert!(quoted.ends_with("> ```"), "{quoted}");
         assert!(quoted.chars().count() <= EXCERPT_CHARS + 2 * quoted.lines().count() + 8);
+    }
+
+    #[test]
+    fn excerpts_preserve_html_looking_markdown_code() {
+        for source in [
+            "Use `<!--` then continue.",
+            "Use ``<script>x()</script>`` then continue.",
+            "```\n<!-- literal -->\n<b>literal</b>\n```\nAfter.",
+            "~~~html\n<script>literal</script>\n~~~\nAfter.",
+            "    <!-- literal -->\n    <b>literal</b>\nAfter.",
+        ] {
+            let expected = source.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+            assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
+        }
+        assert_eq!(quote("<!-- hidden `code` -->After").as_deref(), Some("> After"));
+    }
+
+    #[test]
+    fn excerpts_keep_unicode_boundaries_blank_input_and_long_fences() {
+        assert_eq!(quote("\n\n\n"), None);
+        for offset in 599..=601 {
+            let source = format!("{}é 界 🙂 end", "a".repeat(offset));
+            let quoted = quote(&source).unwrap();
+            assert!(quoted.starts_with("> "));
+            assert!(!quoted.contains('\u{fffd}'));
+        }
+        let fence = "`".repeat(80);
+        let source = format!("{fence}html\n{}", "<!-- literal -->\n".repeat(80));
+        assert!(quote(&source).unwrap().ends_with(&format!("> {fence}")));
+    }
+
+    #[test]
+    fn repeated_script_style_excerpt_preprocessing_is_linear() {
+        let source = format!("{}Visible", "<ScRiPt>hidden</sCrIpT><STYLE>hidden</style>".repeat(64_000));
+        let start = std::time::Instant::now();
+        assert_eq!(quote(&source).as_deref(), Some("> Visible"));
+        assert!(start.elapsed() < Duration::from_secs(2), "excerpt preprocessing took {:?}", start.elapsed());
     }
 }

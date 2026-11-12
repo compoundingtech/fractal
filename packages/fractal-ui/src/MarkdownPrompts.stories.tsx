@@ -35,6 +35,12 @@ const rendersMarkdown = async ({ canvasElement }: { readonly canvasElement: HTML
   await expect(canvas.getByText('st work claim step-run/demo-1/work --as agent/demo/one').tagName).toBe('CODE')
   await expect(canvasElement.textContent).not.toContain('`st work')
   await expect(canvasElement.textContent).toContain('next to a bare Array<string>')
+  await canvasElement.ownerDocument.fonts.ready
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  const message = canvasElement.querySelector<HTMLElement>('[data-item-id="md/lines"]')!
+  const body = message.querySelector<HTMLElement>('[data-testid="markdown"]')!.parentElement!
+  await expect(body.scrollHeight).toBeLessThanOrEqual(body.clientHeight)
+  await expect(within(message).queryByRole('button', { name: 'Show full message' })).toBeNull()
 }
 export const Dark: StoryObj<typeof meta> = { play: rendersMarkdown }
 export const Light: StoryObj<typeof meta> = { args: { scheme: 'light' }, play: rendersMarkdown }

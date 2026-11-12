@@ -17,7 +17,7 @@ import { useCopyFeedback } from './useCopyFeedback'
 import { codeFenceLabel, diffStats, isDiffLanguage } from './markdown-code'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
-import { remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
+import { filteredMarkdownText, remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
 import { loadPulldown, pulldownReady, remarkPulldown } from './markdown-pulldown'
 import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
@@ -77,7 +77,7 @@ function markStreamingTail() {
  * bracket counts twice (at most 1,024 per block); code (fences and inline spans) never counts.
  */
 const DELIMITER_LIMIT = 2048
-const PlainBlock = ({ source }: { readonly source: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{source}</p>
+const PlainBlock = ({ source }: { readonly source: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{filteredMarkdownText(source)}</p>
 /** A block the parser cannot handle shows as its text, never as a broken transcript. */
 class BlockFallback extends React.Component<{ readonly source: string; readonly children: React.ReactNode }, { readonly failed: boolean }> {
   override state = { failed: false }

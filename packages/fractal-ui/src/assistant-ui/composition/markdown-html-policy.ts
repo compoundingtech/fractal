@@ -189,6 +189,12 @@ export function remarkHtmlPolicy() {
         if (token.kind === 'text') { const value = decodeEntities(token.value); if (value.trim() !== '' || !atFlow()) append({ type: 'text', value }); continue }
         if (token.kind === 'open' && HTML_POLICY.dropWithContent.includes(token.name)) { if (!token.selfClosing && !VOID.has(token.name)) dropping = { name: token.name, depth: 1 }; continue }
         if (!(token.name in HTML_POLICY.elements)) continue
+        // The synthetic code child already gives raw pre text the shape CodeFence consumes.
+        // An explicit <code> is that same holder, not another nested code element.
+        if (token.kind === 'open' && token.name === 'code' && stack.at(-1)?.name === 'pre') {
+          if (!token.selfClosing) { stack.push({ name: 'code', node: stack.at(-1)!.node }); opened.set('code', (opened.get('code') ?? 0) + 1) }
+          continue
+        }
         if (token.kind === 'open') {
           const node = element(token.name, token.attributes)
           if (token.name === 'a' && node.data?.hProperties?.href === undefined) continue
@@ -213,6 +219,75 @@ export function remarkHtmlPolicy() {
   }
   // Bounding Markdown nesting first keeps `rebuild`'s recursion shallow; the second pass bounds what HTML added.
   return (tree: Node) => { capDepth(tree, 0); rebuild(tree); capDepth(tree, 0) }
+}
+
+/**
+ * The parser's plain-text rendering path still applies the HTML policy. Code islands remain literal, while prose
+ * passes through the same tree policy as parsed Markdown (including hidden comments and dropped element content).
+ */
+export function filteredMarkdownText(source: string): string {
+  const children: Node[] = []
+  const prose = (value: string): void => {
+    const runs = [...value.matchAll(/`+/g)]
+    const comments = [...value.matchAll(/<!--[\s\S]*?(?:-->|$)/g)]
+    let comment = 0
+    const next = new Map<number, number>()
+    const closing = new Map<number, number>()
+    for (let index = runs.length - 1; index >= 0; index--) {
+      const run = runs[index]!
+      const end = next.get(run[0].length)
+      if (end !== undefined) closing.set(run.index, end)
+      next.set(run[0].length, run.index)
+    }
+    let at = 0
+    for (const run of runs) {
+      if (run.index < at) continue
+      while (comments[comment] !== undefined && (comments[comment]!.index < at || comments[comment]!.index + comments[comment]![0].length <= run.index)) comment++
+      if (comments[comment] !== undefined && comments[comment]!.index <= run.index) continue
+      const end = closing.get(run.index)
+      if (end === undefined) continue
+      children.push({ type: 'html', value: value.slice(at, run.index) })
+      at = end + run[0].length
+      children.push({ type: 'inlineCode', value: value.slice(run.index, at) })
+    }
+    children.push({ type: 'html', value: value.slice(at) })
+  }
+  let at = 0
+  let plainStart = 0
+  let fence: { marker: string; start: number } | undefined
+  while (at < source.length) {
+    const newline = source.indexOf('\n', at)
+    const end = newline === -1 ? source.length : newline + 1
+    const line = source.slice(at, end)
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)/.exec(line)
+    if (fence !== undefined) {
+      if (marker !== null && marker[1]![0] === fence.marker[0] && marker[1]!.length >= fence.marker.length && marker[2]!.trim() === '') {
+        children.push({ type: 'code', value: source.slice(fence.start, end) })
+        fence = undefined
+        plainStart = end
+      }
+    } else if (marker !== null && !(marker[1]![0] === '`' && marker[2]!.includes('`'))) {
+      prose(source.slice(plainStart, at))
+      fence = { marker: marker[1]!, start: at }
+    } else if (/^(?: {4}|\t)/.test(line)) {
+      prose(source.slice(plainStart, at))
+      children.push({ type: 'code', value: line })
+      plainStart = end
+    }
+    at = end
+  }
+  if (fence !== undefined) children.push({ type: 'code', value: source.slice(fence.start) })
+  else prose(source.slice(plainStart))
+  const tree: Node = { type: 'paragraph', children }
+  remarkHtmlPolicy()(tree)
+  const values: string[] = []
+  const pending = [...(tree.children ?? [])].reverse()
+  while (pending.length > 0) {
+    const node = pending.pop()!
+    if (node.value !== undefined) values.push(node.value)
+    else for (let index = (node.children?.length ?? 0) - 1; index >= 0; index--) pending.push(node.children![index]!)
+  }
+  return values.join('')
 }
 
 /** Containers whose direct text is layout, not words: whitespace there is dropped and words become paragraphs. */
