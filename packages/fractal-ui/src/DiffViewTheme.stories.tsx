@@ -7,7 +7,7 @@ import { lightTheme } from './assistant-ui/composition-theme'
 import { DiffView } from './assistant-ui/composition/DiffView'
 import { Markdown } from './assistant-ui/composition/Markdown'
 import { markdownBlock } from './assistant-ui/composition/markdown-text'
-import { samplePatch } from './assistant-ui/composition/diff-fixtures'
+import { samplePatch } from './assistant-ui/composition/diff-sample'
 
 const code = [
   '```ts',
