@@ -458,6 +458,76 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     server.abort();
 }
 
+// Re-executed by the transport test below, so the socket connector has a real exec-time
+// environment rather than process-global test mutations.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scratch_attributed_client_probe() {
+    let Ok(socket) = std::env::var("FRACTAL_SCRATCH_PROBE_SOCKET") else { return; };
+    let body: Value = serde_json::from_str(&std::env::var("FRACTAL_SCRATCH_PROBE_BODY").unwrap()).unwrap();
+    let result: anyhow::Result<Value> = crate::client::Client::unix(Path::new(&socket))
+        .post("/v1/intent/apply", &body).await;
+    if std::env::var("FRACTAL_SCRATCH_PROBE_ALLOWED").unwrap() == "yes" {
+        assert!(result.is_ok(), "{result:?}");
+    } else {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("foreign-agent-actor"), "{error}");
+    }
+}
+
+/// A private instance cannot resolve its creator's outer mission credential. Its clients
+/// use an explicit agent identity instead of claiming that the exec is a person.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_agent() {
+    use std::os::unix::process::CommandExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("scratch.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state.clone()), Some(store.clone()), None, harness_ancestor,
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    for (index, marker, actor, allowed) in [
+        (0, false, "person/operator", false),
+        (1, true, "person/operator", false),
+        (2, true, "agent/fixture/foreign", false),
+        (3, true, "agent/fixture/scratch", true),
+    ] {
+        let source = format!("version 2\nmission \"fixture/scratch-{index}\" state=\"ready\" {{\n  goal \"Exercise scratch attribution.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = apply_request(&state, &source, actor, &format!("scratch-{index}"));
+        let before = store.index().unwrap();
+        // The shell models an outer mission exec, in a different process group with no TTY.
+        // The leaf exec removes the foreign credential; without its own identity the walk
+        // still finds that credential in the parent. With one it binds to that agent.
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "env -u ST_RUN_CREDENTIAL \"$@\"; result=$?; exit \"$result\"", "scratch-probe"]);
+        if marker { command.arg("ST_AGENT=agent/fixture/scratch"); }
+        command.arg(std::env::current_exe().unwrap())
+            .args(["--exact", concat!(module_path!(), "::scratch_attributed_client_probe"), "--nocapture"])
+            .env("ST_RUN_CREDENTIAL", "foreign-instance-credential")
+            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            .env("FRACTAL_SCRATCH_PROBE_SOCKET", &socket)
+            .env("FRACTAL_SCRATCH_PROBE_BODY", serde_json::to_string(&body).unwrap())
+            .env("FRACTAL_SCRATCH_PROBE_ALLOWED", if allowed { "yes" } else { "no" })
+            .stdin(std::process::Stdio::null()).process_group(0);
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let claim = store.latest_claim(&format!("mission/fixture/scratch-{index}"), Some("mission.published")).unwrap();
+        if allowed {
+            assert_eq!(claim.unwrap().actor.as_deref(), Some(actor));
+        } else {
+            assert!(claim.is_none());
+            assert_eq!(store.index().unwrap(), before);
+        }
+    }
+    server.abort();
+}
+
 #[tokio::test]
 async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
     use http_body_util::BodyExt as _;
