@@ -9002,7 +9002,7 @@ async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
         assert!(error.to_string().contains("pass --workspace"), "{error:#}");
         let remote = "/srv/only-on-executor/../launch";
         launch_cli::run_launch(&client, &endpoint, command(Some(PathBuf::from(remote))), &PlannerSpec::default(), true).await.unwrap();
-        let runs: Vec<MissionRunView> = client.get("/v1/mission-runs").await.unwrap();
+        let runs: Vec<MissionRunView> = client.get("/v1/mission-runs?mission=remote-launch").await.unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].workspace, remote);
         server.abort();
