@@ -155,18 +155,22 @@ function* literalUrls(source: string): Generator<LiteralUrl> {
   let tokenEnd = 0
   let trailStart = 0
   let trail = new Uint8Array(0)
+  let domainEnd = 0
+  let domainAt = 0
+  let lastUnderscore = -1
   for (let match = prefix.exec(source); match !== null; match = prefix.exec(source)) {
     const previous = source[match.index - 1] ?? ''
     const www = /^www/i.test(match[0])
     if (www ? previous !== '' && !/[\t\n\r (*_[\]~]/.test(previous) : /[a-z]/i.test(previous)) continue
     const domainStart = match.index + (www ? 0 : match[0].length)
     if (!www && /[\s\p{P}\p{S}\p{Cc}]/u.test(String.fromCodePoint(source.codePointAt(domainStart) ?? 0))) continue
-    let domainEnd = domainStart
-    while (domainEnd < source.length && /[-._]|[^\s\p{P}\p{S}]/u.test(String.fromCodePoint(source.codePointAt(domainEnd)!))) {
-      domainEnd += source.codePointAt(domainEnd)! > 0xffff ? 2 : 1
+    const freshDomain = domainStart >= domainEnd
+    if (freshDomain) {
+      domainEnd = domainStart
+      while (domainEnd < source.length && /[-._]|[^\s\p{P}\p{S}]/u.test(String.fromCodePoint(source.codePointAt(domainEnd)!))) {
+        domainEnd += source.codePointAt(domainEnd)! > 0xffff ? 2 : 1
+      }
     }
-    const domain = source.slice(domainStart, domainEnd).replace(/[._]+$/, '')
-    if (domain.length === 0 || (www && domain.length <= 4) || domain.split('.').slice(-2).some(label => label.includes('_'))) continue
     if (match.index >= tokenEnd) {
       trailStart = match.index
       tokenEnd = domainEnd
@@ -186,7 +190,23 @@ function* literalUrls(source: string): Generator<LiteralUrl> {
         }
       }
     }
-    let at = domainStart + domain.length
+    if (freshDomain) {
+      domainAt = domainStart
+      while (domainAt < domainEnd) {
+        if ((source[domainAt] === '.' || source[domainAt] === '_') && trail[domainAt - trailStart]) break
+        domainAt++
+      }
+      // Only underscores in the last two domain segments invalidate a URL. Cache their last position so a failed
+      // `www._www._…` candidate cannot rescan the same domain at every later prefix.
+      lastUnderscore = -1
+      let dots = 0
+      for (let index = domainAt - 1; index >= domainStart && dots < 2; index--) {
+        if (source[index] === '.') dots++
+        else if (source[index] === '_' && lastUnderscore < 0) lastUnderscore = index
+      }
+    }
+    if (domainAt <= domainStart || lastUnderscore >= domainStart || (www && match.index + match[0].length === source.length)) continue
+    let at = domainAt
     let opens = 0
     let closes = 0
     while (at < tokenEnd) {
@@ -233,11 +253,15 @@ function literalEvents(source: string): readonly Event[] {
     cursor = candidate.index
     while (range < ranges.length && ranges[range]!.end <= byte) range++
     if (range === ranges.length || ranges[range]!.start > byte) continue
-    // A backslash-escaped prefix is plain text, not a literal URL.
-    let backslashes = candidate.index
-    while (backslashes > 0 && source[backslashes - 1] === '\\') backslashes--
-    if ((candidate.index - backslashes) % 2 !== 0) continue
-    parts.push(source.slice(at, candidate.index), `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
+    let before = source.slice(at, candidate.index)
+    // Inserting '[' must not turn a literal preceding '!' into an image, or let a literal '\' escape the link.
+    const marker = source[candidate.index - 1]
+    let slash = candidate.index - (marker === '!' ? 1 : 0)
+    while (slash > at && source[slash - 1] === '\\') slash--
+    const slashCount = candidate.index - (marker === '!' ? 1 : 0) - slash
+    if (marker === '!' && slashCount % 2 === 0) before = `${before.slice(0, -1)}\\!`
+    else if (marker === '\\' && slashCount % 2 !== 0) before += '\\'
+    parts.push(before, `[${escape(candidate.value)}](<${escape(/^www/i.test(candidate.value) ? `http://${candidate.value}` : candidate.value)}>)`)
     at = candidate.index + candidate.value.length
   }
   if (parts.length === 0) return original

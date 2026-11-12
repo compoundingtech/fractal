@@ -470,6 +470,10 @@ test('literal URL precedence matches original remark-gfm, including exact destin
       '😀 https://example.test/a*b*c', '`https://example.test/a*b*c`',
       '[https://example.test/a*b*c](https://target.test/)', '![https://example.test/a*b*c](https://image.test/)',
       '<https://example.test/a*b*c>', 'https://example.test/a*b*c **after**',
+      '!https://example.test/a*b*c', '\\https://example.test/a*b*c', '\\!https://example.test/a*b*c',
+      'HTTPS://example.test/a*b*c', '(WWW.example.test/a*b*c)', 'https://example.test/a&amp;.',
+      'https://example_.test/a*b*c', 'https://example.test_/a*b*c', 'www._www.example.test/a*b*c',
+      'https://example.test/a)b(c', 'www.example.test/a) b', 'https://example.test/a>b',
       'Contact me@example.test or a.b+c@example.test.', 'a.'.repeat(128) + 'x', '.'.repeat(256) + 'x',
     ]) {
       const expected = parse(source, [remarkGfm])
@@ -533,10 +537,11 @@ test('short references remain actionable inside long prose, with bounded path sc
   }
 })
 
-test('both parser paths scan email-like dot runs linearly without changing literal links', () => {
-  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x']) {
+test('both parser paths scan email-like dot runs linearly without changing literal links', t => {
+  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x', 'https://example.test/' + 'a*b*'.repeat(16000) + 'c']) {
     const { milliseconds } = cpuMilliseconds(() => block(source))
     assert.ok(milliseconds < 1000, `literal autolinks took ${milliseconds}ms`)
+    t.diagnostic(`literal autolinks ${source.slice(0, 20)}: ${milliseconds}ms CPU; unchanged budget 1000ms`)
   }
   const html = block('Contact me@example.test or https://example.test/a(b).')
   assert.match(html, /me@example.test/)
