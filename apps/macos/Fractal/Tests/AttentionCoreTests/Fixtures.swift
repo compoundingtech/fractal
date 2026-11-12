@@ -9,11 +9,12 @@ enum Fixture {
     id: String = "attention/one", revision: String = "claim/1", kind: String = "person-step",
     state: String = "open", episode: String? = "claim/1", title: String = "Ship it?",
     actions: [String] = ["work.done"], promptAnswers: [String] = [], request: RequestForm? = nil,
-    update: UpdateNote? = nil, workDoneDefaults: WorkDoneAnswer? = nil
+    update: UpdateNote? = nil, workDoneDefaults: WorkDoneAnswer? = nil, from: String = "builder",
+    requestedAt: Date? = nil, deadlineAt: Date? = nil
   ) -> AttentionRecord {
     AttentionRecord(
       id: id, revision: revision, kind: kind, state: state, sourceID: "work/step-1", episode: episode,
-      title: title, detail: "", from: "builder", requestedAt: nil, deadlineAt: nil,
+      title: title, detail: "", from: from, requestedAt: requestedAt, deadlineAt: deadlineAt,
       defaultAnswerLabel: nil, actions: actions, promptAnswers: promptAnswers, request: request,
       update: update, workDoneDefaults: workDoneDefaults, url: url)
   }

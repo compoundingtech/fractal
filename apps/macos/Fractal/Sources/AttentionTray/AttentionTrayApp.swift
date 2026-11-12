@@ -38,7 +38,10 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
         environment: ProcessInfo.processInfo.environment)
       let adapter = FractalAttentionAdapter(
         configuration: configuration, clientName: "attention-tray \(build.machineVersion)")
-      model = AttentionModel(adapter: adapter, availabilityAdapter: adapter)
+      let speech = configuration.speechSocket.map {
+        SpeechCoordinator(output: SpeechServiceClient(socketPath: $0), store: DefaultsSpeechLedger(), log: Self.log)
+      }
+      model = AttentionModel(adapter: adapter, availabilityAdapter: adapter, speech: speech)
       presence = PresenceReporter(adapter: adapter, model: model, log: Self.log)
       isConfigured = true
     } catch {
@@ -56,6 +59,9 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     Self.log("AttentionTray \(build.machineVersion) started")
+    if isConfigured {
+      Self.log(model.speech == nil ? "speech off: ATTENTION_SPEECH_SOCKET unset" : "speech gate on")
+    }
     if let path = ProcessInfo.processInfo.environment["ATTENTION_TRAY_SNAPSHOT"] {
       Task { await snapshot(to: path) }
       return

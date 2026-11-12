@@ -55,6 +55,10 @@ public enum AnswerState: Sendable, Equatable {
   public internal(set) var availabilityWrite: AnswerState?
   public private(set) var answers: [String: AnswerState] = [:]
   public private(set) var isRefreshing = false
+  /// This Mac's own presence, as its presence reporter last derived it.
+  public var macPresence: PresenceState?
+  /// Speaks urgent asks the speech gate allows; nil when no speech service is configured.
+  public let speech: SpeechCoordinator?
   public let configurationError: String?
   private let adapter: (any AttentionAdapter)?
   let availabilityAdapter: (any AvailabilityAdapter)?
@@ -62,10 +66,11 @@ public enum AnswerState: Sendable, Equatable {
 
   public init(
     adapter: (any AttentionAdapter)?, availabilityAdapter: (any AvailabilityAdapter)? = nil,
-    configurationError: String? = nil
+    speech: SpeechCoordinator? = nil, configurationError: String? = nil
   ) {
     self.adapter = adapter
     self.availabilityAdapter = availabilityAdapter
+    self.speech = speech
     self.configurationError =
       adapter == nil
       ? configurationError
@@ -124,6 +129,22 @@ public enum AnswerState: Sendable, Equatable {
         }
       }
     } while refreshAgain
+    considerSpeech(now: now ?? .now)
+  }
+
+  /// Speech acts only on a read that just succeeded, never on stale asks or availability.
+  private func considerSpeech(now: Date) {
+    guard let speech, case .fresh = attention.state, let page = attention.value else { return }
+    speech.consider(asks, open: page.records, availability: freshAvailability, macPresence: macPresence, now: now)
+  }
+
+  /// The person asked to hear this ask; the speech gate still decides.
+  public func speakAloud(_ record: AttentionRecord, now: Date = .now) {
+    speech?.request(record, availability: freshAvailability, macPresence: macPresence, now: now)
+  }
+
+  private var freshAvailability: Availability? {
+    if case .fresh = availability.state { availability.value?.availability } else { nil }
   }
 
   private func readAttention(from adapter: any AttentionAdapter, now: Date?) async {

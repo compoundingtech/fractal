@@ -208,6 +208,7 @@ private struct AskCard: View {
         if native { answerControls } else { inFractalControls }
       }
       if let state { AnswerStatusView(state: state) }
+      if let speech = model.speech?.status[record.id] { SpeechStatusView(status: speech) }
     }
     .card()
     .onHover { hovered = $0 }
@@ -244,6 +245,7 @@ private struct AskCard: View {
           .disabled(sending || !words.isEmpty)
           .help(AnswerWords.nothing)
       }
+      ReadAloudButton(record: record, model: model)
       Spacer()
       Link("Open in Fractal", destination: record.url).help(record.url.absoluteString)
     }
@@ -279,6 +281,7 @@ private struct AskCard: View {
   private var inFractalControls: some View {
     HStack(spacing: 12) {
       Link("Answer in Fractal", destination: record.url).help(record.url.absoluteString)
+      ReadAloudButton(record: record, model: model)
       Spacer()
     }
     .buttonStyle(.borderless)

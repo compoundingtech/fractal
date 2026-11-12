@@ -92,4 +92,16 @@ final class PresenceMachineTests: XCTestCase {
     XCTAssertEqual(
       wire, PresenceReport(state: "inactive", lastInputAt: "2026-10-19T11:58:30.000Z", observedAt: "2026-10-19T12:00:00.000Z"))
   }
+
+  func testThisMacIsPresentOnlyUntilFractalsInstant() {
+    var machine = PresenceMachine(locked: false)
+    XCTAssertEqual(machine.presence(now: at(0)), .idle, "nothing accepted yet")
+    _ = step(&machine, .check, input: 0, at: 0, again: 600)
+    XCTAssertEqual(machine.presence(now: at(599)), .present)
+    XCTAssertEqual(machine.presence(now: at(600)), .idle)
+    _ = step(&machine, .sessionResigned, input: 0, at: 100)
+    XCTAssertEqual(machine.presence(now: at(100)), .idle)
+    _ = step(&machine, .screenLocked, input: 0, at: 110)
+    XCTAssertEqual(machine.presence(now: at(110)), .locked)
+  }
 }

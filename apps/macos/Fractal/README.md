@@ -3,8 +3,8 @@
 A native macOS 14+ SwiftUI menu-bar client for one person's Fractal: the
 attention inbox, the person's availability and directive note, and the
 objectives every Fractal client reads. It reads only Fractal, through
-`FractalClient`, at launch and every 30 seconds; `FractalClient` has no
-attention or availability collection stream.
+`FractalClient`, at launch and every 30 seconds; Fractal streams the attention
+collection, but `FractalClient` has no typed attention or availability stream.
 
 - **Asks** (all attention pages, classified as Fractal web's
   `data/attention.ts` does) are answered in the panel: a decision's or choice's
@@ -50,6 +50,28 @@ attention or availability collection stream.
   once; keyboard-only returns show within a minute. A failed report is retried
   after a minute, never while asleep. Reports and failures are logged once per
   change.
+- **Speech** (with `ATTENTION_SPEECH_SOCKET`): the tray decides what the local
+  speech service (`flakes/speech-service`) says; the service only decides how.
+  An ask's title (nothing else) is spoken only if the ask is urgent (an explicit
+  deadline of at most an hour, read as `deadline_at - requested_at`) or the
+  person pressed Read aloud, **and** the person is available and this Mac is
+  present as Fractal derives it from the Mac's reports, **and** interruptions
+  are `all`, or `urgent` for an urgent ask; never with `none` or a word the tray
+  does not know. Attention carries no
+  urgent flag, and Fractal stamps `deadline_at` from `[asks] default_deadline`
+  on asks that name none, so urgency matches Fractal's `urgent_ask` only while
+  that default exceeds an hour (it is 24 hours unless configured). Speech is
+  decided after each refresh, so an urgent ask is spoken up to 30 seconds after
+  Fractal shows it. Each ask revision is spoken once and each requesting agent
+  at most every 10 minutes, counted per send whatever its outcome and kept
+  across restarts. Only freshly read asks and availability count. Each verdict
+  and outcome is logged once per ask
+  revision (`speech attention/…#rev from agent: urgent, sent`, then `spoken` or
+  the service's failure); spoken text never enters the log. The tray waits 30
+  seconds for `queued{position}`, then for the result one 60-second speaking
+  budget per request ahead plus its own and 30 seconds of margin; only a
+  service that overruns that logs `no outcome …`. Read aloud shows why an ask
+  stays quiet.
 - Asks, availability and objectives refresh independently: one failing keeps its
   last data with its own stale note and never blanks the others.
 - Times are relative with the absolute time on hover. The footer shows the build
@@ -80,8 +102,10 @@ Standalone launches require three explicit environment variables:
 `ATTENTION_FRACTAL_ENDPOINT`, `ATTENTION_FRACTAL_CREDENTIAL`, `ATTENTION_FRACTAL_URL`.
 There are no endpoint, localhost, or Boss fallbacks. The application itself
 loads no keychain, 1Password item or device-profile file.
+`ATTENTION_SPEECH_SOCKET` (optional, absolute) turns speech on.
 `ATTENTION_TRAY_SNAPSHOT=<png>` refreshes once, renders the open panel to that
 file and exits (`ATTENTION_TRAY_SNAPSHOT_REVEAL=1` shows every card's controls).
+Snapshot mode starts no presence reporter, so its speech gate stays quiet.
 
 On mbp2025, `services.attentionTray.enable = true` imports the Home Manager
 module. Its activation bundle installs `~/Applications/AttentionTray.app`, signs
@@ -94,6 +118,12 @@ Once paired, missing web prerequisites fail with a clear wrapper log under
 `ThrottleInterval = 60`, not a tight loop. There is no separate Login Items or
 SMAppService enrollment. Changed paired payloads restart once; unchanged
 activation does not restart the process.
+
+`services.attentionTray.speechSocket` (default null) makes the wrapper export
+`ATTENTION_SPEECH_SOCKET`. Point it at the speech service's socket only where that
+service admits `~/Applications/AttentionTray.app/Contents/MacOS/AttentionTray` as
+its one caller; any other executable, including a development build, is closed
+unanswered and logged as `speech service unreachable`.
 
 Activation verification checks only installed build/configuration facts
 (signature and registered launchd job). Runtime credentials and web availability
